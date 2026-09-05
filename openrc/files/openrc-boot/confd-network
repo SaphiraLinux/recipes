@@ -1,0 +1,2 @@
+# Optional arguments passed by the network OpenRC service.
+network_args=

@@ -1,0 +1,20 @@
+#!/sbin/openrc-run
+
+description="Valkey key/value datastore server"
+
+command="/usr/bin/valkey-server"
+command_args="/etc/valkey/valkey.conf --daemonize no"
+command_user="valkey:valkey"
+supervisor="supervise-daemon"
+directory="/var/lib/valkey"
+
+depend()
+{
+	use net logger
+	after firewall
+}
+
+start_pre()
+{
+	checkpath -d -m 0750 -o valkey:valkey /var/lib/valkey
+}

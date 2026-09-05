@@ -1,0 +1,8 @@
+#!/bin/sh
+# lb.saphira.imap - IMAP4 greeting + CAPABILITY, no AUTH (L7).
+# Read-only session that closes immediately.
+# Copyright (c) 2026 AKADATA. MIT licensed.
+. /usr/share/saphira/lb-healthchecks/lib/lb-saphira-common.sh
+lb_init "$@"
+PORT="${LB_RPORT:-143}"
+exec curl --silent --max-time "$LB_TIMEOUT" "imap://${LB_REAL}:${PORT}/" >/dev/null

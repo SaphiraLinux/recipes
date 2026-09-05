@@ -1,0 +1,14 @@
+[Unit]
+Description=NTP client/server
+After=network.target
+Conflicts=systemd-timesyncd.service
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/chronyd -n -u root $OPTIONS
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

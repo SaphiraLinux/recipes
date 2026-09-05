@@ -1,0 +1,11 @@
+[Unit]
+Description=System logging daemon
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/syslog-ng --foreground
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

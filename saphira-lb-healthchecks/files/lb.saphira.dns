@@ -1,0 +1,17 @@
+#!/bin/sh
+# lb.saphira.dns - DNS query round-trip (L7).
+# Env: LB_SAPHIRA_DNS_NAME (required), LB_SAPHIRA_DNS_TYPE (1=A, 28=AAAA),
+# LB_SAPHIRA_DNS_RCODE (expected RCODE, default 0 = NOERROR),
+# LB_SAPHIRA_DNS_TCP=1 for TCP transport, LB_SAPHIRA_DNS_EXPECT (regex over
+# the raw response, e.g. a specific record).
+# Copyright (c) 2026 AKADATA. MIT licensed.
+. /usr/share/saphira/lb-healthchecks/lib/lb-saphira-common.sh
+lb_init "$@"
+[ -n "$LB_SAPHIRA_DNS_NAME" ] || exit 2
+set -- dns --host "$LB_REAL" --port "${LB_RPORT:-53}" --timeout "$LB_TIMEOUT" \
+	--name "$LB_SAPHIRA_DNS_NAME" \
+	--qtype "${LB_SAPHIRA_DNS_TYPE:-1}" \
+	--expect-rcode "${LB_SAPHIRA_DNS_RCODE:-0}"
+[ "${LB_SAPHIRA_DNS_TCP:-0}" = "1" ] && set -- "$@" --tcp
+[ -n "$LB_SAPHIRA_DNS_EXPECT" ] && set -- "$@" --expect "$LB_SAPHIRA_DNS_EXPECT"
+lb_probe "$@"

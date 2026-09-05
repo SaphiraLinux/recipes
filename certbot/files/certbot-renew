@@ -1,0 +1,6 @@
+#!/bin/sh
+# Daily Let's Encrypt renewal (house cron convention: /etc/cron.daily is
+# run by dcron's root crontab via /usr/sbin/run-cron). certbot renews
+# certificates inside its 30-day pre-expiry window; every renewal then
+# triggers the deploy hooks under /etc/letsencrypt/renewal-hooks/deploy/.
+exec certbot renew --quiet

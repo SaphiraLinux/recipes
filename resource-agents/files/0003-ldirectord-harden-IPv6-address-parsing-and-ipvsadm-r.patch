@@ -1,0 +1,78 @@
+--- a/ldirectord/ldirectord.in
++++ b/ldirectord/ldirectord.in
+@@ -2235,7 +2235,20 @@
+ 		$fwd = $3;
+ 		$parse_line = $1;
+ 	}
+-	if ($parse_line =~ /(:(\d+|[A-Za-z0-9-_]+))?$/) {
++	if ($parse_line =~ /^\[[0-9A-Fa-f:.]+\]/) {
++		# IPv6 literal: only a port following the closing bracket is
++		# a port, never a trailing group of the address itself. An
++		# unbracketed IPv6 address is left intact so that resolution
++		# produces a clear error instead of a mangled address.
++		if ($parse_line =~ /^(\[[0-9A-Fa-f:.]+\]):([0-9A-Za-z-_]+)$/) {
++			$server = $1;
++			$port = $2;
++		}
++		else {
++			$server = $parse_line;
++		}
++	}
++	elsif ($parse_line =~ /(:(\d+|[A-Za-z0-9-_]+))?$/) {
+ 		# get host and port
+ 		$port=$2;
+ 		
+@@ -2661,16 +2674,19 @@
+ 	foreach $nv (@VIRTUAL) {
+ 		my $nreal = $nv->{real};
+ 		my $ov = $oldsrv->{&get_real_service_str($nv)};
+-		my $or = $ov->{real};
++		# The virtual service may not exist yet (first start) or may
++		# have failed to parse: never dereference the undefined
++		# readback, treat it as the service having no reals.
++		my $or = defined($ov) ? $ov->{real} : undef;
+ 		my $fallback = fallback_find($nv);
+ 
+-		if (defined($fallback)) {
++		if (defined($fallback) and defined($or)) {
+ 			delete($or->{"$fallback->{server}:$fallback->{port}"});
+ 		}
+ 
+ 		for $nr (@$nreal) {
+ 			my $real_str = "$nr->{server}:$nr->{port}";
+-			if (! defined($or->{$real_str}) or
++			if (! defined($or) or ! defined($or->{$real_str}) or
+ 					$or->{$real_str}->{weight} == 0) {
+ 				$server_down->{$real_str} = [$nv, $nr];
+ 				#service_set($nv, $nr, "down", {force => 1});
+@@ -2685,7 +2701,7 @@
+ 		}
+ 
+ 		# remove remaining entries for real servers
+-		for my $k (keys %$or) {
++		for my $k (defined($or) ? keys %$or : ()) {
+ 			purge_untracked_service($nv, $k, "start");
+ 			delete($$or{$k});
+ 		}
+@@ -5500,7 +5516,20 @@
+ 	my $ip;
+ 	my $port;
+ 	
+-	if ($hostserv =~ /(:(\d+|[A-Za-z0-9-_]+))?$/) {
++	if ($hostserv =~ /^\[[0-9A-Fa-f:.]+\]/) {
++		# IPv6 literal: only a port following the closing bracket is
++		# a port, never a trailing group of the address itself. An
++		# unbracketed IPv6 address is left intact so that resolution
++		# produces a clear error instead of a mangled address.
++		if ($hostserv =~ /^(\[[0-9A-Fa-f:.]+\]):([0-9A-Za-z-_]+)$/) {
++			$ip = $1;
++			$port = $2;
++		}
++		else {
++			$ip = $hostserv;
++		}
++	}
++	elsif ($hostserv =~ /(:(\d+|[A-Za-z0-9-_]+))?$/) {
+ 		$port = $2;
+ 		$ip = $hostserv;
+ 		$ip =~ s/(:(\d+|[A-Za-z0-9-_]+))?$//;

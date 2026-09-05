@@ -1,0 +1,13 @@
+#!/sbin/openrc-run
+
+description="Dillon's lightweight cron daemon"
+
+command="/usr/sbin/crond"
+command_args="-f"
+supervisor="supervise-daemon"
+
+depend()
+{
+	use clock logger
+	need localmount
+}

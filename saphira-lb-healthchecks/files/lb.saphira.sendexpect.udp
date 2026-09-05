@@ -1,0 +1,16 @@
+#!/bin/sh
+# lb.saphira.sendexpect.udp - raw UDP send-expect protocol check (L4/L7).
+# Same knobs as lb.saphira.sendexpect.tcp; ICMP port/host-unreachable
+# during the exchange fails the check.
+# Copyright (c) 2026 AKADATA. MIT licensed.
+. /usr/share/saphira/lb-healthchecks/lib/lb-saphira-common.sh
+lb_init "$@"
+[ -n "${LB_SAPHIRA_SEND:-}${LB_SAPHIRA_SEND_HEX:-}${LB_SAPHIRA_SEND_FILE:-}" ] || exit 2
+[ -n "${LB_SAPHIRA_EXPECT:-}" ] || exit 2
+set -- sendexpect --proto udp --host "$LB_REAL" --port "${LB_RPORT:-$LB_VPORT}" \
+	--timeout "$LB_TIMEOUT" --expect "$LB_SAPHIRA_EXPECT"
+[ -n "${LB_SAPHIRA_SEND:-}" ] && set -- "$@" --send "$LB_SAPHIRA_SEND"
+[ -n "${LB_SAPHIRA_SEND_HEX:-}" ] && set -- "$@" --send-hex "$LB_SAPHIRA_SEND_HEX"
+[ -n "${LB_SAPHIRA_SEND_FILE:-}" ] && set -- "$@" --send-file "$LB_SAPHIRA_SEND_FILE"
+[ -n "${LB_SAPHIRA_DELAY:-}" ] && set -- "$@" --delay "$LB_SAPHIRA_DELAY"
+lb_probe "$@"

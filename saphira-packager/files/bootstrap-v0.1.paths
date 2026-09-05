@@ -1,0 +1,135 @@
+# Saphira v0.1 foundational bootstrap seed for a v0.2 disposable root.
+#
+# This is deliberately not a package dependency list.  "path" copies one
+# file or symlink and "tree" copies only the named foundational header tree.
+# Package development headers, pkg-config data, Python modules, and /lib64
+# are intentionally outside this boundary.
+
+path /lib/ld-musl-x86_64.so.1
+path /lib/libc.so
+path /usr/lib/libc.so
+path /usr/lib/libc.a
+path /usr/lib/libdl.a
+path /usr/lib/libm.a
+path /usr/lib/libpthread.a
+path /usr/lib/libresolv.a
+path /usr/lib/librt.a
+path /usr/lib/libutil.a
+path /usr/lib/libxnet.a
+# Temporary generation-zero runtimes for trusted v0.1 repository tools.
+# Perl requires libcrypt.so.2 and binutils requires libfl.so.2, but the
+# established repository currently has no APK producer for either library.
+path /usr/lib/libcrypt.so.2
+path /usr/lib/libcrypt.so.2.0.0
+path /usr/lib/libfl.so.2
+path /usr/lib/libfl.so.2.0.0
+path /usr/lib/crt1.o
+path /usr/lib/Scrt1.o
+path /usr/lib/rcrt1.o
+path /usr/lib/crti.o
+path /usr/lib/crtn.o
+
+tree /usr/include/arpa
+tree /usr/include/asm
+tree /usr/include/asm-generic
+tree /usr/include/bits
+tree /usr/include/linux
+tree /usr/include/net
+tree /usr/include/netinet
+tree /usr/include/netpacket
+tree /usr/include/scsi
+tree /usr/include/sys
+
+path /usr/include/aio.h
+path /usr/include/alloca.h
+path /usr/include/ar.h
+path /usr/include/assert.h
+path /usr/include/byteswap.h
+path /usr/include/complex.h
+path /usr/include/cpio.h
+path /usr/include/crypt.h
+path /usr/include/ctype.h
+path /usr/include/dirent.h
+path /usr/include/dlfcn.h
+path /usr/include/elf.h
+path /usr/include/endian.h
+path /usr/include/err.h
+path /usr/include/errno.h
+path /usr/include/fcntl.h
+path /usr/include/features.h
+path /usr/include/fenv.h
+path /usr/include/float.h
+path /usr/include/fmtmsg.h
+path /usr/include/fnmatch.h
+path /usr/include/fts.h
+path /usr/include/ftw.h
+path /usr/include/getopt.h
+path /usr/include/glob.h
+path /usr/include/grp.h
+path /usr/include/iconv.h
+path /usr/include/ifaddrs.h
+path /usr/include/inttypes.h
+path /usr/include/iso646.h
+path /usr/include/langinfo.h
+path /usr/include/lastlog.h
+path /usr/include/libgen.h
+path /usr/include/libintl.h
+path /usr/include/limits.h
+path /usr/include/link.h
+path /usr/include/locale.h
+path /usr/include/malloc.h
+path /usr/include/math.h
+path /usr/include/memory.h
+path /usr/include/mntent.h
+path /usr/include/monetary.h
+path /usr/include/mqueue.h
+path /usr/include/netdb.h
+path /usr/include/nl_types.h
+path /usr/include/nlist.h
+path /usr/include/paths.h
+path /usr/include/poll.h
+path /usr/include/pthread.h
+path /usr/include/pty.h
+path /usr/include/pwd.h
+path /usr/include/regex.h
+path /usr/include/resolv.h
+path /usr/include/sched.h
+path /usr/include/search.h
+path /usr/include/semaphore.h
+path /usr/include/setjmp.h
+path /usr/include/shadow.h
+path /usr/include/signal.h
+path /usr/include/spawn.h
+path /usr/include/stdalign.h
+path /usr/include/stdarg.h
+path /usr/include/stdbool.h
+path /usr/include/stdc-predef.h
+path /usr/include/stddef.h
+path /usr/include/stdint.h
+path /usr/include/stdio.h
+path /usr/include/stdio_ext.h
+path /usr/include/stdlib.h
+path /usr/include/stdnoreturn.h
+path /usr/include/string.h
+path /usr/include/strings.h
+path /usr/include/stropts.h
+path /usr/include/syscall.h
+path /usr/include/sysexits.h
+path /usr/include/syslog.h
+path /usr/include/tar.h
+path /usr/include/termios.h
+path /usr/include/tgmath.h
+path /usr/include/threads.h
+path /usr/include/time.h
+path /usr/include/uchar.h
+path /usr/include/ucontext.h
+path /usr/include/ulimit.h
+path /usr/include/unistd.h
+path /usr/include/utime.h
+path /usr/include/utmp.h
+path /usr/include/utmpx.h
+path /usr/include/values.h
+path /usr/include/wait.h
+path /usr/include/wchar.h
+path /usr/include/wctype.h
+path /usr/include/wordexp.h

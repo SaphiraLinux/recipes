@@ -1,0 +1,1038 @@
+#!/usr/bin/env python3
+"""
+saphira-gopher-publish — Markdown → geomyidae 0.99 Gopher tree
+
+Consumes the published Markdown interface (Accept: text/markdown) and
+produces a geomyidae directory tree with both gophermap (classic,
+host/port empty, geomyidae fills) and index.gph (native [type|...]) menus.
+
+Contract:
+  saphira-linux-os (website) --build--> https://saphira.vm2.uk/
+       -- Accept: text/markdown --> gopher/bin/saphira-gopher-publish
+       --> gopher/out/ --rsync --delete--> D2:/srv/gopher/
+       --> gopher://saphira.vm2.uk/
+
+Usage:
+  saphira-gopher-publish <root-url> <output-dir> [options]
+
+Standards: stdlib only, same-origin, deterministic, atomic replace,
+bounded timeout, fail loudly.
+"""
+from __future__ import annotations
+
+import argparse
+import configparser
+import os
+import pwd
+import grp
+import re
+import shutil
+import sys
+import tempfile
+import textwrap
+import urllib.error
+import urllib.parse
+import urllib.request
+import xml.etree.ElementTree as ET
+from pathlib import Path
+from collections import defaultdict
+
+VERSION = "0.1.0"
+
+DEFAULT_GOPHER_HOST = "saphira.vm2.uk"
+DEFAULT_GOPHER_PORT = 70
+DEFAULT_TIMEOUT = 10
+
+USER_AGENT = f"saphira-gopher-publish/{VERSION} (+https://saphira.vm2.uk/)"
+
+# ---------------------------------------------------------------------------
+# URL helpers
+# ---------------------------------------------------------------------------
+
+def origin_of(url: str) -> str:
+    p = urllib.parse.urlparse(url)
+    if p.scheme not in ("http", "https"):
+        raise ValueError(f"unsupported scheme in URL: {url!r}")
+    # normalize: lower host, strip default port, no trailing slash
+    host = p.hostname.lower() if p.hostname else ""
+    port = f":{p.port}" if p.port and p.port not in (80, 443) else ""
+    return f"{p.scheme}://{host}{port}"
+
+def normalize_url(url: str) -> str:
+    """Canonical form without fragment, without trailing slash except root."""
+    p = urllib.parse.urlparse(url)
+    # drop fragment
+    path = p.path or "/"
+    # norm path: collapse //, resolve . and ..
+    # posix norm but keep leading /
+    import posixpath
+    path = posixpath.normpath(path)
+    if not path.startswith("/"):
+        path = "/" + path
+    # preserve trailing slash only for explicit dir? sitemap has no //
+    # we keep as normpath gives without trailing slash except root
+    # keep query if any (but sitemap has none)
+    q = f"?{p.query}" if p.query else ""
+    return f"{p.scheme}://{p.hostname.lower()}{f':{p.port}' if p.port else ''}{path}{q}"
+
+def is_same_origin(url: str, root_origin: str) -> bool:
+    try:
+        return origin_of(url) == root_origin
+    except ValueError:
+        return False
+
+# ---------------------------------------------------------------------------
+# HTTP with Accept: text/markdown and same-origin redirect enforcement
+# ---------------------------------------------------------------------------
+
+class SameOriginRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def __init__(self, root_origin: str):
+        super().__init__()
+        self.root_origin = root_origin
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        # urllib gives newurl as possibly relative; resolve
+        resolved = urllib.parse.urljoin(req.full_url, newurl)
+        if not is_same_origin(resolved, self.root_origin):
+            raise urllib.error.URLError(
+                f"redirect to different origin rejected: {req.full_url} -> {resolved}"
+            )
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+def fetch_url(url: str, root_origin: str, timeout: int, accept_markdown: bool = True) -> tuple[bytes, str, str]:
+    """
+    Returns (body_bytes, final_url, content_type).
+    Raises on failure. Enforces same-origin redirects only.
+    """
+    headers = {
+        "User-Agent": USER_AGENT,
+    }
+    if accept_markdown:
+        headers["Accept"] = "text/markdown"
+    req = urllib.request.Request(url, headers=headers, method="GET")
+    handler = SameOriginRedirectHandler(root_origin)
+    opener = urllib.request.build_opener(handler)
+    try:
+        with opener.open(req, timeout=timeout) as resp:
+            body = resp.read()
+            final_url = resp.geturl()  # after redirects
+            ctype = resp.headers.get_content_type() if hasattr(resp.headers, "get_content_type") else resp.headers.get("Content-Type", "")
+            # also check header string fallback
+            if not ctype:
+                ctype = resp.headers.get("Content-Type", "")
+            # enforce same-origin on final
+            if not is_same_origin(final_url, root_origin):
+                raise RuntimeError(f"final URL escaped origin: {url} -> {final_url}")
+            status = getattr(resp, "status", 200)
+            if status >= 400:
+                raise RuntimeError(f"HTTP {status} for {url}")
+            return body, final_url, ctype
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"HTTP {e.code} {e.reason} for {url}") from e
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"fetch failed for {url}: {e.reason}") from e
+    except Exception as e:
+        if isinstance(e, RuntimeError):
+            raise
+        raise RuntimeError(f"fetch failed for {url}: {e}") from e
+
+def fetch_sitemap(root_url: str, timeout: int) -> list[str]:
+    p = urllib.parse.urlparse(root_url)
+    # ensure root ends with /
+    if not root_url.endswith("/"):
+        root_url = root_url + "/"
+    sitemap_url = urllib.parse.urljoin(root_url, "sitemap.xml")
+    root_origin = origin_of(root_url)
+    # sitemap is application/xml, not markdown — fetch without Accept markdown
+    body, final_url, ctype = fetch_url(sitemap_url, root_origin, timeout, accept_markdown=False)
+    text = body.decode("utf-8", errors="replace")
+    # parse <loc>
+    # use regex for robustness (namespace)
+    locs = re.findall(r"<loc>\s*([^<\s]+)\s*</loc>", text)
+    if not locs:
+        # try ET with namespace
+        try:
+            root_el = ET.fromstring(text)
+            ns = {"sm": "http://www.sitemaps.org/schemas/sitemap/0.9"}
+            locs = [e.text.strip() for e in root_el.findall(".//sm:loc", ns) if e.text]
+            if not locs:
+                locs = [e.text.strip() for e in root_el.findall(".//loc") if e.text]
+        except Exception:
+            pass
+    if not locs:
+        raise RuntimeError(f"sitemap at {sitemap_url} contained no <loc> entries")
+    # dedup preserve order, filter same-origin only
+    seen = set()
+    out = []
+    for loc in locs:
+        loc = loc.strip()
+        n = normalize_url(loc)
+        if n in seen:
+            continue
+        if not is_same_origin(n, root_origin):
+            continue
+        seen.add(n)
+        out.append(n)
+    out.sort()
+    return out
+
+# ---------------------------------------------------------------------------
+# Markdown helpers
+# ---------------------------------------------------------------------------
+
+_LINK_RE = re.compile(r"\[([^\]]*)\]\(([^)]+)\)")
+_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")
+_CODE_FENCE_RE = re.compile(r"```([^\n]*)\n(.*?)```", re.DOTALL)
+_INLINE_CODE_RE = re.compile(r"`([^`]+)`")
+_BOLD_RE = re.compile(r"\*\*([^\*]+)\*\*")
+_BOLD2_RE = re.compile(r"__([^_]+)__")
+_ITALIC_RE = re.compile(r"(?<!\*)\*([^\*]+)\*(?!\*)")
+_ITALIC2_RE = re.compile(r"(?<!_) _([^_]+)_ (?!_)".replace(" ", ""))  # _text_
+
+def extract_links(md: str) -> list[tuple[str, str]]:
+    """Return list of (text, href) from markdown."""
+    # exclude images
+    # temporarily remove image patterns
+    tmp = _IMAGE_RE.sub("", md)
+    return [(m.group(1).strip(), m.group(2).strip()) for m in _LINK_RE.finditer(tmp)]
+
+def markdown_to_plain(md: str, page_url: str, root_origin: str) -> tuple[str, list[str], list[str]]:
+    """
+    Convert markdown to readable plain text.
+
+    Returns (plain_text, internal_selectors, external_urls)
+    - plain_text is wrapped, heading/paragraph/list/code preserved
+    - internal selectors are Gopher selectors (e.g. /about.txt)
+    - external urls are full https://...
+    The plain_text itself embeds human-readable hints for links.
+    """
+    # 1. Extract fenced code blocks and replace with placeholders
+    fences: list[str] = []
+    def fence_sub(m):
+        lang = m.group(1).strip()
+        body = m.group(2)
+        fences.append(body)
+        return f"\n__FENCE_{len(fences)-1}__\n"
+    md_no_fence = _CODE_FENCE_RE.sub(fence_sub, md)
+
+    # 2. Collect links before we rewrite them
+    links = extract_links(md_no_fence)
+    internal_selectors: list[str] = []
+    external_urls: list[str] = []
+
+    # Helper to map href to selector
+    def href_to_selector(href: str) -> str | None:
+        # strip fragment and query? keep query? For selector we strip fragment, ignore query for now
+        href = href.strip()
+        if not href or href.startswith("#") or href.startswith("mailto:") or href.startswith("javascript:"):
+            return None
+        # resolve relative to page_url
+        abs_url = urllib.parse.urljoin(page_url, href)
+        p = urllib.parse.urlparse(abs_url)
+        if p.scheme in ("http", "https"):
+            if is_same_origin(abs_url, root_origin):
+                # map path to selector
+                path = p.path or "/"
+                if path == "/":
+                    return "/index.txt"
+                # strip trailing slash
+                if path.endswith("/") and len(path) > 1:
+                    path = path.rstrip("/")
+                # ignore query/fragment for file mapping; keep clean
+                # If path contains dot already (unlikely for sitemap), keep as-is but ensure .txt
+                # Normal pages: /about -> /about.txt
+                if "." in os.path.basename(path):
+                    # e.g. already has extension, treat as-is
+                    return path
+                return path + ".txt"
+            else:
+                return None
+        elif href.startswith("/"):
+            # same-origin without scheme
+            if href == "/":
+                return "/index.txt"
+            clean = href.split("#")[0].split("?")[0]
+            if clean.endswith("/") and len(clean) > 1:
+                clean = clean.rstrip("/")
+            if "." in os.path.basename(clean):
+                return clean
+            return clean + ".txt"
+        else:
+            # relative without leading /
+            abs2 = urllib.parse.urljoin(page_url, href)
+            p2 = urllib.parse.urlparse(abs2)
+            if p2.scheme in ("http", "https") and not is_same_origin(abs2, root_origin):
+                return None
+            path = p2.path or "/"
+            if path == "/":
+                return "/index.txt"
+            if path.endswith("/") and len(path) > 1:
+                path = path.rstrip("/")
+            if "." in os.path.basename(path):
+                return path
+            return path + ".txt"
+
+    # 3. Rewrite links in text
+    def link_repl(m):
+        text = m.group(1).strip()
+        href = m.group(2).strip()
+        abs_url = urllib.parse.urljoin(page_url, href)
+        p = urllib.parse.urlparse(abs_url)
+        # external?
+        if p.scheme in ("http", "https") and not is_same_origin(abs_url, root_origin):
+            # filter only http/https
+            external_urls.append(abs_url.split("#")[0])
+            # For plain text, show as "text <url>"
+            if text:
+                return f"{text} <{abs_url}>"
+            else:
+                return f"<{abs_url}>"
+        elif href.startswith("#") or href.startswith("mailto:") or href.startswith("javascript:"):
+            # just text
+            return text
+        else:
+            # internal
+            sel = href_to_selector(href)
+            if sel:
+                internal_selectors.append(sel)
+                if text:
+                    # show as "text [=> /selector]"
+                    return f"{text} [=> {sel}]"
+                else:
+                    return f"[=> {sel}]"
+            else:
+                return text
+
+    # Remove images: replace with alt text
+    md_no_fence = _IMAGE_RE.sub(lambda m: m.group(1).strip(), md_no_fence)
+    md_linked = _LINK_RE.sub(link_repl, md_no_fence)
+
+    # 4. Headings
+    def heading_repl(m):
+        hashes = m.group(1)
+        text = m.group(2).strip()
+        level = len(hashes)
+        if level == 1:
+            # Uppercase with underline
+            t = text.upper()
+            return f"\n\n{t}\n{'='*len(t)}\n\n"
+        elif level == 2:
+            return f"\n\n{text}\n{'-'*len(text)}\n\n"
+        elif level == 3:
+            return f"\n\n{text}\n\n"
+        else:
+            return f"\n\n{text}\n\n"
+    md_headed = re.sub(r"^(#{1,6})\s+(.+?)\s*$", heading_repl, md_linked, flags=re.MULTILINE)
+
+    # 5. Horizontal rules
+    md_headed = re.sub(r"^\s*([-*_]\s*){3,}\s*$", "\n\n---\n\n", md_headed, flags=re.MULTILINE)
+
+    # 6. Unwrap bold/italic/inline code
+    md_headed = _BOLD_RE.sub(r"\1", md_headed)
+    md_headed = _BOLD2_RE.sub(r"\1", md_headed)
+    # italic single * and _ — careful not to mangle lists
+    md_headed = re.sub(r"(?<!\*)\*([^*]+)\*(?!\*)", r"\1", md_headed)
+    md_headed = re.sub(r"(?<!_) _([^_]+)_ (?!_)".replace(" ", ""), r"\1", md_headed)
+    md_headed = _INLINE_CODE_RE.sub(r"\1", md_headed)
+
+    # 7. Lists: normalize bullets, keep numbering
+    # Unordered: - , * remain as "  * "
+    md_headed = re.sub(r"^\s*[-*]\s+", "  * ", md_headed, flags=re.MULTILINE)
+    # Ordered: keep "  1. "
+    md_headed = re.sub(r"^\s*(\d+)\.\s+", r"  \1. ", md_headed, flags=re.MULTILINE)
+
+    # 8. Collapse remaining markdown cruft: blockquote > , tables |
+    md_headed = re.sub(r"^\s*>\s?", "", md_headed, flags=re.MULTILINE)
+
+    # 9. Restore fences as indented verbatim (no wrapping)
+    # We have placeholders __FENCE_n__
+    # Reinsert with indentation preservation
+    for idx, body in enumerate(fences):
+        placeholder = f"__FENCE_{idx}__"
+        # body is verbatim; ensure it has trailing newline
+        # indent with 4 spaces? For gopher plain text, show as:
+        # --- code ---
+        # body
+        # ------------
+        fenced = "\n    " + body.strip("\n").replace("\n", "\n    ") + "\n"
+        md_headed = md_headed.replace(placeholder, fenced)
+
+    # 10. Clean up whitespace: normalize spaces but preserve paragraph breaks and code indentation
+    # Split into blocks by double newline, process each
+    # Keep code-indented lines (4 spaces) untouched for wrapping
+    # For non-code, collapse spaces and wrap
+    blocks = re.split(r"\n{2,}", md_headed)
+    cleaned_blocks = []
+    for blk in blocks:
+        blk = blk.strip()
+        if not blk:
+            continue
+        # if block is code-like (starts with 4 spaces line), keep as-is
+        lines = blk.split("\n")
+        is_code = all(l.startswith("    ") or not l.strip() for l in lines if l.strip())
+        if is_code and any(l.startswith("    ") for l in lines):
+            # keep verbatim, but strip trailing spaces
+            cleaned_blocks.append("\n".join(l.rstrip() for l in lines))
+        else:
+            # collapse single newlines to space, but keep list items line breaks
+            # If block contains list items (lines starting with "  * " or "  1. "), preserve lines individually
+            if any(l.lstrip().startswith("* ") or re.match(r"^\s*\d+\.\s", l) for l in lines):
+                # wrap each list item individually
+                wrapped_items = []
+                for l in lines:
+                    l = l.strip()
+                    if not l:
+                        continue
+                    # remove leading bullet already normalized, then re-wrap with indent
+                    m = re.match(r"^\*\s+(.*)", l)
+                    if m:
+                        content = m.group(1)
+                        wrapped = textwrap.fill(content, width=76, initial_indent="  * ", subsequent_indent="      ")
+                        wrapped_items.append(wrapped)
+                    else:
+                        m2 = re.match(r"^(\d+)\.\s+(.*)", l)
+                        if m2:
+                            num, content = m2.groups()
+                            indent = f"  {num}. "
+                            sub_indent = " " * len(indent)
+                            wrapped = textwrap.fill(content, width=76, initial_indent=indent, subsequent_indent=sub_indent)
+                            wrapped_items.append(wrapped)
+                        else:
+                            wrapped = textwrap.fill(l, width=76)
+                            wrapped_items.append(wrapped)
+                cleaned_blocks.append("\n".join(wrapped_items))
+            else:
+                # normal paragraph: collapse to single line then wrap
+                para = " ".join(blk.split())
+                # Don't wrap headings that are underlined with === or ---
+                if "\n" in blk and ("=" in blk or "-" in blk):
+                    # heading block already formatted, keep lines as-is but clean
+                    cleaned_blocks.append(blk)
+                else:
+                    if para:
+                        wrapped = textwrap.fill(para, width=76)
+                        cleaned_blocks.append(wrapped)
+
+    plain = "\n\n".join(cleaned_blocks).strip() + "\n"
+
+    # Deduplicate selectors/externals
+    internal_selectors = sorted(set(internal_selectors))
+    external_urls = sorted(set(external_urls))
+
+    return plain, internal_selectors, external_urls
+
+# ---------------------------------------------------------------------------
+# Filesystem mapping
+# ---------------------------------------------------------------------------
+
+def url_to_file_info(url: str, title_hint: str | None) -> tuple[str, str]:
+    """
+    Map canonical URL to (relative_file_path, selector).
+    e.g. https://saphira.vm2.uk/about -> ("about.txt", "/about.txt")
+         https://saphira.vm2.uk/ -> ("index.txt", "/index.txt")
+         https://saphira.vm2.uk/a/b/c -> ("a/b/c.txt", "/a/b/c.txt")
+    """
+    p = urllib.parse.urlparse(url)
+    path = p.path or "/"
+    if path == "/":
+        return "index.txt", "/index.txt"
+    # strip leading / and trailing /
+    rel = path.lstrip("/")
+    if rel.endswith("/"):
+        rel = rel.rstrip("/")
+    # if rel has extension already, keep, else add .txt
+    if "." not in os.path.basename(rel):
+        rel = rel + ".txt"
+    selector = "/" + rel
+    return rel, selector
+
+def title_from_markdown(md: str, fallback: str, url: str | None = None) -> str:
+    # Find first H1 and first H2; disambiguate generic "Saphira Linux" headings
+    # that are duplicated across subpages (e.g. all dnsDragon subpages share
+    # "# Saphira Linux dnsDragon"). In that case use the H2 and optionally
+    # prefix with parent dir for uniqueness (e.g. "Dnsdragon - Install BIND 9").
+    # Root ("/") is excluded: it should keep its H1 (SAPHIRA LINUX).
+    headings: list[tuple[str, str]] = re.findall(r"^(#{1,6})\s+(.+?)\s*$", md, flags=re.MULTILINE)
+    h1: str | None = None
+    h2: str | None = None
+    for hashes, text in headings:
+        clean = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+        clean = re.sub(r"[*_`]+", "", clean).strip()
+        lvl = len(hashes)
+        if lvl == 1 and h1 is None:
+            h1 = clean
+        elif lvl == 2 and h2 is None:
+            h2 = clean
+            if h1 is not None:
+                break
+    # Root special-case: keep H1 to avoid news-item title
+    if url:
+        try:
+            p = urllib.parse.urlparse(url)
+            if p.path == "/" or p.path == "":
+                if h1:
+                    return h1
+        except Exception:
+            pass
+    if h1:
+        if h1.lower().startswith("saphira linux") and h2:
+            # Generic branding -> use H2, prefixed with parent for navigation clarity
+            if url:
+                p = urllib.parse.urlparse(url)
+                path = p.path.strip("/")
+                parts = path.split("/") if path else []
+                if len(parts) >= 2:
+                    parent_disp = parts[0].replace("-", " ").replace("_", " ").title()
+                    if parent_disp.lower() not in h2.lower():
+                        return f"{parent_disp} - {h2}"
+            return h2
+        return h1
+    if h2:
+        return h2
+    return fallback
+
+def gopher_escape(display: str) -> str:
+    """
+    Geomyidae 0.99 index.gph native syntax: [type|Display|Selector|Host|Port]
+    Escape '|' and ']' and newlines. Upstream does not define fully;
+    we escape '|' as r'\\|' and strip control chars. ']' is left as-is
+    unless followed by '|'? Conservative.
+    """
+    # strip control, tabs, newlines
+    display = display.replace("\r", " ").replace("\n", " ").replace("\t", " ")
+    # escape pipe
+    display = display.replace("|", r"\|")
+    # collapse spaces
+    display = re.sub(r"\s+", " ", display).strip()
+    # limit length? geomyidae truncates maybe 70; we keep 70 for display
+    if len(display) > 70:
+        display = display[:67] + "..."
+    return display
+
+
+def default_config_paths() -> list[Path]:
+    """Search order for gopher-publisher.conf (system then dev next-to-bin)."""
+    candidates: list[Path] = []
+    # System location
+    candidates.append(Path("/etc/saphira/gopher-publisher.conf"))
+    # Next-to-bin: gopher/etc/saphira/gopher-publisher.conf (dev)
+    try:
+        bin_dir = Path(__file__).resolve().parent
+        candidates.append(bin_dir.parent / "etc" / "saphira" / "gopher-publisher.conf")
+        candidates.append(bin_dir.parent / "etc" / "gopher-publisher.conf")
+    except Exception:
+        pass
+    # CWD fallback
+    candidates.append(Path("etc/saphira/gopher-publisher.conf"))
+    return candidates
+
+
+def load_publisher_config(path: Path) -> dict[str, str]:
+    """Load key=value config (INI with or without section). Returns dict."""
+    parser = configparser.ConfigParser()
+    # Allow file without section header by prepending [gopher]
+    text = path.read_text(encoding="utf-8")
+    if not re.search(r"^\s*\[", text, re.MULTILINE):
+        text = "[gopher]\n" + text
+    parser.read_string(text)
+    cfg: dict[str, str] = {}
+    # Prefer [gopher] section, fallback to DEFAULT
+    section = "gopher" if parser.has_section("gopher") else parser.default_section
+    for k, v in parser.items(section):
+        cfg[k.lower()] = v.strip()
+    return cfg
+
+
+def chown_tree(root: Path, user: str, group: str) -> None:
+    """Recursively chown root to user:group if possible (best-effort, warns on fail)."""
+    try:
+        uid = pwd.getpwnam(user).pw_uid
+        gid = grp.getgrnam(group).gr_gid
+    except KeyError as e:
+        print(f"warning: chown {user}:{group} skipped ({e})", file=sys.stderr)
+        return
+    try:
+        for dirpath, dirnames, filenames in os.walk(root):
+            os.chown(dirpath, uid, gid)
+            for name in filenames:
+                os.chown(os.path.join(dirpath, name), uid, gid)
+    except PermissionError as e:
+        print(f"warning: chown {root} -> {user}:{group} failed ({e})", file=sys.stderr)
+    except Exception as e:
+        print(f"warning: chown failed: {e}", file=sys.stderr)
+
+# ---------------------------------------------------------------------------
+# Core build
+# ---------------------------------------------------------------------------
+
+def load_root_include(path: Path, gopher_host: str, gopher_port: int) -> tuple[list[str], list[str], set[str]]:
+    """Load optional root include (classic gophermap format).
+
+    Returns (classic_lines, native_lines, curated_selectors).
+    Classic lines are used verbatim for gophermap; native lines are converted
+    for index.gph (info -> plain text, links -> [type|display|selector|host|port]).
+    """
+    classic_lines: list[str] = []
+    native_lines: list[str] = []
+    curated: set[str] = set()
+    try:
+        raw = path.read_text(encoding="utf-8").splitlines()
+    except Exception as e:
+        raise RuntimeError(f"failed to read --root-include {path}: {e}") from e
+    for raw_line in raw:
+        # Preserve leading spaces after type char; do not strip line entirely
+        # Keep line as is except remove trailing \r
+        line = raw_line.rstrip("\r\n")
+        if line == "" or line.startswith("#"):
+            # Blank or comment in include -> blank info line in both
+            # For classic, blank comment is ignored; for native, emit blank
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            # Already native form -> keep for native, convert to classic
+            native_lines.append(line)
+            # Convert native "[type|display|selector|host|port]" -> classic "typeDisplay<TAB>selector"
+            inner = line[1:-1]
+            parts = inner.split("|")
+            if len(parts) >= 3:
+                t, d, s = parts[0], parts[1], parts[2]
+                # For classic, host/port empty
+                if t == "i":
+                    # info native -> classic i line: display is d (if blank -> just "i")
+                    if d.strip() == "" or d == "Err":
+                        classic_lines.append("i")
+                    else:
+                        classic_lines.append(f"i{d}")
+                else:
+                    # link
+                    classic_lines.append(f"{t}{d}\t{s}")
+                    if s.startswith("URL:"):
+                        curated.add(s)
+                    else:
+                        curated.add(s)
+            else:
+                classic_lines.append(line)
+            continue
+        # Classic format: first char is type, rest up to tab is display
+        if not line:
+            continue
+        t = line[0]
+        # Split on tab to get display+selector
+        if "\t" in line:
+            first, rest = line.split("\t", 1)
+            display = first[1:]  # after type
+            # rest may contain selector plus host/port tabs, we keep selector as first field
+            selector = rest.split("\t")[0]
+        else:
+            # No tab: e.g. "i" or "i   text" with no selector
+            display = line[1:]
+            selector = ""
+        # For classic, keep verbatim
+        classic_lines.append(line)
+        # For native, convert
+        if t == "i":
+            # Informational: plain text without brackets (geomyidae native treats any non-"[" line as info)
+            # Preserve display exactly (including leading spaces for centering)
+            if display.strip() == "":
+                # blank info -> empty line or [i||Err||] for explicit blank
+                native_lines.append("")
+            else:
+                # Plain informational line (no brackets)
+                native_lines.append(display)
+        elif t in "0123456789ghH":
+            d = display.strip()
+            s = selector.strip()
+            if s == "":
+                s = "Err"
+            native_lines.append(f"[{t}|{gopher_escape(d)}|{s}|{gopher_host}|{gopher_port}]")
+            curated.add(s)
+        elif t == "h":
+            d = display.strip()
+            s = selector.strip()
+            if s == "":
+                s = "URL:"
+            native_lines.append(f"[h|{gopher_escape(d)}|{s}|{gopher_host}|{gopher_port}]")
+            curated.add(s)
+        else:
+            # Unknown type -> treat as info plain
+            native_lines.append(display)
+    return classic_lines, native_lines, curated
+
+
+def build_tree(root_url: str, output_dir: Path, gopher_host: str, gopher_port: int, timeout: int, dry_run: bool, root_include: Path | None = None, chown_user: str | None = None, chown_group: str | None = None) -> dict:
+    root_origin = origin_of(root_url)
+    # Ensure root_url canonical with trailing slash for origin
+    if not root_url.endswith("/"):
+        root_url_canonical = root_url + "/"
+    else:
+        root_url_canonical = root_url
+
+    print(f"fetching sitemap from {root_url_canonical}sitemap.xml ...", file=sys.stderr)
+    sitemap_urls = fetch_sitemap(root_url_canonical, timeout)
+    print(f"sitemap: {len(sitemap_urls)} URLs", file=sys.stderr)
+
+    # Fetch each page's markdown
+    pages: list[dict] = []
+    seen_selectors: dict[str, str] = {}  # selector -> url (detect collision)
+    skipped: list[str] = []
+    for url in sitemap_urls:
+        # sitemap may include query? Keep as is
+        # Skip non-eligible? Keep all same-origin; but skip if url is sitemap.xml itself (not in locs anyway)
+        # Skip if path is /sitemap.xml etc — but not in list
+        print(f"  GET {url}  Accept: text/markdown", file=sys.stderr)
+        try:
+            body, final_url, ctype = fetch_url(url, root_origin, timeout, accept_markdown=True)
+        except RuntimeError as e:
+            msg = str(e)
+            # POST-only endpoints like /mcp return 405; skip with warning, don't abort whole tree.
+            # The sitemap is authoritative but includes such routes (collectPublicPaths).
+            # Skipping 405/404 is more useful than failing the entire publish.
+            if "HTTP 405" in msg or "HTTP 404" in msg:
+                print(f"  skip {url}: {msg} (non-GET route)", file=sys.stderr)
+                skipped.append(url)
+                continue
+            raise
+        # Validate content-type is text/markdown (allow charset suffix)
+        if "text/markdown" not in ctype.lower():
+            # Some endpoints might return text/markdown; charset=utf-8
+            # If server returns something else, it's an error — fail loudly
+            # Allow text/markdown; charset=utf-8 or similar
+            # If ctype is empty, treat as failure unless body looks like markdown
+            # Strict: require text/markdown
+            # However 405 endpoints already handled above; other non-markdown types skip with warning
+            if ctype.lower().startswith("text/plain") and "Method Not Allowed" in body.decode("utf-8", errors="replace"):
+                print(f"  skip {url}: {ctype!r} Method Not Allowed (POST-only)", file=sys.stderr)
+                skipped.append(url)
+                continue
+            raise RuntimeError(f"unexpected Content-Type for {url}: {ctype!r} (expected text/markdown)")
+        md = body.decode("utf-8", errors="replace")
+        if not md.strip():
+            raise RuntimeError(f"empty markdown body for {url}")
+        plain, internal_sels, external_urls = markdown_to_plain(md, final_url, root_origin)
+        # Use original sitemap URL for selector to preserve hierarchy even when server 307-redirects
+        # (e.g. /packagerepository/systemd -> 307 /packagerepository). Final_url is kept for Source header.
+        rel_path, selector = url_to_file_info(url, None)
+        # Detect selector collision (two URLs mapping to same file via original URL)
+        if selector in seen_selectors and seen_selectors[selector] != url:
+            counter = 2
+            while selector in seen_selectors:
+                sel_base, ext = os.path.splitext(selector)
+                selector = f"{sel_base}-{counter}{ext}"
+                rel_path = selector.lstrip("/")
+                counter += 1
+                if counter > 10:
+                    raise RuntimeError(f"selector collision for {url} vs {seen_selectors[selector]}")
+        seen_selectors[selector] = url
+        if final_url != url:
+            print(f"  note {url} -> {final_url} (redirect, keeping selector {selector})", file=sys.stderr)
+
+        # Title
+        fallback = os.path.splitext(os.path.basename(rel_path))[0].replace("-", " ").replace("_", " ").title()
+        if rel_path == "index.txt":
+            fallback = "Home"
+        title = title_from_markdown(md, fallback, url)
+
+        pages.append({
+            "url": final_url,
+            "original_url": url,
+            "rel_path": rel_path,
+            "selector": selector,
+            "title": title,
+            "md": md,
+            "plain": plain,
+            "internal": internal_sels,
+            "external": external_urls,
+        })
+
+    # Sort pages deterministically by selector
+    pages.sort(key=lambda p: p["selector"])
+    if skipped:
+        print(f"skipped {len(skipped)} non-GET sitemap entries: {', '.join(skipped)}", file=sys.stderr)
+
+    # Build directory structure
+    # dirs: dict[dir_rel -> {files: [], subdirs:set, externals:set}]
+    dirs: dict[str, dict] = defaultdict(lambda: {"files": [], "subdirs": set(), "externals": set()})
+    # Ensure root dir exists
+    dirs[""]  # create
+
+    for p in pages:
+        rel = p["rel_path"]
+        # dir is parent of file
+        dir_rel = os.path.dirname(rel)
+        # normalize "" for root
+        dirs[dir_rel]["files"].append(p)
+        for ext in p["external"]:
+            dirs[dir_rel]["externals"].add(ext)
+        # Also propagate externals to root? Keep per-dir only
+
+    # Add subdirs for intermediate dirs
+    all_dirs = set(dirs.keys())
+    # Ensure every parent dir exists
+    for d in list(all_dirs):
+        parts = Path(d).parts if d else []
+        for i in range(len(parts)):
+            parent = os.path.join(*parts[:i]) if i > 0 else ""
+            child = parts[i]
+            dirs[parent]["subdirs"].add(child)
+            # ensure child dir entry exists
+            child_full = os.path.join(parent, child) if parent else child
+            if child_full not in dirs:
+                dirs[child_full] = {"files": [], "subdirs": set(), "externals": set()}
+                all_dirs.add(child_full)
+
+    # For determinism, sort everything
+    for d in dirs.values():
+        d["files"].sort(key=lambda f: f["selector"])
+        d["externals"] = sorted(d["externals"])
+        d["subdirs"] = sorted(d["subdirs"])
+
+    # Prepare optional root include (generic publisher, site-owned file)
+    # e.g. /etc/saphira/gopher-home.conf or /srv/gopher-source/root-menu.include
+    root_classic_inc: list[str] = []
+    root_native_inc: list[str] = []
+    root_curated: set[str] = set()
+    if root_include is not None:
+        if not root_include.is_file():
+            raise RuntimeError(f"--root-include not found: {root_include}")
+        root_classic_inc, root_native_inc, root_curated = load_root_include(root_include, gopher_host, gopher_port)
+        print(f"root include: {root_include} ({len(root_classic_inc)} lines, {len(root_curated)} curated selectors)", file=sys.stderr)
+
+    # Now write to temp dir unless dry-run
+    tmp_root: Path | None = None
+    if dry_run:
+        print(f"\nDry-run: would write {len(pages)} pages to {output_dir}", file=sys.stderr)
+        if root_include is not None:
+            print(f"  root include: {root_include} -> {len(root_classic_inc)} classic / {len(root_native_inc)} native lines", file=sys.stderr)
+        for p in pages:
+            print(f"  {p['selector']}  <= {p['url']}  \"{p['title']}\"")
+        for d in sorted(dirs.keys()):
+            print(f"  dir /{d} : {len(dirs[d]['files'])} files, {len(dirs[d]['subdirs'])} subdirs, {len(dirs[d]['externals'])} externals", file=sys.stderr)
+        return {"pages": pages, "dirs": dirs}
+
+    tmp_root = Path(tempfile.mkdtemp(prefix="saphira-gopher-"))
+    try:
+        for p in pages:
+            out_path = tmp_root / p["rel_path"]
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            header = f"{p['title']}\n{'='*len(p['title'])}\n\nSource: {p['url']}\n\n"
+            content = header + p["plain"]
+            if not content.endswith("\n"):
+                content += "\n"
+            out_path.write_text(content, encoding="utf-8")
+
+        # Write menus for every directory: both classic gophermap (geomyidae 0.99
+        # deployment) and native index.gph ([1|...] syntax). They share the
+        # same entries, only the serialization differs. Classic gophermap
+        # leaves host/port empty so geomyidae fills its own address.
+        for dir_rel in sorted(dirs.keys()):
+            dir_path = tmp_root / dir_rel if dir_rel else tmp_root
+            dir_path.mkdir(parents=True, exist_ok=True)
+
+            entries = []
+
+            # 1 - subdirectories (skip curated at root)
+            for sub in dirs[dir_rel]["subdirs"]:
+                sub_selector = f"/{dir_rel}/{sub}/" if dir_rel else f"/{sub}/"
+                sub_selector = sub_selector.replace("//", "/")
+                if dir_rel == "" and sub_selector in root_curated:
+                    continue
+                display = gopher_escape(sub.replace("-", " ").replace("_", " ").title())
+                if not display:
+                    display = sub
+                entries.append(("1", display, sub_selector))
+
+            # 0 - files in this directory (skip curated at root)
+            for f in dirs[dir_rel]["files"]:
+                if dir_rel == "" and f["selector"] in root_curated:
+                    continue
+                disp = gopher_escape(f["title"])
+                entries.append(("0", disp, f["selector"]))
+
+            # h - external links found in this directory's files (skip curated at root)
+            for ext in dirs[dir_rel]["externals"]:
+                sel = f"URL:{ext}"
+                if dir_rel == "" and sel in root_curated:
+                    continue
+                parsed = urllib.parse.urlparse(ext)
+                disp_raw = parsed.netloc + parsed.path
+                if len(disp_raw) > 60:
+                    disp_raw = disp_raw[:57] + "..."
+                disp = gopher_escape(disp_raw or ext)
+                entries.append(("h", disp, sel))
+
+            # Native geomyidae index.gph: [type|Display|Selector|Host|Port]
+            # For root, prepend include native lines before exhaustive
+            native_entries = [f"[{t}|{d}|{s}|{gopher_host}|{gopher_port}]" for t, d, s in entries]
+            if dir_rel == "" and root_native_inc:
+                native_lines = root_native_inc + native_entries
+            else:
+                native_lines = native_entries
+            native_content = "\n".join(native_lines) + "\n" if native_lines else ""
+            (dir_path / "index.gph").write_text(native_content, encoding="utf-8", newline="\n")
+
+            # Classic gophermap: type+Display<TAB>Selector<TAB>Host<TAB>Port
+            # For 0.99 deployment leave host/port empty (geomyidae fills).
+            def classic_escape(d: str) -> str:
+                return d.replace("\t", " ").replace("\r", " ").replace("\n", " ").strip()
+
+            classic_entries = [f"{t}{classic_escape(d)}\t{s}" for t, d, s in entries]
+            if dir_rel == "" and root_classic_inc:
+                classic_lines = root_classic_inc + classic_entries
+            else:
+                classic_lines = classic_entries
+            classic_content = "\n".join(classic_lines) + "\n" if classic_lines else ""
+            (dir_path / "gophermap").write_text(classic_content, encoding="utf-8", newline="\n")
+
+        # Atomic replacement of output_dir
+        output_dir = Path(output_dir)
+        # Ensure parent exists
+        output_dir.parent.mkdir(parents=True, exist_ok=True)
+        # If output_dir exists, remove it (disposable)
+        if output_dir.exists():
+            # Remove atomically via rename to .old then delete?
+            # Simpler: shutil.rmtree
+            shutil.rmtree(output_dir)
+        shutil.move(str(tmp_root), str(output_dir))
+        # tmp_root now moved, avoid cleanup
+        tmp_root = None
+        # Ownership: publisher should own files as gopher:gopher (site policy)
+        if chown_user or chown_group:
+            u = chown_user or "gopher"
+            g = chown_group or "gopher"
+            chown_tree(output_dir, u, g)
+        elif not dry_run:
+            # Default site policy: chown to gopher:gopher if that user exists (best-effort)
+            try:
+                pwd.getpwnam("gopher")
+                grp.getgrnam("gopher")
+                chown_tree(output_dir, "gopher", "gopher")
+            except KeyError:
+                pass
+        print(f"wrote {len(pages)} pages, {len(dirs)} directories to {output_dir}", file=sys.stderr)
+        return {"pages": pages, "dirs": dirs}
+    finally:
+        if tmp_root and tmp_root.exists():
+            shutil.rmtree(tmp_root, ignore_errors=True)
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        prog="saphira-gopher-publish",
+        description=(
+            "Walk the Markdown representation of a website and generate a complete "
+            "Gopher tree suitable for geomyidae 0.99 (gophermap + index.gph)."
+        ),
+        epilog=(
+            "examples:\n"
+            "  saphira-gopher-publish https://saphira.vm2.uk/ ./out\n"
+            "  saphira-gopher-publish https://saphira.vm2.uk/ /tmp/gopher-out --gopher-host saphira.vm2.uk --gopher-port 70\n"
+            "  saphira-gopher-publish --config /etc/saphira/gopher-publisher.conf\n"
+            "  saphira-gopher-publish https://saphira.vm2.uk/ ./out --dry-run --timeout 10\n"
+            "\n"
+            "The tool fetches sitemap.xml, then GETs each URL with 'Accept: text/markdown',\n"
+            "converts Markdown to plain text, and writes:\n"
+            "  out/index.txt, out/about.txt, ... and out/**/gophermap (classic) + out/**/index.gph\n"
+            "  (geomyidae 0.99: gophermap classic \"1Display<TAB>/selector\" with host/port empty,\n"
+            "   plus native index.gph \"[0|Display|/file.txt|host|port]\" etc.)\n"
+            "\n"
+            "Config file /etc/saphira/gopher-publisher.conf (or gopher/etc/saphira/gopher-publisher.conf\n"
+            "next to bin) may set any option: root_url, output_dir, gopher_host, gopher_port,\n"
+            "timeout, root_include, user, group. CLI overrides config.\n"
+            "Output is disposable; regenerate deterministically. Never appends stale entries.\n"
+            "Same-origin redirects only; fail loudly on malformed/unreachable source.\n"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("root_url", nargs="?", default=None, help="website root URL, e.g. https://saphira.vm2.uk/ (or in config)")
+    parser.add_argument("output_dir", nargs="?", default=None, help="output directory (disposable, atomically replaced) (or in config)")
+    parser.add_argument("--config", metavar="FILE", help="publisher config file (default: /etc/saphira/gopher-publisher.conf or next-to-bin etc/saphira/gopher-publisher.conf)")
+    parser.add_argument("--root-url", dest="opt_root_url", metavar="URL", help="override root_url from config")
+    parser.add_argument("--output-dir", dest="opt_output_dir", metavar="DIR", help="override output_dir from config")
+    parser.add_argument("--gopher-host", default=None, help=f"Gopher host for selectors (default: {DEFAULT_GOPHER_HOST})")
+    parser.add_argument("--gopher-port", type=int, default=None, help=f"Gopher port (default: {DEFAULT_GOPHER_PORT})")
+    parser.add_argument("--timeout", type=int, default=None, help=f"request timeout seconds (default: {DEFAULT_TIMEOUT})")
+    parser.add_argument("--root-include", metavar="FILE", help="optional root menu include (classic gophermap lines) prepended to / (site-owned, e.g. /etc/saphira/gopher-home.conf or /srv/gopher-source/root-menu.include)")
+    parser.add_argument("--user", dest="chown_user", metavar="USER", help="output owner user (default: gopher)")
+    parser.add_argument("--group", dest="chown_group", metavar="GROUP", help="output owner group (default: gopher)")
+    parser.add_argument("--dry-run", action="store_true", help="validate without writing (print inventory)")
+    parser.add_argument("--validate", action="store_true", help="alias for --dry-run (validation mode)")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
+
+    args = parser.parse_args()
+
+    # --validate is alias
+    dry = args.dry_run or args.validate
+
+    # Load config file (CLI --config overrides search)
+    cfg: dict[str, str] = {}
+    cfg_path: Path | None = None
+    if args.config:
+        cfg_path = Path(args.config)
+        if not cfg_path.is_file():
+            parser.error(f"--config not found: {cfg_path}")
+        cfg = load_publisher_config(cfg_path)
+    else:
+        for cand in default_config_paths():
+            if cand.is_file():
+                cfg_path = cand
+                try:
+                    cfg = load_publisher_config(cand)
+                except Exception as e:
+                    parser.error(f"failed to read config {cand}: {e}")
+                break
+
+    # Explicit --root-url / --output-dir overrides positional
+    if args.opt_root_url is not None:
+        args.root_url = args.opt_root_url
+    if args.opt_output_dir is not None:
+        args.output_dir = args.opt_output_dir
+
+    # Single positional with config: treat non-URL arg as output_dir
+    if args.root_url is not None and args.output_dir is None and cfg.get("root_url") and cfg.get("output_dir"):
+        if not (args.root_url.startswith("http://") or args.root_url.startswith("https://")):
+            args.output_dir = args.root_url
+            args.root_url = None
+
+    def cfg_or_arg(key: str, arg_val, default=None):
+        if arg_val is not None:
+            return arg_val
+        return cfg.get(key, default)
+
+    # Resolve required positional via config fallback
+    root_url = cfg_or_arg("root_url", args.root_url)
+    output_dir = cfg_or_arg("output_dir", args.output_dir)
+    gopher_host = cfg_or_arg("gopher_host", args.gopher_host, DEFAULT_GOPHER_HOST)
+    gopher_port_raw = cfg_or_arg("gopher_port", args.gopher_port, str(DEFAULT_GOPHER_PORT))
+    timeout_raw = cfg_or_arg("timeout", args.timeout, str(DEFAULT_TIMEOUT))
+    root_include_raw = cfg_or_arg("root_include", args.root_include)
+    chown_user = cfg_or_arg("user", args.chown_user, "gopher")
+    chown_group = cfg_or_arg("group", args.chown_group, "gopher")
+
+    try:
+        gopher_port = int(gopher_port_raw)  # type: ignore
+        timeout = int(timeout_raw)  # type: ignore
+    except ValueError as e:
+        parser.error(f"invalid numeric config: {e}")
+
+    if not root_url or not output_dir:
+        parser.error("root_url and output_dir are required (positional or in config)")
+
+    # Validate root_url
+    try:
+        parsed = urllib.parse.urlparse(root_url)
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            parser.error(f"root_url must be http(s) URL, got {root_url!r}")
+        if gopher_port < 1 or gopher_port > 65535:
+            parser.error("gopher-port must be 1..65535")
+    except SystemExit:
+        raise
+    except Exception as e:
+        parser.error(str(e))
+
+    try:
+        root_inc = Path(root_include_raw) if root_include_raw else None
+        build_tree(root_url, Path(output_dir), gopher_host, gopher_port, timeout, dry, root_inc, chown_user, chown_group)
+    except Exception as e:
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()

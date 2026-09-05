@@ -1,0 +1,892 @@
+#!/bin/sh
+#
+# ovs-lib - shared engine behind the saphira-network ovs-* commands.
+#
+# Copyright (c) 2026 AKADATA. MIT licensed.
+#
+# One do-task per command, done well. Every mutating command:
+#   * pre-flights and REFUSES on data-loss conditions
+#   * records state of intent in /etc/ovs/switches.d/<bridge>.conf
+#   * snapshots undo material into /etc/ovs/undo/<ts>/ before applying
+#
+# SaphiraD (systemd-networkd) flavor. MIT: openers of gates.
+
+OVSCONF=/etc/ovs
+SWITCHES_D=$OVSCONF/switches.d
+UNDO_D=$OVSCONF/undo
+NETWORKD=/etc/systemd/network
+
+err()  { echo "ovs: $*" >&2; }
+die()  { err "$*"; exit 1; }
+need() { command -v "$1" >/dev/null || die "$1 not found"; }
+
+ovs()  { ovs-vsctl --timeout=10 "$@"; }
+
+ovs_running()
+{
+	need ovs-vsctl
+	ovs show >/dev/null 2>&1 || die "Open vSwitch is not available (ovsdb or ovs-vswitchd down)"
+}
+
+valid_name()
+{
+	case "$1" in
+		''|*[!A-Za-z0-9_.:-]*) return 1 ;;
+	esac
+	[ "${#1}" -le 15 ]
+}
+
+check_name() { valid_name "$1" || die "invalid interface name: $1 (max 15 chars, alnum . : - _)"; }
+
+bridge_exists() { ovs br-exists "$1" >/dev/null 2>&1; }
+
+# All OVS port names across all bridges (one per line).
+all_ovs_ports()
+{
+	for b in $(ovs list-br); do ovs list-ports "$b"; done
+}
+
+# A real NIC is free when: it exists, is not enslaved (no master), and
+# is not already an OVS port on any bridge.
+nic_is_free()
+{
+	nic=$1
+	[ -d "/sys/class/net/$nic" ] || return 1
+	[ -L "/sys/class/net/$nic/master" ] && return 1
+	for p in $(all_ovs_ports); do
+		[ "$p" = "$nic" ] && return 1
+	done
+	return 0
+}
+
+# Refuse when a systemd-networkd unit matches this interface: networkd
+# would fight OVS for the device.
+networkd_conflict()
+{
+	nic=$1
+	for f in "$NETWORKD"/*.network "$NETWORKD"/*.netdev; do
+		[ -f "$f" ] || continue
+		if grep -qE "^Name=($nic|\$|$nic .*)$" "$f" 2>/dev/null || \
+		   grep -qE "^Name=$nic\$" "$f" 2>/dev/null; then
+			echo "$f"
+			return 0
+		fi
+	done
+	return 1
+}
+
+snapshot_undo()
+{
+	ts=$(date +%Y%m%d-%H%M%S)
+	dir=$UNDO_D/$ts
+	mkdir -p "$dir" "$SWITCHES_D"
+	ovs show > "$dir/ovs-vsctl-show.txt" 2>/dev/null || true
+	cp -a "$NETWORKD" "$dir/systemd-network" 2>/dev/null || true
+	echo "$dir"
+}
+
+record_state()
+{
+	bridge=$1
+	file=$SWITCHES_D/$bridge.conf
+	mkdir -p "$SWITCHES_D"
+	grep -v "^port $2 " "$file" 2>/dev/null > "$file.new" || true
+	[ -n "$3" ] && printf 'port %s %s\n' "$2" "$3" >> "$file.new"
+	mv "$file.new" "$file"
+}
+
+# ---------------------------------------------------------------- bridge
+
+do_bridge_add()
+{
+	name=$1; shift
+	mtu=""
+	while [ "$#" -gt 0 ]; do
+		case "$1" in
+			--mtu) mtu=$2; shift 2 ;;
+			*) die "ovs bridge add: unknown option $1" ;;
+		esac
+	done
+	check_name "$name"
+	ovs_running
+	bridge_exists "$name" && die "bridge already exists: $name"
+	[ -n "$mtu" ] && case "$mtu" in ''|*[!0-9]*) die "invalid MTU: $mtu" ;; esac
+
+	undo=$(snapshot_undo)
+	if [ -n "$mtu" ]; then
+		ovs add-br "$name" -- set Bridge "$name" other_config:mtu="$mtu"
+	else
+		ovs add-br "$name"
+	fi
+	mkdir -p "$SWITCHES_D"
+	printf 'bridge %s\nmtu %s\n' "$name" "${mtu:-default}" > "$SWITCHES_D/$name.conf"
+	ip link set "$name" up 2>/dev/null || true
+	echo "ovs: bridge $name created (undo snapshot: $undo)"
+}
+
+do_bridge_del()
+{
+	name=$1
+	check_name "$name"
+	ovs_running
+	bridge_exists "$name" || die "no such bridge: $name"
+	echo "About to delete bridge $name and ALL its ports."
+	printf 'Type the bridge name to confirm: '
+	read -r answer
+	[ "$answer" = "$name" ] || die "aborted"
+	undo=$(snapshot_undo)
+	ovs del-br "$name"
+	rm -f "$SWITCHES_D/$name.conf"
+	echo "ovs: bridge $name deleted (undo snapshot: $undo)"
+}
+
+do_bridge_list()
+{
+	ovs_running
+	for b in $(ovs list-br); do
+		ports=$(ovs list-ports "$b" | tr '\n' ' ')
+		echo "$b: $ports"
+	done
+}
+
+# ------------------------------------------------------------------ port
+
+do_port_add()
+{
+	bridge=$1; port=$2; shift 2
+	internal=0; vlan=""
+	while [ "$#" -gt 0 ]; do
+		case "$1" in
+			--internal) internal=1; shift ;;
+			--vlan) vlan=$2; shift 2 ;;
+			*) die "ovs port add: unknown option $1" ;;
+		esac
+	done
+	check_name "$bridge"; check_name "$port"
+	ovs_running
+	bridge_exists "$bridge" || die "no such bridge: $bridge"
+	if [ "$internal" = 1 ]; then
+		ip link show "$port" >/dev/null 2>&1 && die "interface already exists: $port"
+	else
+		[ -d "/sys/class/net/$port" ] || die "no such interface: $port"
+		conflict=$(networkd_conflict "$port")
+		[ -n "$conflict" ] && die "systemd-networkd unit matches $port: $conflict (remove/disable it first)"
+		nic_is_free "$port" || die "$port is already enslaved or an OVS port"
+	fi
+	case "$vlan" in ''|*[!0-9]*) [ -n "$vlan" ] && die "invalid VLAN: $vlan" ;; esac
+
+	undo=$(snapshot_undo)
+	if [ "$internal" = 1 ]; then
+		ovs add-port "$bridge" "$port" -- set Interface "$port" type=internal
+	else
+		ovs add-port "$bridge" "$port"
+	fi
+	[ -n "$vlan" ] && ovs set Port "$port" tag="$vlan"
+	ip link set "$port" up 2>/dev/null || true
+	state="internal"
+	[ "$internal" = 1 ] || state="nic"
+	[ -n "$vlan" ] && state="$state vlan=$vlan"
+	record_state "$bridge" "$port" "$state"
+	echo "ovs: port $port added to $bridge (undo snapshot: $undo)"
+}
+
+do_port_del()
+{
+	bridge=$1; port=$2
+	check_name "$bridge"; check_name "$port"
+	ovs_running
+	bridge_exists "$bridge" || die "no such bridge: $bridge"
+	undo=$(snapshot_undo)
+	ovs del-port "$bridge" "$port"
+	record_state "$bridge" "$port" ""
+	echo "ovs: port $port removed from $bridge (undo snapshot: $undo)"
+}
+
+do_port_list()
+{
+	ovs_running
+	bridge_exists "$1" || die "no such bridge: $1"
+	ovs list-ports "$1"
+}
+
+# ---------------------------------------------------------------- uplink
+
+do_uplink_add()
+{
+	bridge=$1; nic=$2; shift 2
+	clone_mac=0
+	while [ "$#" -gt 0 ]; do
+		case "$1" in
+			--clone-mac) clone_mac=1; shift ;;
+			*) die "ovs uplink add: unknown option $1" ;;
+		esac
+	done
+	check_name "$bridge"; check_name "$nic"
+	ovs_running
+	bridge_exists "$bridge" || die "no such bridge: $bridge"
+	[ -d "/sys/class/net/$nic" ] || die "no such interface: $nic"
+	conflict=$(networkd_conflict "$nic")
+	[ -n "$conflict" ] && die "systemd-networkd unit matches $nic: $conflict (remove/disable it first - it would fight OVS for the device)"
+	nic_is_free "$nic" || die "$nic is already enslaved or an OVS port"
+
+	# Outage warning + explicit confirmation: this detaches a live NIC.
+	mac=$(cat "/sys/class/net/$nic/address")
+	echo "WARNING: $nic will be moved into OVS bridge $bridge."
+	echo "  Links on $nic drop for ~1-2s; addressing stops applying;"
+	echo "  remote sessions over $nic will TERMINATE (have a side door)."
+	printf 'Continue? Type "yes": '
+	read -r answer
+	[ "$answer" = "yes" ] || die "aborted"
+
+	undo=$(snapshot_undo)
+	ovs add-port "$bridge" "$nic"
+	ip link set "$nic" up
+	if [ "$clone_mac" = 1 ] && [ "$mac" != "00:00:00:00:00:00" ]; then
+		# Clone the NIC's MAC onto the bridge so external ARP/DHCP
+		# state survives the move.
+		ip link set "$bridge" address "$mac" 2>/dev/null \
+			|| err "could not clone MAC onto $bridge (continuing)"
+	fi
+	record_state "$bridge" "$nic" "uplink mac=$mac"
+	echo "ovs: uplink $nic added to $bridge, MAC cloned: $mac (undo snapshot: $undo)"
+}
+
+do_uplink_del()
+{
+	bridge=$1; nic=$2
+	check_name "$bridge"; check_name "$nic"
+	ovs_running
+	echo "WARNING: removing uplink $nic from $bridge; traffic over it stops."
+	printf 'Continue? Type "yes": '
+	read -r answer
+	[ "$answer" = "yes" ] || die "aborted"
+	undo=$(snapshot_undo)
+	ovs del-port "$bridge" "$nic"
+	record_state "$bridge" "$nic" ""
+	echo "ovs: uplink $nic removed from $bridge (undo snapshot: $undo)"
+}
+
+# ------------------------------------------------------------------- net
+
+# ovs-net: bridge + internal gateway port + systemd-networkd configs.
+# The non-libvirt variant of ovs-vmswitch (which adds the libvirt XML).
+do_net_add()
+{
+	name=$1; gwport=$2; shift 2
+	ipv4=""; ipv6=""; mtu=9000
+	while [ "$#" -gt 0 ]; do
+		case "$1" in
+			--ipv4) ipv4=$2; shift 2 ;;
+			--ipv6) ipv6=$2; shift 2 ;;
+			--mtu)  mtu=$2; shift 2 ;;
+			*) die "ovs net add: unknown option $1" ;;
+		esac
+	done
+	check_name "$name"; check_name "$gwport"
+	case "$mtu" in ''|*[!0-9]*) die "invalid MTU: $mtu" ;; esac
+	ovs_running
+	bridge_exists "$name" && die "bridge already exists: $name"
+	ip link show "$gwport" >/dev/null 2>&1 && die "interface already exists: $gwport"
+	mkdir -p "$NETWORKD"
+	for f in "$NETWORKD/50-$name.network" "$NETWORKD/60-$gwport.network"; do
+		[ -e "$f" ] && die "networkd config already exists: $f"
+	done
+
+	undo=$(snapshot_undo)
+	ovs add-br "$name" \
+		-- add-port "$name" "$gwport" \
+		-- set Interface "$gwport" type=internal \
+		-- set Interface "$name" mtu_request="$mtu" \
+		-- set Interface "$gwport" mtu_request="$mtu"
+
+	{
+		echo "# Generated by ovs-lib (ovs net add)"
+		echo "# OVS bridge: $name"
+		echo ""
+		echo "[Match]"
+		echo "Name=$name"
+		echo ""
+		echo "[Link]"
+		echo "MTUBytes=$mtu"
+		echo "RequiredForOnline=no"
+		echo "ActivationPolicy=up"
+		echo ""
+		echo "[Network]"
+		echo "DHCP=no"
+		echo "LinkLocalAddressing=no"
+		echo "IPv6AcceptRA=no"
+		echo "ConfigureWithoutCarrier=yes"
+	} > "$NETWORKD/50-$name.network"
+
+	{
+		echo "# Generated by ovs-lib (ovs net add)"
+		echo "# OVS internal gateway port: $gwport"
+		echo ""
+		echo "[Match]"
+		echo "Name=$gwport"
+		echo ""
+		echo "[Link]"
+		echo "MTUBytes=$mtu"
+		echo "RequiredForOnline=no"
+		echo "ActivationPolicy=up"
+		echo ""
+		echo "[Network]"
+		echo "DHCP=no"
+		echo "IPv6AcceptRA=no"
+		echo "ConfigureWithoutCarrier=yes"
+		[ -n "$ipv4" ] && echo "Address=$ipv4"
+		[ -n "$ipv6" ] && echo "Address=$ipv6"
+	} > "$NETWORKD/60-$gwport.network"
+
+	mkdir -p "$SWITCHES_D"
+	{
+		printf 'bridge %s\nmtu %s\n' "$name" "$mtu"
+		printf 'port %s internal net gw\n' "$gwport"
+	} > "$SWITCHES_D/$name.conf"
+
+	command -v networkctl >/dev/null && {
+		networkctl reload 2>/dev/null || true
+		networkctl reconfigure "$name" 2>/dev/null || true
+		networkctl reconfigure "$gwport" 2>/dev/null || true
+	}
+	ip link set "$name" up 2>/dev/null || true
+	ip link set "$gwport" up 2>/dev/null || true
+	echo "ovs: net $name created ($gwport carries"
+	echo "  ${ipv4:-no IPv4}${ipv6:+ / $ipv6}) (undo snapshot: $undo)"
+}
+
+do_net_del()
+{
+	name=$1
+	check_name "$name"
+	ovs_running
+	bridge_exists "$name" || die "no such bridge: $name"
+	echo "About to delete net $name (bridge, ports and networkd configs)."
+	printf 'Type the bridge name to confirm: '
+	read -r answer
+	[ "$answer" = "$name" ] || die "aborted"
+	undo=$(snapshot_undo)
+	ports=$(ovs list-ports "$name" 2>/dev/null)
+	ovs del-br "$name"
+	for p in $ports; do
+		rm -f "$NETWORKD/60-$p.network"
+	done
+	rm -f "$NETWORKD/50-$name.network" "$SWITCHES_D/$name.conf"
+	command -v networkctl >/dev/null && networkctl reload 2>/dev/null || true
+	echo "ovs: net $name deleted (undo snapshot: $undo)"
+}
+
+# --------------------------------------------------------------- tunnel
+
+# ovs-tunnel add BRIDGE NAME vxlan|gre REMOTE_IP [--key N]
+# Cross-host overlay link; the underlay IP must be reachable (mgmt or a
+# dedicated uplink). State of intent + undo snapshot like every task.
+do_tunnel_add()
+{
+	bridge=$1; name=$2; type=$3; remote=$4; shift 4
+	key=""
+	local_ip=""
+	while [ "$#" -gt 0 ]; do
+		case "$1" in
+			--key) key=$2; shift 2 ;;
+			--local-ip) local_ip=$2; shift 2 ;;
+			*) die "ovs tunnel add: unknown option $1" ;;
+		esac
+	done
+	check_name "$bridge"; check_name "$name"
+	case $type in vxlan|gre) ;; *) die "tunnel type must be vxlan or gre" ;; esac
+	# Underlay may be IPv4 or IPv6 (OVS vxlan/gre support both natively).
+	case $remote in
+		*[!0-9a-fA-F.:]*) die "invalid remote underlay address: $remote" ;;
+		*:*) : ;;
+		*.*) : ;;
+		*) die "invalid remote underlay address: $remote" ;;
+	esac
+	[ -n "$key" ] && case $key in ''|*[!0-9]*) die "invalid key: $key" ;; esac
+	ovs_running
+	bridge_exists "$bridge" || die "no such bridge: $bridge"
+	ovs list-ports "$bridge" | grep -qx "$name" && die "port already exists on $bridge: $name"
+
+	undo=$(snapshot_undo)
+	# IPv6 underlays with multiple addresses per host need an explicit
+	# local_ip, or ovs-vswitchd picks a source the peer discards.
+	opts="options:remote_ip=$remote"
+	[ -n "$key" ] && opts="$opts options:key=$key"
+	[ -n "$local_ip" ] && opts="$opts options:local_ip=$local_ip"
+	ovs add-port "$bridge" "$name" \
+		-- set Interface "$name" type="$type" options:$opts
+	state="tunnel type=$type remote=$remote"
+	[ -n "$key" ] && state="$state key=$key"
+	[ -n "$local_ip" ] && state="$state local_ip=$local_ip"
+	record_state "$bridge" "$name" "$state"
+	echo "ovs: $type tunnel $name added to $bridge (remote $remote${key:+, key $key}) (undo snapshot: $undo)"
+}
+
+do_tunnel_del()
+{
+	bridge=$1; name=$2
+	check_name "$bridge"; check_name "$name"
+	ovs_running
+	undo=$(snapshot_undo)
+	ovs del-port "$bridge" "$name"
+	record_state "$bridge" "$name" ""
+	echo "ovs: tunnel $name removed from $bridge (undo snapshot: $undo)"
+}
+
+# ---------------------------------------------------------------- patch
+
+# ovs-patch add BRIDGE-A PORT-A BRIDGE-B PORT-B
+# Wires two local bridges together as one L2 (patch pair, peers set).
+do_patch_add()
+{
+	bridgeA=$1; portA=$2; bridgeB=$3; portB=$4
+	check_name "$bridgeA"; check_name "$portA"
+	check_name "$bridgeB"; check_name "$portB"
+	[ "$portA" != "$portB" ] || die "patch ports must differ"
+	ovs_running
+	bridge_exists "$bridgeA" || die "no such bridge: $bridgeA"
+	bridge_exists "$bridgeB" || die "no such bridge: $bridgeB"
+	ovs list-ports "$bridgeA" | grep -qx "$portA" && die "port already exists on $bridgeA: $portA"
+	ovs list-ports "$bridgeB" | grep -qx "$portB" && die "port already exists on $bridgeB: $portB"
+	[ "$bridgeA" = "$bridgeB" ] && die "patch must join two DIFFERENT bridges (use a vlan for segmentation within one bridge)"
+
+	undo=$(snapshot_undo)
+	ovs add-port "$bridgeA" "$portA" \
+		-- set Interface "$portA" type=patch options:peer="$portB" \
+		-- add-port "$bridgeB" "$portB" \
+		-- set Interface "$portB" type=patch options:peer="$portA"
+	record_state "$bridgeA" "$portA" "patch peer=$portB bridgeB=$bridgeB"
+	record_state "$bridgeB" "$portB" "patch peer=$portA bridgeA=$bridgeA"
+	echo "ovs: patched $bridgeA/$portA <-> $bridgeB/$portB (undo snapshot: $undo)"
+}
+
+do_patch_del()
+{
+	bridgeA=$1; portA=$2
+	check_name "$bridgeA"; check_name "$portA"
+	ovs_running
+	peer=$(ovs get Interface "$portA" options:peer 2>/dev/null | tr -d '"') || true
+	undo=$(snapshot_undo)
+	ovs del-port "$bridgeA" "$portA"
+	[ -n "$peer" ] && ovs del-port "$peer" 2>/dev/null || true
+	record_state "$bridgeA" "$portA" ""
+	[ -n "$peer" ] && echo "ovs: patch pair removed ($portA + peer $peer) (undo snapshot: $undo)"
+}
+
+# ------------------------------------------------------------------- wan
+
+# ovs-wan add NIC BRIDGE GWPORT
+# Migrate the PRIMARY interface (its IPv4+IPv6 addresses, default and
+# device routes) into an OVS bridge without losing access. Ordering is
+# everything (S. Smalley's DSR method, 2016):
+#   1. snapshot + generate undo.sh
+#   2. create BRIDGE + internal GWPORT, MAC cloned from the NIC
+#      (bridge carries the hardware address so ARP state survives)
+#   3. dual-home: copy every address to GWPORT BEFORE removing any
+#   4. enslave the NIC, then strip its addresses
+#   5. move default + device routes onto the bridge
+#   6. replace networkd: NIC unit retired (saved to undo), GWPORT unit
+#      generated with the moved addressing so reboots persist.
+do_wan_add()
+{
+	nic=$1; bridge=$2; gwport=$3
+	check_name "$nic"; check_name "$bridge"; check_name "$gwport"
+	ovs_running
+	[ -d "/sys/class/net/$nic" ] || die "no such interface: $nic"
+	bridge_exists "$bridge" && die "bridge already exists: $bridge"
+	ip link show "$gwport" >/dev/null 2>&1 && die "interface already exists: $gwport"
+	[ "$nic" = "$bridge" ] || [ "$nic" = "$gwport" ] && die "names must differ"
+	nic_is_free "$nic" || die "$nic is already enslaved or an OVS port"
+
+	# Collect everything BEFORE touching anything.
+	nic_mac=$(cat "/sys/class/net/$nic/address")
+	# Portable text parse (ip -j is not universal); global scope only.
+	addrs=$(ip -o addr show dev "$nic" 2>/dev/null \
+		| awk '$3=="inet" || $3=="inet6" { \
+			if ($0 !~ /scope link/ && $0 !~ /scope host/) \
+				print $3, $4 }')
+	[ -n "$addrs" ] || die "no global addresses on $nic to migrate"
+	def4=$(ip route show default dev "$nic" | head -1)
+	def6=$(ip -6 route show default dev "$nic" | head -1)
+	devroutes=$(ip route show dev "$nic" | grep -v default)
+	devroutes6=$(ip -6 route show dev "$nic" | grep -v default)
+
+	conflict=$(networkd_conflict "$nic")
+	undo=$(snapshot_undo)
+
+	# Generate an executable undo script into the snapshot.
+	{
+		echo "#!/bin/sh"
+		echo "# Undo for ovs-wan add $nic $bridge $gwport ($(date -u +%FT%TZ))"
+		echo "ovs-vsctl --timeout=10 del-br $bridge"
+		echo "ip addr flush dev $nic"
+		while read -r fam local_cidr; do
+			echo "ip $fam addr add $local_cidr dev $nic"
+		done <<EOF2
+$addrs
+EOF2
+		[ -n "$def4" ] && echo "ip route replace $def4"
+		[ -n "$def6" ] && echo "ip -6 route replace $def6"
+		while read -r r; do
+			[ -n "$r" ] && echo "ip route replace $r"
+		done <<EOF2
+$devroutes
+EOF2
+		while read -r r; do
+			[ -n "$r" ] && echo "ip -6 route replace $r"
+		done <<EOF2
+$devroutes6
+EOF2
+		[ -n "$conflict" ] && echo "cp -a '$undo/systemd-network/$(basename "$conflict")' '$conflict'"
+		echo "networkctl reload 2>/dev/null || true"
+		echo "echo 'wan migration undone: $nic restored'"
+	} > "$undo/undo.sh"
+	chmod +x "$undo/undo.sh"
+
+	# 1. bridge + internal gateway port, hardware address cloned.
+	ovs add-br "$bridge" \
+		-- add-port "$bridge" "$gwport" \
+		-- set Interface "$gwport" type=internal
+	ovs set Bridge "$bridge" other_config:hwaddr="$nic_mac"
+	ip link set "$bridge" address "$nic_mac"
+	ip link set "$bridge" up
+	ip link set "$gwport" up
+
+	# 2. dual-home: every address onto GWPORT first.
+	while read -r fam local_cidr; do
+		[ -n "$fam" ] || continue
+		ip $fam addr replace "$local_cidr" dev "$gwport" 2>/dev/null \
+			|| err "address $local_cidr already present on $gwport?"
+	done <<EOF2
+$addrs
+EOF2
+
+	# 3. enslave the NIC, then strip its addresses (the bridge now
+	#    answers for the hardware MAC, so ARP stays consistent).
+	ovs add-port "$bridge" "$nic"
+	ip addr flush dev "$nic"
+
+	# 4. move default + device routes onto the bridge.
+	[ -n "$def4" ] && {
+		gw4=$(echo "$def4" | sed -n 's/.*via \([0-9.]*\).*/\1/p')
+		ip route del default dev "$nic" 2>/dev/null
+		ip route replace default via "$gw4" dev "$bridge"
+	}
+	[ -n "$def6" ] && {
+		gw6=$(echo "$def6" | sed -n 's/.*via \([0-9a-f:]*\).*/\1/p')
+		ip -6 route del default dev "$nic" 2>/dev/null
+		ip -6 route replace default via "$gw6" dev "$bridge"
+	}
+	while read -r r; do
+		[ -n "$r" ] || continue
+		nr=$(echo "$r" | sed "s/ dev $nic\$/ dev $bridge/")
+		ip route replace $nr 2>/dev/null || true
+	done <<EOF2
+$devroutes
+EOF2
+	while read -r r; do
+		[ -n "$r" ] || continue
+		nr=$(echo "$r" | sed "s/ dev $nic\$/ dev $bridge/")
+		ip -6 route replace $nr 2>/dev/null || true
+	done <<EOF2
+$devroutes6
+EOF2
+
+	# 5. networkd: retire the NIC's unit (saved in snapshot), generate
+	#    the GWPORT unit with the moved addressing (reboot persistence).
+	[ -n "$conflict" ] && mv "$conflict" "$undo/" \
+		|| true
+	{
+		echo "# Generated by ovs-lib (ovs wan add)"
+		echo "# OVS bridge: $bridge, internal gateway port: $gwport"
+		echo "# migrated from $nic ($nic_mac)"
+		echo ""
+		echo "[Match]"
+		echo "Name=$gwport"
+		echo ""
+		echo "[Link]"
+		echo "RequiredForOnline=no"
+		echo "ActivationPolicy=up"
+		echo ""
+		echo "[Network]"
+		echo "DHCP=no"
+		echo "IPv6AcceptRA=no"
+		echo "ConfigureWithoutCarrier=yes"
+		while read -r fam local_cidr; do
+			[ -n "$fam" ] || continue
+			echo "Address=$local_cidr"
+		done <<EOF2
+$addrs
+EOF2
+		gw4=$(echo "$def4" | sed -n 's/.*via \([0-9.]*\).*/\1/p')
+		[ -n "$gw4" ] && {
+			echo ""
+			echo "[Route]"
+			echo "Gateway=$gw4"
+			echo "Destination=0.0.0.0/0"
+		}
+		gw6=$(echo "$def6" | sed -n 's/.*via \([0-9a-f:]*\).*/\1/p')
+		[ -n "$gw6" ] && {
+			echo ""
+			echo "[Route]"
+			echo "Gateway=$gw6"
+			echo "Destination=::/0"
+		}
+	} > "$NETWORKD/60-$gwport.network"
+
+	mkdir -p "$SWITCHES_D"
+	{
+		printf 'bridge %s\n' "$bridge"
+		printf 'port %s internal wan migrated-from=%s\n' "$gwport" "$nic"
+		printf 'port %s uplink mac=%s\n' "$nic" "$nic_mac"
+	} > "$SWITCHES_D/$bridge.conf"
+
+	command -v networkctl >/dev/null && networkctl reload 2>/dev/null || true
+
+	echo "ovs: WAN migrated: $nic -> $bridge/$gwport (hwaddr $nic_mac)"
+	echo "  addresses, default routes and networkd moved; reboot-persistent."
+	echo "  undo: $undo/undo.sh"
+	# Self-check: gateway reachable through the new path?
+	if [ -n "$gw4" ]; then
+		ping -c 1 -W 2 "$gw4" >/dev/null 2>&1 \
+			&& echo "  self-check: gateway $gw4 reachable via $bridge" \
+			|| err "self-check: gateway $gw4 did not answer - inspect before disconnecting (undo available)"
+	fi
+}
+
+do_wan_del()
+{
+	# Reverse of do_wan_add: everything the migration moved comes back
+	# to the real NIC - all addresses (one or hundreds), defaults and
+	# device routes - with the same dual-home-first ordering that keeps
+	# the live session alive.
+	nic=$1; bridge=$2
+	check_name "$nic"; check_name "$bridge"
+	ovs_running
+	[ -d "/sys/class/net/$nic" ] || die "no such interface: $nic"
+	bridge_exists "$bridge" || die "no such bridge: $bridge"
+
+	# Locate the internal gateway port (state of intent first, OVS as
+	# fallback).
+	gwport=""
+	[ -f "$SWITCHES_D/$bridge.conf" ] && \
+		gwport=$(awk '$1=="port" && $3=="internal" && $4=="wan" {print $2; exit}' "$SWITCHES_D/$bridge.conf")
+	if [ -z "$gwport" ]; then
+		for p in $(ovs list-ports "$bridge"); do
+			t=$(ovs get Interface "$p" type 2>/dev/null | tr -d '"')
+			[ "$t" = "internal" ] && gwport=$p && break
+		done
+	fi
+	[ -n "$gwport" ] || die "no internal gateway port found on $bridge"
+	ip link show "$gwport" >/dev/null 2>&1 || die "gateway port $gwport has no interface"
+
+	# Collect what must come back to the NIC.
+	addrs=$(ip -o addr show dev "$gwport" 2>/dev/null \
+		| awk '$3=="inet" || $3=="inet6" { \
+			if ($0 !~ /scope link/ && $0 !~ /scope host/) \
+				print $3, $4 }')
+	[ -n "$addrs" ] || die "no global addresses on $gwport to move back to $nic"
+	def4=$(ip route show default dev "$bridge" | head -1)
+	def6=$(ip -6 route show default dev "$bridge" | head -1)
+	devroutes=$(ip route show dev "$bridge" | grep -v default)
+	devroutes6=$(ip -6 route show dev "$bridge" | grep -v default)
+
+	undo=$(snapshot_undo)
+	{
+		echo "#!/bin/sh"
+		echo "# Undo for ovs-wan del $nic $bridge ($(date -u +%FT%TZ))"
+		echo "ovs-wan add $nic $bridge $gwport"
+	} > "$undo/undo.sh"
+	chmod +x "$undo/undo.sh"
+
+	echo "WARNING: $bridge/$gwport will be removed and everything moved"
+	echo "  back onto $nic. Remote sessions over $bridge may stall ~1-2s"
+	echo "  (have a side door)."
+	printf 'Continue? Type "yes": '
+	read -r answer
+	[ "$answer" = "yes" ] || die "aborted"
+
+	# 1. dual-home: every address onto the NIC first.
+	while read -r fam local_cidr; do
+		[ -n "$fam" ] || continue
+		ip $fam addr replace "$local_cidr" dev "$nic" 2>/dev/null \
+			|| err "could not restore $local_cidr on $nic"
+	done <<EOF2
+$addrs
+EOF2
+
+	# 2. free the NIC from the bridge and delete the bridge wholesale
+	#    (gwport dies with it - its addresses are already dual-homed).
+	ovs del-port "$bridge" "$nic"
+	ip addr flush dev "$gwport" 2>/dev/null || true
+	ovs del-br "$bridge"
+	rm -f "$SWITCHES_D/$bridge.conf" "$NETWORKD/60-$gwport.network"
+
+	# 3. routes back onto the NIC.
+	[ -n "$def4" ] && {
+		gw4=$(echo "$def4" | sed -n 's/.*via \([0-9.]*\).*/\1/p')
+		ip route del default dev "$bridge" 2>/dev/null
+		ip route replace default via "$gw4" dev "$nic"
+	}
+	[ -n "$def6" ] && {
+		gw6=$(echo "$def6" | sed -n 's/.*via \([0-9a-f:]*\).*/\1/p')
+		ip -6 route del default dev "$bridge" 2>/dev/null
+		ip -6 route replace default via "$gw6" dev "$nic"
+	}
+	while read -r r; do
+		[ -n "$r" ] || continue
+		nr=$(echo "$r" | sed "s/ dev $bridge\$/ dev $nic/")
+		ip route replace $nr 2>/dev/null || true
+	done <<EOF2
+$devroutes
+EOF2
+	while read -r r; do
+		[ -n "$r" ] || continue
+		nr=$(echo "$r" | sed "s/ dev $bridge\$/ dev $nic/")
+		ip -6 route replace $nr 2>/dev/null || true
+	done <<EOF2
+$devroutes6
+EOF2
+
+	# 4. networkd: regenerate the NIC's unit from the restored state so
+	#    reboots persist (the migration retired the original unit into
+	#    its undo snapshot; that one also remains available).
+	{
+		echo "# Generated by ovs-lib (ovs wan del)"
+		echo "# Real interface: $nic (restored from $bridge/$gwport)"
+		echo ""
+		echo "[Match]"
+		echo "Name=$nic"
+		echo ""
+		echo "[Link]"
+		echo "RequiredForOnline=no"
+		echo "ActivationPolicy=up"
+		echo ""
+		echo "[Network]"
+		echo "DHCP=no"
+		echo "IPv6AcceptRA=no"
+		echo "ConfigureWithoutCarrier=yes"
+		while read -r fam local_cidr; do
+			[ -n "$fam" ] || continue
+			echo "Address=$local_cidr"
+		done <<EOF2
+$addrs
+EOF2
+		gw4=$(echo "$def4" | sed -n 's/.*via \([0-9.]*\).*/\1/p')
+		[ -n "$gw4" ] && {
+			echo ""
+			echo "[Route]"
+			echo "Gateway=$gw4"
+			echo "Destination=0.0.0.0/0"
+		}
+		gw6=$(echo "$def6" | sed -n 's/.*via \([0-9a-f:]*\).*/\1/p')
+		[ -n "$gw6" ] && {
+			echo ""
+			echo "[Route]"
+			echo "Gateway=$gw6"
+			echo "Destination=::/0"
+		}
+	} > "$NETWORKD/40-$nic.network"
+	# Keep the generated unit: reboot persistence for the restored NIC.
+	# NEVER rm it here - networkd would drop the interface it just
+	# restored (lab-learned: this exact rm took nodea off the wire).
+	command -v networkctl >/dev/null && networkctl reload 2>/dev/null || true
+
+	echo "ovs: WAN restored: $nic carries all addresses and routes again"
+	echo "  ($bridge/$gwport removed). Reboot-persistent via $NETWORKD/40-$nic.network"
+	echo "  undo (re-migrate): $undo/undo.sh"
+	gw4=$(echo "$def4" | sed -n 's/.*via \([0-9.]*\).*/\1/p')
+	if [ -n "$gw4" ]; then
+		ping -c 1 -W 2 "$gw4" >/dev/null 2>&1 \
+			&& echo "  self-check: gateway $gw4 reachable via $nic" \
+			|| err "self-check: gateway $gw4 did not answer - inspect (undo available: $undo/undo.sh)"
+	fi
+}
+
+# ---------------------------------------------------------------- status
+
+do_status()
+{
+	ovs_running
+	echo "== bridges =="
+	do_bridge_list
+	echo
+	echo "== datapath =="
+	ovs-dpctl show 2>/dev/null | head -8 || true
+	echo
+	echo "== links =="
+	ip -br link 2>/dev/null | grep -Ev '^(lo|veth|tap|virbr|vnet)' || true
+}
+
+# ------------------------------------------------------------------ main
+
+cmd=${1:-}
+[ -n "$cmd" ] || die "usage: ovs bridge|port|uplink|net|tunnel|patch|wan|status ..."
+shift
+case $cmd in
+	bridge)
+		action=$1; shift || true
+		case $action in
+			add)  do_bridge_add "$@" ;;
+			del)  do_bridge_del "$@" ;;
+			list) do_bridge_list "$@" ;;
+			*) die "usage: ovs bridge add|del|list ..." ;;
+		esac
+		;;
+	port)
+		action=$1; shift || true
+		case $action in
+			add)  do_port_add "$@" ;;
+			del)  do_port_del "$@" ;;
+			list) [ "$#" -ge 1 ] || die "usage: ovs port list BRIDGE"; do_port_list "$@" ;;
+			*) die "usage: ovs port add|del|list ..." ;;
+		esac
+		;;
+	uplink)
+		action=$1; shift || true
+		case $action in
+			add) do_uplink_add "$@" ;;
+			del) do_uplink_del "$@" ;;
+			*) die "usage: ovs uplink add|del BRIDGE NIC ..." ;;
+		esac
+		;;
+	net)
+		action=$1; shift || true
+		case $action in
+			add)  do_net_add "$@" ;;
+			del)  do_net_del "$@" ;;
+			list) do_bridge_list ;;
+			*) die "usage: ovs net add|del|list ..." ;;
+		esac
+		;;
+	tunnel)
+		action=$1; shift || true
+		case $action in
+			add) do_tunnel_add "$@" ;;
+			del) [ "$#" -ge 2 ] || die "usage: ovs tunnel del BRIDGE NAME"; do_tunnel_del "$@" ;;
+			*) die "usage: ovs tunnel add BRIDGE NAME vxlan|gre REMOTE_IP [--key N] | del BRIDGE NAME" ;;
+		esac
+		;;
+	patch)
+		action=$1; shift || true
+		case $action in
+			add) [ "$#" -ge 4 ] || die "usage: ovs patch add BRIDGE-A PORT-A BRIDGE-B PORT-B"; do_patch_add "$@" ;;
+			del) [ "$#" -ge 2 ] || die "usage: ovs patch del BRIDGE-A PORT-A"; do_patch_del "$@" ;;
+			*) die "usage: ovs patch add|del ..." ;;
+		esac
+		;;
+	wan)
+		action=$1; shift || true
+		case $action in
+			add) [ "$#" -ge 3 ] || die "usage: ovs wan add NIC BRIDGE GWPORT"; do_wan_add "$@" ;;
+			del) [ "$#" -ge 2 ] || die "usage: ovs wan del NIC BRIDGE"; do_wan_del "$@" ;;
+			*) die "usage: ovs wan add NIC BRIDGE GWPORT" ;;
+		esac
+		;;
+	status)
+		do_status "$@"
+		;;
+	*)
+		die "usage: ovs bridge|port|uplink|net|tunnel|patch|wan|status ..."
+		;;
+esac

@@ -1,0 +1,10 @@
+--- a/tools/ports/__init__.py
++++ b/tools/ports/__init__.py
+@@ -348,6 +348,7 @@ class Ports:
+     fullpath = fullname + '.' + ext
+ 
+     def retrieve():
++      utils.exit_with_error(f'port {name} is unavailable under the Akadata offline ports policy')
+       # retrieve from remote server
+       logger.info(f'retrieving port: {name} from {url}')
+ 

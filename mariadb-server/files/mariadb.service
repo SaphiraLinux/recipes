@@ -1,0 +1,16 @@
+[Unit]
+Description=MariaDB database server
+After=network.target
+
+[Service]
+Type=simple
+User=mysql
+Group=mysql
+LimitNOFILE=65536
+ExecStartPre=/usr/bin/install -d -m 0750 -o mysql -g mysql /run/mysqld /var/lib/mysql /var/log/mysql
+ExecStartPre=/bin/rm -f /run/mysqld/mariadbd.pid /run/mysqld/openrc-mariadb.pid
+ExecStartPre=/bin/sh -c 'test -d /var/lib/mysql/mysql || /usr/bin/mariadb-install-db --user=mysql --basedir=/usr --datadir=/var/lib/mysql'
+ExecStart=/usr/sbin/mariadbd --defaults-file=/etc/my.cnf --datadir=/var/lib/mysql --pid-file=/run/mysqld/mariadbd.pid
+
+[Install]
+WantedBy=multi-user.target

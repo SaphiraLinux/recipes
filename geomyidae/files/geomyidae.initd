@@ -1,0 +1,20 @@
+#!/sbin/openrc-run
+
+description="Geomyidae Gopher server (RFC 1436)"
+
+command="/usr/bin/geomyidae"
+# Foreground (-d) under supervise-daemon; geomyidae binds TCP/70 as root
+# and then drops privileges to the unprivileged gopher account itself
+# (-u/-g).  Serves the Saphira Gopher root /srv/gopher on IPv4 and IPv6.
+command_args="-d -b /srv/gopher -p 70 -u gopher -g gopher"
+supervisor="supervise-daemon"
+
+depend()
+{
+	use net
+}
+
+start_pre()
+{
+	/usr/libexec/saphira/geomyidae-seed-defaults
+}

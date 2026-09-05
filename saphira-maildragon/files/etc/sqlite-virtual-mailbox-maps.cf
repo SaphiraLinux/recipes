@@ -1,0 +1,3 @@
+# Postfix sqlite map: mailbox existence + maildir location.
+dbpath = /var/lib/maildragon/mailserver.sqlite
+query = SELECT maildir FROM virtual_users WHERE email = '%s' AND active = 1

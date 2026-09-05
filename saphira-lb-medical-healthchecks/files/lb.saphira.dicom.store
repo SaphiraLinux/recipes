@@ -1,0 +1,17 @@
+#!/bin/sh
+# lb.saphira.dicom.store - DICOM C-STORE of a packaged synthetic object
+# (deep, opt-in). The object is generated at check time (Secondary
+# Capture, 2x2 px, synthetic AE data only - no upstream sample files).
+# Guard-gated: storage mutates PACS state.
+# Required env: LB_SAPHIRA_STATE_CHANGING=1
+# Copyright (c) 2026 AKADATA. MIT licensed.
+. /usr/share/saphira/lb-healthchecks/lib/lb-saphira-common.sh
+lb_init "$@"
+[ "${LB_SAPHIRA_STATE_CHANGING:-0}" = "1" ] || exit 2
+tmp=$(mktemp) || exit 1
+trap 'rm -f "$tmp"' EXIT
+python3 /usr/share/saphira/lb-medical-healthchecks/lib/lb-saphira-dicom-synth.py > "$tmp" || exit 1
+exec storescu -aet "${LB_SAPHIRA_DICOM_AET:-SAPHIRA-HC}" \
+	-aec "${LB_SAPHIRA_DICOM_AEC:-ANY-SCP}" \
+	-ta "$LB_TIMEOUT" \
+	"$LB_REAL" "${LB_RPORT:-104}" "$tmp"

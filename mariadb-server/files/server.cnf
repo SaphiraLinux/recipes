@@ -1,0 +1,9 @@
+[client-server]
+socket=/run/mysqld/mysqld.sock
+
+[mariadbd]
+bind-address=127.0.0.1
+datadir=/var/lib/mysql
+pid-file=/run/mysqld/mariadbd.pid
+log-error=/var/log/mysql/mariadb.log
+skip-name-resolve

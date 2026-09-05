@@ -1,0 +1,124 @@
+diff -ruN a/Makefile b/Makefile
+--- a/Makefile	2026-09-01 02:25:29.035124013 +0000
++++ b/Makefile	2026-09-01 02:28:40.037839318 +0000
+@@ -1,10 +1,10 @@
+ #	$OpenBSD: Makefile,v 1.7 2015/09/11 21:07:01 beck Exp $
+ 
+ PROG=	nc
+-SRCS=	netcat.c atomicio.c socks.c
++SRCS=	netcat.c atomicio.c socks.c b64.c
+ 
+ PKG_CONFIG ?= pkg-config
+-LIBS ?= `$(PKG_CONFIG) --libs libbsd` -lresolv
++LIBS ?= `$(PKG_CONFIG) --libs libbsd`
+ OBJS=  $(SRCS:.c=.o)
+ CFLAGS=  -g -O2
+ LDFLAGS=  -Wl,--no-add-needed
+diff -ruN a/b64.c b/b64.c
+--- a/b64.c	1970-01-01 00:00:00.000000000 +0000
++++ b/b64.c	2026-09-01 02:28:40.039414324 +0000
+@@ -0,0 +1,89 @@
++/* RFC4648 base64 codec, public domain, bundled for musl (no libresolv). */
++#include <sys/types.h>
++
++static const char b64digits[] =
++	"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
++
++int
++b64_ntop(unsigned char const *src, size_t srclength, char *target,
++    size_t targsize)
++{
++	size_t i, len = 0;
++	unsigned char b0, b1, b2;
++
++	for (i = 0; i + 2 < srclength; i += 3) {
++		if (len + 4 > targsize)
++			return -1;
++		b0 = src[i]; b1 = src[i+1]; b2 = src[i+2];
++		target[len++] = b64digits[b0 >> 2];
++		target[len++] = b64digits[((b0 & 0x03) << 4) | (b1 >> 4)];
++		target[len++] = b64digits[((b1 & 0x0f) << 2) | (b2 >> 6)];
++		target[len++] = b64digits[b2 & 0x3f];
++	}
++	if (i < srclength) {
++		if (len + 4 > targsize)
++			return -1;
++		b0 = src[i];
++		if (i + 1 < srclength) {
++			b1 = src[i+1];
++			target[len++] = b64digits[b0 >> 2];
++			target[len++] = b64digits[((b0 & 0x03) << 4) | (b1 >> 4)];
++			target[len++] = b64digits[(b1 & 0x0f) << 2];
++		} else {
++			target[len++] = b64digits[b0 >> 2];
++			target[len++] = b64digits[(b0 & 0x03) << 4];
++		}
++		target[len++] = '=';
++	}
++	if (len < targsize)
++		target[len] = '\0';
++	return len;
++}
++
++static int
++b64val(char c)
++{
++	const char *p;
++
++	if (c == '\0')
++		return -1;
++	for (p = b64digits; *p; p++)
++		if (*p == c)
++			return p - b64digits;
++	return -1;
++}
++
++int
++b64_pton(char const *src, unsigned char *target, size_t targsize)
++{
++	size_t len = 0;
++	int b[4], n, pad = 0;
++
++	while (*src) {
++		if (*src == '\n' || *src == '\r' || *src == ' ' || *src == '\t') {
++			src++;
++			continue;
++		}
++		if (len + 3 > targsize)
++			return -1;
++		for (n = 0; n < 4; n++) {
++			if (src[n] == '=' && n >= 2) {
++				b[n] = 0;
++				pad++;
++			} else {
++				b[n] = b64val(src[n]);
++				if (b[n] < 0)
++					return -1;
++			}
++		}
++		src += 4;
++		target[len++] = (b[0] << 2) | (b[1] >> 4);
++		if (pad < 2)
++			target[len++] = (b[1] << 4) | (b[2] >> 2);
++		if (pad < 1)
++			target[len++] = (b[2] << 6) | b[3];
++		if (pad)
++			break;
++	}
++	return len;
++}
+diff -ruN a/socks.c b/socks.c
+--- a/socks.c	2026-09-01 02:25:29.034942090 +0000
++++ b/socks.c	2026-09-01 02:28:40.037839318 +0000
+@@ -41,6 +41,11 @@
+ #include <bsd/readpassphrase.h>
+ #include "atomicio.h"
+ 
++/* musl has no libresolv: declare the bundled RFC4648 codec (b64.c). */
++int b64_ntop(unsigned char const *src, size_t srclength, char *target,
++    size_t targsize);
++int b64_pton(char const *src, unsigned char *target, size_t targsize);
++
+ #define SOCKS_PORT	"1080"
+ #define HTTP_PROXY_PORT	"3128"
+ #define HTTP_MAXHDRS	64

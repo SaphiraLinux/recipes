@@ -1,0 +1,53 @@
+mhash 0.9.9.9 (2008) does not build or install cleanly against modern
+toolchains (GCC 14+ defaults to C23, where an old-style "()" declaration
+means "(void)"). Two minimal fixes, both verified against the actual
+consumer (WendzelNNTPd 2.2.0-alpha):
+
+1. lib/mhash_int.h: the key-generation declarations were forced into an
+   old-style empty-parameter branch by "#define EMPTY_PROTOTYPES 1",
+   while the definitions in lib/keygen.c take real parameters - C23
+   rejects every one of them ("conflicting types"). The correct full
+   prototypes already exist in the #else branch of the same
+   conditional, so drop the forced define.
+
+2. include/mutils/mincludes.h: the installed public headers only
+   include the generated mutils/mhash_config.h when the CONSUMER
+   defines MUTILS_USE_MHASH_CONFIG - a macro third-party code does not
+   know about. Without it the headers are not self-contained: uint8_t/
+   uint32_t are unknown (mutils.h maps its word types onto them) and
+   PROTOTYPES stays undefined, leaving old-style declarations in
+   mutils/mhash.h that reject real call sites (e.g. WendzelNNTPd's
+   configure conformance test "MHASH td = mhash_init(MHASH_SHA256)"
+   fails with "too many arguments to function 'mhash_init'"). The
+   generated mhash_config.h is installed with the headers, so include
+   it unconditionally.
+
+--- a/lib/mhash_int.h
++++ b/lib/mhash_int.h
+@@ -33,11 +33,7 @@
+ 		      mutils_word32 block);
+ 
+ void *hmac_mhash_end(MHASH thread);
+-
+ /* Key generation functions */
+-
+-#define EMPTY_PROTOTYPES 1
+-
+ #if defined(EMPTY_PROTOTYPES)
+ 
+ mutils_error mhash_keygen();
+--- a/include/mutils/mincludes.h
++++ b/include/mutils/mincludes.h
+@@ -30,7 +30,11 @@
+ #if !defined(__MINCLUDES_H)
+ #define __MINCLUDES_H
+ 
+-#if defined(MUTILS_USE_MHASH_CONFIG)
++/* mutils/mhash_config.h is generated and installed with the headers;
++   the public headers are not self-contained without it (the uint8_t/
++   uint32_t types behind the mutils_word8/word32 macros and the
++   PROTOTYPES switch for mutils/mhash.h). */
++#if 1
+ #include <mutils/mhash_config.h>
+ #endif
+ 

@@ -1,0 +1,31 @@
+#!/sbin/openrc-run
+
+description="WendzelNNTPd NNTP server (NNTP on TCP/119, NNTPS on TCP/563)"
+
+# Upstream runs the daemon in the foreground when started without -d
+# (src/main.c only daemonizes with -d), so the supervise-daemon
+# supervisor runs it directly.
+command="/usr/sbin/wendzelnntpd"
+command_args=""
+supervisor="supervise-daemon"
+directory="/var/spool/news/wendzelnntpd"
+
+depend()
+{
+	use net logger
+	after firewall
+}
+
+start_pre()
+{
+	checkpath -d -m 0700 /var/spool/news/wendzelnntpd
+	if [ ! -f /var/spool/news/wendzelnntpd/usenet.db ]; then
+		# First start only: create the SQLite schema from the
+		# packaged usenet.db_struct. Upstream seeds the database
+		# during "make install", which cannot be packaged without
+		# replacing the operator's live database on every upgrade.
+		# An existing database is never touched.
+		cat /usr/share/wendzelnntpd/usenet.db_struct \
+			| sqlite3 /var/spool/news/wendzelnntpd/usenet.db
+	fi
+}

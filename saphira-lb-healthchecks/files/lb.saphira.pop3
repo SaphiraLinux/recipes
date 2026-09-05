@@ -1,0 +1,8 @@
+#!/bin/sh
+# lb.saphira.pop3 - POP3 greeting, no AUTH (L7).
+# Read-only session that closes immediately.
+# Copyright (c) 2026 AKADATA. MIT licensed.
+. /usr/share/saphira/lb-healthchecks/lib/lb-saphira-common.sh
+lb_init "$@"
+PORT="${LB_RPORT:-110}"
+exec curl --silent --max-time "$LB_TIMEOUT" "pop3://${LB_REAL}:${PORT}/" >/dev/null

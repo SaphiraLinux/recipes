@@ -1,0 +1,195 @@
+diff --git a/meson.build b/meson.build
+--- a/meson.build
++++ b/meson.build
+@@ -131,1 +131,3 @@
+ libexecdir = prefixdir / 'lib/systemd'
++rootlibexecdir = '/lib/systemd'
++rootsbindir = '/sbin'
+@@ -261,1 +261,2 @@
+ conf.set_quoted('LIBEXECDIR',                                 libexecdir)
++conf.set_quoted('ROOTLIBEXECDIR',                             rootlibexecdir)
+@@ -277,2 +278,2 @@
+-conf.set_quoted('SYSTEMD_BINARY_PATH',                        libexecdir / 'systemd')
+-conf.set_quoted('SYSTEMD_EXECUTOR_BINARY_PATH',               libexecdir / 'systemd-executor')
++conf.set_quoted('SYSTEMD_BINARY_PATH',                        rootlibexecdir / 'systemd')
++conf.set_quoted('SYSTEMD_EXECUTOR_BINARY_PATH',               rootlibexecdir / 'systemd-executor')
+@@ -282 +283 @@
+-conf.set_quoted('SYSTEMD_FSCK_PATH',                          libexecdir / 'systemd-fsck')
++conf.set_quoted('SYSTEMD_FSCK_PATH',                          rootlibexecdir / 'systemd-fsck')
+@@ -292 +293 @@
+-conf.set_quoted('SYSTEMD_SHUTDOWN_BINARY_PATH',               libexecdir / 'systemd-shutdown')
++conf.set_quoted('SYSTEMD_SHUTDOWN_BINARY_PATH',               rootlibexecdir / 'systemd-shutdown')
+@@ -300,0 +302 @@
++conf.set_quoted('SYSTEMD_SYSCTL_PATH',                        rootlibexecdir / 'systemd-sysctl')
+@@ -1918,1 +1921,4 @@
++rootlibexec_template = executable_template + {
++        'install_dir' : rootlibexecdir,
++}
+ libexec_template = executable_template + {
+
+diff --git a/src/core/meson.build b/src/core/meson.build
+--- a/src/core/meson.build
++++ b/src/core/meson.build
+@@ -205 +205 @@
+-        libexec_template + {
++        rootlibexec_template + {
+@@ -222 +222 @@
+-        libexec_template + {
++        rootlibexec_template + {
+
+diff --git a/src/fsck/meson.build b/src/fsck/meson.build
+--- a/src/fsck/meson.build
++++ b/src/fsck/meson.build
+@@ -4 +4 @@
+-        libexec_template + {
++        rootlibexec_template + {
+
+diff --git a/src/journal/meson.build b/src/journal/meson.build
+--- a/src/journal/meson.build
++++ b/src/journal/meson.build
+@@ -66 +66 @@
+-        libexec_template + {
++        rootlibexec_template + {
+
+diff --git a/src/modules-load/meson.build b/src/modules-load/meson.build
+--- a/src/modules-load/meson.build
++++ b/src/modules-load/meson.build
+@@ -8 +8 @@
+-        libexec_template + {
++        rootlibexec_template + {
+
+diff --git a/src/remount-fs/meson.build b/src/remount-fs/meson.build
+--- a/src/remount-fs/meson.build
++++ b/src/remount-fs/meson.build
+@@ -8 +8 @@
+-        libexec_template + {
++        rootlibexec_template + {
+
+diff --git a/src/shutdown/meson.build b/src/shutdown/meson.build
+--- a/src/shutdown/meson.build
++++ b/src/shutdown/meson.build
+@@ -13 +13 @@
+-        libexec_template + {
++        rootlibexec_template + {
+
+diff --git a/src/sulogin-shell/meson.build b/src/sulogin-shell/meson.build
+--- a/src/sulogin-shell/meson.build
++++ b/src/sulogin-shell/meson.build
+@@ -4 +4 @@
+-        libexec_template + {
++        rootlibexec_template + {
+
+diff --git a/src/sysctl/meson.build b/src/sysctl/meson.build
+--- a/src/sysctl/meson.build
++++ b/src/sysctl/meson.build
+@@ -4 +4 @@
+-        libexec_template + {
++        rootlibexec_template + {
+
+diff --git a/src/rpm/macros.systemd.in b/src/rpm/macros.systemd.in
+--- a/src/rpm/macros.systemd.in
++++ b/src/rpm/macros.systemd.in
+@@ -222 +222 @@
+-[ -x {{LIBEXECDIR}}/systemd-sysctl ] && {{LIBEXECDIR}}/systemd-sysctl %{?*} || : \
++[ -x {{SYSTEMD_SYSCTL_PATH}} ] && {{SYSTEMD_SYSCTL_PATH}} %{?*} || : \
+
+diff --git a/src/rpm/triggers.systemd.in b/src/rpm/triggers.systemd.in
+--- a/src/rpm/triggers.systemd.in
++++ b/src/rpm/triggers.systemd.in
+@@ -79 +79 @@
+-    assert(rpm.execute("{{LIBEXECDIR}}/systemd-sysctl"))
++    assert(rpm.execute("{{SYSTEMD_SYSCTL_PATH}}"))
+
+diff --git a/src/rpm/triggers.systemd.sh.in b/src/rpm/triggers.systemd.sh.in
+--- a/src/rpm/triggers.systemd.sh.in
++++ b/src/rpm/triggers.systemd.sh.in
+@@ -84 +84 @@
+-  {{LIBEXECDIR}}/systemd-sysctl || :
++  {{SYSTEMD_SYSCTL_PATH}} || :
+
+diff --git a/units/capsule@.service.in b/units/capsule@.service.in
+--- a/units/capsule@.service.in
++++ b/units/capsule@.service.in
+@@ -19 +19 @@
+-ExecStart={{LIBEXECDIR}}/systemd --user --unit=capsule@%i.target
++ExecStart={{SYSTEMD_BINARY_PATH}} --user --unit=capsule@%i.target
+
+diff --git a/units/emergency.service.in b/units/emergency.service.in
+--- a/units/emergency.service.in
++++ b/units/emergency.service.in
+@@ -23 +23 @@
+-ExecStart=-{{LIBEXECDIR}}/systemd-sulogin-shell emergency
++ExecStart=-{{ROOTLIBEXECDIR}}/systemd-sulogin-shell emergency
+
+diff --git a/units/rescue.service.in b/units/rescue.service.in
+--- a/units/rescue.service.in
++++ b/units/rescue.service.in
+@@ -22 +22 @@
+-ExecStart=-{{LIBEXECDIR}}/systemd-sulogin-shell rescue
++ExecStart=-{{ROOTLIBEXECDIR}}/systemd-sulogin-shell rescue
+
+diff --git a/units/systemd-fsck-root.service.in b/units/systemd-fsck-root.service.in
+--- a/units/systemd-fsck-root.service.in
++++ b/units/systemd-fsck-root.service.in
+@@ -23 +23 @@
+-ExecStart={{LIBEXECDIR}}/systemd-fsck
++ExecStart={{ROOTLIBEXECDIR}}/systemd-fsck
+
+diff --git a/units/systemd-fsck@.service.in b/units/systemd-fsck@.service.in
+--- a/units/systemd-fsck@.service.in
++++ b/units/systemd-fsck@.service.in
+@@ -23 +23 @@
+-ExecStart={{LIBEXECDIR}}/systemd-fsck %f
++ExecStart={{ROOTLIBEXECDIR}}/systemd-fsck %f
+
+diff --git a/units/systemd-journald.service.in b/units/systemd-journald.service.in
+--- a/units/systemd-journald.service.in
++++ b/units/systemd-journald.service.in
+@@ -33 +33 @@
+-ExecStart={{LIBEXECDIR}}/systemd-journald
++ExecStart={{ROOTLIBEXECDIR}}/systemd-journald
+
+diff --git a/units/systemd-journald@.service.in b/units/systemd-journald@.service.in
+--- a/units/systemd-journald@.service.in
++++ b/units/systemd-journald@.service.in
+@@ -19 +19 @@
+-ExecStart={{LIBEXECDIR}}/systemd-journald %i
++ExecStart={{ROOTLIBEXECDIR}}/systemd-journald %i
+
+diff --git a/units/systemd-modules-load.service.in b/units/systemd-modules-load.service.in
+--- a/units/systemd-modules-load.service.in
++++ b/units/systemd-modules-load.service.in
+@@ -30 +30 @@
+-ExecStart={{LIBEXECDIR}}/systemd-modules-load
++ExecStart={{ROOTLIBEXECDIR}}/systemd-modules-load
+
+diff --git a/units/systemd-remount-fs.service.in b/units/systemd-remount-fs.service.in
+--- a/units/systemd-remount-fs.service.in
++++ b/units/systemd-remount-fs.service.in
+@@ -25 +25 @@
+-ExecStart={{LIBEXECDIR}}/systemd-remount-fs
++ExecStart={{ROOTLIBEXECDIR}}/systemd-remount-fs
+
+diff --git a/units/systemd-sysctl.service.in b/units/systemd-sysctl.service.in
+--- a/units/systemd-sysctl.service.in
++++ b/units/systemd-sysctl.service.in
+@@ -22 +22 @@
+-ExecStart={{LIBEXECDIR}}/systemd-sysctl
++ExecStart={{ROOTLIBEXECDIR}}/systemd-sysctl
+
+diff --git a/units/user@.service.in b/units/user@.service.in
+--- a/units/user@.service.in
++++ b/units/user@.service.in
+@@ -23 +23 @@
+-ExecStart={{LIBEXECDIR}}/systemd --user
++ExecStart={{SYSTEMD_BINARY_PATH}} --user
+
+diff --git a/src/core/meson.build b/src/core/meson.build
+--- a/src/core/meson.build
++++ b/src/core/meson.build
+@@ -308,3 +308,3 @@
+ install_symlink('init',
+-                pointing_to : '../lib/systemd/systemd',
+-                install_dir : sbindir)
++                pointing_to : '../lib/systemd/systemd',
++                install_dir : rootsbindir)

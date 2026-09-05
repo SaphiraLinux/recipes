@@ -1,0 +1,19 @@
+#!/bin/sh
+# lb.saphira.http3 - real HTTP/3 transaction (L7). STRICT.
+# Proves: QUIC handshake (TLS 1.3, h3 ALPN) + HTTP/3 request/response.
+# Named check = named capability: there is NO fallback to the QUIC
+# Version Negotiation probe (lb.saphira.quic) or to TCP. If HTTP/3
+# fails, this check fails.
+# Env: LB_SAPHIRA_HTTP3_PATH (default /), LB_SAPHIRA_HTTP3_HOST,
+# LB_SAPHIRA_HTTP_OK (status class regex, default 2xx/3xx).
+# Copyright (c) 2026 AKADATA. MIT licensed.
+. /usr/share/saphira/lb-healthchecks/lib/lb-saphira-common.sh
+lb_init "$@"
+PORT="${LB_RPORT:-443}"
+PATH_URL="${LB_SAPHIRA_HTTP3_PATH:-/}"
+HDRS=""
+[ -n "$LB_SAPHIRA_HTTP3_HOST" ] && HDRS="-H Host:$LB_SAPHIRA_HTTP3_HOST"
+code=$(curl --http3-only -sS --max-time "$LB_TIMEOUT" -g -o /dev/null \
+	-w '%{http_code}' $HDRS "https://${LB_REAL}:${PORT}${PATH_URL}" 2>/dev/null) || exit 1
+[ -n "$code" ] || exit 1
+printf '%s' "$code" | grep -qE -- "${LB_SAPHIRA_HTTP_OK:-^(2|3)[0-9][0-9]$}"

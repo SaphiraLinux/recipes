@@ -1,0 +1,33 @@
+--- a/meson.build
++++ b/meson.build
+@@ -631,17 +631,17 @@
+
+ # If -Dxxx-path option is found, use that. Otherwise, use the default from the
+ # middle column; a full path is used directly, a relative path is converted to
+-# /usr/bin/foo or /usr/sbin/foo, depending on whether split-bin is enabled.
++# /bin/foo or /sbin/foo, depending on whether split-bin is enabled.
+ progs = [['quotaon',    'quotaon'              ],
+          ['quotacheck', 'quotacheck'           ],
+-         ['kmod',       '/usr/bin/kmod'        ],
++         ['kmod',       '/bin/kmod'            ],
+          ['kexec',      'kexec'                ],
+          ['sulogin',    'sulogin'              ],
+          ['swapon',     'swapon'               ],
+          ['swapoff',    'swapoff'              ],
+          ['agetty',     'agetty'               ],
+-         ['mount',      '/usr/bin/mount',      'MOUNT_PATH'],
+-         ['umount',     '/usr/bin/umount',     'UMOUNT_PATH'],
++         ['mount',      '/bin/mount',          'MOUNT_PATH'],
++         ['umount',     '/bin/umount',         'UMOUNT_PATH'],
+          ['loadkeys',   '/usr/bin/loadkeys',   'KBD_LOADKEYS'],
+          ['setfont',    '/usr/bin/setfont',    'KBD_SETFONT'],
+          ['nologin',    'nologin',             ],
+@@ -652,7 +652,7 @@
+                 if prog[1].startswith('/')
+                         path = prog[1]
+                 else
+-                        path = '/usr' / (split_bin ? 'sbin' : 'bin') / prog[1]
++                        path = (split_bin ? '/sbin' : '/bin') / prog[1]
+                 endif
+         endif
+         message('Using @1@ for @0@'.format(prog[0], path))

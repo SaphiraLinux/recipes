@@ -1,0 +1,29 @@
+#!/bin/sh
+
+set -eu
+
+. "${SAPHIRA_CONFIG_FILE:-/etc/saphira/package_builder.sh}"
+
+die()
+{
+	printf 'installpkg: %s\n' "$*" >&2
+	exit 1
+}
+
+[ "$(id -u)" -eq 0 ] || die "must be run as root; use sudo explicitly"
+[ "$#" -eq 1 ] || die "usage: $0 PACKAGE"
+PACKAGE=$1
+case $PACKAGE in
+	''|*[!A-Za-z0-9._+-]*) die "invalid package name: $PACKAGE" ;;
+esac
+
+checkpkg=$SAPHIRA_BINDIR/checkpkg
+[ -x "$checkpkg" ] || die "required controller tool is missing: $checkpkg"
+"$checkpkg" "$PACKAGE"
+
+index=$SAPHIRA_REPO_DIR/${SAPHIRA_REPO_NAMES##* }/$SAPHIRA_ARCH/Packages.adb
+"$SAPHIRA_APK" --no-cache --repositories-file /dev/null \
+	--repository "$index" add "$PACKAGE"
+"$SAPHIRA_APK" info -e "$PACKAGE" >/dev/null || die "package was not installed: $PACKAGE"
+installed=$("$SAPHIRA_APK" info -v "$PACKAGE" | head -n 1)
+printf 'installpkg: installed %s\n' "$installed"

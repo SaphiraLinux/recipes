@@ -1,0 +1,18 @@
+#!/sbin/openrc-run
+
+description="Kea DHCPv4 server"
+
+command="/usr/sbin/kea-dhcp4"
+command_args="-c /etc/kea/kea-dhcp4.conf"
+command_background="yes"
+pidfile="/run/kea-dhcp4.pid"
+
+depend()
+{
+	use net logger dns
+}
+
+start_pre()
+{
+	checkpath -d -m 0755 /run/kea
+}

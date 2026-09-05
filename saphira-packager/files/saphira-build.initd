@@ -1,0 +1,25 @@
+#!/sbin/openrc-run
+
+description="Saphira package autobuilder (scan + build queue loop)"
+command="/usr/bin/saphira-build"
+command_args="daemon --interval=${INTERVAL:-300} --limit=${LIMIT:-1}"
+command_background="yes"
+pidfile="/run/saphira-build.pid"
+directory="/build"
+output_log="/var/log/saphira-build.log"
+error_log="/var/log/saphira-build.log"
+command_user="smalley:smalley"
+
+depend()
+{
+	need localmount
+	after bootmisc
+}
+
+start_pre()
+{
+	export SAPHIRA_BUILD_JOBS="${JOBS:-8}"
+	export SAPHIRA_BUILD_STATE="${STATE:-/var/lib/saphira-build}"
+	checkpath --directory --owner smalley:smalley --mode 0755 \
+		"${STATE:-/var/lib/saphira-build}" /build /var/log
+}

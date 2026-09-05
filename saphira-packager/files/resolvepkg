@@ -1,0 +1,598 @@
+#!/usr/bin/python3
+
+"""Plan one native Saphira package build without executing build functions."""
+
+from __future__ import annotations
+
+import functools
+import json
+import os
+import re
+import subprocess
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import NoReturn
+
+
+SCHEMA = "saphira-build-plan/v1"
+METADATA_SCHEMA = b"\0SAPHIRA_RECIPE_METADATA_V1\0"
+CONFIG_KEYS = (
+    "SAPHIRA_RECIPE_ROOT",
+    "SAPHIRA_REFERENCE_RECIPE_ROOT",
+    "SAPHIRA_CPORTS_ROOT",
+    "SAPHIRA_BUILD_ROOT",
+    "SAPHIRA_REPO_DIR",
+    "SAPHIRA_REPO_NAMES",
+    "SAPHIRA_ARCH",
+    "SAPHIRA_APK",
+    "SAPHIRA_BWRAP",
+    "SAPHIRA_METADATA_SHELL",
+    "SAPHIRA_METADATA_TIMEOUT",
+    "SAPHIRA_TRUST_KEY",
+    "SAPHIRA_GENESIS_EXCLUDE",
+)
+METADATA_FIELDS = (
+    "pkgname", "pkgver", "pkgrel", "pkgarch", "pkgdesc", "license",
+    "origin", "repo", "url", "depends", "makedepends", "subpackages",
+    "source", "sha256",
+)
+REQUIRED_METADATA = (
+    "pkgname", "pkgver", "pkgrel", "pkgarch", "pkgdesc", "license",
+    "origin", "repo", "url",
+)
+PACKAGE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+:-]*$")
+DEPENDENCY_RE = re.compile(
+    r"^(?P<name>[A-Za-z0-9][A-Za-z0-9._+:-]*)(?:(?P<op>>=|<=|=|>|<)(?P<version>[^\s]+))?$"
+)
+REVISION_PIN_RE = re.compile(r"-r\d+$")
+NVR_RE = re.compile(r"^(.*)-([0-9][^-]*)-r([0-9]+)$")
+
+
+def _split_nvr(nvr: str) -> tuple[str, str, int] | None:
+    """Split name-version-rN into (name, upstream, rel); None when the
+    shape is unrecognised (upstream versions never contain '-')."""
+    match = NVR_RE.match(nvr)
+    if match is None:
+        return None
+    return match.group(1), match.group(2), int(match.group(3))
+
+
+def _newer_live_nvr(live_nvrs: set[str], nvr: str) -> str | None:
+    """Newest live NVR on the same (name, upstream) version line with a
+    higher pkgrel than the candidate, or None. Same-line rel comparison
+    needs no version ordering and can never misjudge across lines."""
+    parts = _split_nvr(nvr)
+    if parts is None:
+        return None
+    name, upstream, rel = parts
+    best: str | None = None
+    best_rel = rel
+    for live_nvr in live_nvrs:
+        live_parts = _split_nvr(live_nvr)
+        if live_parts is None:
+            continue
+        if live_parts[0] == name and live_parts[1] == upstream and live_parts[2] > best_rel:
+            best, best_rel = live_nvr, live_parts[2]
+    return best
+# Recipe-parameterization environment passed through both sandboxes so a
+# recipe's computed pkgver matches between resolvepkg planning and buildpkg
+# execution (e.g. SAPHIRA_KERNEL_VERSION selects the parallel kernel line).
+RECIPE_ENV_PASSTHROUGH = ("SAPHIRA_KERNEL_VERSION",)
+
+
+class PlanError(RuntimeError):
+    pass
+
+
+def die(message: str) -> NoReturn:
+    raise PlanError(message)
+
+
+def run(command: list[str], *, check: bool = True, timeout: int | None = None) -> subprocess.CompletedProcess[bytes]:
+    try:
+        return subprocess.run(
+            command, check=check, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        die(f"command timed out: {command[0]}")
+    except FileNotFoundError:
+        die(f"required controller tool is missing: {command[0]}")
+    except subprocess.CalledProcessError as exc:
+        detail = exc.stderr.decode("utf-8", "replace").strip()
+        die(f"command failed: {command[0]}: {detail or exc.returncode}")
+
+
+def load_config() -> dict[str, str]:
+    config_path = os.environ.get("SAPHIRA_CONFIG_FILE", "/etc/saphira/package_builder.sh")
+    script = r'''
+set -eu
+set -a
+. "$1"
+shift
+for name do
+    value=${!name-}
+    builtin printf '%s\0%s\0' "$name" "$value"
+done
+'''
+    result = run([
+        "/bin/bash", "--noprofile", "--norc", "-c", script,
+        "resolvepkg-config", config_path, *CONFIG_KEYS,
+    ])
+    parts = result.stdout.split(b"\0")
+    values: dict[str, str] = {}
+    for offset in range(0, len(parts) - 1, 2):
+        values[parts[offset].decode()] = parts[offset + 1].decode()
+    missing = [key for key in CONFIG_KEYS if not values.get(key)]
+    # SAPHIRA_GENESIS_EXCLUDE is legitimately empty (no retired names).
+    missing = [key for key in missing if key != "SAPHIRA_GENESIS_EXCLUDE"]
+    if missing:
+        die(f"configuration fields are empty: {', '.join(missing)}")
+    return values
+
+
+def dynamic_runtime_files(executable: str) -> list[str]:
+    result = run(["ldd", executable])
+    paths = {executable}
+    for match in re.findall(rb"/[A-Za-z0-9_+.,/@:-]+", result.stdout):
+        path = match.decode()
+        if os.path.exists(path):
+            paths.add(path)
+    return sorted(paths)
+
+
+def sandbox_metadata(recipe: Path, config: dict[str, str]) -> dict[str, str]:
+    if not recipe.is_file():
+        die(f"recipe does not exist: {recipe}")
+    shell = config["SAPHIRA_METADATA_SHELL"]
+    runtime = dynamic_runtime_files(shell)
+    directories = {"/bin", "/lib", "/usr", "/usr/lib", "/recipe"}
+    for path in runtime:
+        parent = Path(path).parent
+        while str(parent) not in ("/", "."):
+            directories.add(str(parent))
+            parent = parent.parent
+    command = [
+        config["SAPHIRA_BWRAP"], "--die-with-parent", "--new-session",
+        "--unshare-all", "--uid", "0", "--gid", "0", "--clearenv",
+    ]
+    for directory in sorted(directories, key=lambda item: (item.count("/"), item)):
+        command.extend(("--dir", directory))
+    command.extend(("--tmpfs", "/tmp", "--dev", "/dev"))
+    for path in runtime:
+        command.extend(("--ro-bind", path, path))
+    command.extend(("--ro-bind", str(recipe.parent), "/recipe"))
+    command.extend(("--setenv", "SAPHIRA_ARCH", config["SAPHIRA_ARCH"]))
+    for name in RECIPE_ENV_PASSTHROUGH:
+        value = os.environ.get(name)
+        if value:
+            command.extend(("--setenv", name, value))
+    extractor = r'''
+set -eu
+builtin source /recipe/recipe.sh
+builtin printf '\0SAPHIRA_RECIPE_METADATA_V1\0'
+for name in pkgname pkgver pkgrel pkgarch pkgdesc license origin repo url depends makedepends subpackages source sha256 disabled disabled_reason; do
+    if [[ -v $name ]]; then value=${!name}; else value=; fi
+    builtin printf '%s\0%s\0' "$name" "$value"
+done
+'''
+    command.extend((shell, "--noprofile", "--norc", "-c", extractor))
+    result = run(command, timeout=int(config["SAPHIRA_METADATA_TIMEOUT"]))
+    marker = result.stdout.rfind(METADATA_SCHEMA)
+    if marker < 0:
+        die(f"sandboxed recipe emitted no metadata: {recipe}")
+    parts = result.stdout[marker + len(METADATA_SCHEMA):].split(b"\0")
+    metadata: dict[str, str] = {}
+    for offset in range(0, len(parts) - 1, 2):
+        metadata[parts[offset].decode()] = parts[offset + 1].decode()
+    missing = [name for name in REQUIRED_METADATA if not metadata.get(name)]
+    if missing:
+        die(f"recipe metadata is missing in {recipe}: {', '.join(missing)}")
+    # House packaging policy: r0 packages are forbidden. Every recipe ships
+    # pkgrel>=1; the initial publication of a package is r1.
+    pkgrel = metadata["pkgrel"]
+    if not pkgrel.isdigit() or int(pkgrel) < 1:
+        die(
+            f"invalid pkgrel in {recipe}: {pkgrel!r} (r0 packages are forbidden; "
+            "ship pkgrel>=1 - the initial publication of a package is r1)"
+        )
+    return metadata
+
+
+def dependency_parts(expression: str) -> tuple[str, str | None, str | None]:
+    match = DEPENDENCY_RE.fullmatch(expression)
+    if not match:
+        die(f"unsupported dependency expression: {expression}")
+    return match.group("name"), match.group("op"), match.group("version")
+
+
+@dataclass(frozen=True)
+class RepositoryPackage:
+    name: str
+    version: str
+    arch: str
+    artifact: str
+
+
+@dataclass
+class Recipe:
+    producer: str
+    path: str
+    metadata: dict[str, str]
+    outputs: tuple[str, ...]
+    dependencies: tuple[str, ...]
+
+    @property
+    def version(self) -> str:
+        return f"{self.metadata['pkgver']}-r{self.metadata['pkgrel']}"
+
+
+@dataclass
+class BuildNode:
+    recipe: Recipe
+    required_outputs: set[str] = field(default_factory=set)
+    build_dependencies: set[str] = field(default_factory=set)
+
+
+class Planner:
+    def __init__(self, config: dict[str, str], target: str):
+        self.config = config
+        self.target = target
+        self.recipe_root = Path(config["SAPHIRA_RECIPE_ROOT"])
+        names = config["SAPHIRA_REPO_NAMES"].split()
+        if not names or any(not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name) for name in names):
+            die(f"invalid SAPHIRA_REPO_NAMES: {config['SAPHIRA_REPO_NAMES']!r}")
+        self.repo_dir = Path(config["SAPHIRA_REPO_DIR"]) / names[-1] / config["SAPHIRA_ARCH"]
+        self.live_repo_name = names[-1]
+        self.genesis_excluded = set(config.get("SAPHIRA_GENESIS_EXCLUDE", "").split())
+        self.repository = self._read_repository()
+        self.generation_nvrs = self._read_generation_nvrs(names)
+        self.constraints: dict[str, list[tuple[str | None, str | None, str]]] = {}
+        self.repository_choices: dict[str, RepositoryPackage] = {}
+        self.recipes: dict[str, Recipe] = {}
+        self.output_producers: dict[str, str] = {}
+        self.builds: dict[str, BuildNode] = {}
+        self.state: dict[str, str] = {}
+
+    def _apk(self, *arguments: str) -> subprocess.CompletedProcess[bytes]:
+        return run([self.config["SAPHIRA_APK"], *arguments])
+
+    def _read_repository(self) -> dict[str, list[RepositoryPackage]]:
+        return self._read_index(self.repo_dir, self.live_repo_name, required=True)
+
+    def _read_index(self, repo_dir: Path, repo_label: str, *, required: bool) -> dict[str, list[RepositoryPackage]]:
+        index = repo_dir / "Packages.adb"
+        if not index.is_file():
+            if required:
+                die(f"trusted repository index does not exist: {index}")
+            print(f"resolvepkg: note: generation repository has no index, skipping: {repo_label}", file=sys.stderr)
+            return {}
+        keys_dir = str(Path(self.config["SAPHIRA_TRUST_KEY"]).parent)
+        self._apk("verify", "--keys-dir", keys_dir, str(index))
+        dump = self._apk("adbdump", str(index)).stdout.decode("utf-8", "replace")
+        packages: dict[str, list[RepositoryPackage]] = {}
+        current: dict[str, str] = {}
+        for line in dump.splitlines():
+            if line.startswith("  - name: "):
+                if current:
+                    self._record_repository_package(packages, current, repo_dir)
+                current = {"name": line[len("  - name: "):]}
+            elif current and line.startswith("    version: "):
+                current["version"] = line[len("    version: "):]
+            elif current and line.startswith("    arch: "):
+                current["arch"] = line[len("    arch: "):]
+        if current:
+            self._record_repository_package(packages, current, repo_dir)
+        return packages
+
+    def _read_generation_nvrs(self, names: list[str]) -> dict[str, set[str]]:
+        """Exact NVRs (name-version) published in every known generation
+        repository. Declared SAPHIRA_REPO_NAMES entries are authoritative;
+        any other index-bearing generation directory under SAPHIRA_REPO_DIR
+        is scanned defensively so config drift cannot hide published NVRs."""
+        repo_root = Path(self.config["SAPHIRA_REPO_DIR"])
+        arch = self.config["SAPHIRA_ARCH"]
+        labels: list[str] = []
+        for name in names:
+            if name not in labels:
+                labels.append(name)
+        if repo_root.is_dir():
+            for entry in sorted(repo_root.iterdir()):
+                if entry.name not in labels and (entry / arch / "Packages.adb").is_file():
+                    labels.append(entry.name)
+        nvrs: dict[str, set[str]] = {}
+        for label in labels:
+            repo_dir = repo_root / label / arch
+            packages = self._read_index(repo_dir, label, required=False)
+            nvrs[label] = {
+                f"{package.name}-{package.version}"
+                for packages_of_name in packages.values()
+                for package in packages_of_name
+            }
+        return nvrs
+
+    def _record_repository_package(self, packages: dict[str, list[RepositoryPackage]], current: dict[str, str], repo_dir: Path) -> None:
+        if not all(current.get(key) for key in ("name", "version", "arch")):
+            die("trusted repository index contains incomplete package metadata")
+        artifact = repo_dir / f"{current['name']}-{current['version']}.apk"
+        if artifact.is_file():
+            packages.setdefault(current["name"], []).append(
+                RepositoryPackage(current["name"], current["version"], current["arch"], str(artifact))
+            )
+
+    def _version_compare(self, left: str, right: str) -> int:
+        symbol = self._apk("version", "-t", left, right).stdout.decode().strip()
+        return {"<": -1, "=": 0, ">": 1}.get(symbol, 0)
+
+    def _satisfies(self, version: str, constraints: list[tuple[str | None, str | None, str]]) -> bool:
+        for operator, wanted, _expression in constraints:
+            if operator is None:
+                continue
+            compared = self._version_compare(version, wanted or "")
+            if operator == "=" and compared != 0:
+                # apk dependency semantics: an exact pin without a
+                # revision (e.g. =7.1.5) is satisfied by any -rN of
+                # that base version (7.1.5-r1). `apk version -t`
+                # orders 7.1.5-r1 > 7.1.5, so handle that case
+                # explicitly instead of failing the comparison.
+                if not (
+                    wanted
+                    and "-r" not in wanted
+                    and re.fullmatch(re.escape(wanted) + r"-r[0-9]+", version)
+                ):
+                    return False
+            if operator == ">=" and compared < 0:
+                return False
+            if operator == "<=" and compared > 0:
+                return False
+            if operator == ">" and compared <= 0:
+                return False
+            if operator == "<" and compared >= 0:
+                return False
+        return True
+
+    def _repository_candidate(self, name: str) -> RepositoryPackage | None:
+        constraints = self.constraints[name]
+        candidates = [
+            package for package in self.repository.get(name, ())
+            if package.arch in (self.config["SAPHIRA_ARCH"], "noarch")
+            and self._satisfies(package.version, constraints)
+        ]
+        if not candidates:
+            return None
+        candidates.sort(
+            key=functools.cmp_to_key(lambda left, right: self._version_compare(left.version, right.version)),
+            reverse=True,
+        )
+        candidate = candidates[0]
+        keys_dir = str(Path(self.config["SAPHIRA_TRUST_KEY"]).parent)
+        self._apk("verify", "--keys-dir", keys_dir, candidate.artifact)
+        return candidate
+
+    @staticmethod
+    def _producer_candidates(output: str) -> list[str]:
+        candidates = [output]
+        for suffix in ("-dev", "-doc"):
+            if output.endswith(suffix) and len(output) > len(suffix):
+                candidates.append(output[:-len(suffix)])
+        return candidates
+
+    def _load_producer(self, output: str) -> Recipe:
+        known = self.output_producers.get(output)
+        if known:
+            return self.recipes[known]
+        for candidate in self._producer_candidates(output):
+            recipe_path = self.recipe_root / candidate / "recipe.sh"
+            if not recipe_path.is_file():
+                continue
+            metadata = sandbox_metadata(recipe_path, self.config)
+            if metadata.get("disabled") == "yes":
+                reason = metadata.get("disabled_reason") or "no reason given"
+                die(f"recipe disabled: {candidate} ({reason})")
+            producer = metadata["pkgname"]
+            if producer != candidate:
+                die(f"recipe directory and pkgname differ: {candidate} != {producer}")
+            subpackages = tuple(sorted(set(metadata.get("subpackages", "").split())))
+            outputs = (producer, *subpackages)
+            if output not in outputs:
+                continue
+            for declared in outputs:
+                if not PACKAGE_RE.fullmatch(declared):
+                    die(f"invalid declared output in {recipe_path}: {declared}")
+                existing = self.output_producers.get(declared)
+                if existing and existing != producer:
+                    die(f"duplicate native producer for {declared}: {existing}, {producer}")
+                self.output_producers[declared] = producer
+            dependencies = tuple(sorted(set(
+                metadata.get("depends", "").split() + metadata.get("makedepends", "").split()
+            )))
+            recipe = Recipe(producer, str(recipe_path), metadata, outputs, dependencies)
+            self.recipes[producer] = recipe
+            return recipe
+        reference = Path(self.config["SAPHIRA_REFERENCE_RECIPE_ROOT"])
+        for candidate in self._producer_candidates(output):
+            if (reference / candidate / "recipe.sh").is_file():
+                die(
+                    f"no satisfying trusted APK and no native producer for {output}; "
+                    f"known-working reference recipe exists at {reference / candidate} and must be ported into {self.recipe_root}"
+                )
+        die(f"no satisfying trusted APK and no native producer recipe for: {output}")
+
+    def _guard_published_nvr(self, recipe: Recipe) -> None:
+        """Repository immutability invariant: an exact NVR already
+        published in ANY generation repository is immutable. The resolver
+        must never schedule it for a rebuild; when the live generation
+        lacks it, the repair is promote-repo, never a rebuild."""
+        nvr = f"{recipe.producer}-{recipe.version}"
+        if nvr in self.generation_nvrs.get(self.live_repo_name, set()):
+            die(
+                f"refusing to rebuild {nvr}: exact NVR already published in live repository "
+                f"'{self.live_repo_name}' - bump pkgrel for a genuinely new revision"
+            )
+        for repo_name, nvrs in self.generation_nvrs.items():
+            if nvr not in nvrs:
+                continue
+            if repo_name == self.live_repo_name:
+                die(
+                    f"refusing to rebuild {nvr}: exact NVR already published in live repository "
+                    f"'{repo_name}' (resolver contradiction; repository-first should have selected it)"
+                )
+            if recipe.producer in self.genesis_excluded:
+                die(
+                    f"refusing to rebuild {nvr}: already published in generation repository "
+                    f"'{repo_name}' and the name is retired via SAPHIRA_GENESIS_EXCLUDE; "
+                    "migrate the dependent package instead"
+                )
+            newer = _newer_live_nvr(
+                self.generation_nvrs.get(self.live_repo_name, set()), nvr)
+            if newer is not None:
+                die(
+                    f"refusing to rebuild {nvr}: live repository '{self.live_repo_name}' already carries "
+                    f"newer {newer} on the same version line; bump pkgrel for a genuinely new revision - "
+                    "never promote superseded archive revisions forward into the live view"
+                )
+            die(
+                f"generation lineage repair required: {nvr} already exists in generation repository "
+                f"'{repo_name}' but is absent from live repository '{self.live_repo_name}'; "
+                f"run: promote-repo {repo_name} {self.live_repo_name} {nvr} "
+                "(repair-only: both repositories are normally populated by sign-apk-repo in one operation)"
+            )
+
+    def _ensure_build(self, output: str, consumer: str | None) -> str:
+        recipe = self._load_producer(output)
+        constraints = self.constraints.get(output, [(None, None, output)])
+        if not self._satisfies(recipe.version, constraints):
+            expressions = ", ".join(item[2] for item in constraints)
+            die(f"native producer {recipe.producer}={recipe.version} does not satisfy: {expressions}")
+        self._guard_published_nvr(recipe)
+        node = self.builds.setdefault(recipe.producer, BuildNode(recipe))
+        node.required_outputs.add(output)
+        self.output_producers[output] = recipe.producer
+        self.repository_choices.pop(output, None)
+        if consumer and consumer != recipe.producer:
+            self.builds[consumer].build_dependencies.add(recipe.producer)
+        state = self.state.get(recipe.producer)
+        if state == "visiting":
+            die(f"dependency cycle detected at producer: {recipe.producer}")
+        if state == "done":
+            return recipe.producer
+        self.state[recipe.producer] = "visiting"
+        for expression in recipe.dependencies:
+            self._require(expression, recipe.producer)
+        self.state[recipe.producer] = "done"
+        return recipe.producer
+
+    def _require(self, expression: str, consumer: str) -> None:
+        name, operator, version = dependency_parts(expression)
+        if operator == "=" and version and REVISION_PIN_RE.search(version):
+            die(
+                f"exact revision pin in {consumer} dependency: {expression}; "
+                "repository metadata presents only the newest revision, so "
+                "use a bare name or a >= floor to resolve against the live repository"
+            )
+        self.constraints.setdefault(name, []).append((operator, version, expression))
+        if name in self.output_producers and self.output_producers[name] in self.builds:
+            if self.output_producers[name] == consumer:
+                # Self-hosting case: the target package's own outputs are
+                # listed as its makedepends (gcc needs gcc-dev to build
+                # gcc). The trusted repository copy of the output
+                # satisfies this without recursing into the build being
+                # planned - a bootstrap cycle is not an error here.
+                candidate = self._repository_candidate(name)
+                if candidate is not None:
+                    self.repository_choices[name] = candidate
+                    return
+            self._ensure_build(name, consumer)
+            return
+        candidate = self._repository_candidate(name)
+        if candidate is not None:
+            self.repository_choices[name] = candidate
+            return
+        self._ensure_build(name, consumer)
+
+    def _ordered_builds(self, target_producer: str) -> list[str]:
+        ordered: list[str] = []
+        visited: set[str] = set()
+
+        def visit(producer: str) -> None:
+            if producer in visited:
+                return
+            visited.add(producer)
+            for dependency in sorted(self.builds[producer].build_dependencies):
+                visit(dependency)
+            ordered.append(producer)
+
+        visit(target_producer)
+        return ordered
+
+    def plan(self) -> dict[str, object]:
+        if not PACKAGE_RE.fullmatch(self.target):
+            die(f"invalid top-level package name: {self.target}")
+        self.constraints.setdefault(self.target, []).append((None, None, self.target))
+        target_producer = self._ensure_build(self.target, None)
+        ordered = self._ordered_builds(target_producer)
+        repository_nodes = []
+        for name in sorted(self.repository_choices):
+            package = self.repository_choices[name]
+            repository_nodes.append({
+                "name": name,
+                "version": package.version,
+                "arch": package.arch,
+                "artifact": package.artifact,
+                "requirements": sorted({entry[2] for entry in self.constraints[name]}),
+            })
+        build_nodes = []
+        for producer in ordered:
+            node = self.builds[producer]
+            build_nodes.append({
+                "producer": producer,
+                "version": node.recipe.version,
+                "recipe": node.recipe.path,
+                "outputs": list(node.recipe.outputs),
+                "required_outputs": sorted(node.required_outputs),
+                "build_dependencies": sorted(node.build_dependencies),
+                "target": producer == target_producer,
+            })
+        return {
+            "schema": SCHEMA,
+            "target": self.target,
+            "target_producer": target_producer,
+            "arch": self.config["SAPHIRA_ARCH"],
+            "repository": repository_nodes,
+            "builds": build_nodes,
+        }
+
+
+def real_root() -> bool:
+    """True only for genuine host root; a mapped uid 0 inside an
+    unprivileged user namespace is still an unprivileged controller."""
+    if os.geteuid() != 0:
+        return False
+    try:
+        with open("/proc/self/uid_map", encoding="utf-8") as stream:
+            row = stream.readline().split()
+    except OSError:
+        return True
+    return row == ["0", "0", "1"]
+
+
+def main() -> int:
+    if real_root():
+        print("resolvepkg: must run as an unprivileged controller", file=sys.stderr)
+        return 1
+    if len(sys.argv) != 2:
+        print(f"usage: {sys.argv[0]} PACKAGE", file=sys.stderr)
+        return 1
+    try:
+        plan = Planner(load_config(), sys.argv[1]).plan()
+        json.dump(plan, sys.stdout, sort_keys=True, separators=(",", ":"))
+        sys.stdout.write("\n")
+        return 0
+    except PlanError as exc:
+        print(f"resolvepkg: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,18 @@
+#!/sbin/openrc-run
+
+description="mailDragon setup (apply configs, init database)"
+
+# OpenRC counterpart of the maildragon-setup.service oneshot
+# (RemainAfterExit): runs md-setup apply once and stays 'started';
+# stop is a no-op by design.  Neither init wraps the other; nothing is
+# auto-enabled at install.
+depend()
+{
+	use net
+	use postfix dovecot rspamd
+}
+
+start()
+{
+	/usr/share/saphira/maildragon/scripts/md-setup apply
+}

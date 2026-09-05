@@ -1,0 +1,21 @@
+#!/bin/sh
+
+set -eu
+
+data_directory=${PGDATA:-/var/lib/postgresql/data}
+test "$(id -u)" -eq 0 || {
+	printf 'postgresql-initdb: must be run as root\n' >&2
+	exit 1
+}
+test ! -e "$data_directory/PG_VERSION" || {
+	printf 'postgresql-initdb: cluster already exists at %s\n' \
+		"$data_directory" >&2
+	exit 1
+}
+install -d -m 0700 -o postgres -g postgres "$data_directory"
+su -s /bin/sh postgres -c 'exec "$@"' sh /usr/bin/initdb \
+	-D "$data_directory" --auth-local=peer --auth-host=scram-sha-256
+printf "listen_addresses = 'localhost'\n" >> "$data_directory/postgresql.conf"
+chown postgres:postgres "$data_directory/postgresql.conf"
+chmod 0600 "$data_directory/postgresql.conf"
+printf 'PostgreSQL cluster initialized at %s\n' "$data_directory"

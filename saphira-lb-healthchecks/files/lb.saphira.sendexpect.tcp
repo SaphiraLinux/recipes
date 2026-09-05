@@ -1,0 +1,19 @@
+#!/bin/sh
+# lb.saphira.sendexpect.tcp - raw TCP send-expect protocol check (L4/L7).
+# The escape hatch for custom L4/L7 protocols. Env:
+#   LB_SAPHIRA_SEND / LB_SAPHIRA_SEND_HEX / LB_SAPHIRA_SEND_FILE (required)
+#   LB_SAPHIRA_EXPECT   regex matched against the accumulated response
+#                       (required; healthy iff matched within timeout)
+#   LB_SAPHIRA_DELAY    seconds between connect and send (optional)
+# Copyright (c) 2026 AKADATA. MIT licensed.
+. /usr/share/saphira/lb-healthchecks/lib/lb-saphira-common.sh
+lb_init "$@"
+[ -n "${LB_SAPHIRA_SEND:-}${LB_SAPHIRA_SEND_HEX:-}${LB_SAPHIRA_SEND_FILE:-}" ] || exit 2
+[ -n "${LB_SAPHIRA_EXPECT:-}" ] || exit 2
+set -- sendexpect --proto tcp --host "$LB_REAL" --port "${LB_RPORT:-$LB_VPORT}" \
+	--timeout "$LB_TIMEOUT" --expect "$LB_SAPHIRA_EXPECT"
+[ -n "${LB_SAPHIRA_SEND:-}" ] && set -- "$@" --send "$LB_SAPHIRA_SEND"
+[ -n "${LB_SAPHIRA_SEND_HEX:-}" ] && set -- "$@" --send-hex "$LB_SAPHIRA_SEND_HEX"
+[ -n "${LB_SAPHIRA_SEND_FILE:-}" ] && set -- "$@" --send-file "$LB_SAPHIRA_SEND_FILE"
+[ -n "${LB_SAPHIRA_DELAY:-}" ] && set -- "$@" --delay "$LB_SAPHIRA_DELAY"
+lb_probe "$@"

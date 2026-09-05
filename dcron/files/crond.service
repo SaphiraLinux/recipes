@@ -1,0 +1,11 @@
+[Unit]
+Description=Dillon's lightweight cron daemon
+After=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/crond -f
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

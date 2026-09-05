@@ -1,0 +1,15 @@
+#!/sbin/openrc-run
+
+description="Very Secure FTP daemon"
+
+# Standalone foreground FTP server: the packaged /etc/vsftpd/vsftpd.conf
+# ships listen=YES; -obackground=NO only pins foreground supervision and
+# deliberately does NOT fight operator conf choices otherwise.
+command="/usr/sbin/vsftpd"
+command_args="-obackground=NO /etc/vsftpd/vsftpd.conf"
+supervisor="supervise-daemon"
+
+depend()
+{
+	use net
+}

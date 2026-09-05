@@ -1,0 +1,15 @@
+[Unit]
+Description=Saphira static network configuration
+Wants=network-pre.target
+Before=network.target
+After=systemd-modules-load.service systemd-udevd.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/saphira-network-config start
+ExecStop=/usr/sbin/saphira-network-config stop
+ExecReload=/usr/sbin/saphira-network-config validate
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

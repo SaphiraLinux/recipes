@@ -1,0 +1,28 @@
+#!/sbin/openrc-run
+
+description="NFS client daemons (statd for NFSv3 locking, idmapd for NFSv4)"
+
+depend()
+{
+	use net logger
+	after rpcbind
+	need localmount
+}
+
+start()
+{
+	ebegin "Starting NFS client daemons"
+	# NFSv3 locking: rpc.statd (lock recovery; sm-notify runs on start)
+	/usr/sbin/rpc.statd || { eend 1 "rpc.statd failed"; return 1; }
+	# NFSv4: identity mapping
+	/usr/sbin/rpc.idmapd || { eend 1 "rpc.idmapd failed"; return 1; }
+	eend 0
+}
+
+stop()
+{
+	ebegin "Stopping NFS client daemons"
+	killall -q rpc.idmapd
+	killall -q rpc.statd
+	eend 0
+}

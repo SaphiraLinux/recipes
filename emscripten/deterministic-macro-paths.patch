@@ -1,0 +1,18 @@
+--- a/tools/system_libs.py
++++ b/tools/system_libs.py
+@@ -77,6 +77,8 @@ def get_base_cflags(build_dir, force_object_files=False, preprocess=True):
+   source_dir = utils.path_from_root()
++  sysroot_dir = cache.get_sysroot_dir()
+   relative_source_dir = os.path.relpath(source_dir, build_dir)
+   flags += [f'-ffile-prefix-map={source_dir}={DETERMINISTIC_PREFIX}',
++            f'-ffile-prefix-map={sysroot_dir}={DETERMINISTIC_PREFIX}/sysroot',
+             f'-ffile-prefix-map={relative_source_dir}={DETERMINISTIC_PREFIX}',
+             f'-fdebug-compilation-dir={DETERMINISTIC_PREFIX}']
+   return flags
+@@ -601,2 +604,6 @@ class Library:
+     cflags = self._inherit_list('cflags')
+     cflags += get_base_cflags(self.build_dir, force_object_files=self.force_object_files)
++    sysroot_dir = cache.get_sysroot_dir()
++    cflags += [f'-fmacro-prefix-map={sysroot_dir}={DETERMINISTIC_PREFIX}/sysroot',
++               f'-fmacro-prefix-map={utils.path_from_root()}={DETERMINISTIC_PREFIX}',
++               f'-fmacro-prefix-map={os.path.relpath(utils.path_from_root(), self.build_dir)}={DETERMINISTIC_PREFIX}']

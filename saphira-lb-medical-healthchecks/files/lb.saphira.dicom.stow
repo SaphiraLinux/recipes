@@ -1,0 +1,23 @@
+#!/bin/sh
+# lb.saphira.dicom.stow - STOW-RS store of a synthetic object (DICOMweb,
+# deep, opt-in). The object is generated at check time (synthetic AE
+# data only). Guard-gated: storage mutates PACS state.
+# Configuration ($6 convenience; env/conf otherwise):
+#   $6  STOW URL     LB_SAPHIRA_DICOM_STOW_URL (required, full studies URL)
+#       LB_SAPHIRA_STATE_CHANGING=1 (required opt-in)
+#       LB_SAPHIRA_DICOMWEB_TLS_VERIFY=1 optional
+# Copyright (c) 2026 AKADATA. MIT licensed.
+. /usr/share/saphira/lb-healthchecks/lib/lb-saphira-common.sh
+lb_init "$@"
+[ "${LB_SAPHIRA_STATE_CHANGING:-0}" = "1" ] || exit 2
+URL="${6:-${LB_SAPHIRA_DICOM_STOW_URL:-}}"
+[ -n "$URL" ] || exit 2
+tmp=$(mktemp) || exit 1
+trap 'rm -f "$tmp"' EXIT
+python3 /usr/share/saphira/lb-medical-healthchecks/lib/lb-saphira-dicom-synth.py > "$tmp" || exit 1
+V=""
+[ "${LB_SAPHIRA_DICOMWEB_TLS_VERIFY:-0}" = "1" ] || V="-k"
+code=$(curl $V -sS --max-time "$LB_TIMEOUT" -o /dev/null -w '%{http_code}' \
+	-X POST -H 'Content-Type: multipart/related; type="application/dicom"' \
+	--data-binary "@$tmp" "$URL") || exit 1
+printf '%s' "$code" | grep -qE '^(200|201|202)$'

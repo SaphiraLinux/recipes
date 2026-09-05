@@ -1,0 +1,2 @@
+data_directory=/var/lib/postgresql/data
+listen_addresses=localhost

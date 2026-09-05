@@ -1,0 +1,20 @@
+#!/sbin/openrc-run
+
+description="ProFTPD FTP server"
+
+# Foreground (-n) under supervise-daemon, mirroring the approved systemd
+# unit shape: syntax check first (proftpd -t), then run proftpd directly.
+# Neither init wraps the other; nothing is auto-enabled at install.
+command="/usr/sbin/proftpd"
+command_args="-n -c /etc/proftpd.conf"
+supervisor="supervise-daemon"
+
+depend()
+{
+	use net
+}
+
+start_pre()
+{
+	/usr/sbin/proftpd -t -c /etc/proftpd.conf
+}

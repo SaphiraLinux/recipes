@@ -1,0 +1,19 @@
+#!/sbin/openrc-run
+
+description="OpenBSD SSH daemon"
+
+command="/usr/sbin/sshd"
+command_args="-D"
+supervisor="supervise-daemon"
+required_files="/etc/ssh/sshd_config"
+
+depend()
+{
+	use net logger dns
+}
+
+start_pre()
+{
+	ebegin "Checking sshd configuration"
+	/usr/sbin/sshd -t
+}

@@ -1,0 +1,18 @@
+[Unit]
+Description=Geomyidae Gopher server (RFC 1436)
+Documentation=man:geomyidae(8)
+After=network.target
+
+[Service]
+Type=simple
+ExecStartPre=/usr/libexec/saphira/geomyidae-seed-defaults
+# Foreground (-d) under systemd; geomyidae binds TCP/70 as root and then
+# drops privileges to the unprivileged gopher account itself (-u/-g).
+# Serves the Saphira Gopher root /srv/gopher on IPv4 and IPv6
+# (default AF_UNSPEC listening).
+ExecStart=/usr/bin/geomyidae -d -b /srv/gopher -p 70 -u gopher -g gopher
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,17 @@
+#!/bin/sh
+# lb.saphira.sni - TLS handshake asserting a specific SNI hostname (L7).
+# LB_SAPHIRA_SNI is required (the asserted hostname). Optional
+# LB_SAPHIRA_SNI_MATCH verifies the served certificate CN/SAN contains it.
+# Copyright (c) 2026 AKADATA. MIT licensed.
+. /usr/share/saphira/lb-healthchecks/lib/lb-saphira-common.sh
+lb_init "$@"
+PORT="${LB_RPORT:-$LB_VPORT}"
+[ -n "$LB_SAPHIRA_SNI" ] || exit 2
+out=$(timeout "$LB_TIMEOUT" openssl s_client -connect "${LB_REAL}:${PORT}" \
+	-servername "$LB_SAPHIRA_SNI" </dev/null 2>/dev/null) || exit 1
+printf '%s' "$out" | grep -q -- '-----BEGIN CERTIFICATE-----' || exit 1
+if [ "${LB_SAPHIRA_SNI_MATCH:-0}" = "1" ]; then
+	printf '%s\n' "$out" | openssl x509 -noout -text 2>/dev/null \
+		| grep -qi "CN[ =:]*$LB_SAPHIRA_SNI\|DNS:$LB_SAPHIRA_SNI" || exit 1
+fi
+exit 0

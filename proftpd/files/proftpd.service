@@ -1,0 +1,13 @@
+[Unit]
+Description=ProFTPD FTP Server
+After=network.target
+
+[Service]
+Type=simple
+ExecStartPre=/usr/sbin/proftpd -t -c /etc/proftpd.conf
+ExecStart=/usr/sbin/proftpd -n -c /etc/proftpd.conf
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

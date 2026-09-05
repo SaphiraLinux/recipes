@@ -1,0 +1,47 @@
+#!/sbin/openrc-run
+
+description="NFS server (kernel nfsd, mountd, idmapd, nfsdcld)"
+extra_started_commands="reload"
+
+depend()
+{
+	use net logger
+	after rpcbind
+	need localmount
+}
+
+# kernel nfsd thread pool: rpc.nfsd sets the thread count and returns
+start_nfsd()
+{
+	ebegin "Starting NFS server daemons"
+	exportfs -a || { eend 1 "exportfs -a failed"; return 1; }
+	/usr/sbin/rpc.mountd || { eend 1 "rpc.mountd failed"; return 1; }
+	# NFSv4: id mapping + client reboot tracking
+	/usr/sbin/rpc.idmapd || { eend 1 "rpc.idmapd failed"; return 1; }
+	/usr/sbin/nfsdcld || { eend 1 "nfsdcld failed"; return 1; }
+	/usr/sbin/rpc.nfsd 16 || { eend 1 "rpc.nfsd failed"; return 1; }
+	eend 0
+}
+
+start()
+{
+	start_nfsd
+}
+
+stop()
+{
+	ebegin "Stopping NFS server daemons"
+	/usr/sbin/rpc.nfsd 0
+	killall -q rpc.mountd
+	killall -q nfsdcld
+	killall -q rpc.idmapd
+	exportfs -ua
+	eend 0
+}
+
+reload()
+{
+	ebegin "Reloading /etc/exports"
+	exportfs -ra
+	eend $?
+}

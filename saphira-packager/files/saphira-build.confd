@@ -1,0 +1,13 @@
+# saphira-build daemon configuration.
+# Machine has 24 threads: 8 build jobs keep the box responsive for
+# interactive work. Raise to 16 for unattended bursts.
+JOBS="8"
+
+# Seconds between queue scans.
+INTERVAL="300"
+
+# Packages built per cycle.
+LIMIT="1"
+
+# Queue database and logs location.
+STATE="/var/lib/saphira-build"

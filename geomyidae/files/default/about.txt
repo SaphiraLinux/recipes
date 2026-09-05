@@ -1,0 +1,14 @@
+Saphira Linux -- So simple it hurts.
+
+This is a Saphira Linux Gopher server running geomyidae, a small
+C-based RFC 1436 gopherd, on TCP/70 (IPv4 and IPv6).
+
+Saphira is a small, self-hosting, musl-based distribution built and
+maintained entirely from its own native package repository.
+
+Website:  https://saphira.vm2.uk/
+Gopher:   gopher://<this-server>/
+
+The live Gopher content lives in /srv/gopher -- see the README in the
+root menu for instructions on replacing this holding page with your
+own content.

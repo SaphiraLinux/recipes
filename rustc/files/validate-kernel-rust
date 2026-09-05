@@ -1,0 +1,12 @@
+#!/bin/sh
+
+set -eu
+
+rustc --version
+cargo --version
+rustfmt --version
+test -d /usr/src/linux || {
+	printf 'validate-kernel-rust: /usr/src/linux is absent\n' >&2
+	exit 1
+}
+make -C /usr/src/linux LLVM=1 rustavailable

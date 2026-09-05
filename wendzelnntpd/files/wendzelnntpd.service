@@ -1,0 +1,15 @@
+[Unit]
+Description=WendzelNNTPd Usenet server (NNTP/NNTPS)
+Documentation=man:wendzelnntpd(8)
+After=network.target
+
+[Service]
+# Upstream service model: the daemon runs in the foreground when started
+# without -d, binding port 119 requires root (upstream ships no privilege
+# drop). Runtime state lives under /var/spool/news/wendzelnntpd (news:news).
+Type=simple
+ExecStart=/usr/sbin/wendzelnntpd
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

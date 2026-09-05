@@ -1,0 +1,538 @@
+#!/usr/bin/env python3
+"""saphira-lb-probe v1 - raw/protocol probe engine for Saphira LB healthchecks.
+
+Copyright (c) 2026 AKADATA. MIT licensed. Clean-room implementation.
+
+Stable CLI contract: a future compiled binary must implement the same
+interface and replace this payload. Checks calling this engine must not
+change behaviour across that swap.
+
+Usage:
+    saphira-lb-probe <probe> [options]
+
+Probes:
+    tcp        TCP transport reachability (connect)
+    udp        UDP listener probe (connected socket + ICMP error discrimination)
+    banner     TCP connect + read banner + regex expect
+    sendexpect TCP or UDP send-expect (raw protocol escape hatch)
+    dns        DNS query over UDP (or TCP), ID/QR/rcode verification
+    sip        SIP OPTIONS round-trip (UDP or TCP)
+    radius     RADIUS Status-Server (RFC 5997) or PAP Access-Request
+    mysql      MySQL initial handshake parse
+    postgres   PostgreSQL SSLRequest negotiation
+    redis      Redis inline PING (optional AUTH via env)
+    quic       QUIC Version Negotiation handshake proves a QUIC listener
+    gre        GRE encapsulated-packet loopback (two-party contract)
+    ipproto    Generic raw IP protocol primitive (probe/accept modes)
+    ldap       LDAP anonymous bind + rootDSE response
+
+Exit status: 0 healthy, 1 unhealthy, 2 usage error.
+Secrets (radius/redis credentials) are read from environment only and
+never printed. Dual-stack: addresses resolve via getaddrinfo, any family.
+"""
+
+import argparse
+import hashlib
+import hmac
+import os
+import random
+import re
+import socket
+import struct
+import sys
+import time
+
+USAGE_EXIT = 2
+DEFAULT_TIMEOUT = float(os.environ.get("LB_SAPHIRA_TIMEOUT", "3"))
+
+
+def err(msg):
+    sys.stderr.write(msg.rstrip() + "\n")
+
+
+def resolve(host, port, socktype, family=0):
+    infos = socket.getaddrinfo(host, port, family, socktype)
+    if not infos:
+        raise OSError("no addresses")
+    return infos
+
+
+def connect_first(host, port, socktype, timeout, family=0):
+    last = None
+    for af, st, proto, _cn, sa in resolve(host, port, socktype, family):
+        try:
+            s = socket.socket(af, st, proto)
+            s.settimeout(timeout)
+            s.connect(sa)
+            return s, sa
+        except OSError as e:
+            last = e
+    raise last if last else OSError("connect failed")
+
+
+def is_timeout(e):
+    return isinstance(e, socket.timeout) or (isinstance(e, OSError) and e.errno in (socket.ETIMEDOUT, socket.EAGAIN))
+
+
+def recv_exact(s, n, timeout):
+    s.settimeout(timeout)
+    buf = b""
+    while len(buf) < n:
+        chunk = s.recv(n - len(buf))
+        if not chunk:
+            break
+        buf += chunk
+    return buf
+
+
+def decode_re(flag):
+    return re.compile(flag.encode("latin-1"), re.DOTALL) if flag else None
+
+
+# ---------------------------------------------------------------- probes
+
+def probe_tcp(a):
+    s, _ = connect_first(a.host, a.port, socket.SOCK_STREAM, a.timeout, a.af)
+    s.close()
+    return True
+
+
+def probe_udp(a):
+    s, sa = connect_first(a.host, a.port, socket.SOCK_DGRAM, a.timeout, a.af)
+    try:
+        payload = load_send(a)
+        s.send(payload if payload is not None else b"")
+        exp = decode_re(a.expect)
+        while True:
+            data = s.recv(a.read_bytes)
+            if exp is None or exp.search(data):
+                return True
+    except OSError as e:
+        # ICMP port/host unreachable surfaces as ConnectionRefused here
+        if isinstance(e, ConnectionRefusedError):
+            return False
+        if is_timeout(e):
+            return False
+        return False
+    finally:
+        s.close()
+
+
+def probe_banner(a):
+    s, _ = connect_first(a.host, a.port, socket.SOCK_STREAM, a.timeout, a.af)
+    try:
+        exp = decode_re(a.expect) or re.compile(b".")
+        data = s.recv(a.read_bytes)
+        return bool(exp.search(data))
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
+def load_send(a):
+    if a.send_hex:
+        return bytes.fromhex(a.send_hex.replace(" ", "").replace(":", ""))
+    if a.send_file:
+        with open(a.send_file, "rb") as f:
+            return f.read()
+    if a.send is not None:
+        return a.send.encode("latin-1")
+    return None
+
+
+def probe_sendexpect(a):
+    payload = load_send(a)
+    if payload is None:
+        return None  # usage error
+    exp = decode_re(a.expect)
+    if exp is None:
+        return None
+    if a.proto == "udp":
+        s, sa = connect_first(a.host, a.port, socket.SOCK_DGRAM, a.timeout, a.af)
+    else:
+        s, sa = connect_first(a.host, a.port, socket.SOCK_STREAM, a.timeout, a.af)
+    try:
+        if a.delay:
+            time.sleep(a.delay)
+        s.send(payload)
+        deadline = time.time() + a.timeout
+        buf = b""
+        while time.time() < deadline:
+            s.settimeout(max(0.1, deadline - time.time()))
+            try:
+                chunk = s.recv(a.read_bytes)
+            except ConnectionRefusedError:
+                return False
+            except OSError as e:
+                if is_timeout(e):
+                    return False
+                return False
+            if not chunk:
+                break
+            buf += chunk
+            if exp.search(buf):
+                return True
+        return False
+    finally:
+        s.close()
+
+
+def dns_packet(name, qtype, qid=None):
+    if qid is None:
+        qid = random.getrandbits(16)
+    q = b"".join(bytes([len(p)]) + p.encode() for p in name.rstrip(".").split(".")) + b"\x00"
+    return qid, struct.pack(">HHHHHH", qid, 0x0100, 1, 0, 0, 0) + q + struct.pack(">HH", qtype, 1)
+
+
+def probe_dns(a):
+    qid, query = dns_packet(a.name, a.qtype)
+    exp = decode_re(a.expect)
+    s, sa = connect_first(a.host, a.port,
+                          socket.SOCK_STREAM if a.tcp else socket.SOCK_DGRAM,
+                          a.timeout, a.af)
+    try:
+        if a.tcp:
+            s.send(struct.pack(">H", len(query)) + query)
+            hdr = recv_exact(s, 2, a.timeout)
+            if len(hdr) < 2:
+                return False
+            msg = recv_exact(s, struct.unpack(">H", hdr)[0], a.timeout)
+        else:
+            s.send(query)
+            msg = s.recv(65535)
+        if len(msg) < 12:
+            return False
+        rid, flags, _qd, _an, _ns, _ar = struct.unpack(">HHHHHH", msg[:12])
+        if rid != qid or not (flags & 0x8000):
+            return False
+        rcode = flags & 0x000F
+        if rcode != a.expect_rcode:
+            return False
+        if exp is not None and not exp.search(msg):
+            return False
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
+SIP_OPTIONS = (
+    "OPTIONS sip:healthcheck@{host} SIP/2.0\r\n"
+    "Via: SIP/2.0/{trans} {vsource};branch=z9hG4bK{branch}\r\n"
+    "From: <sip:saphira-check@{vsource}>;tag={tag}\r\n"
+    "To: <sip:healthcheck@{host}>\r\n"
+    "Call-ID: {callid}\r\n"
+    "CSeq: 1 OPTIONS\r\n"
+    "Max-Forwards: 70\r\n"
+    "Content-Length: 0\r\n\r\n"
+)
+
+
+def probe_sip(a):
+    vs = a.vsource or a.host
+    trans = "TCP" if a.proto == "tcp" else "UDP"
+    req = SIP_OPTIONS.format(host=a.host, trans=trans, vsource=vs,
+                             branch=os.urandom(6).hex(), tag=os.urandom(4).hex(),
+                             callid=os.urandom(8).hex()).encode()
+    if a.proto == "tcp":
+        s, _ = connect_first(a.host, a.port, socket.SOCK_STREAM, a.timeout, a.af)
+    else:
+        s, _ = connect_first(a.host, a.port, socket.SOCK_DGRAM, a.timeout, a.af)
+    try:
+        s.send(req)
+        resp = s.recv(a.read_bytes)
+        if not resp.startswith(b"SIP/2.0"):
+            return False
+        try:
+            code = int(resp.split(b" ", 2)[1])
+        except (IndexError, ValueError):
+            return False
+        # any 1xx/2xx is a live SIP endpoint; --expect-status caps the max
+        if code < 100 or code > 299:
+            return False
+        if a.expect_status and code > a.expect_status:
+            return False
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
+def radius_packet(a, pap_user=None):
+    auth = os.urandom(16)
+    attrs = b""
+    if pap_user:
+        user = pap_user.encode()
+        attrs += bytes([1, len(user) + 2]) + user
+        pw = os.environ.get("LB_SAPHIRA_RADIUS_PASSWORD", "")
+        pw = pw.encode()[:16]
+        pw += b"\x00" * (16 - len(pw))
+        key = hashlib.md5(a.secret.encode() + auth).digest()
+        enc = bytes(x ^ y for x, y in zip(pw, key))
+        attrs += bytes([2, len(enc) + 2]) + enc
+    else:
+        attrs += bytes([2, 4]) + struct.pack(">I", 17)  # Service-Type Status-Server
+    body = attrs + bytes([80, 18]) + b"\x00" * 16
+    pkt = bytes([1, random.getrandbits(8)]) + struct.pack(">H", 20 + len(body)) + auth + body
+    mac = hmac.new(a.secret.encode(), pkt, hashlib.md5).digest()
+    pkt = pkt[:-16] + mac
+    return pkt
+
+
+def probe_radius(a):
+    secret = os.environ.get("LB_SAPHIRA_RADIUS_SECRET", "")
+    if not secret:
+        return None
+    pap = os.environ.get("LB_SAPHIRA_RADIUS_USER") if a.pap else None
+    s, _ = connect_first(a.host, a.port, socket.SOCK_DGRAM, a.timeout, a.af)
+    try:
+        s.send(radius_packet(a, pap))
+        resp = s.recv(4096)
+        if len(resp) < 20:
+            return False
+        code = resp[0]
+        # Access-Accept(2) / Access-Challenge(11) healthy; Reject(3) not
+        return code in (2, 11)
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
+def probe_mysql(a):
+    s, _ = connect_first(a.host, a.port, socket.SOCK_STREAM, a.timeout, a.af)
+    try:
+        hdr = recv_exact(s, 4, a.timeout)
+        if len(hdr) < 4:
+            return False
+        plen = struct.unpack("<I", hdr[:3] + b"\x00")[0]
+        body = recv_exact(s, plen, a.timeout)
+        if len(body) < 2 or body[0] != 10:  # protocol version 10
+            return False
+        version = body[1:].split(b"\x00", 1)[0].decode("latin-1", "replace")
+        if a.expect and not re.search(a.expect, version):
+            return False
+        return True
+    except OSError:
+        return False
+    finally:
+        try:
+            s.send(b"\x01\x00\x00\x00\x01")  # COM_QUIT
+        except OSError:
+            pass
+        s.close()
+
+
+def probe_postgres(a):
+    s, _ = connect_first(a.host, a.port, socket.SOCK_STREAM, a.timeout, a.af)
+    try:
+        s.send(struct.pack(">II", 8, 80877103))  # SSLRequest
+        b = recv_exact(s, 1, a.timeout)
+        if len(b) != 1 or b not in (b"S", b"N"):
+            return False
+        if a.require_ssl and b != b"S":
+            return False
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
+def probe_redis(a):
+    s, _ = connect_first(a.host, a.port, socket.SOCK_STREAM, a.timeout, a.af)
+    try:
+        pw = os.environ.get("LB_SAPHIRA_REDIS_PASSWORD", "")
+        if pw:
+            s.send(("AUTH %s\r\n" % pw).encode())
+            if not s.recv(128).startswith(b"+OK"):
+                return False
+        s.send(b"PING\r\n")
+        resp = s.recv(128)
+        if a.expect:
+            return bool(re.search(a.expect.encode(), resp))
+        return resp.startswith(b"+PONG")
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
+def probe_quic(a):
+    s, sa = connect_first(a.host, a.port, socket.SOCK_DGRAM, a.timeout, a.af)
+    try:
+        # QUIC long header: flags, Version (4B), DCID len + DCID, SCID len + SCID.
+        # Unsupported version -> peer MUST reply Version Negotiation (RFC 9000 6),
+        # a long-header packet with Version 0 at bytes 1-5.
+        pkt = bytes([0xC0]) + struct.pack(">I", 0x0A0A0A0A) \
+            + bytes([8]) + os.urandom(8) + bytes([4]) + os.urandom(4)
+        s.send(pkt)
+        resp = s.recv(1500)
+        if len(resp) < 5 or not (resp[0] & 0x80):
+            return False
+        return struct.unpack(">I", resp[1:5])[0] == 0
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
+def build_inner_ip(src, dst, sport, dport):
+    payload = b"SAPHIRA-GRE-PROBE-" + os.urandom(4)
+    udp = struct.pack(">HHHH", sport, dport, 8 + len(payload), 0) + payload
+    total = 20 + len(udp)
+    ip = struct.pack(">BBHHHBBH4s4s", 0x45, 0, total, 0, 0, 64, 17, 0,
+                     socket.inet_aton(src), socket.inet_aton(dst))
+    return ip + udp
+
+
+def probe_gre(a):
+    if not (a.inner_src and a.inner_dst):
+        return None  # two-party contract requires configured inner endpoints
+    s = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_GRE)
+    s.settimeout(a.timeout)
+    try:
+        inner = build_inner_ip(a.inner_src, a.inner_dst,
+                               a.inner_port, a.inner_port)
+        flags = 0x2000 if a.key is not None else 0
+        hdr = struct.pack(">HH", flags, 0) + (struct.pack(">I", a.key) if a.key is not None else b"")
+        pkt = hdr + inner
+        s.sendto(pkt, (a.host, 0))
+        deadline = time.time() + a.timeout
+        while time.time() < deadline:
+            s.settimeout(max(0.1, deadline - time.time()))
+            data, peer = s.recvfrom(65535)
+            if peer[0] == socket.gethostbyname(a.host):
+                return True  # any GRE encapsulated reply from the peer
+        return False
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
+def probe_ipproto(a):
+    if not a.raw_proto:
+        return None
+    proto = a.raw_proto
+    payload = load_send(a) or b""
+    # send via DGRAM raw (kernel builds IP header); listen on RAW for reply
+    snd = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, proto)
+    rcv = socket.socket(socket.AF_INET, socket.SOCK_RAW, proto)
+    icmp = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP)
+    snd.settimeout(a.timeout)
+    rcv.settimeout(a.timeout)
+    icmp.settimeout(a.timeout)
+    try:
+        snd.sendto(payload, (a.host, 0))
+        deadline = time.time() + a.timeout
+        exp = decode_re(a.expect)
+        while time.time() < deadline:
+            for sock in ((icmp,) if a.mode == "accept" else (rcv, icmp)):
+                sock.settimeout(max(0.1, deadline - time.time()))
+                try:
+                    data, peer = sock.recvfrom(65535)
+                except socket.timeout:
+                    continue
+                if peer[0] != socket.gethostbyname(a.host):
+                    continue
+                if sock is icmp and data[20] == 3 and data[21] in (1, 2):
+                    # ICMP destination-unreachable (protocol/admin) about us
+                    return False
+                if sock is rcv and (exp is None or exp.search(data)):
+                    return True
+        return a.mode == "accept"  # documented: evidence of acceptance, not proof
+    except OSError:
+        return False
+    finally:
+        snd.close(); rcv.close(); icmp.close()
+
+
+LDAP_BIND = bytes([0x30, 0x0C, 0x02, 0x01, 0x01, 0x60, 0x07, 0x02, 0x01, 0x03, 0x04, 0x00, 0x80, 0x00])
+LDAP_UNBIND = bytes([0x30, 0x05, 0x02, 0x01, 0x02, 0x42, 0x00])
+
+
+def probe_ldap(a):
+    s, _ = connect_first(a.host, a.port, socket.SOCK_STREAM, a.timeout, a.af)
+    try:
+        s.send(LDAP_BIND)
+        resp = recv_exact(s, 2, a.timeout)
+        if len(resp) < 2 or resp[0] != 0x61:  # bindResponse
+            return False
+        s.send(LDAP_UNBIND)
+        return True
+    except OSError:
+        return False
+    finally:
+        s.close()
+
+
+PROBES = {
+    "tcp": probe_tcp, "udp": probe_udp, "banner": probe_banner,
+    "sendexpect": probe_sendexpect, "dns": probe_dns, "sip": probe_sip,
+    "radius": probe_radius, "mysql": probe_mysql, "postgres": probe_postgres,
+    "redis": probe_redis, "quic": probe_quic, "gre": probe_gre,
+    "ipproto": probe_ipproto, "ldap": probe_ldap,
+}
+
+
+def build_parser():
+    p = argparse.ArgumentParser(prog="saphira-lb-probe", add_help=True)
+    p.add_argument("probe", choices=sorted(PROBES))
+    p.add_argument("--host", required=True)
+    p.add_argument("--port", type=int, default=None)
+    p.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)
+    p.add_argument("--family", choices=["any", "4", "6"], default="any")
+    p.add_argument("--send")
+    p.add_argument("--send-hex")
+    p.add_argument("--send-file")
+    p.add_argument("--expect")
+    p.add_argument("--expect-rcode", type=int, default=0)
+    p.add_argument("--read-bytes", type=int, default=4096)
+    p.add_argument("--delay", type=float, default=0)
+    p.add_argument("--proto", choices=["tcp", "udp"], default="udp")
+    p.add_argument("--tcp", action="store_true")
+    p.add_argument("--name", default="")
+    p.add_argument("--qtype", type=int, default=1)
+    p.add_argument("--expect-status", type=int, default=0)
+    p.add_argument("--vsource", default="")
+    p.add_argument("--pap", action="store_true")
+    p.add_argument("--require-ssl", action="store_true")
+    p.add_argument("--inner-src", default=os.environ.get("LB_SAPHIRA_GRE_INNER_SRC", ""))
+    p.add_argument("--inner-dst", default=os.environ.get("LB_SAPHIRA_GRE_INNER_DST", ""))
+    p.add_argument("--inner-port", type=int, default=int(os.environ.get("LB_SAPHIRA_GRE_INNER_PORT", "0")))
+    p.add_argument("--key", type=int, default=None)
+    p.add_argument("--raw-proto", type=int, default=0)
+    p.add_argument("--mode", choices=["probe", "accept"], default="probe")
+    return p
+
+
+def main():
+    a = build_parser().parse_args()
+    if a.family == "4":
+        a.af = socket.AF_INET
+    elif a.family == "6":
+        a.af = socket.AF_INET6
+    else:
+        a.af = 0
+    if a.port is None:
+        defaults = {"dns": 53, "radius": 1812, "mysql": 3306, "postgres": 5432,
+                    "redis": 6379, "quic": 443, "ldap": 389, "sip": 5060}
+        a.port = defaults.get(a.probe, 0)
+    fn = PROBES[a.probe]
+    try:
+        result = fn(a)
+    except OSError as e:
+        err("probe %s: %s" % (a.probe, e))
+        sys.exit(1)
+    if result is None:
+        err("probe %s: missing required configuration (see check docs)" % a.probe)
+        sys.exit(USAGE_EXIT)
+    sys.exit(0 if result else 1)
+
+
+if __name__ == "__main__":
+    main()

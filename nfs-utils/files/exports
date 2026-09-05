@@ -1,0 +1,14 @@
+# /etc/exports: NFS export table for exportfs(8) and rpc.mountd(8).
+#
+# Example entries (uncomment and adapt; never exported by default):
+#
+#/srv/share    192.168.10.0/24(rw,async,no_subtree_check)
+#/srv/share    2001:db8:10::/64(rw,async,no_subtree_check)
+#/srv/readonly *(ro,all_squash,anonuid=65534,anongid=65534)
+#
+# NFSv4 pseudo-root example:
+#/export       192.168.10.0/24(rw,async,no_subtree_check,fsid=0)
+#/export/data  192.168.10.0/24(rw,async,no_subtree_check)
+#
+# After editing run: exportfs -ra   (or restart the nfs-server service)
+# See: man 5 exports

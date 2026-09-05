@@ -1,0 +1,37 @@
+# /etc/ppp/peers/pppoe
+# Working base PPPoE configuration - Zen Internet over CityFibre.
+# 911 is the VLAN CityFibre uses: the WAN NIC name may change per site
+# (eth2 here), but the VLAN is always 911.  Create ethX.911 first, then
+# point nic- at it.
+#
+# Replace the user name with your Zen login; the password goes in
+# /etc/ppp/chap-secrets or /etc/ppp/pap-secrets (chmod 600).
+#
+# Minimal use: keep only the plugin + nic- lines below.
+#   sudo pppd call pppoe
+# or directly:
+#   sudo pppd plugin /etc/ppp/plugins/rp-pppoe.so nic-eth2.911
+
+plugin /etc/ppp/plugins/rp-pppoe.so
+nic-eth2.911
+
+linkname ZEN
+user "USERNAME@zen"
+
+noauth
+persist
+maxfail 0
+holdoff 5
+
+mtu 1492
+mru 1492
+
+usepeerdns
+
+defaultroute
+replacedefaultroute
+
++ipv6
+defaultroute6
+
+logfile /var/log/pppoe.log

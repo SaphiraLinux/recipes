@@ -1,0 +1,36 @@
+#!/bin/sh
+# lb.saphira.dicom.find - DICOM C-FIND with deliberately synthetic,
+# non-patient query keys (deep-application, read-only, continuous-safe).
+# A successful query cycle (even with zero matches) proves association +
+# query information model + data path.
+#
+# Configuration (resolution: $6+ positional > env > conf file > default):
+#   $6  patient ID      LB_SAPHIRA_DICOM_PATIENT_ID  (default synthetic)
+#   $7  modality        LB_SAPHIRA_DICOM_MODALITY    (optional, only sent
+#                                                     when configured)
+#   $8  query level     LB_SAPHIRA_DICOM_QUERY_LEVEL (PATIENT|STUDY)
+#   AET LB_SAPHIRA_DICOM_AET (default SAPHIRA-HC)
+#   AEC LB_SAPHIRA_DICOM_AEC (default ANY-SCP)
+# A DICOM modality may need its own per-install configuration - set it in
+# /etc/saphira/lb-healthchecks.d/dicom.find.conf or per service under
+# dicom.find/<service>.conf; HAProxy needs no extra interface for this.
+# Copyright (c) 2026 AKADATA. MIT licensed.
+. /usr/share/saphira/lb-healthchecks/lib/lb-saphira-common.sh
+lb_init "$@"
+PATIENT_ID="${6:-${LB_SAPHIRA_DICOM_PATIENT_ID:-SAPHIRA-SYNTHETIC-HEALTHCHECK}}"
+MODALITY="${7:-${LB_SAPHIRA_DICOM_MODALITY:-}}"
+LEVEL="${8:-${LB_SAPHIRA_DICOM_QUERY_LEVEL:-PATIENT}}"
+case "$LEVEL" in
+	PATIENT|STUDY) ;;
+	*) exit 2 ;;
+esac
+set -- findscu \
+	-aet "${LB_SAPHIRA_DICOM_AET:-SAPHIRA-HC}" \
+	-aec "${LB_SAPHIRA_DICOM_AEC:-ANY-SCP}" \
+	-ta "$LB_TIMEOUT" \
+	-P \
+	-k "QueryRetrieveLevel=$LEVEL" \
+	-k "PatientID=$PATIENT_ID"
+[ -n "$MODALITY" ] && set -- "$@" -k "Modality=$MODALITY"
+[ -n "${LB_SAPHIRA_DICOM_FIND_NAME:-}" ] && set -- "$@" -k "PatientName=$LB_SAPHIRA_DICOM_FIND_NAME"
+exec "$@" "$LB_REAL" "${LB_RPORT:-104}"

@@ -1,0 +1,15 @@
+[Unit]
+Description=nftables firewall ruleset
+Documentation=man:nft(8)
+DefaultDependencies=no
+After=systemd-modules-load.service
+Before=network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/nft -f /etc/nftables.conf
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

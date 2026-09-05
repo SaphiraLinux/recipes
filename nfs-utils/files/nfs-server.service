@@ -1,0 +1,22 @@
+[Unit]
+Description=NFS server (kernel nfsd, mountd, idmapd, nfsdcld)
+Documentation=man:rpc.nfsd(8) man:exportfs(8)
+After=network.target rpcbind.service
+Requires=rpcbind.service
+
+# rpc.nfsd programs the kernel nfsd thread pool and returns; the daemons
+# provide the userland protocol services. Native oneshot semantics - no
+# fake foreground wrappers.
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/exportfs -a
+ExecStart=/usr/sbin/rpc.mountd
+ExecStart=/usr/sbin/rpc.idmapd
+ExecStart=/usr/sbin/nfsdcld
+ExecStart=/usr/sbin/rpc.nfsd 16
+ExecStop=/usr/sbin/rpc.nfsd 0
+ExecStop=/usr/sbin/exportfs -ua
+
+[Install]
+WantedBy=multi-user.target

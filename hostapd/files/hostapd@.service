@@ -1,0 +1,14 @@
+[Unit]
+Description=hostapd IEEE 802.11 AP on %i
+After=network.target
+
+[Service]
+Type=simple
+# Instance unit: %i selects the interface AND its configuration file
+# /etc/hostapd/%i.conf (systemd instance escape: systemd-escape first).
+ExecStart=/usr/bin/hostapd /etc/hostapd/%i.conf
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

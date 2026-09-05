@@ -1,0 +1,11 @@
+[Unit]
+Description=GNU inetutils internet super-server (inetd)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/inetd --debug
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

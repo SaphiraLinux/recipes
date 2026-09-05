@@ -1,0 +1,28 @@
+# /etc/dhcpcd.conf
+# Router mode: DHCPv6-PD only on the PPPoE WAN (ppp0).
+# LAN/OVS/Wi-Fi addresses are owned by static config; LAN advertisements
+# are owned by radvd. The delegated prefix (e.g. /48) is NOT assigned to
+# LAN interfaces here - LAN /64s are configured statically from it.
+
+controlgroup wheel
+
+# Keep the DHCPv6 identity stable.
+duid
+persistent
+
+# Do not let dhcpcd alter resolver config.
+nohook resolv.conf
+
+# Do not solicit/accept IPv6 RAs globally. Enable RS only on ppp0 below.
+noipv6rs
+
+# Only manage ppp0.
+allowinterfaces ppp0
+
+interface ppp0
+        noipv4
+        ipv6only
+        ipv6rs
+
+        # Request the delegated /48; LAN /64s are statically configured elsewhere.
+        ia_pd 2/::48 -

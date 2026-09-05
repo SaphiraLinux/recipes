@@ -1,0 +1,215 @@
+.TH SAPHIRA-MERGETOOL 1 "September 2026" "saphira-mergetool 0.1.0" "User Commands"
+.SH NAME
+saphira-mergetool \- resolve apk .apk-new upgrade artifacts
+.SH SYNOPSIS
+.B saphira-mergetool
+.RI [ options ]
+.br
+.B saphira-mergetool --diff
+.RI [ FILE ]
+.br
+.B saphira-mergetool --accept FILE|all
+.br
+.B saphira-mergetool --keep FILE|all
+.br
+.B saphira-mergetool --merge FILE
+.br
+.B saphira-mergetool --auto
+.RI [ options ]
+.SH DESCRIPTION
+When apk upgrades a
+.B protected
+file (everything under
+.BR /etc ,
+plus any tree covered by
+.BR /etc/apk/protected_paths.d )
+and the installed copy was locally modified, the new package version
+is not applied automatically. It lands beside the installed original
+as
+.IR FILE .apk-new
+and waits for the operator to decide. Nothing is merged silently.
+.PP
+.B saphira-mergetool
+makes that decision easy. It scans configured roots for pending
+.BR .apk-new
+files, shows unified diffs against the installed originals, and
+resolves each pair one of three ways:
+.TP
+.B accept
+The
+.B .apk-new
+version replaces the installed file. An orphan
+.B .apk-new
+whose original is gone is promoted to the real name.
+.TP
+.B keep
+The installed file stays exactly as it is; the
+.B .apk-new
+is discarded.
+.TP
+.B merge
+Interactive, hunk by hunk:
+.BR [y]es ,
+.BR [n]o ,
+.B all-remaining ,
+.BR [q]uit .
+Local edits survive in every declined hunk; mode and ownership follow
+the installed file, written atomically (temporary file, mode and
+ownership copied, rename into place).
+.PP
+With no action flags the tool only lists what is pending (flagging
+identical and orphan files). Every action also runs under
+.BR --dry-run .
+.SH WHEN TO MERGE, ACCEPT, OR KEEP
+Always read the diff first
+.RB ( --diff ).
+The right action depends on what the diff shows, not on habit.
+.TP
+.B Merge
+when both sides carry value: you have local edits worth preserving
+.I and
+upstream changed something you want (new options, fixed defaults,
+security-relevant behavior). Typical candidates are
+.B /etc/conf.d
+service configurations and init scripts with local tweaks.
+.TP
+.B Accept
+when the installed copy holds nothing worth keeping: the diff is
+empty or trivial, the file is package-owned data you never edited,
+or the
+.B .apk-new
+is an orphan whose original disappeared. Accepting an orphan
+promotes it to the real name, which is the correct outcome.
+.TP
+.B Keep
+when the installed file deliberately diverges and the upstream
+changes are unwanted or inapplicable to this machine.
+.SH WHEN NOT TO MERGE
+.TP
+.B Never merge blind.
+If you have not read the diff, you have not made a decision.
+Use
+.B --diff
+first, and
+.B --dry-run
+before any write.
+.TP
+.B Never --accept all on first sight.
+List first, review each file, then resolve deliberately or encode
+routine paths in the
+.B [policy]
+section and use
+.BR --auto .
+.TP
+.B Never accept passwd, group or shadow wholesale.
+Upstream account databases routinely gain new service rows (for
+example a new
+.B proxyto
+user and group). Accepting the package version would wipe every
+locally created user. Instead diff the pair, extract only the new
+upstream rows, and append those rows to the installed files by
+hand (checking
+.BR vipw (8)
+conventions: unique names, unique numeric IDs, valid shells).
+Then discard the
+.BR .apk-new .
+.TP
+.B Never hunk-merge binary or non-text files.
+The differ is byte-oriented; merging a binary hunk by hunk
+corrupts it. For non-text files choose whole-file
+.B accept
+or
+.B keep
+only.
+.TP
+.B Never merge what you do not understand.
+If a diff is unclear, do nothing: an unresolved
+.B .apk-new
+sits harmlessly beside the installed file. Aborting a merge with
+.B q
+likewise writes nothing and keeps the
+.B .apk-new
+for later. Research first, resolve second.
+.TP
+.B Never merge symlinks by content.
+Ownership and link targets are handled as links, not text; use
+.B accept
+or
+.B keep
+for the whole link.
+.SH POLICY FILE
+.B /etc/saphira/mergetool.conf
+(CLI flags override it):
+.PP
+.RS
+.nf
+[mergetool]
+scan_paths = /etc /srv/gopher-source
+
+[policy]
+# fnmatch globs against the installed path or basename
+/etc/init.d/* = accept
+/etc/conf.d/* = keep
+.fi
+.RE
+.PP
+With
+.BR --auto ,
+configured policies apply non-interactively; unmatched files are
+prompted for on a terminal, or reported as pending in scripts.
+.SH EXAMPLES
+Typical session after an upgrade:
+.PP
+.RS
+.nf
+saphira-mergetool
+saphira-mergetool --diff
+saphira-mergetool --merge /etc/conf.d/saphira-build.apk-new
+saphira-mergetool --accept /etc/init.d/saphira-build.apk-new
+.fi
+.RE
+.PP
+Absorbing a new service account (upstream added
+.BR proxyto ,
+local users must survive):
+.PP
+.RS
+.nf
+saphira-mergetool --diff /etc/passwd.apk-new
+# confirm the only additions are the proxyto rows,
+# append those two lines to /etc/passwd (and likewise
+# group, shadow), then discard the artifact:
+saphira-mergetool --keep /etc/passwd.apk-new
+.fi
+.RE
+.PP
+Routine non-interactive pass:
+.PP
+.RS
+.nf
+saphira-mergetool --auto --dry-run
+saphira-mergetool --auto
+.fi
+.RE
+.SH FILES
+.TP
+.B /etc/saphira/mergetool.conf
+Operator configuration: scan roots and resolution policy.
+.TP
+.B /etc/apk/protected_paths.d
+Additional trees apk protects (and therefore produces
+.B .apk-new
+files under).
+.SH EXIT STATUS
+.TP
+.B 0
+Success, or nothing pending. Dry runs always exit 0.
+.TP
+.B 1
+A merge was aborted, a scan path is not a directory, the
+configuration is unreadable, or a file is not an
+.B .apk-new
+artifact. Aborts write nothing.
+.SH SEE ALSO
+.BR apk (8),
+.BR vipw (8)

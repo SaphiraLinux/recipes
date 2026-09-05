@@ -1,0 +1,8 @@
+GRUB_DEFAULT=0
+GRUB_TIMEOUT=3
+GRUB_DISTRIBUTOR="Akadata Linux"
+GRUB_CMDLINE_LINUX="rootfstype=ext4 rw rootwait console=tty0 console=ttyS0,115200n8 nomodeset raid=noautodetect"
+GRUB_TERMINAL_INPUT="console serial"
+GRUB_TERMINAL_OUTPUT="console serial"
+GRUB_SERIAL_COMMAND="serial --speed=115200 --unit=0 --word=8 --parity=no --stop=1"
+GRUB_DISABLE_OS_PROBER=true

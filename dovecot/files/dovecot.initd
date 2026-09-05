@@ -1,0 +1,20 @@
+#!/sbin/openrc-run
+
+description="Dovecot IMAP/POP3 email server"
+
+command="/usr/sbin/dovecot"
+command_args="-F"
+supervisor="supervise-daemon"
+pidfile="/run/dovecot/master.pid"
+
+depend()
+{
+	use net logger dns
+}
+
+start_pre()
+{
+	checkpath -d -m 0755 /run/dovecot /var/log/dovecot
+	ebegin "Checking dovecot configuration"
+	/usr/sbin/dovecot configtest
+}

@@ -1,0 +1,11 @@
+#!/sbin/openrc-run
+description="nftables firewall ruleset"
+depend() {
+	after sysctl
+	before net
+}
+start() {
+	ebegin "Loading nftables ruleset"
+	/usr/sbin/nft -f /etc/nftables.conf
+	eend $?
+}

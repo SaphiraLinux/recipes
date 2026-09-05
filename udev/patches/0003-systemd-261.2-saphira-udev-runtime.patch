@@ -1,0 +1,116 @@
+diff --git a/meson.build b/meson.build
+--- a/meson.build
++++ b/meson.build
+@@ -172 +172 @@
+-udevlibexecdir = prefixdir / 'lib/udev'
++udevlibexecdir = '/lib/udev'
+
+diff --git a/src/udev/meson.build b/src/udev/meson.build
+--- a/src/udev/meson.build
++++ b/src/udev/meson.build
+@@ -147,1 +147,2 @@
+                 'public' : true,
++                'install_dir' : '/bin',
+@@ -260,2 +261,2 @@
+-                pointing_to : libexecdir_to_bin + 'udevadm',
+-                install_dir : libexecdir,
++                pointing_to : '../../bin/udevadm',
++                install_dir : '/lib/systemd',
+@@ -262,0 +264,5 @@
++install_symlink('udevadm',
++                pointing_to : '../../bin/udevadm',
++                install_dir : bindir,
++                install_tag : 'udev')
++
+
+diff --git a/src/udev/udev-rules.h b/src/udev/udev-rules.h
+--- a/src/udev/udev-rules.h
++++ b/src/udev/udev-rules.h
+@@ -6,0 +7,10 @@
++#define UDEV_RULES_DIRS \
++        "/etc/udev/rules.d", \
++        "/run/udev/rules.d", \
++        "/usr/local/lib/udev/rules.d", \
++        "/lib/udev/rules.d", \
++        "/usr/lib/udev/rules.d"
++
++#define UDEV_RULES_DIRS_STRV \
++        STRV_MAKE(UDEV_RULES_DIRS)
++
+
+diff --git a/src/udev/udev-rules.c b/src/udev/udev-rules.c
+--- a/src/udev/udev-rules.c
++++ b/src/udev/udev-rules.c
+@@ -60 +60 @@
+-#define RULES_DIRS ((const char* const*) CONF_PATHS_STRV("udev/rules.d"))
++#define RULES_DIRS ((const char* const*) UDEV_RULES_DIRS_STRV)
+@@ -1837 +1837 @@
+-        r = strv_extend_strv(&directories, CONF_PATHS_STRV("udev/rules.d"), /* filter_duplicates= */ false);
++        r = strv_extend_strv(&directories, UDEV_RULES_DIRS_STRV, /* filter_duplicates= */ false);
+
+diff --git a/src/udev/udevadm-util.c b/src/udev/udevadm-util.c
+--- a/src/udev/udevadm-util.c
++++ b/src/udev/udevadm-util.c
+@@ -242 +242 @@
+-        STRV_FOREACH(p, CONF_PATHS_STRV("udev/rules.d")) {
++        STRV_FOREACH(p, UDEV_RULES_DIRS_STRV) {
+@@ -329 +329 @@
+-                                              (const char* const*) CONF_PATHS_STRV("udev/rules.d"), &files, &n_files);
++                                              (const char* const*) UDEV_RULES_DIRS_STRV, &files, &n_files);
+
+diff --git a/src/shared/hwdb-util.c b/src/shared/hwdb-util.c
+--- a/src/shared/hwdb-util.c
++++ b/src/shared/hwdb-util.c
+@@ -31 +31,2 @@
+         UDEVLIBEXECDIR "/hwdb.d",
++        "/usr/lib/udev/hwdb.d",
+         NULL
+
+diff --git a/units/systemd-udevd.service.in b/units/systemd-udevd.service.in
+--- a/units/systemd-udevd.service.in
++++ b/units/systemd-udevd.service.in
+@@ -45 +45 @@
+-ExecStart={{LIBEXECDIR}}/systemd-udevd
++ExecStart=/lib/systemd/systemd-udevd
+
+diff --git a/units/systemd-udev-trigger.service b/units/systemd-udev-trigger.service
+--- a/units/systemd-udev-trigger.service
++++ b/units/systemd-udev-trigger.service
+@@ -22 +22 @@
+-ExecStart=-udevadm trigger --type=all --action=add --prioritized-subsystem=module,block,tpmrm,net,tty,input
++ExecStart=-/bin/udevadm trigger --type=all --action=add --prioritized-subsystem=module,block,tpmrm,net,tty,input
+
+diff --git a/units/systemd-udev-settle.service b/units/systemd-udev-settle.service
+--- a/units/systemd-udev-settle.service
++++ b/units/systemd-udev-settle.service
+@@ -27 +27 @@
+-ExecStart=udevadm settle
++ExecStart=/bin/udevadm settle
+
+diff --git a/units/systemd-udev-load-credentials.service b/units/systemd-udev-load-credentials.service
+--- a/units/systemd-udev-load-credentials.service
++++ b/units/systemd-udev-load-credentials.service
+@@ -24 +24 @@
+-ExecStart=udevadm control --load-credentials
++ExecStart=/bin/udevadm control --load-credentials
+
+diff --git a/rules.d/64-btrfs.rules.in b/rules.d/64-btrfs.rules.in
+--- a/rules.d/64-btrfs.rules.in
++++ b/rules.d/64-btrfs.rules.in
+@@ -15 +15 @@
+-ENV{ID_BTRFS_READY}=="1", RUN+="{{BINDIR}}/udevadm trigger -s block -p ID_BTRFS_READY=0"
++ENV{ID_BTRFS_READY}=="1", RUN+="/bin/udevadm trigger -s block -p ID_BTRFS_READY=0"
+
+diff --git a/rules.d/71-seat.rules.in b/rules.d/71-seat.rules.in
+--- a/rules.d/71-seat.rules.in
++++ b/rules.d/71-seat.rules.in
+@@ -75 +75 @@
+-                  RUN+="{{BINDIR}}/udevadm trigger --parent-match=%p/.."
++                  RUN+="/bin/udevadm trigger --parent-match=%p/.."
+
+diff --git a/rules.d/99-systemd.rules.in b/rules.d/99-systemd.rules.in
+--- a/rules.d/99-systemd.rules.in
++++ b/rules.d/99-systemd.rules.in
+@@ -69 +69 @@
+-ACTION=="add", SUBSYSTEM=="net", KERNEL!="lo", RUN+="{{LIBEXECDIR}}/systemd-sysctl --prefix=/net/ipv4/conf/$name --prefix=/net/ipv4/neigh/$name --prefix=/net/ipv6/conf/$name --prefix=/net/ipv6/neigh/$name"
++ACTION=="add", SUBSYSTEM=="net", KERNEL!="lo", RUN+="/lib/systemd/systemd-sysctl --prefix=/net/ipv4/conf/$name --prefix=/net/ipv4/neigh/$name --prefix=/net/ipv6/conf/$name --prefix=/net/ipv6/neigh/$name"

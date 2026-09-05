@@ -1,0 +1,18 @@
+#!/sbin/openrc-run
+
+description="Kea Control Agent (REST API)"
+
+command="/usr/sbin/kea-ctrl-agent"
+command_args="-c /etc/kea/kea-ctrl-agent.conf"
+command_background="yes"
+pidfile="/run/kea-ctrl-agent.pid"
+
+depend()
+{
+	use net logger dns
+}
+
+start_pre()
+{
+	checkpath -d -m 0755 /run/kea
+}

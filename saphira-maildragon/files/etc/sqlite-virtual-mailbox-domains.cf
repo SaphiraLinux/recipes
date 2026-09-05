@@ -1,0 +1,6 @@
+# Postfix sqlite map: virtual mailbox domains.
+# Mirrors mysql-virtual-mailbox-domains.cf from the v0 MariaDB system;
+# the %s placeholder expands to the recipient domain inside postfix's
+# sqlite driver (sqlite:query requires the '#' continuation style).
+dbpath = /var/lib/maildragon/mailserver.sqlite
+query = SELECT 1 FROM virtual_domains WHERE name = '%s' AND active = 1

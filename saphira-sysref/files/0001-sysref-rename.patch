@@ -1,0 +1,256 @@
+--- a/src/main.c	2026-09-05 10:38:25.353389642 +0000
++++ new/akaman/src/main.c	2026-09-05 10:37:39.134221500 +0000
+@@ -7,21 +7,21 @@
+ #include <unistd.h>
+ 
+ static const char *usage =
+-    "akaman - minimal local man-page context for AI agents\n"
++    "sysref - minimal local man-page context for AI agents\n"
+     "\n"
+     "usage:\n"
+-    "  akaman QUERY [SECTION]         query native man pages (source=man)\n"
++    "  sysref QUERY [SECTION]         query native man pages (source=man)\n"
+     "                                 SECTION numeric = man section, alphabetic = named section\n"
+-    "  akaman -s SECTION QUERY        same\n"
+-    "  akaman --source doc QUERY      query /usr/share/doc (README/FAQ/.txt/.md)\n"
+-    "  akaman --source headers QUERY  query system headers (stdio.h printf)\n"
+-    "  akaman --source man QUERY      query native man pages (default)\n"
+-    "  akaman --stats QUERY [SECTION] print result plus token metrics\n"
+-    "  akaman --mcp                   MCP stdio server (one tool: man)\n"
+-    "  akaman --http[=ADDR] | --web[=ADDR]   webMCP HTTP server (default 127.0.0.1:8931)\n"
+-    "                                 requires APIKEY in /etc/akaman/akamcp.conf\n"
+-    "  akaman --conf PATH             config file path (APIKEY for webMCP)\n"
+-    "  akaman --bench                 benchmark table\n"
++    "  sysref -s SECTION QUERY        same\n"
++    "  sysref --source doc QUERY      query /usr/share/doc (README/FAQ/.txt/.md)\n"
++    "  sysref --source headers QUERY  query system headers (stdio.h printf)\n"
++    "  sysref --source man QUERY      query native man pages (default)\n"
++    "  sysref --stats QUERY [SECTION] print result plus token metrics\n"
++    "  sysref --mcp                   MCP stdio server (one tool: man)\n"
++    "  sysref --http[=ADDR] | --web[=ADDR]   webMCP HTTP server (default 127.0.0.1:8931)\n"
++    "                                 requires APIKEY in /etc/sysref/sysref.conf\n"
++    "  sysref --conf PATH             config file path (APIKEY for webMCP)\n"
++    "  sysref --bench                 benchmark table\n"
+     "\n"
+     "  QUERY forms: command [option] | command [section-name] | command subcommand\n"
+     "    e.g. \"grep -r\"      -> the -r, --recursive option entry\n"
+@@ -36,12 +36,12 @@
+     "  (starting -/--) additionally list the nearest real option names.\n"
+     "\n"
+     "examples:\n"
+-    "  akaman \"ip link set\"\n"
+-    "  akaman \"rsync --delete\"\n"
+-    "  akaman -s 2 open\n";
++    "  sysref \"ip link set\"\n"
++    "  sysref \"rsync --delete\"\n"
++    "  sysref -s 2 open\n";
+ 
+ int main(int argc, char **argv) {
+-	const char *conf = "/etc/akaman/akamcp.conf";
++	const char *conf = "/etc/sysref/sysref.conf";
+ 	int mode = 0; /* 0 cli, 1 mcp, 2 http, 3 bench */
+ 	char httpaddr[256] = "127.0.0.1:8931";
+ 	const char *query = NULL;
+@@ -70,14 +70,14 @@
+ 		} else if (strcmp(a, "-s") == 0 && i + 1 < argc) {
+ 			section = argv[++i];
+ 		} else if (a[0] == '-' && a[1]) {
+-			fprintf(stderr, "akaman: unknown option: %s\n", a);
++			fprintf(stderr, "sysref: unknown option: %s\n", a);
+ 			fputs(usage, stderr);
+ 			return 2;
+ 		} else {
+ 			if (!query) query = a;
+ 			else if (!section) section = a;
+ 			else {
+-				fprintf(stderr, "akaman: too many arguments\n");
++				fprintf(stderr, "sysref: too many arguments\n");
+ 				return 2;
+ 			}
+ 		}
+@@ -87,7 +87,7 @@
+ 	if (mode == 2) {
+ 		char key[512] = {0};
+ 		if (!conf_load(conf, key, sizeof key)) {
+-			fprintf(stderr, "akaman: webMCP requires APIKEY defined in %s\n", conf);
++			fprintf(stderr, "sysref: webMCP requires APIKEY defined in %s\n", conf);
+ 			return 1;
+ 		}
+ 		return run_http(httpaddr, key);
+--- a/src/mcp.c	2026-09-05 10:38:25.353347909 +0000
++++ new/akaman/src/mcp.c	2026-09-05 10:42:31.300882234 +0000
+@@ -14,7 +14,7 @@
+ #include <fcntl.h>
+ 
+ /* ------------------------------------------------------------------ */
+-/* config: /etc/akaman/akamcp.conf  (APIKEY=...)                         */
++/* config: /etc/sysref/sysref.conf  (APIKEY=...)                         */
+ /* ------------------------------------------------------------------ */
+ int conf_load(const char *path, char *key, size_t keysz) {
+ 	FILE *f = fopen(path, "r");
+@@ -112,7 +112,7 @@
+ 		json_escape(&r, pv, strlen(pv));
+ 		gbuf_adds(&r,
+ 		          ",\"capabilities\":{\"tools\":{\"listChanged\":false}},"
+-		          "\"serverInfo\":{\"name\":\"akaman\",\"version\":\"0.1.0\"}}");
++		          "\"serverInfo\":{\"name\":\"sysref\",\"version\":\"0.1.0\"}}");
+ 		jsonrpc_result(resp, id->raw, id->rawlen, r.p);
+ 		gbuf_free(&r);
+ 	} else if (strcmp(m, "ping") == 0) {
+@@ -397,7 +397,7 @@
+ 	}
+ 	struct in_addr bind_addr;
+ 	if (inet_pton(AF_INET, host, &bind_addr) != 1) {
+-		fprintf(stderr, "akaman: invalid IPv4 bind address: %s\n", host);
++		fprintf(stderr, "sysref: invalid IPv4 bind address: %s\n", host);
+ 		return 1;
+ 	}
+ 
+@@ -413,7 +413,7 @@
+ 	sa.sin_addr = bind_addr;
+ 	if (bind(fd, (struct sockaddr *)&sa, sizeof sa) < 0) { perror("bind"); close(fd); return 1; }
+ 	if (listen(fd, 16) < 0) { perror("listen"); close(fd); return 1; }
+-	fprintf(stderr, "akaman webMCP listening on %s:%d (api key: %s)\n", host, port,
++	fprintf(stderr, "sysref webMCP listening on %s:%d (api key: %s)\n", host, port,
+ 	        api_key && api_key[0] ? "required" : "none");
+ 
+ 	for (;;) {
+--- a/docs/akaman.1	2026-09-05 10:38:25.353216748 +0000
++++ new/akaman/docs/akaman.1	2026-09-05 10:37:39.134221500 +0000
+@@ -1,41 +1,41 @@
+-.TH AKAMAN 1 "August 2026" "akaman 0.1.0" "User Commands"
++.TH SYSREF 1 "August 2026" "sysref 0.1.0" "User Commands"
+ .SH NAME
+-akaman \- minimal local man-page context for AI agents
++sysref \- minimal local man-page context for AI agents
+ .SH SYNOPSIS
+-.B akaman
++.B sysref
+ .RI QUERY " [" SECTION ]
+ .br
+-.B akaman
++.B sysref
+ .B \-s
+ .RI SECTION " " QUERY
+ .br
+-.B akaman
++.B sysref
+ .B \-\-source
+ .BR man " | " doc " | " headers " " QUERY
+ .br
+-.B akaman
++.B sysref
+ .B \-\-stats
+ .RI QUERY " [" SECTION ]
+ .br
+-.B akaman
++.B sysref
+ .B \-\-bench
+ .br
+-.B akaman
++.B sysref
+ .B \-\-mcp
+ .br
+-.B akaman
++.B sysref
+ .B \-\-http
+ .RI [ =ADDR ]
+ .br
+-.B akaman
++.B sysref
+ .B \-\-web
+ .RI [ =ADDR ]
+ .br
+-.B akaman
++.B sysref
+ .B \-\-conf
+ .I PATH
+ .SH DESCRIPTION
+-.B akaman
++.B sysref
+ answers one question \(em "what is the exact syntax of
+ .I X
+ ?" \(em by extracting the smallest useful fragment from the native man pages,
+@@ -45,7 +45,7 @@
+ It is a single static C binary with no dependencies, no database, no index,
+ no embeddings, no AI summaries, and no network.  Native
+ .B man
+-is authoritative: akaman never re-implements man's discovery or rendering.
++is authoritative: sysref never re-implements man's discovery or rendering.
+ Extraction works on whole lines only, and results are budget-capped
+ (\(<= ~400 tokens by default) so replies stay small.
+ .PP
+@@ -88,7 +88,7 @@
+ Read the configuration file from
+ .I PATH
+ instead of
+-.IR /etc/akaman/akamcp.conf .
++.IR /etc/sysref/sysref.conf .
+ The config supplies the bearer key used by the webMCP HTTP server.
+ .TP
+ .B \-\-bench
+@@ -140,7 +140,7 @@
+ Results are whole declaration blocks matching every symbol, budget capped.
+ .SH MCP
+ In MCP mode
+-.B akaman
++.B sysref
+ uses the Model Context Protocol over stdio and exposes exactly one tool:
+ .PP
+ .B  man(query, section?, source?)
+@@ -158,7 +158,7 @@
+ pages.
+ .SH HTTP
+ The webMCP HTTP server speaks JSON-RPC 2.0 over HTTP
+-.RI ( akaman\ \-\-http
++.RI ( sysref\ \-\-http
+ or
+ .RB \-\-web ).
+ Requests authenticate with a bearer key in the
+@@ -167,18 +167,18 @@
+ refuses to start.
+ .SH EXAMPLES
+ .nf
+-akaman grep
+-akaman "grep -r"
+-akaman "grep exit status"
+-akaman "ip link set"
+-akaman "gcc -fPIC"
+-akaman -s 2 open
+-akaman --source doc "sudo troubleshooting"
+-akaman --source headers "sys/socket connect"
+-akaman --stats "rsync --delete"
++sysref grep
++sysref "grep -r"
++sysref "grep exit status"
++sysref "ip link set"
++sysref "gcc -fPIC"
++sysref -s 2 open
++sysref --source doc "sudo troubleshooting"
++sysref --source headers "sys/socket connect"
++sysref --stats "rsync --delete"
+ .fi
+ .PP
+-.B akaman grep
++.B sysref grep
+ returns the SYNOPSIS of
+ .B grep(1)
+ plus a SECTIONS map.  Adding an option name
+@@ -186,7 +186,7 @@
+ returns that option's entry.  A named section
+ .RB ( "grep exit status" )
+ returns the section body.  A numeric section
+-.RB ( "akaman\ \-s\ 2\ open" )
++.RB ( "sysref\ \-s\ 2\ open" )
+ selects the system-call page
+ .BR open(2) .
+ .SH EXIT STATUS
+@@ -221,7 +221,7 @@
+ security guarantee against every possible input class.
+ .SH FILES
+ .TP
+-.I /etc/akaman/akamcp.conf
++.I /etc/sysref/sysref.conf
+ Configuration file for the webMCP HTTP server.  A single
+ .B APIKEY=
+ assignment is read; blank lines and lines beginning with \fB#\fR are ignored.

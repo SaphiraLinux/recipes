@@ -1,0 +1,11 @@
+[Unit]
+Description=Kea DHCPv6 server
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/kea-dhcp6 -c /etc/kea/kea-dhcp6.conf
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

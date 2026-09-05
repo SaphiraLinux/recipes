@@ -1,0 +1,20 @@
+#!/sbin/openrc-run
+
+description="Rapid spam filtering system"
+
+command="/usr/sbin/rspamd"
+command_args="-c /etc/rspamd/rspamd.conf -f"
+command_background="yes"
+pidfile="/run/rspamd/rspamd.pid"
+
+depend()
+{
+	use net logger dns
+}
+
+start_pre()
+{
+	checkpath -d -o rspamd:rspamd -m 0755 /run/rspamd /var/log/rspamd
+	ebegin "Checking rspamd configuration"
+	/usr/sbin/rspamd -c /etc/rspamd/rspamd.conf -t
+}

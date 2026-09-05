@@ -1,0 +1,13 @@
+#!/bin/sh
+# lb.saphira.radius - RADIUS Status-Server (RFC 5997) round-trip (L7).
+# Credential-free: no user authentication. The shared secret arrives via
+# LB_SAPHIRA_RADIUS_SECRET (env only, never echoed). Set
+# LB_SAPHIRA_RADIUS_USER=1 to fall back to a PAP Access-Request using
+# LB_SAPHIRA_RADIUS_USER/LB_SAPHIRA_RADIUS_PASSWORD env credentials.
+# Copyright (c) 2026 AKADATA. MIT licensed.
+. /usr/share/saphira/lb-healthchecks/lib/lb-saphira-common.sh
+lb_init "$@"
+[ -n "${LB_SAPHIRA_RADIUS_SECRET:-}" ] || exit 2
+set -- radius --host "$LB_REAL" --port "${LB_RPORT:-1812}" --timeout "$LB_TIMEOUT"
+[ "${LB_SAPHIRA_RADIUS_PAP:-0}" = "1" ] && set -- "$@" --pap
+lb_probe "$@"

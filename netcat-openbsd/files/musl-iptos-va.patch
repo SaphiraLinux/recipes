@@ -1,0 +1,13 @@
+--- a/netcat.c
++++ b/netcat.c
+@@ -2098,6 +2098,10 @@
+ int
+ process_tos_opt(char *s, int *val)
+ {
++	/* musl's netinet/ip.h lacks the Voice Admit DSCP name (glibc-only). */
++#ifndef IPTOS_DSCP_VA
++#define IPTOS_DSCP_VA 0xb0
++#endif
+ 	/* DiffServ Codepoints and other TOS mappings */
+ 	const struct toskeywords {
+ 		const char	*keyword;

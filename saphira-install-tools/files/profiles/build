@@ -1,0 +1,9 @@
+@akadata-stage4-server
+ncurses-dev
+python3
+ninja
+meson
+nodejs
+ripgrep
+bubblewrap
+git

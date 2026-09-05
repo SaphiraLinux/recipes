@@ -1,0 +1,43 @@
+Saphira helper entry points: run_inference.py / run_inference_server.py
+resolve llama-cli / llama-server from PATH (packaged binaries) with a
+local build tree fallback for the setup_env.py workflow.
+--- a/run_inference.py
++++ b/run_inference.py
+@@ -14,13 +14,10 @@
+         sys.exit(1)
+ 
+ def run_inference():
+-    build_dir = "build"
+-    if platform.system() == "Windows":
+-        main_path = os.path.join(build_dir, "bin", "Release", "llama-cli.exe")
+-        if not os.path.exists(main_path):
+-            main_path = os.path.join(build_dir, "bin", "llama-cli")
+-    else:
+-        main_path = os.path.join(build_dir, "bin", "llama-cli")
++    # Saphira: the packaged binary lives in PATH; a local build tree
++    # (setup_env.py workflow) still takes precedence when present.
++    import shutil
++    main_path = shutil.which("llama-cli") or os.path.join("build", "bin", "llama-cli")
+     command = [
+         f'{main_path}',
+         '-m', args.model,
+--- a/run_inference_server.py
++++ b/run_inference_server.py
+@@ -14,13 +14,10 @@
+         sys.exit(1)
+ 
+ def run_server():
+-    build_dir = "build"
+-    if platform.system() == "Windows":
+-        server_path = os.path.join(build_dir, "bin", "Release", "llama-server.exe")
+-        if not os.path.exists(server_path):
+-            server_path = os.path.join(build_dir, "bin", "llama-server")
+-    else:
+-        server_path = os.path.join(build_dir, "bin", "llama-server")
++    # Saphira: the packaged binary lives in PATH; a local build tree
++    # (setup_env.py workflow) still takes precedence when present.
++    import shutil
++    server_path = shutil.which("llama-server") or os.path.join("build", "bin", "llama-server")
+     
+     command = [
+         f'{server_path}',

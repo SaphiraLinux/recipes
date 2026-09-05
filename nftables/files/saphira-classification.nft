@@ -1,0 +1,92 @@
+#!/usr/sbin/nft -f
+#
+# Saphira Linux - nftables-native packet classification layer
+#
+# Design contract (see README.md alongside this file):
+#
+#   * Classification happens FIRST (priority -150, before the default
+#     filter chains) and publishes results as packet marks, named sets
+#     and verdict maps that enforcement chains consume.
+#   * nftables-native metadata is the primary classifier: L3/L4
+#     protocol, ports, ct state, interfaces, rate/behaviour, OSF
+#     passive fingerprinting. No payload inspection is implied.
+#   * NFQUEUE provides the single sanctioned extension point for a
+#     future userspace classifier (DNSDragon, or a small verifier);
+#     the hook exists but is empty until such a component ships.
+#   * Everything is local: no SaaS, no cloud dependency, no telemetry.
+#   * This layer is deliberately inert until enabled: removing (or not
+#     loading) it leaves the default firewall policy untouched.
+#
+# What can be classified reliably:
+#   - protocol, ports, interfaces, address sets
+#   - connection state, direction, lifetime (ct)
+#   - SYN fingerprints of the remote OS (osf) for UNENCRYPTED
+#     handshakes - classified at connection setup
+#   - rate/behaviour: connection rates, new-connection bursts
+#   - packet/byte accounting for baselining
+#
+# What cannot be classified from the box alone:
+#   - anything inside encrypted payloads (TLS, QUIC, VPN). DNS names
+#     only via the planned DNSDragon resolver integration, never by
+#     payload sniffing.
+#
+
+table inet saphira_classify {
+
+    #
+    # Classification state
+    #
+
+    set infrastructure4 {
+        type ipv4_addr
+        flags interval
+        comment "Infrastructure hosts classified by operator (DNS, NTP, routers)"
+    }
+
+    set offenders4 {
+        type ipv4_addr
+        flags dynamic,timeout
+        timeout 1h
+        comment "Rate-offending sources (auto-expiring)"
+    }
+
+    #
+    # Classification chain: runs before filter/nat hooks.
+    # Publishes results as marks; never drops by itself except for
+    # explicit operator-configured offender rules.
+    #
+
+    chain classify {
+        type filter hook input priority -150; policy accept;
+
+        # Baseline: established flows are already classified.
+        ct state established,related accept
+
+        # Infrastructure hosts get the trusted mark (bit 0x10).
+        ip saddr @infrastructure4 meta mark set mark or 0x10 accept
+
+        # Passive OS fingerprint at connection setup (requires the
+        # nf_tables_osf module from saphira-kernel r3). Unknown OSes
+        # fall through unmarked for downstream policy.
+        ct state new osf ttl skip name vmap { "Linux" : accept, "Windows" : continue }
+
+        # Rate/behaviour: burst of new connections from one source
+        # lands in the offenders set (enforcement decides later).
+        ct state new add @offenders4 { ip saddr limit rate 30/second burst 10 packets }
+
+        # Extension point: nothing here today. A future userspace
+        # classifier (DNSDragon / NFQUEUE verifier) would receive only
+        # traffic explicitly sent to queue number 100 by operator
+        # rules, e.g.:
+        #   queue num 100 bypass
+        # and return verdicts as marks. Payload never leaves the box.
+    }
+
+    chain classify_output {
+        type filter hook output priority -150; policy accept;
+
+        # Locally generated traffic: tag by interface for egress
+        # accounting and policy routing integration.
+        oifname != "lo" meta mark set mark or 0x1
+    }
+}

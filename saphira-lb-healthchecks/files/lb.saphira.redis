@@ -1,0 +1,7 @@
+#!/bin/sh
+# lb.saphira.redis - Redis inline PING -> +PONG (L7).
+# Optional AUTH via LB_SAPHIRA_REDIS_PASSWORD (env only, never echoed).
+# Copyright (c) 2026 AKADATA. MIT licensed.
+. /usr/share/saphira/lb-healthchecks/lib/lb-saphira-common.sh
+lb_init "$@"
+lb_probe redis --host "$LB_REAL" --port "${LB_RPORT:-6379}" --timeout "$LB_TIMEOUT"

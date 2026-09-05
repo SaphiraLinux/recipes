@@ -1,0 +1,24 @@
+#!/bin/sh
+# certbot deploy hook (installed by the wendzelnntpd package): when the
+# certificate lineage recorded by wendzelnntpd-setup is renewed, copy the
+# fresh certificate into WendzelNNTPd's TLS paths and restart the service
+# if it is running. Certbot sets RENEWED_LINEAGE for every deploy hook it
+# runs and the hook ignores lineages this package does not manage.
+set -eu
+DOMAIN_FILE=/etc/wendzelnntpd/ssl/letsencrypt-domain
+SSLDIR=/etc/wendzelnntpd/ssl
+[ -f "$DOMAIN_FILE" ] || exit 0
+[ -n "${RENEWED_LINEAGE:-}" ] || exit 0
+[ "$RENEWED_LINEAGE" = "/etc/letsencrypt/live/$(cat "$DOMAIN_FILE")" ] || exit 0
+
+install -d -m 0750 -o news -g news "$SSLDIR"
+install -m 0644 "$RENEWED_LINEAGE/fullchain.pem" "$SSLDIR/server.crt"
+install -m 0640 -o news -g news "$RENEWED_LINEAGE/privkey.pem" "$SSLDIR/server.key"
+
+if command -v rc-service >/dev/null 2>&1 && \
+	rc-service wendzelnntpd status >/dev/null 2>&1; then
+	rc-service wendzelnntpd restart
+elif command -v systemctl >/dev/null 2>&1 && \
+	systemctl is-active --quiet wendzelnntpd 2>/dev/null; then
+	systemctl try-restart wendzelnntpd
+fi

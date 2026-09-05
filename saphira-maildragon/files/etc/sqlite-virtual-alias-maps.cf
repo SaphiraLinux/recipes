@@ -1,0 +1,3 @@
+# Postfix sqlite map: virtual aliases.
+dbpath = /var/lib/maildragon/mailserver.sqlite
+query = SELECT destination FROM virtual_aliases WHERE source = '%s' AND active = 1

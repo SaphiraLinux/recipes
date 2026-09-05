@@ -1,0 +1,363 @@
+#!/usr/bin/env python3
+"""bumppkg: bump pkgrel in Saphira recipes, with human-error guards.
+
+Copyright (c) 2026 AKADATA. MIT licensed.
+
+Commands:
+    bumppkg status [all|PKG...]   show recipe vs published revisions
+    bumppkg history [PKG]         recent entries from the release ledger
+    bumppkg PKG...                bump one or more packages (+1)
+    bumppkg bump PKG...           same, with the explicit keyword
+    bumppkg all                   bump every active package (+1)
+    bumppkg set all max           align every active package to the
+                                  global maximum revision + 1
+Options: --dry-run (show, do not write), --force (bypass anti-loop and
+never-published guards), --yes (non-interactive confirmation).
+
+Guards (deliberate friction, not bugs):
+  * Never-published packages are refused: bumping before the first
+    publish is pure churn (the first publish claims the filename).
+  * A package bumped within the last 24h is refused (anti-loop); 'all'
+    and 'set all max' refuse within 24h of the previous world bump.
+  * 'all' and 'set all max' print the world-rebuild consequence (a full
+    rebuild, easily 1-2+ days) and require typing 'yes'.
+  * Disabled recipes are never touched.
+  * Every change is appended to the release ledger
+    ($SAPHIRA_RELEASE_STATE/releases.jsonl), shared with
+    'saphira-build rel-status'.
+
+Overrides for testing: SAPHIRA_RECIPES, SAPHIRA_BUILD_STATE,
+SAPHIRA_RELEASE_STATE, SAPHIRA_REPO.
+"""
+
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+RECIPES = Path(os.environ.get("SAPHIRA_RECIPES", "/recipes"))
+STATE = Path(os.environ.get("SAPHIRA_BUILD_STATE", "/var/lib/saphira-build"))
+RELEASE_STATE = Path(os.environ.get("SAPHIRA_RELEASE_STATE", str(STATE / "releases")))
+
+
+def _packager_conf(name, default):
+    """Read one packager config value: explicit env wins, else the
+    SAPHIRA_CONFIG_FILE default chain (/etc/saphira/package_builder.sh),
+    else the compiled-in default. Pure assignments file, safe to source."""
+    if name in os.environ:
+        return os.environ[name]
+    cfg = os.environ.get("SAPHIRA_CONFIG_FILE", "/etc/saphira/package_builder.sh")
+    try:
+        out = subprocess.run(
+            ["bash", "-c", "source /dev/stdin >/dev/null 2>&1; printf '%s' \"${" + name + ":-" + default + "}\""],
+            input=open(cfg).read() if os.path.isfile(cfg) else "",
+            capture_output=True, text=True, timeout=10)
+        if out.returncode == 0 and out.stdout:
+            return out.stdout
+    except Exception:
+        pass
+    return default
+
+
+def _live_repo_dir():
+    """Live generation repository: the LAST SAPHIRA_REPO_NAMES entry
+    (checkpkg rule). Explicit SAPHIRA_REPO stays a full-path escape
+    hatch (used by the test suites)."""
+    if "SAPHIRA_REPO" in os.environ:
+        return Path(os.environ["SAPHIRA_REPO"])
+    names = _packager_conf("SAPHIRA_REPO_NAMES", "hatchling").split()
+    live = names[-1] if names else "hatchling"
+    arch = _packager_conf("SAPHIRA_ARCH", "x86_64")
+    return Path(_packager_conf("SAPHIRA_REPO_DIR", "/out/stage4/packages")) / live / arch
+
+
+REPO = _live_repo_dir()
+
+REL_LINE_RE = re.compile(r"^pkgrel=([0-9]+)\s*$", re.MULTILINE)
+ANTI_LOOP_HOURS = 24
+WORLD_REBUILD_NOTE = (
+    "This bumps every active recipe. The builder will queue a FULL WORLD "
+    "REBUILD - on a typical machine that is 1-2+ DAYS of continuous builds. "
+    "Distribution implication: everyone building from these recipes will "
+    "rebuild on their next pull, on any architecture they chose (x86-64, "
+    "x86-64-v1/v3/v4, aarch64)."
+)
+
+
+def die(msg):
+    print(f"bumppkg: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def recipe_info(pkgdir):
+    script = (
+        '. "$1" >/dev/null 2>&1\n'
+        'printf "%s\\n" "name=$pkgname" "ver=$pkgver" "rel=$pkgrel"'
+        ' "disabled=${disabled-}" "reason=${disabled_reason-}"\n'
+    )
+    r = subprocess.run(
+        ["/bin/bash", "--noprofile", "--norc", "-c", script, "sh", str(pkgdir / "recipe.sh")],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+    )
+    info = {"pkgdir": pkgdir}
+    for line in r.stdout.splitlines():
+        if "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        if k == "name" and v:
+            info["name"] = v
+        elif k == "ver":
+            info["version"] = v
+        elif k == "rel":
+            info["rel"] = v
+        elif k == "disabled":
+            info["disabled"] = v
+        elif k == "reason":
+            info["reason"] = v
+    if not info.get("name"):
+        return None
+    return info
+
+
+def all_recipes():
+    out = []
+    if not RECIPES.is_dir():
+        return out
+    for d in sorted(RECIPES.iterdir()):
+        if (d / "recipe.sh").is_file():
+            info = recipe_info(d)
+            if info:
+                out.append(info)
+    return out
+
+
+def published_rel(name, version):
+    """Largest published revision for name-version, or None if the
+    package version has never been published (r0-published counts as
+    published: it returns 0)."""
+    best = None
+    if not REPO.is_dir():
+        return None
+    for f in REPO.glob(f"{name}-{version}-r*.apk"):
+        m = re.search(r"-r(\d+)\.apk$", f.name)
+        if m:
+            r = int(m.group(1))
+            best = r if best is None else max(best, r)
+    return best
+
+
+def load_ledger():
+    path = RELEASE_STATE / "releases.jsonl"
+    if not path.is_file():
+        return []
+    entries = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            entries.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return entries
+
+
+def ledger_append(entries_out):
+    RELEASE_STATE.mkdir(parents=True, exist_ok=True)
+    with (RELEASE_STATE / "releases.jsonl").open("a", encoding="utf-8") as s:
+        for entry in entries_out:
+            s.write(json.dumps(entry, sort_keys=True) + "\n")
+
+
+def hours_since(ts):
+    try:
+        return (time.time() - time.mktime(time.strptime(ts, "%Y-%m-%dT%H:%M:%SZ"))) / 3600.0
+    except (ValueError, TypeError):
+        return 1e9
+
+
+def set_rel(info, new_rel, action):
+    script = info["pkgdir"] / "recipe.sh"
+    text = script.read_text(encoding="utf-8")
+    new_text, count = REL_LINE_RE.subn(f"pkgrel={new_rel}", text, count=1)
+    if count != 1:
+        die(f"cannot update pkgrel in {script}")
+    script.write_text(new_text, encoding="utf-8")
+    return {
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "action": action, "package": info["name"], "version": info["version"],
+        "from": f"r{info['rel']}", "to": f"r{new_rel}", "tool": "bumppkg",
+        "reason": os.environ.get("BUMPPKG_REASON", ""),
+    }
+
+
+def rows(targets=None):
+    out = []
+    for info in all_recipes():
+        if targets and info["name"] not in targets:
+            continue
+        rel = int(info.get("rel") or 0)
+        pub = published_rel(info["name"], info.get("version", ""))
+        out.append((info, rel, pub))
+    return out
+
+
+def fmt_pub(pub):
+    return "-" if pub is None else f"r{pub}"
+
+
+def cmd_status(args):
+    targets = set(args) - {"all"} if args else None
+    selected = rows(targets)
+    if not selected:
+        die("no matching recipes")
+    print(f"{'PACKAGE':<32} {'VERSION':<16} {'RECIPE':>7} {'PUBLISHED':>10} {'NEXT':>6}")
+    for info, rel, pub in selected:
+        dis = "  [DISABLED]" if info.get("disabled") == "yes" else ""
+        nxt = max(rel, (pub or 0)) + 1
+        print(f"{info['name']:<32} {info.get('version', ''):<16} {'r' + str(rel):>7} {fmt_pub(pub):>10} {'r' + str(nxt):>5}{dis}")
+
+
+def cmd_history(args):
+    entries = load_ledger()
+    if args and args != ["all"]:
+        entries = [e for e in entries if e.get("package") in args]
+    if not entries:
+        print("bumppkg: release ledger is empty")
+        return
+    for e in entries[-30:]:
+        print(f"{e.get('ts', '?')} {e.get('action', '?'):<10} {e.get('package', '?')}"
+              f" {e.get('version', '')} {e.get('from', '?')} -> {e.get('to', '?')}")
+
+
+def bump_targets(targets, dry, assume_yes, action, force=False):
+    """targets=None means every recipe; otherwise a set of package names."""
+    ledger = load_ledger()
+    planned, skipped, entries_out = [], [], []
+    for info, rel, pub in rows(None if targets in (None, {"__all__"}) else set(targets)):
+        name = info["name"]
+        if info.get("disabled") == "yes":
+            skipped.append(f"{name}: disabled, never touched")
+            continue
+        new = max(rel, (pub or 0)) + 1
+        if new <= rel:
+            skipped.append(f"{name}: nothing to bump (recipe r{rel} >= published r{pub}+1)")
+            continue
+        if pub is None and action in ("bump", "all-bump") and not force:
+            skipped.append(f"{name}: version {info.get('version')} was never published - "
+                           "bumping before first publish is churn (--force overrides)")
+            continue
+        recent = [e for e in ledger if e.get("package") == name
+                  and hours_since(e.get("ts", "")) < ANTI_LOOP_HOURS]
+        if recent and not force:
+            skipped.append(f"{name}: bumped {recent[-1]['from']}->{recent[-1]['to']} "
+                           f"{hours_since(recent[-1]['ts']):.1f}h ago (< {ANTI_LOOP_HOURS}h anti-loop guard; --force overrides)")
+            continue
+        planned.append((info, rel, pub, new))
+    if not planned:
+        for s in skipped:
+            print(f"bumppkg: skip: {s}")
+        die("nothing to bump")
+    print("Planned changes:")
+    for info, rel, pub, new in planned:
+        print(f"  {info['name']} {info.get('version')} r{rel} -> r{new}")
+    for s in skipped:
+        print(f"  skip: {s}")
+    if dry:
+        print("bumppkg: dry run, nothing written")
+        return
+    if not assume_yes:
+        answer = input("Apply these bumps? Type 'yes' to confirm: ").strip().lower()
+        if answer != "yes":
+            die("aborted, nothing written")
+    for info, rel, pub, new in planned:
+        entries_out.append(set_rel(info, new, action))
+    ledger_append(entries_out)
+    print(f"bumppkg: {len(entries_out)} package(s) bumped; ledger updated")
+
+
+def cmd_bump(args, dry=False, force=False, assume_yes=False):
+    if not args:
+        die("usage: bumppkg PKG...")
+    known = {i["name"] for i in all_recipes()}
+    for name in args:
+        if name not in known:
+            die(f"no recipe for {name}")
+    bump_targets(args, dry, assume_yes, "bump", force)
+
+
+def cmd_all(args, dry=False, force=False, assume_yes=False):
+    ledger = load_ledger()
+    worlds = [e for e in ledger if e.get("action") in ("all-bump", "all-max")
+              and hours_since(e.get("ts", "")) < ANTI_LOOP_HOURS]
+    if worlds and not dry and not force:
+        die(f"a world bump happened {hours_since(worlds[-1]['ts']):.1f}h ago "
+            f"(< {ANTI_LOOP_HOURS}h anti-loop guard; --force overrides)")
+    print(WORLD_REBUILD_NOTE)
+    bump_targets(None, dry, assume_yes, "all-bump", force)
+
+
+def cmd_set_all_max(args, dry=False, force=False, assume_yes=False):
+    ledger = load_ledger()
+    worlds = [e for e in ledger if e.get("action") in ("all-bump", "all-max")
+              and hours_since(e.get("ts", "")) < ANTI_LOOP_HOURS]
+    if worlds and not dry and not force:
+        die(f"a world bump happened {hours_since(worlds[-1]['ts']):.1f}h ago "
+            f"(< {ANTI_LOOP_HOURS}h anti-loop guard; --force overrides)")
+    active = rows()
+    global_max = max((rel for info, rel, _ in active if info.get("disabled") != "yes"), default=0)
+    new_rel = global_max + 1
+    raised = [(info, rel) for info, rel, _ in active if rel < new_rel and info.get("disabled") != "yes"]
+    print(WORLD_REBUILD_NOTE)
+    print(f"set all max: global maximum is r{global_max}; every active package "
+          f"will be set to r{new_rel}.")
+    print(f"Growth report: {len(raised)} of {len(active)} packages are below "
+          f"r{new_rel} and will be raised. The global floor rises by "
+          f"{new_rel - global_max} this invocation; repeated world bumps push "
+          "every package's revision up - use sparingly (the r99999 smell).")
+    if not raised:
+        die("all packages are already at or above the maximum")
+    if dry:
+        print("bumppkg: dry run, nothing written")
+        return
+    if not assume_yes:
+        answer = input(f"Set {len(raised)} packages to r{new_rel}? Type 'yes' to confirm: ").strip().lower()
+        if answer != "yes":
+            die("aborted, nothing written")
+    entries_out = []
+    for info, rel in raised:
+        info = dict(info)
+        info["rel"] = rel
+        entries_out.append(set_rel(info, new_rel, "all-max"))
+    ledger_append(entries_out)
+    print(f"bumppkg: {len(entries_out)} package(s) set to r{new_rel}; ledger updated")
+
+
+def main():
+    argv = sys.argv[1:]
+    dry = "--dry-run" in argv
+    force = "--force" in argv
+    assume_yes = "--yes" in argv or os.environ.get("BUMPPKG_ASSUME_YES") == "1"
+    argv = [a for a in argv if a not in ("--dry-run", "--force", "--yes")]
+
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        print(__doc__)
+        return 0
+    cmd, rest = argv[0], argv[1:]
+    if cmd == "status":
+        cmd_status(rest)
+    elif cmd == "history":
+        cmd_history(rest)
+    elif cmd == "all":
+        cmd_all(rest, dry, force, assume_yes)
+    elif cmd == "set" and rest[:2] == ["all", "max"]:
+        cmd_set_all_max(rest[2:], dry, force, assume_yes)
+    elif cmd == "bump":
+        cmd_bump(rest, dry, force, assume_yes)
+    else:
+        cmd_bump(argv, dry, force, assume_yes)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

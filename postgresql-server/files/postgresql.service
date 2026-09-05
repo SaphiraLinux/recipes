@@ -1,0 +1,14 @@
+[Unit]
+Description=PostgreSQL database server
+After=network.target
+
+[Service]
+Type=simple
+User=postgres
+Group=postgres
+ExecStartPre=/usr/bin/install -d -m 0755 -o postgres -g postgres /run/postgresql
+ExecStartPre=/usr/bin/install -d -m 0700 -o postgres -g postgres /var/lib/postgresql
+ExecStart=/usr/bin/postgres -D /var/lib/postgresql/data -c listen_addresses=localhost -c unix_socket_directories=/run/postgresql
+
+[Install]
+WantedBy=multi-user.target

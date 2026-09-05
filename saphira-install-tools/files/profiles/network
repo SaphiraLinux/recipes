@@ -1,0 +1,12 @@
+@akadata-stage4-base
+libmnl
+iproute2
+iputils
+dhcpcd
+nftables
+chrony
+bind-tools
+netcat-openbsd
+tmux
+psmisc
+conntrack-tools

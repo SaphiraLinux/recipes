@@ -1,0 +1,33 @@
+#!/sbin/openrc-run
+
+description="Saphira static network configuration"
+
+command="/usr/sbin/saphira-network-config"
+
+depend()
+{
+	after modules sysctl udev
+	before netmount
+	provide net
+}
+
+start_pre()
+{
+	checkpath -d -m 0755 /run/saphira-network
+	ebegin "Validating saphira network configuration"
+	"$command" validate
+}
+
+start()
+{
+	ebegin "Applying saphira network configuration"
+	"$command" start
+	eend $?
+}
+
+stop()
+{
+	ebegin "Reverting saphira network configuration"
+	"$command" stop
+	eend $?
+}

@@ -1,0 +1,60 @@
+#!/bin/sh
+# wendzelnntpd-setup: interactive TLS setup for WendzelNNTPd.
+#
+# Operator-invoked; the package never runs this automatically. Asks for
+# the FQDN, optionally obtains a Let's Encrypt certificate with certbot
+# (standalone authenticator; needs TCP/80 free), installs the certificate
+# into WendzelNNTPd's TLS paths (/etc/wendzelnntpd/ssl/) and records the
+# domain so the packaged certbot deploy hook keeps renewed certificates
+# in sync automatically (daily renewal via /etc/cron.daily/certbot-renew).
+set -eu
+
+CONFDIR=/etc/wendzelnntpd
+SSLDIR=$CONFDIR/ssl
+DOMAIN_FILE=$SSLDIR/letsencrypt-domain
+
+default_fqdn=$(hostname -f 2>/dev/null || true)
+printf 'FQDN for the NNTP server%s: ' "${default_fqdn:+ [$default_fqdn]}"
+read -r fqdn
+[ -n "$fqdn" ] || fqdn=$default_fqdn
+case $fqdn in
+	''|*[!A-Za-z0-9.-]*) echo "wendzelnntpd-setup: invalid FQDN: $fqdn" >&2; exit 1 ;;
+esac
+
+printf "Request a Let's Encrypt certificate with certbot for %s? [y/N] " "$fqdn"
+read -r answer
+case $answer in
+	[yY]|[yY][eE][sS])
+		# The standalone authenticator serves the ACME challenge on
+		# TCP/80; free the port first if another server holds it.
+		certbot certonly --standalone -d "$fqdn"
+		install -d -m 0750 -o news -g news "$SSLDIR"
+		install -m 0644 "/etc/letsencrypt/live/$fqdn/fullchain.pem" \
+			"$SSLDIR/server.crt"
+		install -m 0640 -o news -g news \
+			"/etc/letsencrypt/live/$fqdn/privkey.pem" "$SSLDIR/server.key"
+		printf '%s\n' "$fqdn" > "$DOMAIN_FILE"
+		chmod 0644 "$DOMAIN_FILE"
+		echo "Installed the $fqdn certificate into $SSLDIR (server.crt/server.key)."
+		echo "Renewals run daily via /etc/cron.daily/certbot-renew; the deploy hook"
+		echo "/etc/letsencrypt/renewal-hooks/deploy/wendzelnntpd copies renewed"
+		echo "certificates here and restarts the running service."
+		;;
+	*)
+		echo "Skipping the certificate request; place TLS material manually in $SSLDIR."
+		;;
+esac
+
+cat <<'EOF'
+
+Next steps:
+  1. Edit /etc/wendzelnntpd/wendzelnntpd.conf: define the NNTP connector
+     (port 119, listen on the public address) and the TLS/NNTPS connector
+     (port 563; tls-server-certificate / tls-server-key pointing at
+     /etc/wendzelnntpd/ssl/server.crt and server.key; see
+     man wendzelnntpd.conf).
+  2. Create users and newsgroups with wendzelnntpadm
+     (man wendzelnntpadm).
+  3. Start the service (rc-service wendzelnntpd start or
+     systemctl start wendzelnntpd); nothing is auto-enabled.
+EOF
