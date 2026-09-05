@@ -10,11 +10,13 @@ repo=saphira
 url=https://libexpat.github.io/
 expat_sha256=ef7d1994f533c9e7343d6c19f31064fc8ebbcbcaa144be3812b4f43052a05f4c
 depends="gcc-libs"
-# Stage4 generation shipped a separate libexpat package owning xmlwf and the
-# shared objects. replaces is the apk-tools v3 ownership handover: files of
-# the named packages may be taken over on upgrade without an overwrite
-# error (solver ignores replaces; it is conflict metadata only).
-replaces="libexpat"
+# Stage4 generation shipped a separate libexpat package owning xmlwf, the
+# headers and the shared objects. replaces is the apk-tools v3 ownership
+# handover: files of the named packages may be taken over on upgrade
+# without an overwrite error (solver ignores replaces; it is conflict
+# metadata only). All three legacy names are covered: main takes the
+# sonames/xmlwf, -dev the headers and -doc the manual pages.
+replaces="libexpat libexpat-dev libexpat-doc"
 makedepends="gawk gcc make pkgconf"
 subpackages="$pkgname-dev $pkgname-doc"
 recipe_build() {

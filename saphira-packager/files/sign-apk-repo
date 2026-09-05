@@ -282,6 +282,15 @@ done
 # Single adbdump per package: the identity pass (filename match, duplicate
 # detection) and the ownership gate share one dump each. Dumping twice
 # doubled process spawns over the full repo on every publication.
+#
+# Ownership gate precision: owners collapse by package NAME (routine
+# same-name version updates never fire), and only paths present in a
+# STAGED artifact are gated. A staged clean rebuild must publish even
+# when a superseded same-name version in the archive still carries the
+# dropped path (archive dirt from before the split was fixed): nothing
+# new enters, so nothing is refused. Genuinely new overlaps (a staged
+# artifact claims a path owned by another name) still refuse, unless
+# covered by replaces=.
 "$SAPHIRA_PYTHON" - "$SAPHIRA_APK" "$identities" "$staged_list" "${all_packages[@]}" <<'PY'
 import json
 import re
@@ -338,8 +347,9 @@ def load(path):
 identities = []
 seen = set()
 owners = defaultdict(dict)  # path -> {package name: version label}
-staged_names = set()
-staged_replaces_by_name = {}
+staged_identities = set()
+staged_paths = defaultdict(set)  # (name, version) -> paths in that artifact
+staged_replaces = {}
 for raw in packages:
     package = Path(raw)
     name, version, files, replaces = load(package)
@@ -351,8 +361,9 @@ for raw in packages:
     seen.add(identity)
     identities.append({"name": identity[0], "version": identity[1]})
     if package.name in staged_files:
-        staged_names.add(name)
-        staged_replaces_by_name[name] = replaces
+        staged_identities.add(identity)
+        staged_replaces[identity] = replaces
+        staged_paths[identity].update(files)
     for f in files:
         owners[f][name] = f"{name}-{version}"
 Path(identities_path).write_text(json.dumps(sorted(identities, key=lambda item: (item["name"], item["version"])), separators=(",", ":")) + "\n", encoding="utf-8")
@@ -362,14 +373,19 @@ for path, name_versions in sorted(owners.items()):
     if len(name_versions) < 2:
         continue
     names = set(name_versions)
-    staged_here = sorted(names & staged_names)
+    # Only paths present in a staged artifact are gated: a staged clean
+    # rebuild must publish even when a superseded same-name version in
+    # the archive still carries the dropped path. Same-name versions
+    # collapse to one owner above, so routine updates never fire here.
+    staged_here = sorted(ident for ident in staged_identities if path in staged_paths[ident])
     if not staged_here:
         continue  # legacy pair, handled by the purge pass
-    for staged_name in staged_here:
+    for staged_identity in staged_here:
+        staged_name = staged_identity[0]
         others = names - {staged_name}
         if not others:
             continue
-        if others <= staged_replaces_by_name.get(staged_name, set()):
+        if others <= staged_replaces.get(staged_identity, set()):
             continue
         detail = ", ".join(name_versions[n] for n in sorted(others))
         collisions[path] = (name_versions[staged_name], detail)
