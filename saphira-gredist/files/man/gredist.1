@@ -1,0 +1,56 @@
+.TH GREDIST 1 "2026-09-05" "Saphira Linux" "System Administration"
+.SH NAME
+gredist \- Protocol 47/GRE distributor
+.SH SYNOPSIS
+.B gredist
+[\fB--syslog\fR] \fIservice_name\fR
+.br
+.B gredist
+.B -c
+\fIconfig_path\fR [\fB--syslog\fR]
+.SH DESCRIPTION
+.B saphira-gredist
+is a small userspace control service that distributes raw Protocol 47/GRE traffic from a single frontend address to a pool of backends. Userspace owns configuration, membership, health and HRW distribution; kernel handles high-rate packet I/O via raw sockets and optional nft fast-path.
+.PP
+Each service is named by its config file:
+.B /etc/saphira/gredist/\fIservice_name\fR.conf
+and started as
+.B gredist \fIservice_name\fR.
+.PP
+Config is deliberately simple: one
+.B frontend=IP
+and one or more
+.B backend=IP
+lines. IPv4 and IPv6 use same syntax; mixed pools and cross-family forwarding (v4->v6, v6->v4) are supported by rebuilding the outer IP envelope while preserving GRE header and inner payload.
+.SH CONFIGURATION
+.nf
+frontend=217.155.241.55
+backend=172.16.10.10
+backend=172.16.10.11
+
+frontend=2a02:8012:bc57::47
+backend=2a02:8012:bc57:100::10
+.fi
+.PP
+Comments start with \fB#\fR or \fB;\fR. Exactly one frontend, at least one backend. Families are not tied.
+.SH GRE HANDLING
+Parsing follows Linux \fBnet/ipv4/gre_demux.c:gre_parse_header\fR: validate outer IP, check \fBGRE_VERSION\fR and \fBGRE_ROUTING\fR, compute \fBgre_calc_hlen\fR from CSUM/KEY/SEQ, fail closed on truncated or malformed, support keyless and keyed (key is visible tunnel identifier). Fragments, oversized (>9000) and queue pressure are counted as drops.
+.SH DISTRIBUTION
+Rendezvous/HRW hashing on outer source address plus GRE key when present. Score = splitmix64(fnv1a(backend) XOR flow_hash). Removal moves only affected flows; rejoin is deterministic.
+.SH HEALTH
+ICMP ping per backend every 2s; 2 consecutive fails -> down, 2 successes -> up. Logs transitions. No healthy backend -> drop.
+.SH SIGNALS
+.B SIGHUP
+reload config,
+.B SIGUSR1
+dump stats,
+.B SIGINT/SIGTERM
+exit.
+.SH FILES
+.B /etc/saphira/gredist/*.conf
+.br
+.B /run/saphira/gredist/
+.SH SEE ALSO
+.B ip-gre(8), nft(8)
+.SH LICENSE
+MIT, Copyright (c) 2026 Saphira Linux.
