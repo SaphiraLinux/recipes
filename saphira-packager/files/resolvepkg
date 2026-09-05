@@ -35,7 +35,7 @@ CONFIG_KEYS = (
 METADATA_FIELDS = (
     "pkgname", "pkgver", "pkgrel", "pkgarch", "pkgdesc", "license",
     "origin", "repo", "url", "depends", "makedepends", "subpackages",
-    "source", "sha256",
+    "source", "sha256", "vendor",
 )
 REQUIRED_METADATA = (
     "pkgname", "pkgver", "pkgrel", "pkgarch", "pkgdesc", "license",
@@ -77,8 +77,10 @@ def _newer_live_nvr(live_nvrs: set[str], nvr: str) -> str | None:
     return best
 # Recipe-parameterization environment passed through both sandboxes so a
 # recipe's computed pkgver matches between resolvepkg planning and buildpkg
-# execution (e.g. SAPHIRA_KERNEL_VERSION selects the parallel kernel line).
-RECIPE_ENV_PASSTHROUGH = ("SAPHIRA_KERNEL_VERSION",)
+# execution (e.g. SAPHIRA_KERNEL_VERSION selects the parallel kernel line,
+# SAPHIRA_GCC_VERSION the GCC version); keep in sync with buildpkg's
+# RECIPE_ENV_PASSTHROUGH.
+RECIPE_ENV_PASSTHROUGH = ("SAPHIRA_KERNEL_VERSION", "SAPHIRA_GCC_VERSION")
 
 
 class PlanError(RuntimeError):
@@ -172,7 +174,7 @@ def sandbox_metadata(recipe: Path, config: dict[str, str]) -> dict[str, str]:
 set -eu
 builtin source /recipe/recipe.sh
 builtin printf '\0SAPHIRA_RECIPE_METADATA_V1\0'
-for name in pkgname pkgver pkgrel pkgarch pkgdesc license origin repo url depends makedepends subpackages source sha256 disabled disabled_reason; do
+for name in pkgname pkgver pkgrel pkgarch pkgdesc license origin repo url depends makedepends subpackages source sha256 vendor disabled disabled_reason; do
     if [[ -v $name ]]; then value=${!name}; else value=; fi
     builtin printf '%s\0%s\0' "$name" "$value"
 done
@@ -197,6 +199,19 @@ done
             f"invalid pkgrel in {recipe}: {pkgrel!r} (r0 packages are forbidden; "
             "ship pkgrel>=1 - the initial publication of a package is r1)"
         )
+    # vendor=/sha256= pair discipline: remote fetching is allowed only for
+    # a complete, explicit pair (mirrors buildpkg-single enforcement).
+    vendor_url = metadata.get("vendor", "")
+    pair_sha256 = metadata.get("sha256", "")
+    pair_source = metadata.get("source", "")
+    if vendor_url and not pair_sha256:
+        die(f"recipe vendor= requires sha256= (unverifiable fetch refused): {recipe}")
+    if pair_sha256 and not (vendor_url or pair_source):
+        die(f"recipe sha256= requires vendor= or source= (unfetchable pin refused): {recipe}")
+    if pair_sha256 and (
+        not all(c in "0123456789abcdef" for c in pair_sha256) or len(pair_sha256) != 64
+    ):
+        die(f"recipe sha256= is not a 64-hex digest: {recipe}")
     return metadata
 
 

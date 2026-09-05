@@ -1,0 +1,69 @@
+#!/bin/sh
+# audit-vendor-sources: survey vendor=/sha256= conversion readiness.
+#
+# For every recipe under $SAPHIRA_RECIPE_ROOT, report one status:
+#   converted  vendor=+64-hex sha256= present (fetch-ready; a present local
+#              archive still wins at build time and is never re-downloaded)
+#   legacy     no pair at all (builds from files/ only, as today)
+#   BROKEN     lone vendor= (unverifiable), lone sha256= (unfetchable),
+#              malformed digest, or a vendor= URL whose basename matches
+#              neither the archives the recipe consumes nor files/ (the
+#              gcc-16.1-URL-building-16.2.0 class of staleness)
+# Exit 1 when any BROKEN recipe exists, else 0. Read-only: never fetches.
+
+set -eu
+
+ROOT=${SAPHIRA_RECIPE_ROOT:-/recipes}
+[ -d "$ROOT" ] || { printf 'audit-vendor-sources: recipe root missing: %s\n' "$ROOT" >&2; exit 2; }
+
+n_converted=0 n_legacy=0 n_broken=0
+
+for recipe_sh in "$ROOT"/*/recipe.sh; do
+	pkg=${recipe_sh%/*}; pkg=${pkg##*/}
+	# Metadata only: strip function bodies first, so shell locals such
+	# as the cargo recipes' vendor=$BUILDDIR/vendor are never mistaken
+	# for the top-level vendor= fetch field. Version-case recipes (gcc,
+	# kernel) keep their indented vendor=/sha256= branches: those live
+	# at top level, outside any function.
+	meta=$(sed '/^recipe_\(build\|install\)()/,/^}/d' "$recipe_sh")
+	vendor=$(printf '%s\n' "$meta" | sed -n 's/^[[:space:]]*vendor=//p' | head -1)
+	sha=$(printf '%s\n' "$meta" | sed -n 's/^[[:space:]]*sha256=//p' | head -1)
+	source_url=$(printf '%s\n' "$meta" | sed -n 's/^[[:space:]]*source=//p' | head -1)
+	# Archives the recipe consumes (files/<archive> references) plus what
+	# is actually present in files/.
+	consumed=$(grep -o 'files/[A-Za-z0-9._+-]*\.\(tar\(\.\(gz\|bz2\|xz\|zst\)\)\?\|tgz\|tbz2\?\|txz\|zip\|whl\|gz\|bz2\|xz\)' "$recipe_sh" 2>/dev/null | sed 's|^files/||' | sort -u | tr '\n' ' ')
+	status=""
+	if [ -n "$vendor" ] && [ -z "$sha" ]; then
+		status="BROKEN lone-vendor"
+	elif [ -n "$sha" ] && [ -z "$vendor" ] && [ -z "$source_url" ]; then
+		status="BROKEN lone-sha256"
+	elif [ -n "$sha" ]; then
+		case $sha in
+			*[!0-9a-f]*|'') status="BROKEN bad-digest" ;;
+			*) [ "${#sha}" -eq 64 ] || status="BROKEN bad-digest" ;;
+		esac
+	fi
+	if [ -z "$status" ] && [ -n "$vendor" ]; then
+		base=${vendor##*/}; base=${base%%\?*}
+		case " $consumed " in
+			*" $base "*) ;;
+			*)
+				present=$(ls "$ROOT/$pkg/files/$base" 2>/dev/null || true)
+				[ -n "$present" ] || status="BROKEN url-basename-unmatched($base)"
+				;;
+		esac
+	fi
+	if [ -n "$status" ]; then
+		printf '%-32s %s\n' "$pkg" "$status"
+		n_broken=$((n_broken + 1))
+	elif [ -n "$vendor" ] || [ -n "$source_url" ]; then
+		# Fetch-ready: an explicit source= or vendor= URL plus its pin.
+		# (source=+sha pairs predate vendor= and ride the same path.)
+		n_converted=$((n_converted + 1))
+	else
+		n_legacy=$((n_legacy + 1))
+	fi
+done
+
+printf 'audit-vendor-sources: converted=%d legacy=%d BROKEN=%d\n' "$n_converted" "$n_legacy" "$n_broken"
+[ "$n_broken" -eq 0 ]

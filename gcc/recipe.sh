@@ -1,16 +1,30 @@
 #!/bin/sh
 
 pkgname=gcc
-pkgver=16.2.0
+pkgver=${SAPHIRA_GCC_VERSION:-16.2.0}
 pkgrel=8
 pkgarch=${SAPHIRA_ARCH:-x86_64}
-pkgdesc='GNU Compiler Collection 16.2.0 (C, C++, Fortran, ObjC/ObjC++, Modula-2, LTO; AKADATA branch-cost policy)'
+pkgdesc="GNU Compiler Collection ${pkgver} (C, C++, Fortran, ObjC/ObjC++, Modula-2, LTO; AKADATA branch-cost policy)"
 license='GPL-3.0-or-later WITH GCC Runtime Library Exception'
 origin=gcc
 repo=saphira
 url=https://gcc.gnu.org/
-# Vendored: https://ftp.gnu.org/gnu/gcc/gcc-16.1.0/gcc-16.1.0.tar.xz
-gcc_sha256=e6738e29597f733270731aa90600f37ffdc045079dfc27ec7e8192cc81085c3e
+# Upstream tarball per version line (SAPHIRA_GCC_VERSION selects; kernel
+# recipe pattern). vendor=+sha256= is the fetch contract: when the archive
+# is absent from files/, the builder downloads vendor=, verifies sha256,
+# and exposes the verified archive as $SOURCE_ARCHIVE. A present local
+# archive always wins and is never re-downloaded.
+case "$pkgver" in
+	16.1.0)
+		vendor=https://ftp.gnu.org/gnu/gcc/gcc-16.1.0/gcc-16.1.0.tar.xz
+		sha256=50efb4d94c3397aff3b0d61a5abd748b4dd31d9d3f2ab7be05b171d36a510f79
+		;;
+	16.2.0)
+		vendor=https://ftp.gnu.org/gnu/gcc/gcc-16.2.0/gcc-16.2.0.tar.xz
+		sha256=e6738e29597f733270731aa90600f37ffdc045079dfc27ec7e8192cc81085c3e
+		;;
+	*) echo "ERROR: no pinned vendor/sha256 for gcc $pkgver" >&2; return 1 ;;
+esac
 
 # GENESIS compiler (operator decision 2026-08-30): 16.2.0 with 102+
 # upstream bug fixes over 16.1. Lineage: 16.1.0-r2 builds 16.2.0-r0
@@ -24,37 +38,18 @@ gcc_sha256=e6738e29597f733270731aa90600f37ffdc045079dfc27ec7e8192cc81085c3e
 # rust1); future Ada path: AdaCore gnat-llvm. Do NOT fall back to an
 # Alpine or other-distro bootstrap toolchain (AGENTS.md policy).
 #
-# Saphira compiler policy: 0001 preserves the upstream GCC x86 tuning
-# change authored by Lili Cui (Intel), commit
-# 52cd02606b906160bf47001a00b446c35d46f15f:
-#
-#   x86: Increase generic tune branch misprediction cost
-#
-# It changes generic_cost branch misprediction scale from
-# COSTS_N_INSNS (2) to COSTS_N_INSNS (2) + 3, encouraging
-# if-conversion on modern deeper-pipeline CPUs.
-#
-# Reported upstream result: 544.nab_r (-O2) improved 12.7% on
-# Intel GNR and 12.1% on AMD Znver5 with single-copy.
-#
-# This is an upstream backport, not a Saphira-authored optimisation.
-# Keep the attribution and commit reference when carrying it across
-# GCC upgrades; verify whether it has landed upstream before retaining
-# the patch.
-# 
 # Patch evidence on pristine 16.2.0: branch-cost fix NOT upstream
 # (still COSTS_N_INSNS (2),) -> 0001 carried; t-linux64 still
 # m64=../lib64 -> 0002 carried. Both verified applying cleanly.
 #
+# Saphira compiler policy: 0001 preserves the AKADATA backport of GCC
+# commit 52cd02606b906160bf47001a00b446c35d46f15f (x86 generic tune
 # branch misprediction cost COSTS_N_INSNS (2) -> (2) + 3) - verified
 # against this source; do not silently drop it on upgrades.
-
 depends="gcc-libs gmp mpfr mpc isl zlib zstd binutils"
-
 # gcc-dev kept until the live toolchain is r8+: r8 is the first revision
 # with headers in main, so building it still needs the r7 -dev headers
 # installed. Drop that line once r8+ is live.
-
 makedepends="
 	bison
 	binutils
@@ -88,8 +83,16 @@ replaces="gcc-dev"
 
 recipe_build()
 {
-	GCCBALL="$RECIPE_DIR/files/gcc-16.2.0.tar.xz"
-	echo "$gcc_sha256  $GCCBALL" | sha256sum -c -
+	# Local archive wins when present (verified, never re-downloaded);
+	# otherwise build from the builder-verified $SOURCE_ARCHIVE.
+	GCCBALL="$RECIPE_DIR/files/gcc-${pkgver}.tar.xz"
+	if [ -f "$GCCBALL" ]; then
+		echo "$sha256  $GCCBALL" | sha256sum -c -
+	else
+		[ -n "${SOURCE_ARCHIVE-}" ] && [ -f "$SOURCE_ARCHIVE" ] \
+			|| { echo "ERROR: no local gcc-${pkgver}.tar.xz and no fetched SOURCE_ARCHIVE" >&2; return 1; }
+		GCCBALL=$SOURCE_ARCHIVE
+	fi
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$GCCBALL"
 	patch -d "$SRC" -Np1 \
 		-i "$RECIPE_DIR/files/0001-x86-increase-generic-tune-branch-misprediction-cost.patch"
@@ -114,7 +117,7 @@ recipe_build()
 		--with-mpc=/usr \
 		--with-isl=/usr \
 		--with-system-zlib \
-		--with-pkgversion='Saphira 16.2.0 (akadata-branch-cost, lib-only layout)' \
+		--with-pkgversion="Saphira ${pkgver} (akadata-branch-cost, lib-only layout)" \
 		--enable-languages=c,c++,fortran,objc,obj-c++,m2,lto \
 		--enable-threads=posix \
 		--enable-shared \

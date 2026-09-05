@@ -48,8 +48,27 @@ esac
 depends=${depends-}
 makedepends=${makedepends-}
 subpackages=${subpackages-}
-source_url=${source-}
+vendor_url=${vendor-}
+source_url=${source-${vendor-}}
 source_sha256=${sha256-}
+
+# vendor=/sha256= pair discipline: remote fetching is allowed only for a
+# complete, explicit pair. A lone vendor= (unverifiable fetch) or a lone
+# sha256= (unfetchable pin) is a recipe error, refused immediately.
+if [ -n "$vendor_url" ] && [ -z "$source_sha256" ]; then
+	die "recipe vendor= requires sha256= (unverifiable fetch refused): $PACKAGE"
+fi
+if [ -n "$source_sha256" ] && [ -z "$source_url" ]; then
+	die "recipe sha256= requires vendor= or source= (unfetchable pin refused): $PACKAGE"
+fi
+if [ -n "$source_sha256" ]; then
+	case $source_sha256 in
+		*[!0-9a-f]*)
+			die "recipe sha256= is not lowercase hex: $PACKAGE"
+			;;
+	esac
+	[ "${#source_sha256}" -eq 64 ] || die "recipe sha256= is not a 64-hex digest: $PACKAGE"
+fi
 
 if [ -n "$SOURCE" ]; then
 	[ -d "$SOURCE" ] || die "source directory does not exist: $SOURCE"
@@ -58,6 +77,9 @@ elif [ -z "$source_url" ]; then
 elif [ -z "$source_sha256" ]; then
 	die "recipe source requires sha256"
 fi
+# Always defined (possibly empty) so converted recipes can reference it
+# under set -u regardless of which source path was taken.
+SOURCE_ARCHIVE=${SOURCE_ARCHIVE-}
 
 work_dir=$SAPHIRA_BUILD_ROOT/$PACKAGE
 case $work_dir in
@@ -89,16 +111,40 @@ trap buildpkg_exit EXIT
 
 if [ -n "$SOURCE" ]; then
 	cp -a "$SOURCE"/. "$SRC"/
+	SOURCE_ARCHIVE=""
 else
 	command -v curl >/dev/null 2>&1 || die "curl is required to download source"
 	command -v sha256sum >/dev/null 2>&1 || die "sha256sum is required to verify source"
+	# Persistent content-addressed cache: verified archives keyed by
+	# sha256 survive workdir disposal, so rebuilds never re-fetch.
+	# Integrity comes from re-verification, not the path: a cache
+	# entry that fails verification is corrupt, so hard fail rather
+	# than build from it. Cache placement is atomic (temp + rename)
+	# so concurrent builders never observe a partial entry.
+	source_cache=${SAPHIRA_SOURCE_CACHE:-/var/cache/saphira/sources}
+	mkdir -p "$source_cache" || die "cannot create source cache: $source_cache"
+	cached_archive=$source_cache/$source_sha256
 	source_archive=$work_dir/source.archive
+	if [ -f "$cached_archive" ]; then
+		printf '%s  %s\n' "$source_sha256" "$cached_archive" | sha256sum -c - \
+			|| die "cached source failed verification (corrupt cache entry): $cached_archive"
+		cp -- "$cached_archive" "$source_archive"
+	else
+		download_tmp=$work_dir/source.download
+		curl -fL --retry 3 --output "$download_tmp" "$source_url" \
+			|| die "source download failed: $source_url"
+		printf '%s  %s\n' "$source_sha256" "$download_tmp" | sha256sum -c - \
+			|| { rm -f -- "$download_tmp"; die "downloaded source failed verification: $source_url"; }
+		cp -- "$download_tmp" "$source_archive"
+		cache_tmp=$source_cache/.tmp.$$.download
+		cp -- "$download_tmp" "$cache_tmp" && mv -- "$cache_tmp" "$cached_archive"
+		rm -f -- "$download_tmp"
+	fi
+	SOURCE_ARCHIVE=$source_archive
 	extract_dir=$work_dir/extract
 	mkdir -p "$extract_dir"
-	curl -fL --retry 3 --output "$source_archive" "$source_url"
-	printf '%s  %s\n' "$source_sha256" "$source_archive" | sha256sum -c -
 	case "$source_url" in
-		*.zip)
+		*.zip|*.whl)
 			command -v unzip >/dev/null 2>&1 || die "unzip is required to extract ZIP sources"
 			unzip -q "$source_archive" -d "$extract_dir"
 			;;
@@ -117,7 +163,7 @@ else
 	fi
 fi
 
-export SRC BUILDDIR PKGDEST RECIPE_DIR SUBPKGDEST
+export SRC BUILDDIR PKGDEST RECIPE_DIR SUBPKGDEST SOURCE_ARCHIVE
 export pkgname pkgver pkgrel pkgarch pkgdesc license origin repo url
 export depends makedepends subpackages DESTDIR="$PKGDEST"
 

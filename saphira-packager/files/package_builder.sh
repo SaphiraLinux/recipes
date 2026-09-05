@@ -6,6 +6,10 @@ SAPHIRA_REFERENCE_RECIPE_ROOT=${SAPHIRA_REFERENCE_RECIPE_ROOT:-/reference-packag
 SAPHIRA_CPORTS_ROOT=${SAPHIRA_CPORTS_ROOT:-/cports}
 SAPHIRA_BUILD_ROOT=${SAPHIRA_BUILD_ROOT:-/build}
 SAPHIRA_PACKAGE_TMP=${SAPHIRA_PACKAGE_TMP:-/var/tmp/saphira-package}
+# Persistent content-addressed source cache (verified upstream archives,
+# keyed by sha256). Survives workdir disposal so rebuilds never re-fetch;
+# bind-mounted into the isolated build namespace at the same path.
+SAPHIRA_SOURCE_CACHE=${SAPHIRA_SOURCE_CACHE:-/var/cache/saphira/sources}
 SAPHIRA_REPO_DIR=${SAPHIRA_REPO_DIR:-/out/stage4/packages}
 # Generation repositories, oldest first: every publication lands in ALL
 # listed repositories (each is an append-only archive holding real APK
@@ -61,7 +65,7 @@ SAPHIRA_HOST_APK_KEY_DIR=${SAPHIRA_HOST_APK_KEY_DIR:-/etc/apk/keys}
 SAPHIRA_ROOT_SHELL_LINK=${SAPHIRA_ROOT_SHELL_LINK:-/bin/sh}
 
 export SAPHIRA_CONFIG_FILE SAPHIRA_RECIPE_ROOT SAPHIRA_REFERENCE_RECIPE_ROOT SAPHIRA_CPORTS_ROOT
-export SAPHIRA_BUILD_ROOT SAPHIRA_PACKAGE_TMP SAPHIRA_REPO_DIR SAPHIRA_INCOMING_DIR
+export SAPHIRA_BUILD_ROOT SAPHIRA_PACKAGE_TMP SAPHIRA_SOURCE_CACHE SAPHIRA_REPO_DIR SAPHIRA_INCOMING_DIR
 export SAPHIRA_REPO_NAMES SAPHIRA_GENESIS_EXCLUDE SAPHIRA_VERSION_LINES_FILE
 export SAPHIRA_SIGN_KEY SAPHIRA_TRUST_KEY SAPHIRA_ARCH SAPHIRA_BINDIR
 export SAPHIRA_RELEASE_STATE SAPHIRA_RELEASE_POLICY
