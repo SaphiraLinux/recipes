@@ -11,6 +11,7 @@ url=https://www.gnu.org/software/patch/
 patch_sha256=ac610bda97abe0d9f6b7c963255a11dcb196c25e337c61f94e4778d632f1d8fd
 depends=""
 makedepends="gawk gcc make"
+subpackages="$pkgname-doc"
 recipe_build() {
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$RECIPE_DIR/files/patch-2.7.6.tar.xz"
 	cd "$SRC"

@@ -24,18 +24,37 @@ gcc_sha256=e6738e29597f733270731aa90600f37ffdc045079dfc27ec7e8192cc81085c3e
 # rust1); future Ada path: AdaCore gnat-llvm. Do NOT fall back to an
 # Alpine or other-distro bootstrap toolchain (AGENTS.md policy).
 #
+# Saphira compiler policy: 0001 preserves the upstream GCC x86 tuning
+# change authored by Lili Cui (Intel), commit
+# 52cd02606b906160bf47001a00b446c35d46f15f:
+#
+#   x86: Increase generic tune branch misprediction cost
+#
+# It changes generic_cost branch misprediction scale from
+# COSTS_N_INSNS (2) to COSTS_N_INSNS (2) + 3, encouraging
+# if-conversion on modern deeper-pipeline CPUs.
+#
+# Reported upstream result: 544.nab_r (-O2) improved 12.7% on
+# Intel GNR and 12.1% on AMD Znver5 with single-copy.
+#
+# This is an upstream backport, not a Saphira-authored optimisation.
+# Keep the attribution and commit reference when carrying it across
+# GCC upgrades; verify whether it has landed upstream before retaining
+# the patch.
+# 
 # Patch evidence on pristine 16.2.0: branch-cost fix NOT upstream
 # (still COSTS_N_INSNS (2),) -> 0001 carried; t-linux64 still
 # m64=../lib64 -> 0002 carried. Both verified applying cleanly.
 #
-# Saphira compiler policy: 0001 preserves the AKADATA backport of GCC
-# commit 52cd02606b906160bf47001a00b446c35d46f15f (x86 generic tune
 # branch misprediction cost COSTS_N_INSNS (2) -> (2) + 3) - verified
 # against this source; do not silently drop it on upgrades.
+
 depends="gcc-libs gmp mpfr mpc isl zlib zstd binutils"
+
 # gcc-dev kept until the live toolchain is r8+: r8 is the first revision
 # with headers in main, so building it still needs the r7 -dev headers
 # installed. Drop that line once r8+ is live.
+
 makedepends="
 	bison
 	binutils

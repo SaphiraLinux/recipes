@@ -9,6 +9,9 @@ origin=cronie
 repo=saphira
 url=https://github.com/cronie-crond/cronie
 cronie_sha256=241ecc1dcd8d4b2a6744fe93509932254d20b7bb9d979d27429809493806357f
+# Sole cron: dcron retired (same /usr/sbin/crond + man pages, cannot
+# coexist). replaces takes the legacy names over on upgrade.
+replaces="dcron dcron-doc"
 depends=""
 makedepends="autoconf automake gcc make saphira-kernel-headers=7.1.5"
 recipe_build() {

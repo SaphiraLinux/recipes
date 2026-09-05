@@ -31,9 +31,12 @@ recipe_install() {
 	install -m 0644 "$RECIPE_DIR/files/mergetool.conf" \
 		"$PKGDEST/etc/saphira/mergetool.conf"
 
-	install -d -m 0755 "$PKGDEST/usr/share/doc/saphira-mergetool"
+	# README stays in main under /usr/share/saphira-mergetool (never
+	# /usr/share/doc - that tree auto-splits to -doc and r1 shipped it
+	# from main, so a move would collide with the published r1).
+	install -d -m 0755 "$PKGDEST/usr/share/saphira-mergetool"
 	install -m 0644 "$RECIPE_DIR/files/README.md" \
-		"$PKGDEST/usr/share/doc/saphira-mergetool/README.md"
+		"$PKGDEST/usr/share/saphira-mergetool/README.md"
 
 	install -d -m 0755 "$PKGDEST/usr/share/man/man1"
 	install -m 0644 "$RECIPE_DIR/files/saphira-mergetool.1" \

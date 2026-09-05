@@ -25,7 +25,7 @@ makedepends="
 	xz-dev
 	zlib-dev
 "
-subpackages="$pkgname-dev"
+subpackages="$pkgname-dev $pkgname-doc"
 recipe_build() {
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$RECIPE_DIR/files/Python-3.14.6.tar.xz"
 	cd "$SRC"
