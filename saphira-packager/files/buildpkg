@@ -42,7 +42,7 @@ PACKAGE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
 # recipe's computed pkgver matches between resolvepkg planning and buildpkg
 # execution (e.g. SAPHIRA_KERNEL_VERSION selects the parallel kernel line);
 # keep in sync with resolvepkg's RECIPE_ENV_PASSTHROUGH.
-RECIPE_ENV_PASSTHROUGH = ("SAPHIRA_KERNEL_VERSION",)
+RECIPE_ENV_PASSTHROUGH = ("SAPHIRA_KERNEL_VERSION", "SAPHIRA_GCC_VERSION")
 REPO_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 NVR_RE = re.compile(r"^(.*)-([0-9][^-]*)-r([0-9]+)\.apk$")
 
@@ -747,6 +747,16 @@ class Transaction:
                 "--setenv", "CCACHE_PATH", "/usr/bin",
                 "--setenv", "CCACHE_COMPILERCHECK", "content",
             ]
+        # Verified-source cache: host-persistent, content-addressed by
+        # sha256. Bound read-write at a top-level namespace path (same
+        # pattern as /ccache) so rebuilds never re-fetch.
+        source_cache_host = Path(os.environ.get(
+            "SAPHIRA_SOURCE_CACHE", "/var/cache/saphira/sources"))
+        source_cache_host.mkdir(parents=True, exist_ok=True)
+        source_cache_options = [
+            "--dir", "/source-cache", "--bind", str(source_cache_host), "/source-cache",
+            "--setenv", "SAPHIRA_SOURCE_CACHE", "/source-cache",
+        ]
         command = [*self._nsenter_prefix(),
             self.config["SAPHIRA_BWRAP"], "--die-with-parent", "--new-session",
             "--unshare-all", "--share-net", "--uid", "0", "--gid", "0", "--clearenv",
@@ -759,6 +769,7 @@ class Transaction:
             "--ro-bind", str(config_file), "/controller/package_builder.sh",
             "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp",
             *ccache_options,
+            *source_cache_options,
             "--setenv", "PATH", worker_path,
             "--setenv", "HOME", "/tmp", "--setenv", "LANG", "C",
             "--setenv", "SAPHIRA_ISOLATED_BUILD", "1",

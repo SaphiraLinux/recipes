@@ -7,18 +7,31 @@ license=GPL-2.0-only
 origin=saphira-kernel
 repo=saphira
 url=https://saphira.vm2.uk/
-# Upstream kernel tarball, vendored + PGP-verified (kernel.org signs the UNCOMPRESSED .tar;
-# verify procedure: xz -dc file.xz > file.tar && gpg --verify file.tar.sign file.tar):
-# https://mirrors.edge.kernel.org/pub/linux/kernel/v7.x/linux-${pkgver}.tar.xz
-# 7.3-rc1 is a torvalds-tree cgit snapshot (unsigned by nature; TLS fetch +
-# sha256 pin, same as other vendored payloads):
-# https://git.kernel.org/torvalds/t/linux-7.3-rc1.tar.gz
+# Upstream kernel tarball per version line (SAPHIRA_KERNEL_VERSION selects).
+# vendor=+sha256= is the fetch contract: when the archive is absent from
+# files/, the builder downloads vendor=, verifies sha256, and exposes the
+# verified archive as $SOURCE_ARCHIVE (kernel.org signs the UNCOMPRESSED
+# .tar; verify procedure: xz -dc file.xz > file.tar && gpg --verify
+# file.tar.sign file.tar). 7.3-rc1 is a torvalds-tree cgit snapshot
+# (unsigned by nature; TLS fetch + sha256 pin, same as other payloads).
 case "$pkgver" in
-	7.1.5) linux_sha256=22a0196b3cbcdf34dc27b77561f4d040585fd3447edc9ab3531a1ac79e3041e7 ;;
-	7.2.2) linux_sha256=7d0e7ce14f98c43efe880cffbf354a59be45928fdf7170d7333c374ae91c0d83 ;;
-	7.2.3) linux_sha256=8ba259e8e7b13ec6ef0941c8a39ad90b24bd4a4d6c0010ba6bafb794550ecd03 ;;
-	7.3-rc1) linux_sha256=8d36fbfc7c8906ccfa1ebacc30f84998406504c3f13733a040bb3a3fbe8ac270 ;;
-	*) echo "ERROR: no pinned sha256 for kernel $pkgver" >&2; return 1 ;;
+	7.1.5)
+		vendor=https://mirrors.edge.kernel.org/pub/linux/kernel/v7.x/linux-7.1.5.tar.xz
+		sha256=22a0196b3cbcdf34dc27b77561f4d040585fd3447edc9ab3531a1ac79e3041e7
+		;;
+	7.2.2)
+		vendor=https://mirrors.edge.kernel.org/pub/linux/kernel/v7.x/linux-7.2.2.tar.xz
+		sha256=7d0e7ce14f98c43efe880cffbf354a59be45928fdf7170d7333c374ae91c0d83
+		;;
+	7.2.3)
+		vendor=https://mirrors.edge.kernel.org/pub/linux/kernel/v7.x/linux-7.2.3.tar.xz
+		sha256=8ba259e8e7b13ec6ef0941c8a39ad90b24bd4a4d6c0010ba6bafb794550ecd03
+		;;
+	7.3-rc1)
+		vendor=https://git.kernel.org/torvalds/t/linux-7.3-rc1.tar.gz
+		sha256=8d36fbfc7c8906ccfa1ebacc30f84998406504c3f13733a040bb3a3fbe8ac270
+		;;
+	*) echo "ERROR: no pinned vendor/sha256 for kernel $pkgver" >&2; return 1 ;;
 esac
 
 makedepends="
@@ -54,9 +67,17 @@ recipe_build()
 	[ -f "$KEY" ] || { echo "ERROR: module signing key missing at $KEY (staged /input?)" >&2; return 1; }
 	export TAR_OPTIONS=--no-same-owner
 
+	# Local archive wins when present (verified, never re-downloaded);
+	# otherwise build from the builder-verified $SOURCE_ARCHIVE.
 	KBALL="$RECIPE_DIR/files/linux-${pkgver}.tar.xz"
 	[ -f "$KBALL" ] || KBALL="$RECIPE_DIR/files/linux-${pkgver}.tar.gz"
-	echo "$linux_sha256  $KBALL" | sha256sum -c -
+	if [ -f "$KBALL" ]; then
+		echo "$sha256  $KBALL" | sha256sum -c -
+	else
+		[ -n "${SOURCE_ARCHIVE-}" ] && [ -f "$SOURCE_ARCHIVE" ] \
+			|| { echo "ERROR: no local linux-${pkgver}.tar.{xz,gz} and no fetched SOURCE_ARCHIVE" >&2; return 1; }
+		KBALL=$SOURCE_ARCHIVE
+	fi
 	mkdir -p "$SRC/linux-${pkgver}"
 	tar --no-same-owner -C "$SRC/linux-${pkgver}" --strip-components=1 -xf "$KBALL"
 	cd "$SRC/linux-${pkgver}"

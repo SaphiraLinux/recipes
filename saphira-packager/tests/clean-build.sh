@@ -30,7 +30,8 @@ run_buildpkg()
 	SAPHIRA_BOOTSTRAP_ROOT=/ \
 	SAPHIRA_BOOTSTRAP_MANIFEST=$source_root/saphira-packager/files/bootstrap-v0.1.paths \
 	SAPHIRA_HOST_RESOLV_CONF=/etc/resolv.conf SAPHIRA_HOST_HOSTS_FILE=/etc/hosts \
-	SAPHIRA_BUILD_SEED='saphira-base-abi apk-tools bash libcap coreutils findutils pcre2 grep python3 ca-certificates' \
+	SAPHIRA_BUILD_SEED='saphira-base-abi apk-tools bash libcap coreutils findutils pcre2 grep python3 ca-certificates curl tar' \
+	SAPHIRA_SOURCE_CACHE=$test_root/source-cache \
 		"$buildpkg" "$@"
 }
 
@@ -328,4 +329,57 @@ SAPHIRA_KERNEL_VERSION=9.9 run_buildpkg env-probe >/dev/null 2> "$test_root/env-
 test -n "$(find "$incoming" -mindepth 3 -maxdepth 3 -name 'env-probe-9.9-r1.apk')"
 test -z "$(find "$incoming" -mindepth 3 -maxdepth 3 -name 'env-probe-1-r1.apk')"
 
-printf '%s\n' 'single-root isolation, graph-output, lifecycle, overlay base reuse, and incoming transaction tests: OK'
+# --- verified-source cache -------------------------------------------------
+# A vendor=+sha256= recipe fetches once, verifies, populates the
+# content-addressed cache, and builds. Deleting the origin then rebuilding
+# at a new pkgrel must succeed from the cache alone: no re-download. A
+# wrong digest fails the build before anything is cached.
+#
+# The origins are staged under the recipes tree (hidden dot-dir, never a
+# recipe): /recipes is ro-mounted into the isolated build namespace, while
+# anything else on the host (e.g. $test_root/origin) is invisible there,
+# so a host-absolute file:// URL could never resolve. file:// keeps the
+# test hermetic; the fetch->verify->cache machinery is transport-agnostic.
+mkdir -p "$test_root/origin-content" "$recipes/.vendor-origin"
+printf '%s\n' probe-payload > "$test_root/origin-content/probe.txt"
+tar -C "$test_root" -cf "$recipes/.vendor-origin/vendor-probe-1.tar" origin-content
+probe_sha=$(sha256sum "$recipes/.vendor-origin/vendor-probe-1.tar" | cut -d' ' -f1)
+recipe_header vendor-probe '' '' 1
+printf '%s\n' \
+	'vendor=file:///recipes/.vendor-origin/vendor-probe-1.tar' \
+	"sha256=$probe_sha" \
+	'recipe_build() { test -f probe.txt; }' \
+	'recipe_install() {' \
+	'	install -d "$DESTDIR/usr/bin"' \
+	'	printf "%s\n" "#!/bin/sh" "exit 0" > "$DESTDIR/usr/bin/vendor-probe"' \
+	'	chmod 755 "$DESTDIR/usr/bin/vendor-probe"' \
+	'}' >> "$recipes/vendor-probe/recipe.sh"
+run_buildpkg vendor-probe >/dev/null 2> "$test_root/vendor-probe.err"
+test -n "$(find "$incoming" -mindepth 3 -maxdepth 3 -name 'vendor-probe-1-r1.apk')"
+test -f "$test_root/source-cache/$probe_sha"
+rm -f "$recipes/.vendor-origin/vendor-probe-1.tar"
+sed -i 's/^pkgrel=1$/pkgrel=2/' "$recipes/vendor-probe/recipe.sh"
+run_buildpkg vendor-probe >/dev/null 2> "$test_root/vendor-probe-r2.err"
+test -n "$(find "$incoming" -mindepth 3 -maxdepth 3 -name 'vendor-probe-1-r2.apk')"
+recipe_header vendor-bad '' '' 1
+printf '%s\n' poisoned-payload > "$test_root/origin-content/probe.txt"
+tar -C "$test_root" -cf "$recipes/.vendor-origin/vendor-bad-1.tar" origin-content
+printf '%s\n' \
+	'vendor=file:///recipes/.vendor-origin/vendor-bad-1.tar' \
+	'sha256=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff' \
+	'recipe_build() { :; }' \
+	'recipe_install() { :; }' >> "$recipes/vendor-bad/recipe.sh"
+if run_buildpkg vendor-bad > "$test_root/vendor-bad.out" 2> "$test_root/vendor-bad.err"; then
+	printf '%s\n' 'digest mismatch unexpectedly built' >&2
+	exit 1
+fi
+grep 'failed verification' "$build_root/vendor-bad.buildpkg/logs/buildpkg.log" >/dev/null
+# Retire the deliberately-failed workspace through the trusted lifecycle
+# (kills the overlay holder, fixes workdir perms, removes); otherwise the
+# EXIT-trap cleanup below cannot delete the retained overlay workdir.
+SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
+SAPHIRA_BUILD_ROOT=$build_root \
+	"$source_root/saphira-packager/files/cleanpkg" vendor-bad >/dev/null
+test ! -e "$build_root/vendor-bad.buildpkg"
+
+printf '%s\n' 'single-root isolation, graph-output, lifecycle, overlay base reuse, incoming transaction, and verified-source cache tests: OK'

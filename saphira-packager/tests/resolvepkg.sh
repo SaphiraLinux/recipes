@@ -350,5 +350,42 @@ run_resolver env-probe > "$test_root/envprobe-default.json"
 assert_plan "$test_root/envprobe-default.json" 'assert plan["builds"][0]["version"] == "1-r1"'
 SAPHIRA_KERNEL_VERSION=9.9 run_resolver env-probe > "$test_root/envprobe-override.json"
 assert_plan "$test_root/envprobe-override.json" 'assert plan["builds"][0]["version"] == "9.9-r1"'
+recipe gcc-probe 1 ''
+sed -i 's/^pkgver=1$/pkgver=${SAPHIRA_GCC_VERSION:-1}/' "$recipes/gcc-probe/recipe.sh"
+SAPHIRA_GCC_VERSION=9.9 run_resolver gcc-probe > "$test_root/gccprobe-override.json"
+assert_plan "$test_root/gccprobe-override.json" 'assert plan["builds"][0]["version"] == "9.9-r1"'
 
-printf '%s\n' 'resolvepkg closure, repository precedence, and sandbox tests: OK'
+# vendor=/sha256= pair discipline: a complete pair resolves; a lone
+# vendor= (unverifiable fetch), a lone sha256= (unfetchable pin), and a
+# malformed digest are refused immediately at plan time.
+recipe vendor-ok 1 ''
+printf '%s\n' \
+	'vendor=https://example.invalid/vendor-ok-1.tar.gz' \
+	'sha256=0000000000000000000000000000000000000000000000000000000000000000' >> "$recipes/vendor-ok/recipe.sh"
+run_resolver vendor-ok > "$test_root/vendor-ok.json"
+assert_plan "$test_root/vendor-ok.json" 'assert plan["builds"][0]["version"] == "1-r1"'
+recipe vendor-lonely 1 ''
+printf '%s\n' 'vendor=https://example.invalid/vendor-lonely-1.tar.gz' >> "$recipes/vendor-lonely/recipe.sh"
+if run_resolver vendor-lonely > "$test_root/vendor-lonely.json" 2> "$test_root/vendor-lonely.log"; then
+	printf '%s\n' 'lone vendor= unexpectedly planned' >&2
+	exit 1
+fi
+grep 'vendor= requires sha256=' "$test_root/vendor-lonely.log" >/dev/null
+recipe sha-lonely 1 ''
+printf '%s\n' 'sha256=0000000000000000000000000000000000000000000000000000000000000000' >> "$recipes/sha-lonely/recipe.sh"
+if run_resolver sha-lonely > "$test_root/sha-lonely.json" 2> "$test_root/sha-lonely.log"; then
+	printf '%s\n' 'lone sha256= unexpectedly planned' >&2
+	exit 1
+fi
+grep 'sha256= requires vendor= or source=' "$test_root/sha-lonely.log" >/dev/null
+recipe sha-malformed 1 ''
+printf '%s\n' \
+	'vendor=https://example.invalid/sha-malformed-1.tar.gz' \
+	'sha256=abcd' >> "$recipes/sha-malformed/recipe.sh"
+if run_resolver sha-malformed > "$test_root/sha-malformed.json" 2> "$test_root/sha-malformed.log"; then
+	printf '%s\n' 'malformed sha256= unexpectedly planned' >&2
+	exit 1
+fi
+grep 'sha256= is not a 64-hex digest' "$test_root/sha-malformed.log" >/dev/null
+
+printf '%s\n' 'resolvepkg closure, repository precedence, sandbox, and vendor-pair tests: OK'
