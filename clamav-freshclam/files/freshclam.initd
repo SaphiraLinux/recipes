@@ -1,0 +1,20 @@
+#!/sbin/openrc-run
+
+description="ClamAV virus signature updater (freshclam)"
+
+command="/usr/bin/freshclam"
+command_args="--daemon --pid=/run/clamav/freshclam.pid"
+command_background="yes"
+pidfile="/run/clamav/freshclam.pid"
+command_user="clamav:clamav"
+
+depend()
+{
+	use net dns
+}
+
+start_pre()
+{
+	checkpath -d -o clamav:clamav -m 0750 /run/clamav /var/log/clamav
+	checkpath -d -o clamav:clamav -m 0755 /var/lib/clamav
+}

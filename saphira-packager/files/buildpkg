@@ -1,0 +1,1166 @@
+#!/usr/bin/python3
+
+"""Public rootless orchestrator for one native Saphira build transaction."""
+
+from __future__ import annotations
+
+import fcntl
+import hashlib
+import json
+import os
+import posixpath
+import re
+import shlex
+import shutil
+import signal
+import stat
+import subprocess
+import sys
+import time
+import uuid
+from pathlib import Path
+from typing import NoReturn
+
+
+PLAN_SCHEMA = "saphira-build-plan/v1"
+FAILED_MARKER = "saphira-buildpkg-failed/v1\n"
+BASE_SCHEMA = "saphira-base-root/v1"
+BASE_STATE_SCHEMA = "saphira-base-root-state/v1"
+HOLDER_SCHEMA = "saphira-overlay-holder/v1"
+OVERLAY_OPTIONS = "userxattr,index=off"
+CONFIG_KEYS = (
+    "SAPHIRA_CONFIG_FILE", "SAPHIRA_RECIPE_ROOT", "SAPHIRA_BUILD_ROOT",
+    "SAPHIRA_PACKAGE_TMP", "SAPHIRA_REPO_DIR", "SAPHIRA_INCOMING_DIR",
+    "SAPHIRA_REPO_NAMES", "SAPHIRA_ARCH", "SAPHIRA_BINDIR", "SAPHIRA_BUILD_SEED", "SAPHIRA_APK",
+    "SAPHIRA_BWRAP", "SAPHIRA_PYTHON", "SAPHIRA_TRUST_KEY",
+    "SAPHIRA_ROOT_SHELL", "SAPHIRA_BOOTSTRAP_ROOT", "SAPHIRA_BOOTSTRAP_MANIFEST",
+    "SAPHIRA_HOST_RESOLV_CONF", "SAPHIRA_HOST_HOSTS_FILE",
+    "SAPHIRA_SOURCE_DATE_EPOCH",
+)
+PACKAGE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
+# Recipe-parameterization environment passed through the build sandbox so a
+# recipe's computed pkgver matches between resolvepkg planning and buildpkg
+# execution (e.g. SAPHIRA_KERNEL_VERSION selects the parallel kernel line);
+# keep in sync with resolvepkg's RECIPE_ENV_PASSTHROUGH.
+RECIPE_ENV_PASSTHROUGH = ("SAPHIRA_KERNEL_VERSION",)
+REPO_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+NVR_RE = re.compile(r"^(.*)-([0-9][^-]*)-r([0-9]+)\.apk$")
+
+
+def _split_nvr(filename: str) -> tuple[str, str, int] | None:
+    """Split name-version-rN.apk into (name, upstream, rel); None when the
+    shape is unrecognised (upstream versions never contain '-')."""
+    match = NVR_RE.match(filename)
+    if match is None:
+        return None
+    return match.group(1), match.group(2), int(match.group(3))
+
+
+def _newer_live_nvr(live_filenames: list[str], filename: str) -> str | None:
+    """Newest live filename on the same (name, upstream) version line with
+    a higher pkgrel than the candidate, or None. Same-line rel comparison
+    needs no version ordering and can never misjudge across lines."""
+    parts = _split_nvr(filename)
+    if parts is None:
+        return None
+    name, upstream, rel = parts
+    best: str | None = None
+    best_rel = rel
+    for live_name in live_filenames:
+        live_parts = _split_nvr(live_name)
+        if live_parts is None:
+            continue
+        if live_parts[0] == name and live_parts[1] == upstream and live_parts[2] > best_rel:
+            best, best_rel = live_name, live_parts[2]
+    return best
+
+
+def live_repo_dir(config: dict[str, str]) -> Path:
+    """The live generation repository: the LAST name in SAPHIRA_REPO_NAMES.
+
+    Repositories are listed oldest first and every publication lands in
+    all of them; consumers (clean-root seeding, published-payload guards)
+    resolve against the newest generation only.
+    """
+    names = config["SAPHIRA_REPO_NAMES"].split()
+    if not names or any(not REPO_NAME_RE.fullmatch(name) for name in names):
+        die(f"invalid SAPHIRA_REPO_NAMES: {config['SAPHIRA_REPO_NAMES']!r}")
+    return Path(config["SAPHIRA_REPO_DIR"]) / names[-1] / config["SAPHIRA_ARCH"]
+
+
+class BuildError(RuntimeError):
+    pass
+
+
+def die(message: str) -> NoReturn:
+    raise BuildError(message)
+
+
+def load_config() -> dict[str, str]:
+    config_path = os.environ.get("SAPHIRA_CONFIG_FILE", "/etc/saphira/package_builder.sh")
+    script = r'''
+set -eu
+set -a
+. "$1"
+shift
+for name do
+    value=${!name-}
+    builtin printf '%s\0%s\0' "$name" "$value"
+done
+'''
+    result = subprocess.run(
+        ["/bin/bash", "--noprofile", "--norc", "-c", script, "buildpkg-config", config_path, *CONFIG_KEYS],
+        check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    parts = result.stdout.split(b"\0")
+    values = {parts[index].decode(): parts[index + 1].decode() for index in range(0, len(parts) - 1, 2)}
+    missing = [key for key in CONFIG_KEYS if not values.get(key)]
+    if missing:
+        die(f"configuration fields are empty: {', '.join(missing)}")
+    return values
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def overlay_mounts_referencing(path: str) -> list[tuple[int, str]]:
+    """Every process whose mountinfo contains an overlay mount referencing
+    ``path`` (as lower/upper/work or mountpoint). Used to keep retired base
+    roots alive while any live overlay still depends on them."""
+    references: list[tuple[int, str]] = []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            mountinfo = (entry / "mountinfo").read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for line in mountinfo.splitlines():
+            if " - overlay " in line and path in line:
+                references.append((int(entry.name), line))
+                break
+    return references
+
+
+def dynamic_runtime_files(executable: str) -> list[str]:
+    try:
+        result = subprocess.run(["ldd", executable], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    except (FileNotFoundError, subprocess.CalledProcessError) as exc:
+        die(f"cannot determine bootstrap runtime for {executable}: {exc}")
+    paths = {executable}
+    for path in re.findall(r"/[A-Za-z0-9_+.,/@:-]+", result.stdout):
+        if os.path.exists(path):
+            paths.add(path)
+    return sorted(paths)
+
+
+def _is_real_root() -> bool:
+    """True only for genuine host root; a mapped uid 0 inside our own
+    unprivileged user namespace is the expected controller identity."""
+    try:
+        with open("/proc/self/uid_map", encoding="utf-8") as stream:
+            row = stream.readline().split()
+        return row == ["0", "0", "1"] and os.geteuid() == 0
+    except OSError:
+        return os.geteuid() == 0
+
+
+def reexec_in_user_namespace() -> None:
+    """Re-exec the controller once inside a dedicated unprivileged user
+    namespace. Entering the overlay holder's mount namespace later (setns)
+    requires CAP_SYS_ADMIN in the user namespace that owns it, so the
+    controller and every overlay holder must share that one namespace; a
+    host-side unprivileged process cannot enter a foreign one."""
+    if os.environ.get("SAPHIRA_BUILDPKG_USERNS") == "1":
+        if _is_real_root():
+            print("buildpkg: must run as an unprivileged controller", file=sys.stderr)
+            raise SystemExit(1)
+        return
+    if os.geteuid() == 0:
+        print("buildpkg: must run as an unprivileged controller", file=sys.stderr)
+        raise SystemExit(1)
+    unshare = shutil.which("unshare")
+    if not unshare:
+        print("buildpkg: unshare is required for the overlay-backed build root", file=sys.stderr)
+        raise SystemExit(1)
+    script = str(Path(__file__).resolve())
+    environment = dict(os.environ)
+    environment["SAPHIRA_BUILDPKG_USERNS"] = "1"
+    try:
+        os.execve(unshare, [unshare, "--user", "--map-root-user", sys.executable, script, *sys.argv[1:]], environment)
+    except OSError as exc:
+        print(f"buildpkg: cannot re-exec inside the controller user namespace: {exc}", file=sys.stderr)
+        raise SystemExit(1)
+
+
+class Transaction:
+    def __init__(self, config: dict[str, str], target: str, source: str | None, *, root: Path | None = None):
+        self.config = config
+        self.target = target
+        self.source = source
+        self.build_root = Path(config["SAPHIRA_BUILD_ROOT"])
+        self.workspace = self.build_root / f"{target}.buildpkg"
+        # `root` is overridden only by the canonical base-root seeder, which
+        # reuses the exact per-workspace root-generation logic against the
+        # visible staging directory /build/rootfs_overlay/base.new.
+        self.root = root if root is not None else self.workspace / "root"
+        self.stage = self.workspace / "stage"
+        self.artifacts = self.workspace / "artifacts"
+        self.logs = self.workspace / "logs"
+        self.package_tmp = self.workspace / "package-tmp"
+        self.plan_path = self.workspace / "plan.json"
+        self.artifact_manifest = self.workspace / "artifact-manifest.json"
+        self.bootstrap_receipt = self.workspace / "bootstrap-seed.json"
+        self.log_path = self.logs / "buildpkg.log"
+        self.log_stream = None
+        self.incoming_building: Path | None = None
+        # OverlayFS layout: one canonical immutable base root plus this
+        # workspace's private writable upper/workdir; `root` remains the
+        # merged view mountpoint for every Bubblewrap session.
+        self.overlay_root = self.build_root / "rootfs_overlay"
+        self.base_root = self.overlay_root / "base"
+        self.upper = self.workspace / "upper"
+        self.work = self.workspace / "work"
+        self.holder: subprocess.Popen | None = None
+        self.holder_pid: int | None = None
+
+    def prepare(self) -> None:
+        self.build_root.mkdir(parents=True, exist_ok=True)
+        if self.workspace.exists() or self.workspace.is_symlink():
+            marker = self.workspace / "FAILED"
+            if not marker.is_file() or marker.is_symlink():
+                die(f"workspace already exists without a trusted FAILED marker: {self.workspace}")
+            try:
+                marker_value = marker.read_text(encoding="utf-8")
+            except OSError as exc:
+                die(f"cannot read FAILED marker in {self.workspace}: {exc}")
+            if marker_value != FAILED_MARKER:
+                die(f"workspace FAILED marker is not trusted: {marker}")
+            self._kill_recorded_holder()
+            shutil.rmtree(self.workspace)
+        self.workspace.mkdir()
+        for directory in (
+            self.root, self.upper, self.work,
+            self.stage, self.artifacts / self.config["SAPHIRA_ARCH"],
+            self.logs, self.package_tmp,
+        ):
+            directory.mkdir(parents=True)
+        base_receipt = self.overlay_root / "state" / "bootstrap-seed.json"
+        if not base_receipt.is_file():
+            die(f"canonical base root receipt is missing (run with SAPHIRA_BASE_REBUILD=1 to rebuild): {base_receipt}")
+        shutil.copy2(base_receipt, self.bootstrap_receipt)
+        self.log_stream = self.log_path.open("x", encoding="utf-8")
+
+    def log(self, message: str) -> None:
+        if self.log_stream is None or self.log_stream.closed:
+            return
+        self.log_stream.write(message.rstrip("\n") + "\n")
+        self.log_stream.flush()
+
+    def run(self, command: list[str], *, env: dict[str, str] | None = None, capture: bool = False) -> subprocess.CompletedProcess[str]:
+        self.log(f"RUN {shlex.join(command)}")
+        try:
+            result = subprocess.run(
+                command, check=True, text=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
+            )
+        except FileNotFoundError:
+            die(f"required tool is missing: {command[0]}")
+        except subprocess.CalledProcessError as exc:
+            if exc.stdout:
+                self.log(exc.stdout)
+            if exc.stderr:
+                self.log(exc.stderr)
+            die(f"command failed ({exc.returncode}): {command[0]}")
+        if result.stdout:
+            self.log(result.stdout)
+        if result.stderr:
+            self.log(result.stderr)
+        return result
+
+    def _kill_recorded_holder(self) -> None:
+        """A retried failed workspace still has its overlay holder running;
+        stop it before the workspace (and its upper/work dirs) are replaced,
+        so two holders can never claim the same workspace."""
+        record = self.workspace / "overlay-holder.json"
+        if not record.is_file():
+            return
+        try:
+            pid = int(json.loads(record.read_text(encoding="utf-8"))["pid"])
+        except (OSError, ValueError, KeyError, json.JSONDecodeError):
+            return
+        if pid <= 1:
+            return
+        try:
+            cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode("utf-8", "replace")
+        except OSError:
+            return
+        if "saphira-overlay-holder" not in cmdline or str(self.workspace) not in cmdline:
+            return
+        try:
+            os.killpg(os.getpgid(pid), signal.SIGTERM)
+        except (OSError, ProcessLookupError):
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError:
+                return
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and Path(f"/proc/{pid}").exists():
+            time.sleep(0.1)
+        if Path(f"/proc/{pid}").exists():
+            try:
+                os.killpg(os.getpgid(pid), signal.SIGKILL)
+            except (OSError, ProcessLookupError):
+                pass
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+            time.sleep(0.5)
+
+    def start_overlay(self) -> None:
+        unshare = shutil.which("unshare")
+        if not unshare:
+            die("unshare is required for the overlay-backed build root")
+        lower = str(self.base_root)
+        upper = str(self.upper)
+        work = str(self.work)
+        root = str(self.root)
+        options = f"lowerdir={lower},upperdir={upper},workdir={work},{OVERLAY_OPTIONS}"
+        marker = f"# saphira-overlay-holder {self.workspace}"
+        # The holder only unshares the mount namespace: it must stay inside
+        # the controller's user namespace so the controller (uid 0 there)
+        # can setns into it for every root-touching session. The marker is a
+        # shell comment at both exec levels so it stays visible in the final
+        # /proc/<pid>/cmdline for holder identification and cleanup.
+        script = (
+            f"{marker}\n"
+            f"mount -t overlay overlay -o {shlex.quote(options)} {shlex.quote(root)} || exit 90\n"
+            f"exec /bin/sh -c {shlex.quote(marker + chr(10) + f'while [ -d {shlex.quote(str(self.workspace))} ]; do sleep 5; done')}\n"
+        )
+        holder_err_path = self.logs / "overlay-holder.err"
+        holder_err = holder_err_path.open("wb")
+        try:
+            self.holder = subprocess.Popen(
+                [unshare, "--mount", "/bin/sh", "-c", script],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=holder_err, cwd="/",
+                start_new_session=True,
+            )
+        finally:
+            holder_err.close()
+        deadline = time.monotonic() + 30
+        while True:
+            if self.holder.poll() is not None:
+                self.holder = None
+                die(f"overlay holder exited early with status: see {holder_err_path}")
+            if self._overlay_mounted():
+                break
+            if time.monotonic() > deadline:
+                self.stop_overlay()
+                die(f"overlay merged root did not appear at {root} within 30s; see {holder_err_path}")
+            time.sleep(0.2)
+        self.holder_pid = self.holder.pid
+        record = {
+            "schema": HOLDER_SCHEMA,
+            "pid": self.holder_pid,
+            "workspace": str(self.workspace),
+            "root": root, "lower": lower, "upper": upper, "work": work,
+            "options": options,
+        }
+        (self.workspace / "overlay-holder.json").write_text(
+            json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8",
+        )
+        self.log(f"OVERLAY {root} <- lower={lower} upper={upper} work={work} (holder pid {self.holder_pid})")
+
+    def _overlay_mounted(self) -> bool:
+        if self.holder is None or self.holder.pid is None:
+            return False
+        try:
+            with open(f"/proc/{self.holder.pid}/mountinfo", encoding="utf-8") as stream:
+                mountinfo = stream.read()
+        except OSError:
+            return False
+        return any(" - overlay " in line and f"upperdir={self.upper}" in line for line in mountinfo.splitlines())
+
+    def stop_overlay(self) -> None:
+        if self.holder is None:
+            return
+        holder, self.holder = self.holder, None
+        if holder.poll() is None:
+            # The holder owns a session (start_new_session), so killing the
+            # group also reaps its poll children; the namespace (and the
+            # overlay mount with it) disappears immediately, which matters
+            # because the workspace removal right after must not race a
+            # still-mounted overlay workdir.
+            try:
+                os.killpg(os.getpgid(holder.pid), signal.SIGTERM)
+            except (OSError, ProcessLookupError):
+                holder.terminate()
+            try:
+                holder.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(os.getpgid(holder.pid), signal.SIGKILL)
+                except (OSError, ProcessLookupError):
+                    holder.kill()
+                holder.wait(timeout=10)
+        self.log("OVERLAY unmounted: holder terminated before workspace removal")
+
+    def _nsenter_prefix(self) -> list[str]:
+        if self.holder_pid is None:
+            die("overlay holder is not running; the merged root is unavailable")
+        nsenter = shutil.which("nsenter")
+        if not nsenter:
+            die("nsenter is required to enter the overlay holder namespace")
+        # The controller and holder share one user namespace (reexec_in_user_
+        # namespace), so entering the holder's mount namespace is permitted.
+        return [
+            nsenter,
+            f"--mount=/proc/{self.holder_pid}/ns/mnt",
+            "--",
+        ]
+
+    def _merged_root_has_file(self, path: str) -> bool:
+        result = subprocess.run(
+            [*self._nsenter_prefix(), "--root", str(self.root), "/bin/sh", "-c", f"test -f {shlex.quote(path)}"],
+            check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        return result.returncode == 0
+
+    def _write_overlay_recover(self) -> None:
+        lines = [
+            "Overlay root diagnosis",
+            "",
+            f"workspace: {self.workspace}",
+            f"merged root (OverlayFS view): {self.root}",
+            f"lower (canonical base, read-only): {self.base_root}",
+            f"upper (this package's writes): {self.upper}",
+            f"work (overlay workdir): {self.work}",
+            "",
+        ]
+        if self.holder is not None and self.holder.poll() is None:
+            pid = self.holder.pid
+            lines += [
+                f"holder pid {pid} is still running: the merged root is mounted right now.",
+                "inspect it with:",
+                f"  nsenter --target {pid} --mount -- /bin/sh",
+                "",
+                "the holder exits automatically (within ~5s) once this workspace",
+                "directory is removed (e.g. cleanpkg). Keep upper/ and work/ while",
+                "diagnosing; the base root itself is shared and must never be",
+                "modified.",
+            ]
+        else:
+            lines += [
+                "no overlay holder is running; reconstruct the merged view manually:",
+                "  unshare --user --map-root-user --mount /bin/sh -c '"
+                f"mount -t overlay overlay -o \"lowerdir={self.base_root},upperdir={self.upper},"
+                f"workdir={self.work},{OVERLAY_OPTIONS}\" {self.root}; exec sleep 2147483647'",
+            ]
+        (self.workspace / "OVERLAY-RECOVER.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    def resolve(self) -> dict[str, object]:
+        resolver = str(Path(self.config["SAPHIRA_BINDIR"]) / "resolvepkg")
+        result = self.run([resolver, self.target], capture=True)
+        try:
+            plan = json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            die(f"resolver did not emit a valid machine plan: {exc}")
+        if plan.get("schema") != PLAN_SCHEMA or plan.get("target") != self.target:
+            die("resolver plan identity does not match the build request")
+        builds = plan.get("builds")
+        if not isinstance(builds, list) or not builds or builds[-1].get("target") is not True:
+            die("resolver plan does not build the requested producer last")
+        with self.plan_path.open("x", encoding="utf-8") as stream:
+            json.dump(plan, stream, sort_keys=True, separators=(",", ":"))
+            stream.write("\n")
+        return plan
+
+    def _bootstrap_bwrap(self, apk_arguments: list[str]) -> None:
+        runtime = dynamic_runtime_files(self.config["SAPHIRA_APK"])
+        directories = {"/bin", "/lib", "/usr", "/usr/bin", "/usr/lib", "/target", "/repository", "/keys"}
+        for path in runtime:
+            parent = Path(path).parent
+            while str(parent) not in ("/", "."):
+                directories.add(str(parent))
+                parent = parent.parent
+        command = [
+            self.config["SAPHIRA_BWRAP"], "--die-with-parent", "--new-session",
+            "--unshare-all", "--uid", "0", "--gid", "0", "--clearenv",
+        ]
+        for directory in sorted(directories, key=lambda item: (item.count("/"), item)):
+            command.extend(("--dir", directory))
+        command.extend(("--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp"))
+        for path in runtime:
+            command.extend(("--ro-bind", path, path))
+        repo_dir = live_repo_dir(self.config)
+        trust_key = Path(self.config["SAPHIRA_TRUST_KEY"])
+        command.extend(("--bind", str(self.root), "/target"))
+        command.extend(("--ro-bind", str(repo_dir), "/repository"))
+        command.extend(("--ro-bind", str(trust_key), f"/keys/{trust_key.name}"))
+        command.extend(("--setenv", "PATH", "/usr/bin:/bin"))
+        # Genesis transition: tolerate stage4-era payload overlaps
+        # (e.g. /usr/share/info/dir) during clean-root bootstrap; see
+        # root_apk for the matching flag and the planned validation stage.
+        command.extend((self.config["SAPHIRA_APK"], "--force-overwrite", *apk_arguments))
+        self.run(command)
+
+    @staticmethod
+    def _validated_bootstrap_path(raw_path: str) -> str:
+        if not raw_path.startswith("/") or raw_path == "/":
+            die(f"bootstrap manifest path must be an absolute file or tree: {raw_path}")
+        normalized = posixpath.normpath(raw_path)
+        if normalized != raw_path or normalized.startswith("/lib64") or normalized.startswith("/usr/lib64"):
+            die(f"unsafe or forbidden bootstrap manifest path: {raw_path}")
+        return normalized
+
+    @staticmethod
+    def _validate_link(path: str, link_target: str) -> None:
+        resolved = posixpath.normpath(
+            link_target if link_target.startswith("/") else posixpath.join(posixpath.dirname(path), link_target)
+        )
+        if not resolved.startswith("/") or resolved.startswith("/lib64") or resolved.startswith("/usr/lib64"):
+            die(f"bootstrap symlink escapes or references lib64: {path} -> {link_target}")
+
+    def seed_foundation(self) -> None:
+        source_root = Path(self.config["SAPHIRA_BOOTSTRAP_ROOT"])
+        manifest = Path(self.config["SAPHIRA_BOOTSTRAP_MANIFEST"])
+        if not source_root.is_absolute() or not source_root.is_dir():
+            die(f"bootstrap source root is not an absolute directory: {source_root}")
+        if not manifest.is_file() or manifest.is_symlink():
+            die(f"bootstrap manifest is missing or not a regular file: {manifest}")
+
+        selected: list[tuple[str, str]] = []
+        for line_number, raw_line in enumerate(manifest.read_text(encoding="utf-8").splitlines(), 1):
+            line = raw_line.partition("#")[0].strip()
+            if not line:
+                continue
+            fields = line.split()
+            if len(fields) != 2 or fields[0] not in ("path", "tree"):
+                die(f"invalid bootstrap manifest directive at {manifest}:{line_number}")
+            selected.append((fields[0], self._validated_bootstrap_path(fields[1])))
+        if not selected:
+            die("bootstrap manifest selected no foundational inputs")
+
+        entries: list[dict[str, object]] = []
+
+        def copy_one(absolute_path: str) -> None:
+            source = source_root / absolute_path.lstrip("/")
+            destination = self.root / absolute_path.lstrip("/")
+            try:
+                metadata = source.lstat()
+            except FileNotFoundError:
+                die(f"approved bootstrap input is absent from Egg v0.1: {absolute_path}")
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if os.path.lexists(destination):
+                die(f"duplicate bootstrap manifest destination: {absolute_path}")
+            if stat.S_ISLNK(metadata.st_mode):
+                link_target = os.readlink(source)
+                self._validate_link(absolute_path, link_target)
+                destination.symlink_to(link_target)
+                digest = hashlib.sha256(link_target.encode()).hexdigest()
+                entry_type = "symlink"
+                size = len(link_target.encode())
+            elif stat.S_ISREG(metadata.st_mode):
+                shutil.copy2(source, destination, follow_symlinks=False)
+                digest = sha256_file(destination)
+                entry_type = "file"
+                size = metadata.st_size
+            else:
+                die(f"bootstrap input is neither a regular file nor symlink: {absolute_path}")
+            entries.append({
+                "path": absolute_path, "type": entry_type, "mode": stat.S_IMODE(metadata.st_mode),
+                "size": size, "sha256": digest,
+            })
+
+        copied: set[str] = set()
+        for directive, absolute_path in selected:
+            source = source_root / absolute_path.lstrip("/")
+            paths: list[str]
+            if directive == "path":
+                paths = [absolute_path]
+            else:
+                if not source.is_dir() or source.is_symlink():
+                    die(f"approved bootstrap tree is absent or not a real directory: {absolute_path}")
+                paths = []
+                for directory, directory_names, file_names in os.walk(source, followlinks=False):
+                    directory_names.sort()
+                    file_names.sort()
+                    relative_directory = Path(directory).relative_to(source_root)
+                    for name in file_names:
+                        paths.append("/" + (relative_directory / name).as_posix())
+                    # os.walk puts symlinked directories in directory_names; copy the
+                    # links themselves and do not descend through them.
+                    for name in list(directory_names):
+                        candidate = Path(directory) / name
+                        if candidate.is_symlink():
+                            paths.append("/" + (relative_directory / name).as_posix())
+                            directory_names.remove(name)
+            for path in paths:
+                self._validated_bootstrap_path(path)
+                if path in copied:
+                    die(f"duplicate bootstrap manifest input: {path}")
+                copy_one(path)
+                copied.add(path)
+
+        receipt = {
+            "schema": "saphira-bootstrap-seed/v1",
+            "generation": "Saphira-v0.1-to-v0.2",
+            "manifest": str(manifest),
+            "manifest_sha256": sha256_file(manifest),
+            "entries": sorted(entries, key=lambda item: str(item["path"])),
+        }
+        with self.bootstrap_receipt.open("x", encoding="utf-8") as stream:
+            json.dump(receipt, stream, sort_keys=True, separators=(",", ":"))
+            stream.write("\n")
+        self.log(
+            f"BOOTSTRAP seeded {len(entries)} explicit Saphira v0.1 ABI/runtime inputs "
+            f"from manifest {receipt['manifest_sha256']}"
+        )
+
+    def seed_root_packages(self) -> None:
+        seed = shlex.split(self.config["SAPHIRA_BUILD_SEED"])
+        if not seed:
+            die("configured Saphira build seed is empty")
+        self._bootstrap_bwrap([
+            "--root", "/target", "--initdb", "--no-cache", "--no-network",
+            "--repositories-file", "/dev/null", "--keys-dir", "/keys",
+            "--repository", "/repository/Packages.adb", "add", *seed,
+        ])
+        ca_update = self.root / "usr/sbin/update-ca-certificates"
+        if not ca_update.is_file():
+            die("repository seed did not provide /usr/sbin/update-ca-certificates")
+        shell_link = self.root / "bin/sh"
+        if not os.path.lexists(shell_link):
+            self.run([
+                self.config["SAPHIRA_BWRAP"], "--die-with-parent", "--new-session",
+                "--unshare-all", "--uid", "0", "--gid", "0", "--clearenv",
+                "--bind", str(self.root), "/", "/bin/ln", "-s", "bash", "/bin/sh",
+            ])
+        if not shell_link.is_symlink() or os.readlink(shell_link) != "bash":
+            die("Saphira root /bin/sh is not the expected link to bash")
+        env_link = self.root / "usr/bin/env"
+        if not os.path.lexists(env_link):
+            self.run([
+                self.config["SAPHIRA_BWRAP"], "--die-with-parent", "--new-session",
+                "--unshare-all", "--uid", "0", "--gid", "0", "--clearenv",
+                "--bind", str(self.root), "/", "/bin/ln", "-s", "/bin/env",
+                "/usr/bin/env",
+            ])
+        if not (env_link.is_symlink() or env_link.is_file()):
+            die("Saphira root initialization did not provide /usr/bin/env")
+        self.run([
+            self.config["SAPHIRA_BWRAP"], "--die-with-parent", "--new-session",
+            "--unshare-all", "--uid", "0", "--gid", "0", "--clearenv",
+            "--bind", str(self.root), "/", "--dev", "/dev", "--proc", "/proc",
+            "--tmpfs", "/tmp", "--setenv", "PATH", "/usr/bin:/bin:/usr/sbin:/sbin",
+            "/usr/sbin/update-ca-certificates",
+        ])
+        if not (self.root / "etc/ssl/certs/ca-certificates.crt").is_file():
+            die("Saphira root initialization did not create the CA certificate bundle")
+        # A minimal account database: builds routinely run `install -o root`
+        # and friends, which need a resolvable root user even when the
+        # configured seed does not ship saphira-baselayout.
+        passwd = self.root / "etc/passwd"
+        try:
+            passwd_content = passwd.read_text(encoding="utf-8")
+        except OSError:
+            passwd_content = ""
+        if "root:x:0:0" not in passwd_content:
+            self.run([
+                self.config["SAPHIRA_BWRAP"], "--die-with-parent", "--new-session",
+                "--unshare-all", "--uid", "0", "--gid", "0", "--clearenv",
+                "--bind", str(self.root), "/", "/bin/sh", "-c",
+                "printf 'root:x:0:0:root:/root:/bin/sh\\n' >> /etc/passwd && "
+                "{ grep -q '^root:' /etc/group 2>/dev/null || "
+                "printf 'root:x:0:\\n' >> /etc/group; }",
+            ])
+
+    def root_apk(self, arguments: list[str], *, allow_untrusted: bool = False) -> None:
+        repo_dir = live_repo_dir(self.config)
+        trust_key = Path(self.config["SAPHIRA_TRUST_KEY"])
+        # The merged overlay root lives in the holder's mount namespace, so
+        # every root-touching session enters that namespace first; the bind
+        # of self.root then attaches the OverlayFS merged view as /.
+        command = [*self._nsenter_prefix(),
+            self.config["SAPHIRA_BWRAP"], "--die-with-parent", "--new-session",
+            "--unshare-all", "--uid", "0", "--gid", "0", "--clearenv",
+            "--bind", str(self.root), "/",
+            "--dir", "/repository", "--dir", "/artifacts", "--dir", "/keys",
+            "--ro-bind", str(repo_dir), "/repository",
+            "--ro-bind", str(self.artifacts), "/artifacts",
+            "--ro-bind", str(trust_key), f"/keys/{trust_key.name}",
+            "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp",
+            "--setenv", "PATH", "/usr/bin:/bin",
+            "/usr/bin/apk", "--root", "/", "--no-cache", "--no-network",
+            "--repositories-file", "/dev/null", "--keys-dir", "/keys",
+            "--repository", "/repository/Packages.adb",
+            # Genesis transition: some stage4-era packages ship
+            # overlapping artifacts (e.g. /usr/share/info/dir); the
+            # root setup must not deadlock on their legacy payloads.
+            # A proper file-overlap validation stage is planned in
+            # saphira-build.
+            "--force-overwrite",
+        ]
+        if allow_untrusted:
+            command.extend(("--allow-untrusted", "--force-non-repository"))
+        command.extend(arguments)
+        self.run(command)
+
+    def install_repository_requirements(self, plan: dict[str, object]) -> None:
+        requirements = [f"{node['name']}={node['version']}" for node in plan["repository"]]
+        if requirements:
+            self.root_apk(["add", *requirements])
+
+    def run_worker(self, producer: str, *, top_target: bool) -> None:
+        recipe_root = Path(self.config["SAPHIRA_RECIPE_ROOT"])
+        worker = Path(self.config["SAPHIRA_BINDIR"]) / "buildpkg-single"
+        config_file = Path(self.config["SAPHIRA_CONFIG_FILE"])
+        worker_path = "/usr/bin:/bin:/usr/sbin:/sbin"
+        ccache_options: list[str] = []
+        if self._merged_root_has_file("/usr/bin/ccache"):
+            ccache_host = Path(os.environ.get("SAPHIRA_CCACHE_DIR", "/build/ccache"))
+            ccache_host.mkdir(parents=True, exist_ok=True)
+            masquerade = self.stage / "ccache-bin"
+            masquerade.mkdir(exist_ok=True)
+            for compiler in ("gcc", "g++", "clang", "clang++"):
+                link = masquerade / compiler
+                if not link.is_symlink():
+                    link.symlink_to("/usr/bin/ccache")
+            # cc is NOT cached: several build systems (cmake, plain
+            # Makefiles) invoke cc directly and ccache-as-cc fails to
+            # resolve the real compiler through the masquerade PATH.
+            link = masquerade / "cc"
+            if not link.is_symlink():
+                link.symlink_to("/usr/bin/gcc")
+            worker_path = "/build/ccache-bin:" + worker_path
+            ccache_options = [
+                "--dir", "/ccache", "--bind", str(ccache_host), "/ccache",
+                "--setenv", "CCACHE_DIR", "/ccache",
+                # ccache needs the real compiler name/lookup path: the
+                # masquerade bin dir hides it from its own PATH search.
+                "--setenv", "CCACHE_PATH", "/usr/bin",
+                "--setenv", "CCACHE_COMPILERCHECK", "content",
+            ]
+        command = [*self._nsenter_prefix(),
+            self.config["SAPHIRA_BWRAP"], "--die-with-parent", "--new-session",
+            "--unshare-all", "--share-net", "--uid", "0", "--gid", "0", "--clearenv",
+            "--bind", str(self.root), "/",
+            "--dir", "/recipes", "--ro-bind", str(recipe_root), "/recipes",
+            "--dir", "/repository", "--ro-bind", str(live_repo_dir(self.config)), "/repository",
+            "--dir", "/build", "--bind", str(self.stage), "/build",
+            "--dir", "/artifacts", "--bind", str(self.artifacts), "/artifacts",
+            "--dir", "/controller", "--ro-bind", str(worker), "/controller/buildpkg-single",
+            "--ro-bind", str(config_file), "/controller/package_builder.sh",
+            "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp",
+            *ccache_options,
+            "--setenv", "PATH", worker_path,
+            "--setenv", "HOME", "/tmp", "--setenv", "LANG", "C",
+            "--setenv", "SAPHIRA_ISOLATED_BUILD", "1",
+            "--setenv", "SAPHIRA_CONFIG_FILE", "/controller/package_builder.sh",
+            "--setenv", "SAPHIRA_RECIPE_ROOT", "/recipes",
+            "--setenv", "SAPHIRA_BUILD_ROOT", "/build",
+            "--setenv", "SAPHIRA_REPO_DIR", "/repository",
+            "--setenv", "SAPHIRA_INCOMING_DIR", "/artifacts",
+            "--setenv", "SAPHIRA_PACKAGE_TMP", "/tmp/package",
+            "--setenv", "SAPHIRA_BINDIR", "/controller",
+            "--setenv", "SAPHIRA_ARCH", self.config["SAPHIRA_ARCH"],
+            "--setenv", "SAPHIRA_ROOT_SHELL", self.config["SAPHIRA_ROOT_SHELL"],
+            "--setenv", "SOURCE_DATE_EPOCH", self.config["SAPHIRA_SOURCE_DATE_EPOCH"],
+        ]
+        for name in RECIPE_ENV_PASSTHROUGH:
+            value = os.environ.get(name)
+            if value:
+                command.extend(("--setenv", name, value))
+        network_files = (
+            (self.config["SAPHIRA_HOST_RESOLV_CONF"], "/etc/resolv.conf"),
+            (self.config["SAPHIRA_HOST_HOSTS_FILE"], "/etc/hosts"),
+        )
+        for source_path, target_path in network_files:
+            source_file = Path(source_path)
+            if not source_file.is_file():
+                die(f"configured build network file is missing: {source_file}")
+            command.extend(("--ro-bind", str(source_file), target_path))
+        worker_arguments = [self.config["SAPHIRA_ROOT_SHELL"], "/controller/buildpkg-single", producer]
+        if top_target and self.source:
+            source = Path(self.source).resolve()
+            if not source.is_dir():
+                die(f"explicit source directory does not exist: {source}")
+            command.extend(("--dir", "/input", "--ro-bind", str(source), "/input"))
+            worker_arguments.append("/input")
+        command.extend(worker_arguments)
+        self.run(command)
+
+    def package(self, producer: str) -> dict[str, object]:
+        makepkg = str(Path(self.config["SAPHIRA_BINDIR"]) / "makepkg")
+        environment = os.environ.copy()
+        environment.update({
+            "SAPHIRA_CONFIG_FILE": self.config["SAPHIRA_CONFIG_FILE"],
+            "SAPHIRA_BUILD_ROOT": str(self.stage),
+            "SAPHIRA_INCOMING_DIR": str(self.artifacts),
+            "SAPHIRA_PACKAGE_TMP": str(self.package_tmp),
+            "SAPHIRA_ARCH": self.config["SAPHIRA_ARCH"],
+            "SAPHIRA_APK": self.config["SAPHIRA_APK"],
+            "SAPHIRA_FAKEROOT_BOOTSTRAP": "1" if self.target == "fakeroot" else "0",
+            "SAPHIRA_BOOTSTRAP_TARGET": self.target,
+            "SOURCE_DATE_EPOCH": self.config["SAPHIRA_SOURCE_DATE_EPOCH"],
+        })
+        self.run([makepkg, producer], env=environment)
+        receipt_path = self.stage / producer / "artifact-manifest.json"
+        try:
+            with receipt_path.open(encoding="utf-8") as stream:
+                receipt = json.load(stream)
+        except (OSError, json.JSONDecodeError) as exc:
+            die(f"canonical makepkg receipt is missing or invalid for {producer}: {exc}")
+        if receipt.get("constructor") != "makepkg" or receipt.get("producer") != producer:
+            die(f"artifact receipt does not identify canonical makepkg for {producer}")
+        return receipt
+
+    def install_local_outputs(self, node: dict[str, object]) -> None:
+        names = set(node["required_outputs"])
+        if any(name != node["producer"] for name in names):
+            names.add(node["producer"])
+        paths = [f"/artifacts/{self.config['SAPHIRA_ARCH']}/{name}-{node['version']}.apk" for name in sorted(names)]
+        for path in paths:
+            host_path = self.artifacts / self.config["SAPHIRA_ARCH"] / Path(path).name
+            if not host_path.is_file():
+                die(f"graph-required local output is missing: {host_path}")
+        self.root_apk(["add", *paths], allow_untrusted=True)
+
+    def build(self, plan: dict[str, object]) -> list[dict[str, object]]:
+        receipts = []
+        for node in plan["builds"]:
+            producer = node["producer"]
+            self.log(f"BUILD {producer} {node['version']}")
+            self.run_worker(producer, top_target=bool(node["target"]))
+            receipt = self.package(producer)
+            receipts.append(receipt)
+            if not node["target"]:
+                self.install_local_outputs(node)
+        return receipts
+
+    def _published_content_hash(self, package: Path) -> str | None:
+        """Signature-independent identity of a published APK (the adbdump
+        'hashes' line covers the whole ADB block: metadata + data)."""
+        apk = self.config["SAPHIRA_APK"]
+        dump = subprocess.run(
+            [apk, "adbdump", str(package)], check=True, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        ).stdout
+        for line in dump.splitlines():
+            if line.startswith("  hashes: "):
+                return line.strip().split(" ", 2)[1]
+        return None
+
+    def _generation_repo_dirs(self) -> list[tuple[str, Path]]:
+        """Every known generation repository: declared SAPHIRA_REPO_NAMES
+        entries plus any other index-bearing directory under
+        SAPHIRA_REPO_DIR (defensive config-drift check)."""
+        names = self.config["SAPHIRA_REPO_NAMES"].split()
+        repo_root = Path(self.config["SAPHIRA_REPO_DIR"])
+        arch = self.config["SAPHIRA_ARCH"]
+        labels = list(dict.fromkeys(names))
+        if repo_root.is_dir():
+            for entry in sorted(repo_root.iterdir()):
+                if entry.name not in labels and (entry / arch / "Packages.adb").is_file():
+                    labels.append(entry.name)
+        return [(label, repo_root / label / arch) for label in labels]
+
+    def guard_published_payload(self, package_files: list[Path]) -> None:
+        """A rebuild whose payload differs from the published package of the
+        same name and version can never publish (immutable-filename rule).
+        Auto-bump the recipe revision (ledger-recorded) and fail with a
+        clear message, so a rebuild is required and the collision can never
+        reach - or churn against - sign-apk-repo."""
+        repo_dir = live_repo_dir(self.config)
+        live_filenames = [entry.name for entry in repo_dir.iterdir() if entry.is_file()]
+        for gen_name, gen_dir in self._generation_repo_dirs():
+            if gen_dir == repo_dir:
+                continue
+            for package in package_files:
+                if (gen_dir / package.name).is_file():
+                    newer = _newer_live_nvr(live_filenames, package.name)
+                    if newer is not None:
+                        die(
+                            f"refusing to stage {package.name}: live repository already carries "
+                            f"newer {newer} on the same version line; bump pkgrel for a genuinely "
+                            "new revision - never promote superseded archive revisions forward "
+                            "into the live view"
+                        )
+                    die(
+                        f"refusing to stage {package.name}: exact filename already published in "
+                        f"generation repository '{gen_name}' and published NVRs are immutable "
+                        "across generations - never rebuild a published artifact; run "
+                        "promote-repo to repair generation lineage (repair-only: both repositories "
+                        "are normally populated by sign-apk-repo in one operation), or bump pkgrel "
+                        "for a genuinely new revision"
+                    )
+        for package in package_files:
+            published = repo_dir / package.name
+            if not published.is_file():
+                continue
+            new_hash = self._published_content_hash(package)
+            pub_hash = self._published_content_hash(published)
+            if new_hash is None or pub_hash is None or new_hash == pub_hash:
+                continue
+            recipe = Path(self.config["SAPHIRA_RECIPE_ROOT"]) / self.target / "recipe.sh"
+            text = recipe.read_text(encoding="utf-8")
+            match = re.search(r"^pkgrel=(\d+)\s*$", text, re.MULTILINE)
+            if not match:
+                die(f"payload differs from published {package.name} but pkgrel cannot be auto-bumped in {recipe}")
+            old_rel = int(match.group(1))
+            new_rel = old_rel + 1
+            recipe.write_text(re.sub(r"^pkgrel=\d+\s*$", f"pkgrel={new_rel}", text, count=1, flags=re.MULTILINE), encoding="utf-8")
+            ledger_dir = Path(self.config.get("SAPHIRA_RELEASE_STATE", "/var/lib/saphira-build/releases"))
+            ledger_dir.mkdir(parents=True, exist_ok=True)
+            entry = {
+                "ts": subprocess.run(["date", "-u", "+%Y-%m-%dT%H:%M:%SZ"], capture_output=True, text=True).stdout.strip(),
+                "action": "auto-bump-payload-change", "package": self.target,
+                "version": package.name[len(self.target) + 1:].rsplit(".", 1)[0],
+                "from": f"r{old_rel}", "to": f"r{new_rel}",
+                "tool": "buildpkg", "reason": f"payload differs from published {package.name}",
+            }
+            with (ledger_dir / "releases.jsonl").open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps(entry, sort_keys=True) + "\n")
+            die(f"payload differs from published {package.name}: recipe auto-bumped r{old_rel} -> r{new_rel} (recorded in the release ledger); rebuild required to publish")
+
+    def promote(self, receipts: list[dict[str, object]]) -> Path:
+        aggregate = {
+            "schema": "saphira-build-artifacts/v1",
+            "target": self.target,
+            "constructors": receipts,
+            "bootstrap_seed": json.loads(self.bootstrap_receipt.read_text(encoding="utf-8")),
+        }
+        with self.artifact_manifest.open("x", encoding="utf-8") as stream:
+            json.dump(aggregate, stream, sort_keys=True, separators=(",", ":"))
+            stream.write("\n")
+        incoming_arch = Path(self.config["SAPHIRA_INCOMING_DIR"]) / self.config["SAPHIRA_ARCH"]
+        incoming_arch.mkdir(parents=True, exist_ok=True)
+        identifier = uuid.uuid4().hex[:12]
+        # Ready transactions are unpublished staging: supersede any older
+        # one for the same target so repeated rebuilds cannot accumulate
+        # duplicate transactions that later collide at publication under
+        # the immutable-filename rule. Renamed, never deleted, with a
+        # note - the visible lifecycle rules still apply to the renamed
+        # directories.
+        for stale in sorted(incoming_arch.glob(f"{self.target}-*-ready")):
+            retired = stale.with_name(stale.name + ".superseded-rebuilt")
+            os.rename(stale, retired)
+            (retired / "RETIRED-NOTE.txt").write_text(
+                f"Superseded automatically: a newer buildpkg run of {self.target} "
+                f"created {self.target}-{identifier}-ready, replacing this "
+                "unpublished staging transaction. Retained as evidence under "
+                "the visible lifecycle rules.\n",
+                encoding="utf-8",
+            )
+        building = incoming_arch / f"{self.target}-{identifier}-building"
+        ready = incoming_arch / f"{self.target}-{identifier}-ready"
+        building.mkdir()
+        self.incoming_building = building
+        package_files = sorted((self.artifacts / self.config["SAPHIRA_ARCH"]).glob("*.apk"))
+        if not package_files:
+            die("transaction constructed no APK artifacts")
+        self.guard_published_payload(package_files)
+        manifest_lines = []
+        for package in package_files:
+            destination = building / package.name
+            shutil.copy2(package, destination)
+            manifest_lines.append(f"{sha256_file(destination)}  {package.name}")
+        shutil.copy2(self.artifact_manifest, building / "artifact-manifest.json")
+        shutil.copy2(self.bootstrap_receipt, building / "bootstrap-seed.json")
+        (building / "target").write_text(self.target + "\n", encoding="utf-8")
+        (building / "manifest.sha256").write_text("\n".join(manifest_lines) + "\n", encoding="utf-8")
+        os.replace(building, ready)
+        self.incoming_building = None
+        return ready
+
+    def fail(self, message: str) -> None:
+        if self.incoming_building and self.incoming_building.exists():
+            shutil.rmtree(self.incoming_building)
+        if self.log_stream and not self.log_stream.closed:
+            self.log(f"FAILED {message}")
+            self.log_stream.close()
+        if self.workspace.is_dir():
+            (self.workspace / "FAILED").write_text(FAILED_MARKER, encoding="utf-8")
+            # Failed workspaces stay diagnosable: the upper layer, workdir,
+            # logs, plan and the holder-recorded merged root are all retained.
+            # The holder (if alive) keeps the overlay mounted for inspection
+            # and self-terminates when the workspace is removed.
+            self._write_overlay_recover()
+
+    def succeed(self) -> None:
+        self.stop_overlay()
+        if self.log_stream and not self.log_stream.closed:
+            self.log_stream.close()
+        shutil.rmtree(self.workspace)
+
+
+class BaseRoot:
+    """The one canonical immutable build root backing every overlay workspace.
+
+    The base is created by reusing the exact per-workspace root-generation
+    logic (bootstrap manifest seeding + repository seed install) through a
+    seeder Transaction pointed at visible staging, then swapped in. Its
+    identity is pinned by a fingerprint over the bootstrap manifest content,
+    the build seed, the bootstrap source root and the architecture, recorded
+    in a visible state file; buildpkg rebuilds the base when the fingerprint
+    no longer matches (or SAPHIRA_BASE_REBUILD=1 forces it)."""
+
+    schema = BASE_SCHEMA
+    state_schema = BASE_STATE_SCHEMA
+
+    def __init__(self, config: dict[str, str]):
+        self.config = config
+        self.build_root = Path(config["SAPHIRA_BUILD_ROOT"])
+        self.overlay_root = self.build_root / "rootfs_overlay"
+        self.base = self.overlay_root / "base"
+        self.staging = self.overlay_root / "base.new"
+        self.state_dir = self.overlay_root / "state"
+        self.state_path = self.state_dir / "base.json"
+        self.receipt_path = self.state_dir / "bootstrap-seed.json"
+        self.seed_log = self.state_dir / "base-seed.log"
+
+    def fingerprint(self) -> tuple[str, str]:
+        manifest = Path(self.config["SAPHIRA_BOOTSTRAP_MANIFEST"])
+        manifest_sha = sha256_file(manifest)
+        digest = hashlib.sha256()
+        for part in (
+            self.schema, self.config["SAPHIRA_ARCH"],
+            self.config["SAPHIRA_BUILD_SEED"], self.config["SAPHIRA_BOOTSTRAP_ROOT"],
+            manifest_sha,
+        ):
+            digest.update(part.encode("utf-8"))
+            digest.update(b"\0")
+        return digest.hexdigest(), manifest_sha
+
+    def intact(self) -> bool:
+        shell = self.base / "bin/sh"
+        return (
+            self.base.is_dir()
+            and shell.is_symlink()
+            and os.readlink(shell) == "bash"
+            and (self.base / "usr/bin/env").exists()
+            and (self.base / "usr/bin/apk").is_file()
+            and (self.base / "etc/ssl/certs/ca-certificates.crt").is_file()
+        )
+
+    def ensure(self) -> None:
+        self.overlay_root.mkdir(parents=True, exist_ok=True)
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        fingerprint, manifest_sha = self.fingerprint()
+        with (self.state_dir / "base.lock").open("a+b") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            state = None
+            if self.state_path.is_file():
+                try:
+                    state = json.loads(self.state_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    state = None
+            fresh = (
+                isinstance(state, dict)
+                and state.get("schema") == self.state_schema
+                and state.get("fingerprint") == fingerprint
+                and self.intact()
+            )
+            if os.environ.get("SAPHIRA_BASE_REBUILD", "") == "1":
+                print("buildpkg: SAPHIRA_BASE_REBUILD=1 forces a canonical base root rebuild", file=sys.stderr)
+                fresh = False
+            if not fresh:
+                self._rebuild(fingerprint, manifest_sha)
+            self._retire_stale_bases()
+
+    def _rebuild(self, fingerprint: str, manifest_sha: str) -> None:
+        if self.staging.exists() or self.staging.is_symlink():
+            shutil.rmtree(self.staging)
+        seeder = Transaction(self.config, "rootfs-overlay-base", None, root=self.staging)
+        seeder.bootstrap_receipt = self.receipt_path
+        if self.receipt_path.exists():
+            self.receipt_path.unlink()
+        seeder.log_stream = self.seed_log.open("a", encoding="utf-8")
+        try:
+            seeder.seed_foundation()
+            seeder.seed_root_packages()
+        finally:
+            seeder.log_stream.close()
+        if self.base.exists() or self.base.is_symlink():
+            os.rename(self.base, self.overlay_root / f"base.old-{int(time.time())}-{os.getpid()}")
+        os.rename(self.staging, self.base)
+        state = {
+            "schema": self.state_schema,
+            "fingerprint": fingerprint,
+            "created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "arch": self.config["SAPHIRA_ARCH"],
+            "seed": self.config["SAPHIRA_BUILD_SEED"],
+            "manifest": self.config["SAPHIRA_BOOTSTRAP_MANIFEST"],
+            "manifest_sha256": manifest_sha,
+        }
+        if self.state_path.exists():
+            self.state_path.unlink()
+        with self.state_path.open("x", encoding="utf-8") as stream:
+            json.dump(state, stream, sort_keys=True, separators=(",", ":"))
+            stream.write("\n")
+
+    def _retire_stale_bases(self) -> None:
+        for stale in sorted(self.overlay_root.glob("base.old-*")):
+            if overlay_mounts_referencing(str(stale)):
+                print(f"buildpkg: retained {stale}: still referenced by overlay mounts", file=sys.stderr)
+                continue
+            shutil.rmtree(stale)
+
+
+def check_disabled_recipe(config: dict[str, str], package: str) -> None:
+    recipe = Path(config["SAPHIRA_RECIPE_ROOT"]) / package / "recipe.sh"
+    if not recipe.is_file():
+        return
+    probe = subprocess.run(
+        ["/bin/bash", "--noprofile", "--norc", "-c",
+         '. "$1" >/dev/null 2>&1\n'
+         'printf "%s\\0%s\\0" disabled "${disabled-}" reason "${disabled_reason-}"\n',
+         "buildpkg-disabled-probe", str(recipe)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    parts = probe.stdout.split(b"\0")
+    values = dict(zip(parts[0::2], parts[1::2]))
+    if values.get(b"disabled", b"").decode() == "yes":
+        reason = values.get(b"reason", b"").decode() or "no reason given"
+        die(f"recipe disabled: {package} ({reason})")
+
+
+def main() -> int:
+    reexec_in_user_namespace()
+    if len(sys.argv) not in (2, 3) or not PACKAGE_RE.fullmatch(sys.argv[1]):
+        print(f"usage: {sys.argv[0]} PACKAGE [SOURCE]", file=sys.stderr)
+        return 1
+    transaction = None
+    try:
+        config = load_config()
+        check_disabled_recipe(config, sys.argv[1])
+        # One canonical base root for all workspaces: created once from the
+        # same seed logic, refreshed when its fingerprint no longer matches.
+        BaseRoot(config).ensure()
+        transaction = Transaction(config, sys.argv[1], sys.argv[2] if len(sys.argv) == 3 else None)
+        transaction.prepare()
+        transaction.start_overlay()
+        plan = transaction.resolve()
+        transaction.install_repository_requirements(plan)
+        receipts = transaction.build(plan)
+        ready = transaction.promote(receipts)
+        transaction.succeed()
+        print(f"buildpkg: built {sys.argv[1]}; unsigned artifacts ready at {ready}")
+        return 0
+    except (BuildError, OSError, ValueError, json.JSONDecodeError, subprocess.CalledProcessError) as exc:
+        message = str(exc)
+        if transaction is not None:
+            transaction.fail(message)
+            print(f"buildpkg: failed workspace retained at {transaction.workspace}", file=sys.stderr)
+        print(f"buildpkg: {message}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

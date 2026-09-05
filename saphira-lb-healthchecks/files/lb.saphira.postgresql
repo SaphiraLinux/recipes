@@ -1,0 +1,10 @@
+#!/bin/sh
+# lb.saphira.postgresql - PostgreSQL SSLRequest negotiation (L7).
+# Server must answer S (SSL supported) or N (SSL not supported);
+# LB_SAPHIRA_PG_REQUIRE_SSL=1 demands S. No authentication.
+# Copyright (c) 2026 AKADATA. MIT licensed.
+. /usr/share/saphira/lb-healthchecks/lib/lb-saphira-common.sh
+lb_init "$@"
+set -- postgres --host "$LB_REAL" --port "${LB_RPORT:-5432}" --timeout "$LB_TIMEOUT"
+[ "${LB_SAPHIRA_PG_REQUIRE_SSL:-0}" = "1" ] && set -- "$@" --require-ssl
+lb_probe "$@"

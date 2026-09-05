@@ -1,0 +1,352 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+test "$(id -u)" -eq 0 || {
+	printf 'saphira-firstboot: must be run as root\n' >&2
+	exit 1
+}
+
+marker=${SAPHIRA_FIRSTBOOT_MARKER:-/etc/saphira-firstboot-required}
+network_apply=${SAPHIRA_FIRSTBOOT_NETWORK_APPLY:-/usr/libexec/saphira/apply-network.sh}
+state_dir=${SAPHIRA_FIRSTBOOT_STATE_DIR:-/var/lib/saphira-firstboot}
+root_dir=${SAPHIRA_FIRSTBOOT_ROOT:-}
+root_dir=${root_dir%/}
+root_dir=${root_dir:-/}
+completed=$state_dir/completed
+pending_user=$state_dir/pending-user
+active=$state_dir/active
+
+test -x "$network_apply" || {
+	printf 'saphira-firstboot: network helper is absent: %s\n' "$network_apply" >&2
+	exit 1
+}
+if test -e "$completed"; then
+	printf 'Saphira firstboot has already completed.\n' >&2
+	exit 1
+fi
+test -e "$marker" || {
+	printf 'Akadata first-boot configuration is already complete.\n'
+	exit 0
+}
+
+install -d -m 0700 "$state_dir"
+if test "${SAPHIRA_NETWORK_SKIP_OWNERSHIP:-0}" = 1; then
+	test "$(stat -c %a "$state_dir")" = 700 || {
+		printf 'saphira-firstboot: state directory is not protected\n' >&2
+		exit 1
+	}
+else
+	test "$(stat -c %u:%a "$state_dir")" = '0:700' || {
+		printf 'saphira-firstboot: state directory is not protected\n' >&2
+		exit 1
+	}
+fi
+transaction_tmp=$(mktemp "$state_dir/.active.XXXXXX")
+chmod 0600 "$transaction_tmp"
+mv -f "$transaction_tmp" "$active"
+network_state=$(mktemp "$state_dir/.network.XXXXXX")
+chmod 0600 "$network_state"
+repository_file=${SAPHIRA_FIRSTBOOT_REPOSITORIES_FILE:-/etc/apk/repositories}
+cleanup()
+{
+	rm -f -- "$network_state" "$active"
+}
+trap cleanup EXIT
+setup_signal()
+{
+	printf '\nFirst-boot setup cannot be interrupted; please complete the current step.\n' >&2
+}
+trap setup_signal INT TERM HUP QUIT TSTP
+
+read_setup()
+{
+	local variable=$1
+	while ! IFS= read -r "$variable"; do
+		printf '\nEnd-of-file is not a valid setup response; please enter a value.\n' >&2
+	done
+}
+
+set_password()
+{
+	local account=$1
+	while ! passwd "$account"; do
+		printf 'Password setup was interrupted or failed; please try again.\n' >&2
+	done
+}
+
+install_shell_defaults()
+{
+	local home group
+	home=$root_dir/home/$username
+	group=$(id -gn "$username")
+	install -d -m 0700 "$root_dir/root" "$home"
+	install -m 0644 "$root_dir/etc/skel/.bashrc" "$root_dir/root/.bashrc"
+	install -m 0644 "$root_dir/etc/skel/.profile" "$root_dir/root/.profile"
+	install -m 0644 "$root_dir/etc/skel/.bashrc" "$home/.bashrc"
+	install -m 0644 "$root_dir/etc/skel/.profile" "$home/.profile"
+	chown 0:0 "$root_dir/root/.bashrc" "$root_dir/root/.profile"
+	chown "$username:$group" "$home/.bashrc" "$home/.profile"
+}
+
+IPV4_MODE=off IPV4_CIDR= IPV4_GATEWAY=
+IPV6_MODE=off IPV6_CIDR= IPV6_GATEWAY=
+DNS_SERVERS=9.9.9.9 DNS_SEARCH=
+REPOSITORY_URL=https://packages.saphira.vm2.uk/hatchling
+
+write_network_state()
+{
+	{
+		printf 'TYPE=%s\nINTERFACE=%s\n' physical eth0
+		printf 'IPV4_MODE=%s\nIPV4_CIDR=%s\nIPV4_GATEWAY=%s\nIPV4_METRIC=\n' \
+			"$IPV4_MODE" "$IPV4_CIDR" "$IPV4_GATEWAY"
+		printf 'IPV6_MODE=%s\nIPV6_CIDR=%s\nIPV6_GATEWAY=%s\nIPV6_METRIC=\n' \
+			"$IPV6_MODE" "$IPV6_CIDR" "$IPV6_GATEWAY"
+		printf 'DNS_SERVERS=%s\nDNS_SEARCH=%s\n' "$DNS_SERVERS" "$DNS_SEARCH"
+	} > "$network_state"
+	chmod 0600 "$network_state"
+}
+
+validate_network_state()
+{
+	write_network_state
+	"$network_apply" validate "$network_state"
+}
+
+ask_family()
+{
+	local family=$1 address gateway
+	while :; do
+		printf '%s address and CIDR prefix (blank for not configured): ' "$family"
+		read_setup address
+		if test -z "$address"; then
+			if test "$family" = IPv4; then
+				IPV4_MODE=off IPV4_CIDR= IPV4_GATEWAY=
+			else
+				IPV6_MODE=off IPV6_CIDR= IPV6_GATEWAY=
+			fi
+			return
+		fi
+		if test "$family" = IPv4; then
+			"$network_apply" validate-ipv4-cidr "$address" || {
+				printf 'Enter a valid IPv4 address with CIDR prefix.\n' >&2
+				continue
+			}
+			while :; do
+				printf 'IPv4 gateway: '
+				read_setup gateway
+				if test -n "$gateway" && "$network_apply" validate-ipv4 "$gateway"; then
+					IPV4_MODE=static IPV4_CIDR=$address IPV4_GATEWAY=$gateway
+					if validate_network_state; then return; fi
+				fi
+				printf 'Enter a valid IPv4 gateway inside the configured prefix.\n' >&2
+			done
+		else
+			"$network_apply" validate-ipv6-cidr "$address" || {
+				printf 'Enter a valid IPv6 address with CIDR prefix.\n' >&2
+				continue
+			}
+			while :; do
+				printf 'IPv6 gateway: '
+				read_setup gateway
+				if test -n "$gateway" && "$network_apply" validate-ipv6 "$gateway"; then
+					IPV6_MODE=static IPV6_CIDR=$address IPV6_GATEWAY=$gateway
+					if validate_network_state; then return; fi
+				fi
+				printf 'Enter a valid IPv6 gateway inside the configured prefix.\n' >&2
+			done
+		fi
+	done
+}
+
+validate_dns_list()
+{
+	local family=$1 values=$2 server
+	for server in $values; do
+		"$network_apply" "validate-$family" "$server" || return 1
+	done
+}
+
+validate_repository_url()
+{
+	local url=$1 rest
+	rest=${url#https://}
+	[[ $url == https://* && $rest != "$url" &&
+		$url != *[![:graph:]]* &&
+		$rest =~ ^[A-Za-z0-9.-]+(:[0-9]+)?([/?#].*)?$ ]]
+}
+
+write_repository()
+{
+	local directory temporary
+	directory=${repository_file%/*}
+	test "$directory" != "$repository_file" || directory=.
+	install -d -m 0755 "$directory"
+	temporary=$(mktemp "$directory/.repositories.XXXXXX")
+	trap 'rm -f "$temporary"' RETURN
+	printf '%s\n' "$REPOSITORY_URL" > "$temporary"
+	chmod 0644 "$temporary"
+	if test "${SAPHIRA_FIRSTBOOT_SKIP_OWNERSHIP:-0}" != 1; then
+		chown 0:0 "$temporary"
+	fi
+	mv -f -- "$temporary" "$repository_file"
+	trap - RETURN
+}
+
+choose_dns()
+{
+	local choice provider_data dns4 dns6 custom4 custom6
+	while :; do
+		printf '%s\n' \
+			'DNS provider:' \
+			'  1. Quad9' \
+			'  2. Cloudflare' \
+			'  3. OpenDNS / Cisco Umbrella' \
+			'  4. Custom'
+		printf 'Choice: '
+		read_setup choice
+		case $choice in
+			1|2|3)
+				provider_data=$("$network_apply" dns-provider "$choice")
+				IFS='|' read -r dns4 dns6 <<< "$provider_data"
+				DNS_SERVERS="$dns4 $dns6"
+				return
+				;;
+			4)
+				printf 'Custom IPv4 DNS servers (space-separated): '
+				read_setup custom4
+				printf 'Custom IPv6 DNS servers (space-separated): '
+				read_setup custom6
+				if test -z "$custom4$custom6" ||
+					! validate_dns_list ipv4 "$custom4" ||
+					! validate_dns_list ipv6 "$custom6"; then
+					printf 'Enter at least one valid DNS server in the correct family field.\n' >&2
+					continue
+				fi
+				DNS_SERVERS=$(printf '%s %s\n' "$custom4" "$custom6")
+				DNS_SERVERS=$("$network_apply" normalize-dns "$DNS_SERVERS")
+				return
+				;;
+			*) printf 'Choose 1, 2, 3, or 4.\n' >&2 ;;
+		esac
+	done
+}
+
+is_safe_full_name()
+{
+	local value=$1
+	[[ $value != *[![:print:]]* && $value != *:* ]]
+}
+
+is_safe_username()
+{
+	local value=$1
+	(( ${#value} <= 32 )) &&
+		[[ $value =~ ^[a-z_][a-z0-9_-]*$ ]] &&
+		test "$value" != root
+}
+
+printf 'Set the root password.\n'
+set_password root
+
+if test -s "$pending_user"; then
+	username=$(<"$pending_user")
+	if ! is_safe_username "$username"; then
+			printf 'saphira-firstboot: protected pending username is invalid\n' >&2
+			exit 1
+	fi
+	getent passwd "$username" >/dev/null 2>&1 || {
+		printf 'saphira-firstboot: pending operator account is absent\n' >&2
+		exit 1
+	}
+	printf 'Resuming configuration for administrator account %s.\n' "$username"
+else
+	printf 'Login name for the administrator account: '
+	while :; do
+		read_setup username
+		if ! is_safe_username "$username"; then
+			printf 'Use 1-32 lowercase letters, digits, underscores, and hyphens; start with a letter or underscore.\n' >&2
+		else
+			if getent passwd "$username" >/dev/null 2>&1; then
+				printf 'That account already exists.\n' >&2
+			else
+				break
+			fi
+		fi
+		printf 'Login name for the administrator account: '
+	done
+fi
+
+printf 'Full name: '
+read_setup full_name
+is_safe_full_name "$full_name" || {
+	printf 'Full name contains unsupported control or delimiter characters.\n' >&2
+	exit 1
+}
+
+if ! test -s "$pending_user"; then
+	pending_tmp=$(mktemp "$state_dir/.pending-user.XXXXXX")
+	chmod 0600 "$pending_tmp"
+	printf '%s\n' "$username" > "$pending_tmp"
+	mv -f "$pending_tmp" "$pending_user"
+fi
+
+if ! getent passwd "$username" >/dev/null 2>&1; then
+	while ! useradd -m -c "$full_name" -s /bin/bash -G wheel "$username"; do
+		printf 'Administrator account creation was interrupted or failed; please try again.\n' >&2
+	done
+fi
+set_password "$username"
+
+printf '\nNetwork Configuration\n'
+printf 'Configure eth0 using static addressing.\n'
+ask_family IPv4
+ask_family IPv6
+choose_dns
+while :; do
+	printf 'DNS search domain (optional): '
+	read_setup DNS_SEARCH
+	if "$network_apply" validate-domain "$DNS_SEARCH"; then break; fi
+	printf 'Enter a valid DNS search suffix or leave it blank.\n' >&2
+done
+validate_network_state
+
+while :; do
+	printf 'APK repository URL [%s]: ' "$REPOSITORY_URL"
+	read_setup repository_answer
+	if test -n "$repository_answer"; then
+		REPOSITORY_URL=$repository_answer
+	fi
+	if validate_repository_url "$REPOSITORY_URL"; then break; fi
+	printf 'Enter a valid HTTPS APK repository URL.\n' >&2
+done
+
+printf '\nNetwork summary\n'
+printf 'Interface:       eth0\n'
+printf 'IPv4:            %s\n' "${IPV4_CIDR:-not configured}"
+printf 'IPv4 gateway:    %s\n' "${IPV4_GATEWAY:-not configured}"
+printf 'IPv6:            %s\n' "${IPV6_CIDR:-not configured}"
+printf 'IPv6 gateway:    %s\n' "${IPV6_GATEWAY:-not configured}"
+printf 'DNS:             %s\n' "$DNS_SERVERS"
+printf 'Search domain:   %s\n' "${DNS_SEARCH:-none}"
+printf 'APK repository:  %s\n' "$REPOSITORY_URL"
+printf 'Apply this configuration? [y/N] '
+	read_setup answer
+case $answer in
+	y|Y) ;;
+	*) printf 'First-boot configuration cancelled.\n'; exit 1 ;;
+esac
+
+while ! "$network_apply" apply "$network_state"; do
+	printf 'Network configuration was interrupted or failed; please retry the setup.\n' >&2
+done
+
+write_repository
+install_shell_defaults
+
+completed_tmp=$(mktemp "$state_dir/.completed.XXXXXX")
+chmod 0600 "$completed_tmp"
+printf 'completed\n' > "$completed_tmp"
+mv -f "$completed_tmp" "$completed"
+rm -f -- "$pending_user" "$marker"
+printf 'First-boot configuration complete for %s.\n' "$username"

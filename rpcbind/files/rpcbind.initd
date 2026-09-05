@@ -1,0 +1,21 @@
+#!/sbin/openrc-run
+
+description="RPC port mapper (required for NFSv3 and other ONC RPC services)"
+
+# rpcbind runs in the foreground with -f; -w keeps warm-start state across
+# restarts. Upstream runs as root by default (--with-rpcuser=root).
+command="/usr/sbin/rpcbind"
+command_args="-f -w"
+supervisor="supervise-daemon"
+pidfile="/run/rpcbind.pid"
+
+depend()
+{
+	use net
+	after firewall
+}
+
+start_pre()
+{
+	checkpath -d -m 0755 /run/rpcbind
+}

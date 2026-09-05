@@ -1,0 +1,11 @@
+[Unit]
+Description=mailDragon setup (apply configs, init database)
+After=network.target postfix.service dovecot.service rspamd.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/share/saphira/maildragon/scripts/md-setup apply
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

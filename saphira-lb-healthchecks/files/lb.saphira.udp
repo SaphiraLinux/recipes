@@ -1,0 +1,12 @@
+#!/bin/sh
+# lb.saphira.udp - UDP listener bound on real:$4 (L4).
+# Sends one datagram on a connected socket; an ICMP port/host-unreachable
+# return marks the listener absent. A reply (if any) must match
+# LB_SAPHIRA_EXPECT when set.
+# Copyright (c) 2026 AKADATA. MIT licensed.
+. /usr/share/saphira/lb-healthchecks/lib/lb-saphira-common.sh
+lb_init "$@"
+set -- udp --host "$LB_REAL" --port "${LB_RPORT:-$LB_VPORT}" --timeout "$LB_TIMEOUT"
+[ -n "$LB_SAPHIRA_SEND" ] && set -- "$@" --send "$LB_SAPHIRA_SEND"
+[ -n "$LB_SAPHIRA_EXPECT" ] && set -- "$@" --expect "$LB_SAPHIRA_EXPECT"
+lb_probe "$@"

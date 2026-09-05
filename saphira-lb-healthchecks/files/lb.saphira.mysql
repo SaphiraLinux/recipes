@@ -1,0 +1,10 @@
+#!/bin/sh
+# lb.saphira.mysql - MySQL protocol handshake parse (L7).
+# Reads the initial handshake packet and validates protocol version;
+# closes with COM_QUIT. No authentication.
+# Copyright (c) 2026 AKADATA. MIT licensed.
+. /usr/share/saphira/lb-healthchecks/lib/lb-saphira-common.sh
+lb_init "$@"
+set -- mysql --host "$LB_REAL" --port "${LB_RPORT:-3306}" --timeout "$LB_TIMEOUT"
+[ -n "$LB_SAPHIRA_MYSQL_VERSION" ] && set -- "$@" --expect "$LB_SAPHIRA_MYSQL_VERSION"
+lb_probe "$@"

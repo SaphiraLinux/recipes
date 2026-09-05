@@ -1,0 +1,8 @@
+# Saphira proxyto instance selection, shared by the OpenRC init
+# script (/etc/init.d/proxyto) and the systemd unit
+# (proxyto.service) via EnvironmentFile.
+#
+# The name loads /etc/saphira/proxyto/<name>.conf (shipped instances:
+# geomyidae). After editing, restart the running service:
+# rc-service proxyto restart (OpenRC) or systemctl restart proxyto.
+proxyto_name="geomyidae"

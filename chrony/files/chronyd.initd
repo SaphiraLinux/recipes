@@ -1,0 +1,16 @@
+#!/sbin/openrc-run
+
+description="NTP daemon (chrony)"
+
+# Mirrors the approved systemd unit (ExecStart=/usr/sbin/chronyd -n -u
+# root): foreground (-n) under supervise-daemon.  Neither init wraps the
+# other; nothing is auto-enabled at install.
+command="/usr/sbin/chronyd"
+command_args="-n -u root"
+supervisor="supervise-daemon"
+
+depend()
+{
+	use net
+	need localmount
+}

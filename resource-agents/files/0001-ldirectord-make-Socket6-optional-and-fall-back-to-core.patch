@@ -1,0 +1,85 @@
+--- a/ldirectord/ldirectord.in
++++ b/ldirectord/ldirectord.in
+@@ -771,6 +771,7 @@
+ use strict;
+ # Set defaults for configuration variables in the "set_defaults" function
+ use vars qw(
++	    $HAVE_SOCKET6
+ 	    $VERSION_STR
+ 	    $AUTOCHECK
+ 	    $CHECKINTERVAL
+@@ -864,11 +865,26 @@
+ #use English;
+ #use Time::HiRes qw( gettimeofday tv_interval );
+ use Socket;
+-use Socket6 qw(NI_NUMERICHOST NI_NUMERICSERV NI_NAMEREQD getaddrinfo getnameinfo inet_pton inet_ntop);
+-# Workaround warnning messages : Three "_in6" symbols redefined.
+-eval "use Socket6 qw(pack_sockaddr_in6)" unless defined &pack_sockaddr_in6;
+-eval "use Socket6 qw(sockaddr_in6)" unless defined &sockaddr_in6;
+-eval "use Socket6 qw(unpack_sockaddr_in6)" unless defined &unpack_sockaddr_in6;
++# Socket6 is optional: modern Perl core Socket provides the complete
++# getaddrinfo/getnameinfo/inet_pton/inet_ntop and sockaddr_in6 API. The
++# behavioural difference between the backends is that the core functions
++# die() on error while Socket6 returns an error string, so every call
++# site goes through eval blocks and both are safe. $HAVE_SOCKET6 is true
++# when the Socket6 module is in use.
++BEGIN {
++	$HAVE_SOCKET6 = eval {
++		require Socket6;
++		Socket6->import(qw(NI_NUMERICHOST NI_NUMERICSERV NI_NAMEREQD
++			getaddrinfo getnameinfo inet_pton inet_ntop
++			pack_sockaddr_in6 sockaddr_in6 unpack_sockaddr_in6));
++		1;
++	};
++	unless ($HAVE_SOCKET6) {
++		Socket->import(qw(NI_NUMERICHOST NI_NUMERICSERV NI_NAMEREQD
++			getaddrinfo getnameinfo inet_pton inet_ntop
++			pack_sockaddr_in6 sockaddr_in6 unpack_sockaddr_in6));
++	}
++}
+ 
+ use Sys::Hostname;
+ use POSIX qw(setsid :sys_wait_h);
+@@ -5288,11 +5304,22 @@
+ 	if ($name =~ /\[(.*)\]/) {
+ 		$name = $1;
+ 	}
+-	my @host = getaddrinfo($name, 0, $af);
+-	if (!defined($host[3])) {
++	# Socket6::getaddrinfo takes a positional family hint and returns
++	# an error string; the core function takes hints and dies on error.
++	my @host = $HAVE_SOCKET6 ?
++		getaddrinfo($name, 0, $af) :
++		eval { getaddrinfo($name, 0, family => $af) };
++	if (!@host or !defined($host[3])) {
++		return undef;
++	}
++	# The core getnameinfo() dies on error while Socket6 returns an
++	# error string; both must yield undef here.
++	my @ret = eval {
++		getnameinfo($host[3], NI_NUMERICHOST | NI_NUMERICSERV)
++	};
++	if (!@ret or !defined($ret[0])) {
+ 		return undef;
+ 	}
+-	my @ret = getnameinfo($host[3], NI_NUMERICHOST | NI_NUMERICSERV);
+ 	if ($host[0] == AF_INET6) {
+ 		return "[$ret[0]]";
+ 	}
+@@ -5313,11 +5340,13 @@
+ 	my ($ip)=(@_);
+ 
+ 	$ip = &ld_strip_brackets($ip);
+-	my @host = getaddrinfo($ip,0);
+-	if (!defined($host[3])) {
++	my @host = eval { getaddrinfo($ip, 0) };
++	if (!@host or !defined($host[3])) {
+ 		return undef;
+ 	}
+-	my @ret = getnameinfo($host[3], NI_NAMEREQD);
++	# The core getnameinfo() dies on error while Socket6 returns an
++	# error string; both must yield undef here.
++	my @ret = eval { getnameinfo($host[3], NI_NAMEREQD) };
+ 	return undef unless(scalar(@ret) == 2);
+ 	return $ret[0];
+ }

@@ -1,0 +1,16 @@
+[Unit]
+Description=Open vSwitch switch daemon suite
+Documentation=man:ovs-ctl(8)
+After=network-pre.target
+Before=network.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+ExecStartPre=/bin/sh -c 'test -e /etc/openvswitch/conf.db || ovsdb-tool create /etc/openvswitch/conf.db'
+ExecStart=/usr/share/openvswitch/scripts/ovs-ctl --system-id=random start
+ExecStop=/usr/share/openvswitch/scripts/ovs-ctl stop
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

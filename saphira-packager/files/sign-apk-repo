@@ -1,0 +1,442 @@
+#!/bin/bash
+
+set -euo pipefail
+
+. "${SAPHIRA_CONFIG_FILE:-/etc/saphira/package_builder.sh}"
+
+# Shared index generation/signing (source tree and tests carry it next to
+# this script; the installed packager places it in /usr/lib/saphira-packager).
+lib_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+if [ -f "$lib_dir/repo-index.sh" ]; then
+	. "$lib_dir/repo-index.sh"
+elif [ -f /usr/lib/saphira-packager/repo-index.sh ]; then
+	. /usr/lib/saphira-packager/repo-index.sh
+else
+	printf 'sign-apk-repo: shared index helper repo-index.sh not found\n' >&2
+	exit 1
+fi
+
+die()
+{
+	printf 'sign-apk-repo: %s\n' "$*" >&2
+	exit 1
+}
+
+[ "$EUID" -eq 0 ] || die "must be run as root; use sudo explicitly"
+
+# Ownership policy: published /out state belongs to the invoking user with
+# the repository group, even when invoked through sudo. Repository
+# directories are kept setgid so group inheritance holds between writes.
+normalize_ownership()
+{
+	if [ -n "${SUDO_UID:-}" ]; then
+		chown "${SUDO_UID}:${SAPHIRA_REPO_GROUP:-saphira-build}" "$@" 2>/dev/null || true
+	fi
+}
+
+incoming_dir=$SAPHIRA_INCOMING_DIR/$SAPHIRA_ARCH
+sign_key=$SAPHIRA_SIGN_KEY
+trust_key=$SAPHIRA_TRUST_KEY
+trust_dir=${trust_key%/*}
+
+IFS=' ' read -ra repo_names <<< "$SAPHIRA_REPO_NAMES"
+[ "${#repo_names[@]}" -gt 0 ] || die "SAPHIRA_REPO_NAMES is empty"
+for repo_name in "${repo_names[@]}"; do
+	case $repo_name in
+		''|*[!A-Za-z0-9._-]*) die "invalid repository name: $repo_name" ;;
+	esac
+	repo_dir=$SAPHIRA_REPO_DIR/$repo_name/$SAPHIRA_ARCH
+	[ -d "$repo_dir" ] || die "generation repository does not exist: $repo_dir (seed it or fix SAPHIRA_REPO_NAMES)"
+done
+
+[ -r "$sign_key" ] || die "cannot read signing key: $sign_key"
+[ -r "$trust_key" ] || die "cannot read repository trust key: $trust_key"
+mkdir -p "$incoming_dir" "$SAPHIRA_PACKAGE_TMP"
+
+lock=$incoming_dir/sign-apk-repo.lock
+mkdir "$lock" 2>/dev/null || die "publication lock already exists: $lock"
+workspace=$(mktemp -d "$SAPHIRA_PACKAGE_TMP/sign-apk-repo-XXXXXXXX")
+packages_dir=$workspace/packages
+mkdir "$packages_dir"
+
+cleanup()
+{
+	rm -rf -- "$workspace"
+	rmdir "$lock" 2>/dev/null || true
+}
+trap cleanup EXIT HUP INT TERM
+
+shopt -s nullglob
+ready_transactions=("$incoming_dir"/*-ready)
+[ "${#ready_transactions[@]}" -gt 0 ] || die "no complete ready transactions in $incoming_dir"
+
+# Optional selective publication: when package names are given as
+# arguments, only transactions whose target matches are published. This
+# lets an operator unblock themselves without touching unrelated pending
+# transactions. Without arguments, all ready transactions publish.
+if [ "$#" -gt 0 ]; then
+	for pkg in "$@"; do
+		case $pkg in
+			''|*[!A-Za-z0-9._+-]*) die "invalid package name: $pkg" ;;
+		esac
+	done
+	selected=()
+	for transaction in "${ready_transactions[@]}"; do
+		[ -f "$transaction/target" ] || continue
+		target=$(cat "$transaction/target")
+		for pkg in "$@"; do
+			if [ "$target" = "$pkg" ]; then
+				selected+=("$transaction")
+				break
+			fi
+		done
+	done
+	[ "${#selected[@]}" -gt 0 ] ||
+		die "no ready transactions target the requested packages: $* (build one first: buildpkg $1)"
+	ready_transactions=("${selected[@]}")
+fi
+
+"$SAPHIRA_PYTHON" - "${ready_transactions[@]}" <<'PY'
+import hashlib
+import json
+import re
+import sys
+from pathlib import Path
+
+package_re = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*\.apk$")
+for raw in sys.argv[1:]:
+    transaction = Path(raw)
+    if transaction.is_symlink() or not transaction.is_dir() or not transaction.name.endswith("-ready"):
+        raise SystemExit(f"invalid ready transaction: {transaction}")
+    required = ("target", "manifest.sha256", "artifact-manifest.json", "bootstrap-seed.json")
+    for name in required:
+        path = transaction / name
+        if path.is_symlink() or not path.is_file():
+            raise SystemExit(f"ready transaction is incomplete: {path}")
+    target = (transaction / "target").read_text(encoding="utf-8").strip()
+    with (transaction / "artifact-manifest.json").open(encoding="utf-8") as stream:
+        artifact_manifest = json.load(stream)
+    with (transaction / "bootstrap-seed.json").open(encoding="utf-8") as stream:
+        bootstrap = json.load(stream)
+    if artifact_manifest.get("schema") != "saphira-build-artifacts/v1" or artifact_manifest.get("target") != target:
+        raise SystemExit(f"artifact manifest identity mismatch: {transaction}")
+    if artifact_manifest.get("bootstrap_seed") != bootstrap or bootstrap.get("schema") != "saphira-bootstrap-seed/v1":
+        raise SystemExit(f"bootstrap receipt mismatch: {transaction}")
+    constructors = artifact_manifest.get("constructors")
+    if not isinstance(constructors, list) or not constructors or any(item.get("constructor") != "makepkg" for item in constructors):
+        raise SystemExit(f"transaction did not use canonical makepkg exclusively: {transaction}")
+    expected = {}
+    for line in (transaction / "manifest.sha256").read_text(encoding="utf-8").splitlines():
+        fields = line.split("  ", 1)
+        if len(fields) != 2 or not re.fullmatch(r"[0-9a-f]{64}", fields[0]) or not package_re.fullmatch(fields[1]):
+            raise SystemExit(f"invalid package checksum manifest: {transaction}")
+        if fields[1] in expected:
+            raise SystemExit(f"duplicate package in checksum manifest: {fields[1]}")
+        expected[fields[1]] = fields[0]
+    actual = {path.name for path in transaction.glob("*.apk") if path.is_file() and not path.is_symlink()}
+    if set(expected) != actual or not actual:
+        raise SystemExit(f"package set does not match checksum manifest: {transaction}")
+    for name, digest in expected.items():
+        value = hashlib.sha256((transaction / name).read_bytes()).hexdigest()
+        if value != digest:
+            raise SystemExit(f"package checksum mismatch: {transaction / name}")
+PY
+
+publication_id=$(date -u +%Y%m%dT%H%M%SZ)-$$
+
+# Automatic retirement of pure-rebuild transactions: when EVERY package in
+# a transaction content-conflicts with the same-NVR published copy in some
+# generation repository, nothing in it can ever publish (published NVRs
+# are immutable; the published copy wins) and retiring it is safe. A
+# transaction mixing conflicting rebuilds with publishable packages must
+# stop loudly instead - the novel outputs must not be discarded alongside
+# the rebuilds.
+auto_retired=0
+publishable_transactions=()
+for transaction in "${ready_transactions[@]}"; do
+	conflicts=0
+	publishable=0
+	conflicting_name=""
+	for package in "$transaction"/*.apk; do
+		name=${package##*/}
+		published_apk=""
+		for candidate_repo in "${repo_names[@]}"; do
+			candidate=$SAPHIRA_REPO_DIR/$candidate_repo/$SAPHIRA_ARCH/$name
+			if [ -e "$candidate" ]; then
+				published_apk=$candidate
+				break
+			fi
+		done
+		if [ -z "$published_apk" ]; then
+			publishable=$((publishable + 1))
+			continue
+		fi
+		probe=$workspace/probe-${name}
+		cp -- "$package" "$probe"
+		"$SAPHIRA_APK" adbsign --allow-untrusted --sign-key "$sign_key" "$probe" >/dev/null 2>&1 ||
+			{ rm -f -- "$probe"; die "incoming package cannot be re-signed for comparison: $package"; }
+		if cmp -s -- "$probe" "$published_apk"; then
+			publishable=$((publishable + 1))
+		else
+			conflicts=$((conflicts + 1))
+			conflicting_name=$name
+		fi
+		rm -f -- "$probe"
+	done
+	if [ "$conflicts" -gt 0 ] && [ "$publishable" -eq 0 ]; then
+		retired=${transaction}.superseded-conflict
+		[ ! -e "$retired" ] || die "automatic retirement target already exists: $retired"
+		mv -- "$transaction" "$retired"
+		{
+			printf 'Automatically retired by sign-apk-repo: every package in this transaction\n'
+			printf 'is a rebuild of an NVR already published in a generation repository with\n'
+			printf 'different bytes (first conflict: %s). Published NVRs are immutable and\n' "$conflicting_name"
+			printf 'the published copy wins; nothing here could publish. Retained as evidence\n'
+			printf 'under the visible lifecycle rules; restore with a rename if disputed.\n'
+		} > "$retired/RETIRED-NOTE.txt"
+		printf 'sign-apk-repo: auto-retired pure-rebuild transaction %s (every package conflicts with an already-published NVR; the published copy wins)\n' "${transaction##*/}"
+		auto_retired=$((auto_retired + 1))
+	elif [ "$conflicts" -gt 0 ]; then
+		die "published filename is immutable and has different content: $conflicting_name (in transaction ${transaction##*/}; the transaction mixes publishable packages with conflicting rebuilds, so automatic retirement is not safe - retire the rebuild manually and re-run: mv '$transaction' '${transaction}.superseded-conflict')"
+	else
+		publishable_transactions+=("$transaction")
+	fi
+done
+if [ "${#publishable_transactions[@]}" -gt 0 ]; then
+	ready_transactions=("${publishable_transactions[@]}")
+else
+	printf 'sign-apk-repo: nothing left to publish after automatic retirement (%s transaction(s) auto-retired)\n' "$auto_retired"
+	trap - EXIT HUP INT TERM
+	cleanup
+	exit 0
+fi
+
+# Validation pass over every repo (no copies yet): per-repo published
+# conflicts die here, cross-transaction conflicts are detected globally,
+# and staged_sources accumulates the union of filenames needing
+# publication anywhere. Copies and signatures happen exactly once below,
+# outside the per-repo loop.
+declare -A staged_sources=()
+for repo_name in "${repo_names[@]}"; do
+	repo_dir=$SAPHIRA_REPO_DIR/$repo_name/$SAPHIRA_ARCH
+	for transaction in "${ready_transactions[@]}"; do
+	for package in "$transaction"/*.apk; do
+		name=${package##*/}
+		if [ -e "$repo_dir/$name" ]; then
+			if ! cmp -s "$package" "$repo_dir/$name"; then
+				# Incoming staging APKs are UNSIGNED while the
+				# published copy is signed, so raw-byte comparison
+				# is wrong for a deterministic same-version rebuild.
+				# Sign a scratch copy with the same key and compare
+				# again; only a real content difference conflicts.
+				probe=$(mktemp "$workspace/probe-XXXXXXXX.apk")
+				cp -- "$package" "$probe"
+				"$SAPHIRA_APK" adbsign --allow-untrusted --sign-key "$sign_key" "$probe"
+				if ! cmp -s "$probe" "$repo_dir/$name"; then
+					die "published filename is immutable and has different content: $name (in transaction ${transaction##*/}; the published copy wins - retire this transaction: mv '$transaction' '${transaction}.superseded-conflict' and re-run sign-apk-repo)"
+				fi
+				rm -f -- "$probe"
+			fi
+			continue
+		fi
+		if [ -n "${staged_sources[$name]-}" ]; then
+			if ! cmp -s "$package" "${staged_sources[$name]}"; then
+				die "ready transactions conflict for filename: $name (${transaction##*/} differs from an earlier staged transaction; keep the newer build and retire the other: mv '<stale transaction>' '<stale transaction>.superseded-conflict')"
+			fi
+			continue
+		fi
+		staged_sources[$name]=$package
+	done
+done
+done
+
+# Stage, sign and verify the union exactly once. Per-repo iterations
+# below only publish the subset missing from that repository.
+for name in "${!staged_sources[@]}"; do
+	cp --reflink=auto -- "${staged_sources[$name]}" "$packages_dir/$name"
+done
+for package in "$packages_dir"/*.apk; do
+	"$SAPHIRA_APK" adbsign --allow-untrusted --sign-key "$sign_key" "$package"
+	"$SAPHIRA_APK" verify --keys-dir "$trust_dir" "$package"
+done
+
+for repo_name in "${repo_names[@]}"; do
+	repo_dir=$SAPHIRA_REPO_DIR/$repo_name/$SAPHIRA_ARCH
+	install_set=()
+	for name in "${!staged_sources[@]}"; do
+		[ -e "$repo_dir/$name" ] || install_set+=("$packages_dir/$name")
+	done
+	all_packages=("$repo_dir"/*.apk)
+	[ "${#install_set[@]}" -eq 0 ] || all_packages+=("${install_set[@]}")
+	[ "${#all_packages[@]}" -gt 0 ] || die "publication set contains no APK files"
+	for package in "$repo_dir"/*.apk; do
+		"$SAPHIRA_APK" verify --keys-dir "$trust_dir" "$package" >/dev/null
+	done
+
+identities=$workspace/package-identities.json
+staged_list=$workspace/staged-packages.txt
+: > "$staged_list"
+for staged_file in "${!staged_sources[@]}"; do
+	printf '%s\n' "$staged_file" >> "$staged_list"
+done
+# Single adbdump per package: the identity pass (filename match, duplicate
+# detection) and the ownership gate share one dump each. Dumping twice
+# doubled process spawns over the full repo on every publication.
+"$SAPHIRA_PYTHON" - "$SAPHIRA_APK" "$identities" "$staged_list" "${all_packages[@]}" <<'PY'
+import json
+import re
+import subprocess
+import sys
+from collections import defaultdict
+from pathlib import Path
+
+apk, identities_path, staged_list, *packages = sys.argv[1:]
+staged_files = {line.strip() for line in Path(staged_list).read_text().splitlines() if line.strip()}
+DIR_RE = re.compile(r"^  - name: (\S+)$")
+FILE_RE = re.compile(r"^      - name: (\S+)$")
+TOP_RE = re.compile(r"^([A-Za-z][A-Za-z0-9_.-]*):")
+
+def load(path):
+    dump = subprocess.run([apk, "adbdump", str(path)], check=True, text=True, capture_output=True).stdout
+    name = version = None
+    files, replaces = [], set()
+    section, cur, in_replaces = None, None, False
+    for line in dump.splitlines():
+        top = TOP_RE.match(line)
+        if top:
+            section, cur, in_replaces = top.group(1), None, False
+            continue
+        if section == "info":
+            if re.match(r"^  replaces:", line):
+                in_replaces = True
+                continue
+            if in_replaces:
+                m = re.match(r"^    +- (\S+)$", line) or re.match(r"^    +- name: (\S+)$", line)
+                if m:
+                    replaces.add(m.group(1))
+                    continue
+                if re.match(r"^  \S", line):
+                    in_replaces = False
+            m = re.match(r"^  name: (\S+)$", line)
+            if m:
+                name = m.group(1)
+            m = re.match(r"^  version: (\S+)$", line)
+            if m:
+                version = m.group(1)
+        elif section == "paths":
+            m = DIR_RE.match(line)
+            if m:
+                cur = m.group(1)
+                continue
+            m = FILE_RE.match(line)
+            if m and cur:
+                files.append(f"{cur}/{m.group(1)}")
+    if not name or not version:
+        raise SystemExit(f"cannot read package identity: {path}")
+    return name, version, files, replaces
+
+identities = []
+seen = set()
+owners = defaultdict(dict)  # path -> {package name: version label}
+staged_names = set()
+staged_replaces_by_name = {}
+for raw in packages:
+    package = Path(raw)
+    name, version, files, replaces = load(package)
+    identity = (name, version)
+    if package.name != f"{identity[0]}-{identity[1]}.apk":
+        raise SystemExit(f"package filename does not match identity: {package}")
+    if identity in seen:
+        raise SystemExit(f"duplicate package identity: {identity[0]}={identity[1]}")
+    seen.add(identity)
+    identities.append({"name": identity[0], "version": identity[1]})
+    if package.name in staged_files:
+        staged_names.add(name)
+        staged_replaces_by_name[name] = replaces
+    for f in files:
+        owners[f][name] = f"{name}-{version}"
+Path(identities_path).write_text(json.dumps(sorted(identities, key=lambda item: (item["name"], item["version"])), separators=(",", ":")) + "\n", encoding="utf-8")
+
+collisions = {}
+for path, name_versions in sorted(owners.items()):
+    if len(name_versions) < 2:
+        continue
+    names = set(name_versions)
+    staged_here = sorted(names & staged_names)
+    if not staged_here:
+        continue  # legacy pair, handled by the purge pass
+    for staged_name in staged_here:
+        others = names - {staged_name}
+        if not others:
+            continue
+        if others <= staged_replaces_by_name.get(staged_name, set()):
+            continue
+        detail = ", ".join(name_versions[n] for n in sorted(others))
+        collisions[path] = (name_versions[staged_name], detail)
+if collisions:
+    lines = [f"{path}: claimed by {sv} and {dv}" for path, (sv, dv) in sorted(collisions.items())]
+    raise SystemExit(
+        "sign-apk-repo: file ownership collision - exactly one package must own a path; "
+        "fix the recipe split (never --force-overwrite):\n  " + "\n  ".join(lines)
+    )
+print(f"sign-apk-repo: ownership gate: {len(packages)} package(s) scanned, no file collisions")
+PY
+
+packages_adb=$workspace/$repo_name-Packages.adb
+apkindex=$workspace/$repo_name-APKINDEX.tar.gz
+repo_generate_index "$SAPHIRA_APK" "$packages_adb" "$apkindex" "$sign_key" "$trust_dir" \
+	"${all_packages[@]}" || die "index generation failed for $repo_name"
+
+"$SAPHIRA_PYTHON" - "$SAPHIRA_APK" "$identities" "$packages_adb" "$apkindex" <<'PY'
+import json
+import re
+import subprocess
+import sys
+
+apk, identities_path, *indexes = sys.argv[1:]
+with open(identities_path, encoding="utf-8") as stream:
+    expected = {(item["name"], item["version"]) for item in json.load(stream)}
+for index in indexes:
+    dump = subprocess.run([apk, "adbdump", index], check=True, text=True, capture_output=True).stdout
+    names = re.findall(r"^  - name: (\S+)$", dump, re.MULTILINE)
+    versions = re.findall(r"^    version: (\S+)$", dump, re.MULTILINE)
+    actual = set(zip(names, versions))
+    if len(names) != len(versions) or len(actual) != len(names) or actual != expected:
+        raise SystemExit(f"index identities/count do not match package set: {index}")
+PY
+
+publication_id=$(date -u +%Y%m%dT%H%M%SZ)-$$
+for package in ${install_set[@]+"${install_set[@]}"}; do
+	name=${package##*/}
+	temporary=$repo_dir/$name.publishing-$publication_id
+	[ ! -e "$repo_dir/$name" ] || die "package appeared concurrently: $name"
+	install -m 644 -- "$package" "$temporary"
+	mv -- "$temporary" "$repo_dir/$name"
+	normalize_ownership "$repo_dir/$name"
+done
+
+for index_name in Packages.adb APKINDEX.tar.gz; do
+	case $index_name in
+		Packages.adb) source_index=$packages_adb ;;
+		APKINDEX.tar.gz) source_index=$apkindex ;;
+	esac
+	temporary=$repo_dir/$index_name.publishing-$publication_id
+	install -m 644 -- "$source_index" "$temporary"
+	mv -f -- "$temporary" "$repo_dir/$index_name"
+	normalize_ownership "$repo_dir/$index_name"
+done
+chmod g+rws -- "$repo_dir" 2>/dev/null || true
+
+printf 'sign-apk-repo: published and indexed %s verified APK files in %s\n' \
+	"${#all_packages[@]}" "$repo_dir"
+done
+
+for transaction in "${ready_transactions[@]}"; do
+	published=${transaction%-ready}-published
+	[ ! -e "$published" ] || die "published transaction marker already exists: $published"
+	mv -- "$transaction" "$published"
+done
+
+trap - EXIT HUP INT TERM
+cleanup
+printf 'sign-apk-repo: publication complete across %s generation repositories\n' "${#repo_names[@]}"

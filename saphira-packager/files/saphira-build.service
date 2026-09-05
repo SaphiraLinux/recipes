@@ -1,0 +1,18 @@
+[Unit]
+Description=Saphira package autobuilder (scan + build queue loop)
+After=local-fs.target
+
+[Service]
+Type=simple
+User=smalley
+Group=smalley
+WorkingDirectory=/build
+Environment=SAPHIRA_BUILD_JOBS=8
+Environment=SAPHIRA_BUILD_STATE=/var/lib/saphira-build
+ExecStartPre=/usr/bin/install -d -o smalley -g smalley /var/lib/saphira-build /build
+ExecStart=/usr/bin/saphira-build daemon --interval=300 --limit=1
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,3 @@
+#!/bin/sh
+# Saphira OVS do-task (see OVS_PROPOSAL.md). MIT.
+exec /usr/libexec/saphira/ovs-lib "uplink" "$@"

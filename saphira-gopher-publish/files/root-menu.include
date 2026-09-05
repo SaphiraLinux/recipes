@@ -1,0 +1,17 @@
+i
+i                 S a p h i r a   L i n u x
+i
+i                    So simple it hurts.
+i
+iA small, musl-based, self-hosting Linux distribution.
+iThis is the Gopher edition of https://saphira.vm2.uk/
+iNo pictures. No noise. Just the words.
+i
+0Home	/index.txt
+1Read The Favourite Manual	/rtfm/
+1Package repository	/packagerepository/
+1Health checks	/rtfm/loadbalancing/healthchecks/
+1Why Saphira	/why-saphira/
+0Downloads	/downloads.txt
+0About Saphira	/about.txt
+0Contact	/contact.txt

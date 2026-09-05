@@ -1,0 +1,407 @@
+#!/usr/bin/python3
+
+"""Construct unsigned APKs from one normalized staged-tree manifest."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import posixpath
+import re
+import shutil
+import stat as stat_module
+import subprocess
+import sys
+import tempfile
+from pathlib import Path, PurePosixPath
+from typing import NoReturn
+
+
+CONFIG_KEYS = (
+    "SAPHIRA_BUILD_ROOT",
+    "SAPHIRA_PACKAGE_TMP",
+    "SAPHIRA_INCOMING_DIR",
+    "SAPHIRA_ARCH",
+    "SAPHIRA_APK",
+)
+PACKAGE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
+
+
+class PackageError(RuntimeError):
+    pass
+
+
+def die(message: str) -> NoReturn:
+    raise PackageError(message)
+
+
+def run(command: list[str]) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(command, check=True, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except FileNotFoundError:
+        die(f"required controller tool is missing: {command[0]}")
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or exc.stdout or "").strip()
+        die(f"command failed: {command[0]}: {detail or exc.returncode}")
+
+
+def load_config() -> dict[str, str]:
+    config_path = os.environ.get("SAPHIRA_CONFIG_FILE", "/etc/saphira/package_builder.sh")
+    script = r'''
+set -eu
+set -a
+. "$1"
+shift
+for name do
+    value=${!name-}
+    builtin printf '%s\0%s\0' "$name" "$value"
+done
+'''
+    result = subprocess.run(
+        ["/bin/bash", "--noprofile", "--norc", "-c", script, "makepkg-config", config_path, *CONFIG_KEYS],
+        check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    parts = result.stdout.split(b"\0")
+    values = {parts[index].decode(): parts[index + 1].decode() for index in range(0, len(parts) - 1, 2)}
+    missing = [key for key in CONFIG_KEYS if not values.get(key)]
+    if missing:
+        die(f"configuration fields are empty: {', '.join(missing)}")
+    return values
+
+
+def contained_path(parent: Path, relative: str, label: str) -> Path:
+    pure = PurePosixPath(relative)
+    if pure.is_absolute() or not pure.parts or any(part in ("", ".", "..") for part in pure.parts):
+        die(f"invalid {label} path: {relative}")
+    candidate = parent.joinpath(*pure.parts)
+    current = parent
+    for part in pure.parts:
+        current = current / part
+        if current.is_symlink():
+            die(f"{label} path traverses a symlink: {relative}")
+    return candidate
+
+
+def validate_symlink(payload: Path, link: Path) -> None:
+    target = os.readlink(link)
+    if "\0" in target:
+        die(f"payload symlink contains NUL: {link}")
+    relative_link = link.relative_to(payload).as_posix()
+    if target.startswith("/"):
+        normalized = posixpath.normpath(target).lstrip("/")
+    else:
+        normalized = posixpath.normpath(posixpath.join(posixpath.dirname(relative_link), target))
+    if normalized == ".." or normalized.startswith("../"):
+        die(f"payload symlink escapes transaction: {relative_link} -> {target}")
+    if "lib64" in PurePosixPath(normalized).parts:
+        die(f"payload symlink violates Saphira /lib-only layout: {relative_link} -> {target}")
+
+
+def validate_payload(payload: Path) -> None:
+    if not payload.is_dir():
+        die(f"payload directory does not exist: {payload}")
+    found = False
+    for root, directories, files in os.walk(payload, topdown=True, followlinks=False):
+        root_path = Path(root)
+        for name in sorted(directories + files):
+            found = True
+            path = root_path / name
+            relative = path.relative_to(payload)
+            if "lib64" in relative.parts:
+                die(f"payload violates Saphira /lib-only layout: {relative}")
+            if path.is_symlink():
+                validate_symlink(payload, path)
+    if not found:
+        die(f"payload is empty: {payload}")
+
+
+def metadata_from_apk(apk: str, artifact: Path) -> tuple[dict[str, str], list[str]]:
+    dump = run([apk, "adbdump", str(artifact)]).stdout
+    metadata: dict[str, str] = {}
+    dependencies: list[str] = []
+    reading_dependencies = False
+    dump_lines = dump.splitlines()
+    i = 0
+    n = len(dump_lines)
+    while i < n:
+        line = dump_lines[i]
+        i += 1
+        if line.startswith("paths:"):
+            break
+        if line.startswith("  depends:"):
+            reading_dependencies = True
+            continue
+        if reading_dependencies and line.startswith("    - "):
+            dependencies.append(line[len("    - "):])
+            continue
+        if reading_dependencies and line.startswith("  ") and not line.startswith("    "):
+            reading_dependencies = False
+        match = re.match(r"  (name|version|arch|description|license|origin|url|build-time): (.*)", line)
+        if match:
+            value = match.group(2)
+            # adb writers quote or fold values containing reserved
+            # punctuation: short ones stay inline inside single quotes,
+            # long/multiline ones become a '|' block scalar whose body is
+            # the following more-indented lines.
+            if len(value) >= 2 and value[0] == "'" and value[-1] == "'":
+                value = value[1:-1]
+            elif value == "|":
+                block = []
+                while i < n and dump_lines[i].startswith("    "):
+                    block.append(dump_lines[i][4:])
+                    i += 1
+                value = "\n".join(block)
+            metadata[match.group(1)] = value
+    for line in dump.splitlines():
+        if line.strip().startswith(("user:", "group:")) and not line.rstrip().endswith("root"):
+            die(f"APK payload ownership is not root:root: {artifact}")
+    return metadata, dependencies
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def copy_payload(payload: Path, destination: Path) -> None:
+    """Copy the staged payload, PRESERVING hardlinks.
+
+    shutil.copytree silently splits hardlink groups into independent
+    files (upstream make-install links tool drivers together - binutils'
+    objdump/ld/... and gcc's driver set), which duplicated hundreds of
+    MiB per package. First occurrence of an inode is copied, further
+    occurrences are linked back to it; symlinks are preserved as-is.
+    """
+    destination.mkdir(parents=True, exist_ok=True)
+    seen: dict[tuple[int, int], Path] = {}
+    for src in sorted(payload.rglob("*")):
+        rel = src.relative_to(payload)
+        dst = destination / rel
+        if src.is_symlink():
+            dst.symlink_to(src.readlink())
+        elif src.is_dir():
+            dst.mkdir(parents=True, exist_ok=True)
+            # mkdir applies the process umask, which silently dropped
+            # directory permission bits (a 2775 shared dir shipped as
+            # 0755). File modes survive through the hardlink inodes, so
+            # directories are the only gap; carry the exact mode over.
+            os.chmod(dst, stat_module.S_IMODE(src.stat().st_mode))
+        else:
+            st = src.stat()
+            key = (st.st_dev, st.st_ino)
+            first = seen.get(key)
+            if first is not None:
+                try:
+                    os.link(first, dst)
+                    continue
+                except OSError:
+                    pass
+            try:
+                os.link(src, dst)
+            except OSError:
+                shutil.copy2(src, dst, follow_symlinks=False)
+            seen[key] = dst
+
+
+def strip_payload(payload: Path) -> int:
+    """Strip debug sections from ELF content in the payload.
+
+    The toolchain builds with -g by default, so unstripped payloads ship
+    hundreds of MiB of DWARF per binary (gcc's cc1 alone carried ~280 MiB).
+    Binaries and shared libraries get --strip-unneeded; static archives get
+    --strip-debug (symbol index preserved). Skipped entirely when strip is
+    unavailable (payloads built without binutils).
+    """
+    strip = shutil.which("strip")
+    if not strip:
+        return 0
+    count = 0
+    for path in sorted(payload.rglob("*")):
+        if not path.is_file() or path.is_symlink():
+            continue
+        try:
+            with path.open("rb") as f:
+                if f.read(4) != b"\x7fELF":
+                    continue
+        except OSError:
+            continue
+        # Kernel modules: never strip until module safety is explicitly
+        # verified (operator directive - saphira-kernel/saphira-zfs stay
+        # out of the first strip pass).
+        if path.suffix in (".ko", ".ko.xz", ".ko.zst"):
+            continue
+        args = [strip, "--strip-unneeded", str(path)]
+        if path.suffix == ".a":
+            args = [strip, "--strip-debug", str(path)]
+        # Tolerant: an odd ELF file must never fail the whole build.
+        subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        count += 1
+    return count
+
+
+def construct(apk: str, payload: Path, arguments: list[str], producer: str) -> str:
+    # apk-tools 3 reads payload ownership through statx, which the musl
+    # libfakeroot build does not intercept, so fakeroot would silently
+    # record the invoking user.  Construct instead inside an isolated user
+    # namespace with a real mapped root: the chown is genuine, the process
+    # stays unprivileged on the host, and ownership is correct by
+    # construction rather than by interception.
+    del producer
+    # The kernel clears setuid/setgid bits on any chown, so the -R 0:0
+    # would silently strip them from the payload (sudo lost its setuid
+    # bit this way - see the hatchling sudo incident).  Record the
+    # special bits before the chown and restore them afterwards.
+    # Directories are included too: a setgid directory (drwxrwsr-x)
+    # loses its bit just the same.  Only symlinks are skipped - chmod
+    # on a symlink would follow it and mutate the target.
+    special: list[str] = []
+    for path in sorted(payload.rglob("*")):
+        if path.is_symlink():
+            continue
+        mode = path.stat().st_mode & 0o7777
+        if mode & 0o7000:
+            special.append(f"{oct(mode)[2:]} {path}")
+    modes_file = payload.parent / f".special-modes-{payload.name}"
+    modes_file.write_text("\n".join(special) + ("\n" if special else ""), encoding="utf-8")
+    shell_script = (
+        'payload=$1; modes=$2; shift 2; chown -R 0:0 "$payload"; '
+        'while IFS=" " read -r mode path; do '
+        '[ -n "$path" ] || continue; chmod "$mode" "$path" || exit 1; done < "$modes"; '
+        'rm -f "$modes"; exec "$@"'
+    )
+    command_tail = [apk, "mkpkg", "-F", str(payload), *arguments]
+    unshare = shutil.which("unshare")
+    if not unshare:
+        die("unshare is required for rootless payload ownership")
+    run([
+        unshare, "--user", "--map-root-user", "/bin/sh", "-c", shell_script,
+        "makepkg", str(payload), str(modes_file), *command_tail,
+    ])
+    import subprocess as sp
+    r = sp.run(["stat","-c","%a",str(payload/"usr/bin/sudo")],capture_output=True,text=True)
+    print(f"DEBUG post-construct sudo mode={r.stdout.strip()}", file=sys.stderr)
+    modes_file.unlink(missing_ok=True)
+    return "userns-maproot"
+
+
+def real_root() -> bool:
+    """True only for genuine host root; a mapped uid 0 inside an
+    unprivileged user namespace is still an unprivileged controller."""
+    if os.geteuid() != 0:
+        return False
+    try:
+        with open("/proc/self/uid_map", encoding="utf-8") as stream:
+            row = stream.readline().split()
+    except OSError:
+        return True
+    return row == ["0", "0", "1"]
+
+
+def main() -> int:
+    if real_root():
+        print("makepkg: must run as an unprivileged controller", file=sys.stderr)
+        return 1
+    if len(sys.argv) != 2 or not PACKAGE_RE.fullmatch(sys.argv[1]):
+        print(f"usage: {sys.argv[0]} PACKAGE", file=sys.stderr)
+        return 1
+    producer = sys.argv[1]
+    try:
+        config = load_config()
+        stage_root = contained_path(Path(config["SAPHIRA_BUILD_ROOT"]), producer, "stage")
+        manifest_path = stage_root / "manifest.json"
+        with manifest_path.open(encoding="utf-8") as stream:
+            manifest = json.load(stream)
+        if manifest.get("schema") != "saphira-stage-manifest/v1" or manifest.get("name") != producer:
+            die(f"invalid normalized stage manifest: {manifest_path}")
+        for key in ("version", "arch", "license", "origin", "url", "build_time", "outputs"):
+            if key not in manifest:
+                die(f"stage manifest field is missing: {key}")
+        if manifest["arch"] not in (config["SAPHIRA_ARCH"], "noarch"):
+            die(f"stage architecture does not match transaction: {manifest['arch']}")
+
+        artifact_dir = Path(config["SAPHIRA_INCOMING_DIR"]) / config["SAPHIRA_ARCH"]
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        package_tmp = Path(config["SAPHIRA_PACKAGE_TMP"])
+        package_tmp.mkdir(parents=True, exist_ok=True)
+        temp_root = Path(tempfile.mkdtemp(prefix=f"makepkg-{producer}-", dir=package_tmp))
+        receipts = []
+        try:
+            for output in manifest["outputs"]:
+                name = output.get("name", "")
+                if not PACKAGE_RE.fullmatch(name):
+                    die(f"invalid output name in stage manifest: {name}")
+                payload = contained_path(stage_root, output.get("payload", ""), "payload")
+                validate_payload(payload)
+                payload_copy = temp_root / f"payload-{name}"
+                copy_payload(payload, payload_copy)
+                stripped = strip_payload(payload_copy)
+                artifact = artifact_dir / f"{name}-{manifest['version']}.apk"
+                if artifact.exists() or artifact.is_symlink():
+                    die(f"artifact already exists in private transaction: {artifact}")
+                temporary_artifact = temp_root / artifact.name
+                arguments = [
+                    "--info", f"name:{name}",
+                    "--info", f"version:{manifest['version']}",
+                    "--info", f"arch:{manifest['arch']}",
+                    "--info", f"description:{output['description']}",
+                    "--info", f"license:{manifest['license']}",
+                    "--info", f"origin:{manifest['origin']}",
+                    "--info", f"url:{manifest['url']}",
+                    "--info", f"build-time:{manifest['build_time']}",
+                ]
+                dependencies = output.get("dependencies", [])
+                if dependencies:
+                    arguments.extend(("--info", f"depends:{' '.join(dependencies)}"))
+                replaces = manifest.get("replaces") or []
+                if replaces:
+                    # Space-separated like depends=: apk splits replaces
+                    # items on whitespace (verified: comma-joined multi
+                    # names collapse into one unmatchable token and the
+                    # takeover silently fails - see grub r4).
+                    arguments.extend(("--info", f"replaces:{' '.join(replaces)}"))
+                arguments.extend(("-o", str(temporary_artifact)))
+                backend = construct(config["SAPHIRA_APK"], payload_copy, arguments, producer)
+                run([config["SAPHIRA_APK"], "verify", "--allow-untrusted", str(temporary_artifact)])
+                metadata, recorded_dependencies = metadata_from_apk(config["SAPHIRA_APK"], temporary_artifact)
+                expected = {
+                    "name": name,
+                    "version": manifest["version"],
+                    "arch": manifest["arch"],
+                    "description": output["description"],
+                    "license": manifest["license"],
+                    "origin": manifest["origin"],
+                    "url": manifest["url"],
+                    "build-time": str(manifest["build_time"]),
+                }
+                if any(metadata.get(key) != value for key, value in expected.items()):
+                    die(f"constructed APK metadata differs from normalized manifest: {temporary_artifact}")
+                if sorted(recorded_dependencies) != sorted(dependencies):
+                    die(f"constructed APK dependencies differ from normalized manifest: {temporary_artifact}")
+                os.replace(temporary_artifact, artifact)
+                digest = sha256_file(artifact)
+                receipts.append({"name": name, "artifact": str(artifact), "sha256": digest, "backend": backend})
+        finally:
+            shutil.rmtree(temp_root)
+
+        receipt_path = stage_root / "artifact-manifest.json"
+        with receipt_path.open("x", encoding="utf-8") as stream:
+            json.dump({
+                "schema": "saphira-artifact-manifest/v1",
+                "constructor": "makepkg",
+                "producer": producer,
+                "artifacts": receipts,
+            }, stream, sort_keys=True, separators=(",", ":"))
+            stream.write("\n")
+        print(f"makepkg: created {len(receipts)} unsigned APK(s) for {producer}")
+        return 0
+    except (OSError, ValueError, json.JSONDecodeError, PackageError) as exc:
+        print(f"makepkg: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

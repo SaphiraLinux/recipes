@@ -1,0 +1,5 @@
+--- a/configure
++++ b/configure
+@@ -4427 +4427 @@
+-if diff "$cache_file" confcache >/dev/null 2>&1; then :; else
++if cmp -s "$cache_file" confcache; then :; else

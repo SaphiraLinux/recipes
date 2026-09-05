@@ -1,0 +1,63 @@
+#!/bin/sh
+
+set -eu
+
+. "${SAPHIRA_CONFIG_FILE:-/etc/saphira/package_builder.sh}"
+
+die()
+{
+	printf 'checkpkg: %s\n' "$*" >&2
+	exit 1
+}
+
+[ "$#" -eq 1 ] || die "usage: $0 PACKAGE"
+PACKAGE=$1
+case $PACKAGE in
+	''|*[!A-Za-z0-9._+-]*) die "invalid package name: $PACKAGE" ;;
+esac
+
+repo_dir=$SAPHIRA_REPO_DIR/${SAPHIRA_REPO_NAMES##* }/$SAPHIRA_ARCH
+index=$repo_dir/Packages.adb
+export SAPHIRA_INCOMING_DIR
+[ -s "$index" ] || die "repository index is missing or empty: $index"
+"$SAPHIRA_APK" verify --keys-dir "${SAPHIRA_TRUST_KEY%/*}" "$index" >/dev/null ||
+	die "repository index signature is invalid"
+
+"$SAPHIRA_PYTHON" - "$PACKAGE" "$repo_dir" "$index" "$SAPHIRA_APK" "${SAPHIRA_TRUST_KEY%/*}" "${SAPHIRA_INCOMING_DIR:-}/$SAPHIRA_ARCH" <<'PY'
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+name, raw_repo, index, apk, keys, incoming = sys.argv[1:]
+repo = Path(raw_repo)
+dump = subprocess.run([apk, "adbdump", index], check=True, text=True, capture_output=True).stdout
+names = re.findall(r"^  - name: (\S+)$", dump, re.MULTILINE)
+versions = re.findall(r"^    version: (\S+)$", dump, re.MULTILINE)
+if len(names) != len(versions):
+    raise SystemExit("checkpkg: malformed repository index identities")
+matches = [(package_name, version) for package_name, version in zip(names, versions) if package_name == name]
+if not matches:
+    raise SystemExit(f"checkpkg: package is not present in Packages.adb: {name}")
+ready = sorted(Path(incoming).glob(f"{name}-*-ready")) if incoming else []
+if ready:
+    installed_version = matches[0][1]
+    import sys as _sys
+    print(
+        f"checkpkg: WARNING: a built-but-unpublished transaction exists: {ready[-1].name}; "
+        f"installpkg will install the published version ({installed_version}) - "
+        "run: sudo sign-apk-repo first if you want the new build",
+        file=_sys.stderr,
+    )
+for package_name, version in matches:
+    package = repo / f"{package_name}-{version}.apk"
+    if package.is_symlink() or not package.is_file():
+        raise SystemExit(f"checkpkg: indexed package artifact is missing: {package}")
+    subprocess.run([apk, "verify", "--keys-dir", keys, str(package)], check=True)
+    package_dump = subprocess.run([apk, "adbdump", str(package)], check=True, text=True, capture_output=True).stdout
+    actual_name = re.search(r"^  name: (\S+)$", package_dump, re.MULTILINE)
+    actual_version = re.search(r"^  version: (\S+)$", package_dump, re.MULTILINE)
+    if not actual_name or not actual_version or (actual_name.group(1), actual_version.group(1)) != (package_name, version):
+        raise SystemExit(f"checkpkg: package metadata identity mismatch: {package}")
+print(f"checkpkg: verified {name} ({len(matches)} indexed version(s); {len(names)} repository APK identities)")
+PY

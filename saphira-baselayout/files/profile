@@ -1,0 +1,13 @@
+# Saphira Linux system-wide profile
+
+umask 022
+
+: "${PATH:=/usr/bin:/usr/sbin:/bin:/sbin}"
+export PATH
+
+if [ -d /etc/profile.d ]; then
+	for profile in /etc/profile.d/*.sh; do
+		[ -r "$profile" ] && . "$profile"
+	done
+	unset profile
+fi

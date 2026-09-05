@@ -1,0 +1,163 @@
+#!/bin/sh
+
+set -u
+
+usage()
+{
+	printf 'usage: saphira-chroot TARGET [COMMAND...]\n' >&2
+	exit 2
+}
+
+die()
+{
+	printf 'saphira-chroot: %s\n' "$*" >&2
+	exit 1
+}
+
+id_command=${SAPHIRA_ID:-id}
+test "$($id_command -u)" -eq 0 || die 'root privileges are required'
+test $# -ge 1 || usage
+
+target=$1
+shift
+test -d "$target" || die "target is not a directory: $target"
+target=$(readlink -f -- "$target") || die "cannot resolve target: $target"
+shell_path=$target/bin/sh
+test -e "$shell_path" || test -L "$shell_path" ||
+	die 'target does not contain /bin/sh'
+if test -L "$shell_path"; then
+	shell_link=$(readlink -- "$shell_path") || die 'target /bin/sh is unusable'
+	case $shell_link in
+		/*) shell_path=$target/${shell_link#/} ;;
+		*) shell_path=$target/bin/$shell_link ;;
+	esac
+fi
+shell=$(readlink -f -- "$shell_path") || die 'target /bin/sh is unusable'
+case $shell in
+	"$target"/*) ;;
+	*) die 'target /bin/sh resolves outside the target' ;;
+esac
+test -x "$shell" || die 'target /bin/sh is not executable'
+
+unshare_command=${SAPHIRA_UNSHARE:-unshare}
+mount_command=${SAPHIRA_MOUNT:-mount}
+umount_command=${SAPHIRA_UMOUNT:-umount}
+chroot_command=${SAPHIRA_CHROOT:-chroot}
+env_command=${SAPHIRA_ENV:-env}
+
+if test "${SAPHIRA_CHROOT_PLAN:-0}" = 1; then
+	printf '%s\n' \
+		'mount --make-rprivate /' \
+		"mount --bind /dev $target/dev" \
+		"mount --make-rslave $target/dev" \
+		"mount --bind /dev/pts $target/dev/pts" \
+		"mount --make-rslave $target/dev/pts" \
+		"mount -t proc proc $target/proc" \
+		"mount --rbind /sys $target/sys" \
+		"mount --make-rslave $target/sys" \
+		"mount --rbind /run $target/run" \
+		"mount --make-rslave $target/run" \
+		"mount --bind /etc/resolv.conf $target/etc/resolv.conf"
+	exit 0
+fi
+
+if test "${SAPHIRA_CHROOT_INNER:-0}" != 1; then
+	"$chroot_command" "$target" /bin/sh -c ':' >/dev/null 2>&1 ||
+		die 'target /bin/sh cannot be executed'
+	export SAPHIRA_CHROOT_INNER=1
+	exec "$unshare_command" --mount --fork -- "$0" "$target" "$@"
+fi
+
+mounted=
+dns_created=
+cleaned=0
+
+remember_mount()
+{
+	mounted="$1${mounted:+
+}$mounted"
+}
+
+cleanup()
+{
+	status=${1:-$?}
+	test "$cleaned" -eq 0 || exit "$status"
+	cleaned=1
+	old_ifs=$IFS
+	IFS='
+'
+	for owned in $mounted; do
+		"$umount_command" -R -- "$owned" >/dev/null 2>&1 || :
+	done
+	IFS=$old_ifs
+	if test -n "$dns_created"; then
+		rm -f -- "$dns_created"
+	fi
+	exit "$status"
+}
+
+interrupted()
+{
+	cleanup "$1"
+}
+
+trap 'cleanup $?' EXIT
+trap 'interrupted 129' HUP
+trap 'interrupted 130' INT
+trap 'interrupted 143' TERM
+
+mount_owned()
+{
+	destination=$1
+	shift
+	remember_mount "$destination"
+	"$mount_command" "$@" "$destination" || return 1
+}
+
+"$mount_command" --make-rprivate / || die 'cannot make mount propagation private'
+install -d -m 0755 "$target/dev" "$target/dev/pts" "$target/proc" \
+	"$target/sys" "$target/run" "$target/etc"
+
+mount_owned "$target/dev" --bind /dev || die 'cannot bind /dev'
+"$mount_command" --make-rslave "$target/dev" || die 'cannot set /dev rslave propagation'
+mount_owned "$target/dev/pts" --bind /dev/pts || die 'cannot bind /dev/pts'
+"$mount_command" --make-rslave "$target/dev/pts" || die 'cannot set /dev/pts rslave propagation'
+mount_owned "$target/proc" -t proc proc || die 'cannot mount /proc'
+mount_owned "$target/sys" --rbind /sys || die 'cannot recursively bind /sys'
+"$mount_command" --make-rslave "$target/sys" || die 'cannot set /sys rslave propagation'
+mount_owned "$target/run" --rbind /run || die 'cannot recursively bind /run'
+"$mount_command" --make-rslave "$target/run" || die 'cannot set /run rslave propagation'
+
+dns_target=$target/etc/resolv.conf
+if test -L "$dns_target"; then
+	dns_link=$(readlink -- "$dns_target") || die 'cannot read target resolv.conf link'
+	case $dns_link in
+		/*) dns_target=$target/${dns_link#/} ;;
+		*) dns_target=$target/etc/$dns_link ;;
+	esac
+	dns_target=$(readlink -m -- "$dns_target") || die 'cannot resolve target resolv.conf link'
+fi
+case $dns_target in
+	"$target"/*) ;;
+	*) die 'target resolv.conf resolves outside the target' ;;
+esac
+if test ! -e "$dns_target"; then
+	install -d -m 0755 "$(dirname -- "$dns_target")"
+	install -m 0644 /dev/null "$dns_target"
+	dns_created=$dns_target
+fi
+mount_owned "$dns_target" --bind /etc/resolv.conf || die 'cannot provide target DNS'
+
+term=${TERM:-dumb}
+if test $# -gt 0; then
+	"$env_command" -i HOME=/root USER=root LOGNAME=root SHELL=/bin/sh \
+		"TERM=$term" PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+		"$chroot_command" "$target" "$@"
+	status=$?
+else
+	"$env_command" -i HOME=/root USER=root LOGNAME=root SHELL=/bin/sh \
+		"TERM=$term" PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+		"$chroot_command" "$target" /bin/sh -l
+	status=$?
+fi
+cleanup "$status"

@@ -1,0 +1,12 @@
+[Unit]
+Description=Saphira PROXY-protocol front proxy
+After=network.target
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/conf.d/proxyto
+ExecStart=/usr/bin/proxyto --syslog ${proxyto_name:-geomyidae}
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

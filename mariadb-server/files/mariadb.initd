@@ -1,0 +1,27 @@
+#!/sbin/openrc-run
+
+description="MariaDB database server"
+command=/usr/sbin/mariadbd
+command_args="--defaults-file=/etc/my.cnf --datadir=/var/lib/mysql --pid-file=/run/mysqld/mariadbd.pid"
+command_user="mysql:mysql"
+command_background=true
+pidfile=/run/mysqld/openrc-mariadb.pid
+rc_ulimit="-n 65536"
+
+depend()
+{
+	need localmount
+	use net
+}
+
+start_pre()
+{
+	checkpath -d -m 0750 -o mysql:mysql /run/mysqld
+	checkpath -d -m 0750 -o mysql:mysql /var/lib/mysql
+	checkpath -d -m 0750 -o mysql:mysql /var/log/mysql
+	rm -f /run/mysqld/mariadbd.pid /run/mysqld/openrc-mariadb.pid
+	if test ! -d /var/lib/mysql/mysql; then
+		/usr/bin/mariadb-install-db --user=mysql \
+			--basedir=/usr --datadir=/var/lib/mysql
+	fi
+}

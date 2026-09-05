@@ -1,0 +1,18 @@
+#!/sbin/openrc-run
+
+description="Kea DHCPv6 server"
+
+command="/usr/sbin/kea-dhcp6"
+command_args="-c /etc/kea/kea-dhcp6.conf"
+command_background="yes"
+pidfile="/run/kea-dhcp6.pid"
+
+depend()
+{
+	use net logger dns
+}
+
+start_pre()
+{
+	checkpath -d -m 0755 /run/kea
+}

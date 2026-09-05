@@ -1,0 +1,14 @@
+[Unit]
+Description=FreeRADIUS authentication server
+After=network.target
+
+[Service]
+Type=simple
+User=radius
+Group=radius
+ExecStartPre=/usr/bin/install -d -m 0750 -o radius -g radius /var/log/radius /var/lib/radius
+ExecStart=/usr/sbin/radiusd -f
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

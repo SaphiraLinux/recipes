@@ -1,0 +1,27 @@
+#!/sbin/openrc-run
+
+description="PostgreSQL database server"
+data_directory=${data_directory:-/var/lib/postgresql/data}
+listen_addresses=${listen_addresses:-localhost}
+command=/usr/bin/postgres
+command_user=postgres:postgres
+command_background=true
+pidfile=${data_directory}/postmaster.pid
+command_args="-D ${data_directory} -c listen_addresses=${listen_addresses} -c unix_socket_directories=/run/postgresql"
+
+depend()
+{
+	need localmount
+	use net
+}
+
+start_pre()
+{
+	checkpath -d -m 0755 -o postgres:postgres /run/postgresql
+	checkpath -d -m 0700 -o postgres:postgres /var/lib/postgresql
+	if test ! -s "${data_directory}/PG_VERSION"; then
+		eerror "PostgreSQL is not initialized; run postgresql-initdb"
+		return 1
+	fi
+	checkpath -d -m 0700 -o postgres:postgres "${data_directory}"
+}

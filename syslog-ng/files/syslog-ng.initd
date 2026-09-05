@@ -1,0 +1,19 @@
+#!/sbin/openrc-run
+
+description="System logging daemon"
+
+command="/usr/sbin/syslog-ng"
+command_args="--foreground"
+supervisor="supervise-daemon"
+
+depend()
+{
+	use clock hostname localmount
+	after bootmisc
+	provide logger
+}
+
+start_pre()
+{
+	checkpath -d -m 0755 /var/log
+}

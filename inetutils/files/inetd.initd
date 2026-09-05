@@ -1,0 +1,13 @@
+#!/sbin/openrc-run
+
+description="GNU inetutils internet super-server (inetd)"
+
+command="/usr/sbin/inetd"
+command_args="--debug"
+command_background="yes"
+pidfile="/run/inetd.pid"
+
+depend()
+{
+	use net logger
+}

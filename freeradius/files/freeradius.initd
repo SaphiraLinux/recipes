@@ -1,0 +1,18 @@
+#!/sbin/openrc-run
+
+description="FreeRADIUS authentication server"
+
+command="/usr/sbin/radiusd"
+command_args="-f"
+supervisor="supervise-daemon"
+
+depend()
+{
+	use net logger dns
+	after firewall
+}
+
+start_pre()
+{
+	checkpath -d -m 0750 -o radius:radius /var/log/radius /var/lib/radius
+}

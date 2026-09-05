@@ -1,0 +1,16 @@
+#!/sbin/openrc-run
+
+description="Emit the completed Stage4 default-runlevel marker"
+
+depend()
+{
+	need local net-online
+	after agetty.tty1 agetty.ttyS0
+}
+
+start()
+{
+	ebegin "Marking Saphira Stage4 boot complete"
+	printf 'Saphira is alive...\nSAPHIRA_BOOT_OK\n' > /dev/console
+	eend 0
+}

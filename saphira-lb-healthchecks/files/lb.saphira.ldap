@@ -1,0 +1,6 @@
+#!/bin/sh
+# lb.saphira.ldap - LDAP anonymous bind + rootDSE response (L7).
+# Copyright (c) 2026 AKADATA. MIT licensed.
+. /usr/share/saphira/lb-healthchecks/lib/lb-saphira-common.sh
+lb_init "$@"
+lb_probe ldap --host "$LB_REAL" --port "${LB_RPORT:-389}" --timeout "$LB_TIMEOUT"

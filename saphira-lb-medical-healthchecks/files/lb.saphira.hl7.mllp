@@ -1,0 +1,59 @@
+#!/usr/bin/env python3
+"""lb.saphira.hl7.mllp - HL7 v2 over MLLP query round-trip (deep-application).
+
+Copyright (c) 2026 AKADATA. MIT licensed.
+
+Sends a synthetic, read-only HL7 v2 QRY^A19 (patient query for a
+non-existent synthetic patient) over MLLP framing and verifies a valid
+ACK frame with MSA-1 in {AA, CA}. No patient data is created or
+modified. Env: LB_SAPHIRA_HL7_MESSAGE overrides the payload entirely
+(env only, never echoed if credentials/config are embedded by operator).
+
+Interface: $1 FWM/VIP, $2 vport, $3 real, $4 rport, $5 vsource (optional).
+Exit 0 healthy, 1 unhealthy, 2 misconfiguration.
+"""
+
+import os
+import re
+import socket
+import sys
+
+SB, EB, CR = b"\x0b", b"\x1c", b"\x0d"
+
+DEFAULT_QUERY = (
+    "MSH|^~\\&|SAPHIRA-HC|SAPHIRA|HIS|HIS|20260902000000||QRY^A19|1|P|2.5\r"
+    "QRD|20260902000000|R|I|SAPHIRA-HC|||10|RD|SAPHIRA-SYNTHETIC-PATIENT\r"
+)
+
+
+def main():
+    args = sys.argv[1:]
+    if len(args) < 3:
+        sys.exit(2)
+    host, port = args[2], args[3] if len(args) > 3 else "2575"
+    timeout = float(os.environ.get("LB_SAPHIRA_TIMEOUT", "3"))
+    msg = os.environ.get("LB_SAPHIRA_HL7_MESSAGE", DEFAULT_QUERY).encode()
+    framed = SB + msg + EB + CR
+    try:
+        s = socket.create_connection((host, int(port)), timeout=timeout)
+        s.settimeout(timeout)
+        s.sendall(framed)
+        buf = b""
+        deadline = timeout
+        while EB + CR not in buf and deadline > 0:
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            buf += chunk
+        s.close()
+    except OSError:
+        sys.exit(1)
+    if not buf.startswith(SB) or EB + CR not in buf:
+        sys.exit(1)
+    ack = buf[1:buf.index(EB + CR)].decode("latin-1", "replace")
+    msa = re.search(r"\rMSA\|([^|]*)\|", ack)
+    sys.exit(0 if msa and msa.group(1) in ("AA", "CA") else 1)
+
+
+if __name__ == "__main__":
+    main()

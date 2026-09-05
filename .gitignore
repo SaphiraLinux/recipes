@@ -1,0 +1,38 @@
+codex.resume
+opencode.oxalpha
+opencode.*
+opencode*
+codex.*
+opencode.resume
+opencode.mailDragon
+__pycache__/
+*.pyc
+
+codex.history.md
+
+# --- publication policy: this repository is pure text ---
+# Source archives and binary blobs live in the local archive mirror,
+# never here. Keep this list in sync with the export filter.
+*.tar
+*.tar.gz
+*.tar.bz2
+*.tar.xz
+*.tar.zst
+*.tgz
+*.tbz
+*.tbz2
+*.txz
+*.gz
+*.bz2
+*.xz
+*.zst
+*.zip
+*.apk
+*.whl
+*.bin
+*.rom
+# Package docs stay with internal development; only the root README ships.
+/*/*.md
+*/*/*.md
+*/*/*/*.md
+!README.md

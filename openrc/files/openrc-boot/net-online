@@ -1,0 +1,54 @@
+#!/sbin/openrc-run
+
+description="Verify that configured Akadata networking is online"
+
+depend()
+{
+	need network
+	before saphira-boot-ok
+}
+
+configured_interface()
+{
+	local file interface
+	for file in /etc/network.d/*.conf; do
+		test -f "$file" || continue
+		unset INTERFACE
+		. "$file"
+		interface=${INTERFACE:-}
+		test -n "$interface" && test "$interface" != lo && return 0
+	done
+	return 1
+}
+
+start()
+{
+	local attempt interface ipv4_mode ipv6_mode
+	if ! configured_interface; then
+		ebegin "No non-loopback network configured"
+		eend 0
+		return 0
+	fi
+	# shellcheck disable=SC1091
+	. /etc/network.conf
+	interface=${INTERFACE:-eth0}
+	ipv4_mode=${IPV4_MODE:-off}
+	ipv6_mode=${IPV6_MODE:-off}
+
+	ebegin "Waiting for user-space networking on $interface"
+	for attempt in $(seq 1 30); do
+		if { test "$ipv4_mode" = off ||
+			ip -4 address show dev "$interface" scope global |
+				grep -q 'inet '; } &&
+			{ test "$ipv6_mode" = off ||
+				ip -6 address show dev "$interface" scope global |
+					grep -q 'inet6 '; }; then
+			eend 0
+			return 0
+		fi
+		sleep 1
+	done
+	eerror "network did not become online on $interface"
+	eend 1
+	return 1
+}

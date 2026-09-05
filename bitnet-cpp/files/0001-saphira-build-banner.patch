@@ -1,0 +1,13 @@
+Saphira build banner: replace the git-derived b0-unknown with the
+Saphira BitNet identity. Vendored tree has no git metadata.
+--- a/3rdparty/llama.cpp/common/build-info.cpp.in
++++ b/3rdparty/llama.cpp/common/build-info.cpp.in
+@@ -25,7 +25,7 @@
+ }
+ 
+ const char * llama_build_info(void) {
+-    static std::string s = "b" + std::to_string(LLAMA_BUILD_NUMBER) + "-" + LLAMA_COMMIT;
++    static std::string s = "Saphira Linux BitNet (1.58-Bit / Ternary) LLM";
+     return s.c_str();
+ }
+ 

@@ -1,0 +1,333 @@
+#!/usr/bin/env python3
+"""
+saphira-mergetool — resolve apk .apk-new files after upgrades
+
+apk leaves the new package's version of a protected file next to the
+installed original as FILE.apk-new. This tool scans configured roots,
+shows the differences, and resolves each pair: accept (take the new
+version), keep (discard the new version), or merge (interactive,
+hunk by hunk: keep local edits, take upstream changes, or both).
+
+Standards: python3, stdlib only, fail loudly, never delete an original.
+"""
+
+from __future__ import annotations
+
+import argparse
+import configparser
+import difflib
+from fnmatch import fnmatch
+import os
+import shutil
+import stat
+import sys
+from pathlib import Path
+
+VERSION = "0.1.0"
+APK_NEW_SUFFIX = ".apk-new"
+DEFAULT_CONFIG = "/etc/saphira/mergetool.conf"
+DEFAULT_SCAN_PATHS = ("/etc",)
+
+
+class MergeError(RuntimeError):
+    pass
+
+
+def die(message: str) -> "MergeError":
+    raise MergeError(message)
+
+
+def load_config(path: str) -> configparser.ConfigParser:
+    parser = configparser.ConfigParser()
+    if not Path(path).is_file():
+        return parser
+    try:
+        parser.read(path, encoding="utf-8")
+    except (configparser.Error, OSError) as exc:
+        raise MergeError(f"configuration unreadable: {path}: {exc}") from exc
+    return parser
+
+
+def scan_paths(config: configparser.ConfigParser, cli_paths: list[str]) -> list[Path]:
+    paths = list(cli_paths)
+    if not paths and config.has_option("mergetool", "scan_paths"):
+        paths = config.get("mergetool", "scan_paths").split()
+    if not paths:
+        paths = list(DEFAULT_SCAN_PATHS)
+    roots = []
+    for raw in paths:
+        path = Path(raw)
+        if not path.is_dir():
+            raise MergeError(f"scan path is not a directory: {path}")
+        roots.append(path)
+    return roots
+
+
+def find_apk_new(roots: list[Path]) -> list[Path]:
+    found: list[Path] = []
+    for root in roots:
+        for parent, _dirs, files in os.walk(root, followlinks=False):
+            for name in sorted(files):
+                if name.endswith(APK_NEW_SUFFIX):
+                    found.append(Path(parent) / name)
+    return sorted(found)
+
+
+def pair_for(apk_new: Path) -> Path | None:
+    original = Path(str(apk_new)[: -len(APK_NEW_SUFFIX)])
+    return original if original.is_file() or original.is_symlink() else None
+
+
+def unified_diff(original: Path, apk_new: Path) -> str:
+    old = original.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
+    new = apk_new.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
+    return "".join(difflib.unified_diff(
+        old, new, fromfile=str(original), tofile=str(apk_new)))
+
+
+def accept(apk_new: Path, dry_run: bool) -> str:
+    original = pair_for(apk_new)
+    if original is None:
+        # Orphan .apk-new: the package dropped the file; the new version
+        # is the only version - promote it to the real name.
+        original = Path(str(apk_new)[: -len(APK_NEW_SUFFIX)])
+    if dry_run:
+        return f"would accept: {apk_new} -> {original}"
+    shutil.copy2(apk_new, original, follow_symlinks=False)
+    apk_new.unlink()
+    return f"accepted: {apk_new} -> {original}"
+
+
+def keep(apk_new: Path, dry_run: bool) -> str:
+    if dry_run:
+        return f"would keep installed version and discard: {apk_new}"
+    apk_new.unlink()
+    return f"kept installed version, discarded: {apk_new}"
+
+
+def parse_hunks(diff_lines: list[str]) -> list[list[str]]:
+    hunks: list[list[str]] = []
+    current: list[str] | None = None
+    for line in diff_lines:
+        if line.startswith("@@"):
+            if current:
+                hunks.append(current)
+            current = [line]
+        elif current is not None:
+            current.append(line)
+    if current:
+        hunks.append(current)
+    return hunks
+
+
+def merge_interactive(original: Path, apk_new: Path, dry_run: bool) -> str:
+    old_lines = original.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
+    new_lines = apk_new.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
+    diff = list(difflib.unified_diff(
+        old_lines, new_lines,
+        fromfile=f"a/{original.name}", tofile=f"b/{apk_new.name}"))
+    hunks = parse_hunks(diff)
+    if not hunks:
+        keep(apk_new, dry_run=dry_run)
+        return f"identical: {apk_new} (nothing to merge; discarded)"
+
+    result: list[str] = []
+    old_index = 0
+    taken = 0
+    for number, hunk in enumerate(hunks, start=1):
+        header = hunk[0]
+        body = hunk[1:]
+        ranges = header.split()[1:3]  # @@ -old,count +new,count @@
+        # 1-based inclusive start of the hunk's first old line; pure-addition
+        # hunks report start 0 (nothing to keep before them).
+        old_start = max(0, int(ranges[0].split(",")[0].lstrip("-")) - 1)
+        # context lines up to this hunk stay as they are in the old file
+        result.extend(old_lines[old_index:old_start])
+        old_index = old_start
+        print(f"--- hunk {number}/{len(hunks)} {header.strip()}")
+        for line in body:
+            if line.startswith(" "):
+                sys.stdout.write("  " + line)
+            else:
+                sys.stdout.write(line[:1] + " " + line[1:])
+        while True:
+            answer = input("take this new hunk? [y]es/[n]o/[a]ll-remaining/[q]uit: ").strip().lower()
+            if answer in ("y", "n", "a", "q"):
+                break
+        if answer == "q":
+            if dry_run:
+                return "merge aborted (dry run; nothing written)"
+            return "merge aborted; .apk-new kept for later"
+        if answer in ("y", "a"):
+            for line in body:
+                if line.startswith("+"):
+                    result.append(line[1:])
+                elif not line.startswith("-"):
+                    result.append(line[1:] if line.startswith(" ") else line)
+            consumed = sum(1 for line in body if not line.startswith("+"))
+            old_index += consumed
+            taken += 1
+            if answer == "a":
+                # take every remaining hunk without further prompts
+                for hunk_rest in hunks[number:]:
+                    rest_header = hunk_rest[0].split()[1:3]
+                    rest_start = int(rest_header[0].split(",")[0].lstrip("-"))
+                    rest_start = rest_start - 1 if rest_start > 1 else 0
+                    if rest_start < old_index:
+                        rest_start = old_index
+                    result.extend(old_lines[old_index:rest_start])
+                    old_index = rest_start
+                    for line in hunk_rest[1:]:
+                        if line.startswith("+"):
+                            result.append(line[1:])
+                        elif not line.startswith("-"):
+                            result.append(line[1:] if line.startswith(" ") else line)
+                    consumed = sum(1 for line in hunk_rest[1:] if not line.startswith("+"))
+                    old_index += consumed
+                    taken += 1
+                break
+        # answer == "n": skip; old lines stay (already extended up to hunk start;
+        # the removed old lines of the hunk remain in place)
+    result.extend(old_lines[old_index:])
+    if taken == 0:
+        keep(apk_new, dry_run=dry_run)
+        return f"kept installed version: {original} (no hunks taken)"
+    if dry_run:
+        return f"merge dry-run: {taken} hunk(s) would be applied to {original}"
+    temporary = original.with_name(original.name + ".mergetool")
+    with temporary.open("w", encoding="utf-8") as stream:
+        stream.writelines(result)
+    shutil.copymode(original, temporary)
+    try:
+        original_stat = original.stat()
+        os.chown(temporary, original_stat.st_uid, original_stat.st_gid)
+    except (OSError, PermissionError):
+        pass  # best effort when not root
+    os.replace(temporary, original)
+    apk_new.unlink()
+    return f"merged {taken}/{len(hunks)} hunk(s) into {original}; discarded {apk_new}"
+
+
+def resolve_policy(apk_new: Path, config: configparser.ConfigParser) -> str | None:
+    if not config.has_section("policy"):
+        return None
+    name = str(apk_new)[: -len(APK_NEW_SUFFIX)]
+    for option, value in config.items("policy"):
+        value = value.strip().lower()
+        if value not in ("accept", "keep"):
+            continue
+        if fnmatch(name, option) or fnmatch(apk_new.name, option):
+            return value
+    return None
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        prog="saphira-mergetool",
+        description=(
+            "Find apk .apk-new files, show their differences against the installed "
+            "originals, and accept, keep, or interactively merge them."
+        ),
+        epilog=(
+            "examples:\n"
+            "  saphira-mergetool                          # list pending .apk-new files\n"
+            "  saphira-mergetool --diff                   # show all differences\n"
+            "  saphira-mergetool --diff /etc/init.d/saphira-build.apk-new\n"
+            "  saphira-mergetool --merge /etc/conf.d/saphira-build.apk-new\n"
+            "  saphira-mergetool --accept all\n"
+            "  saphira-mergetool --scan-path /etc --dry-run\n"
+        ),
+    )
+    parser.add_argument("--config", default=DEFAULT_CONFIG,
+                        help=f"config file (default: {DEFAULT_CONFIG})")
+    parser.add_argument("--scan-path", action="append", default=[], metavar="DIR",
+                        help="scan this directory (repeatable; overrides config)")
+    parser.add_argument("--diff", nargs="?", const="all", metavar="FILE",
+                        help="show unified diff for one or all pending files")
+    parser.add_argument("--accept", metavar="FILE|all",
+                        help="take the .apk-new version (orphan .apk-new is promoted)")
+    parser.add_argument("--keep", metavar="FILE|all",
+                        help="keep the installed version and discard the .apk-new")
+    parser.add_argument("--merge", metavar="FILE",
+                        help="interactively merge .apk-new hunk by hunk")
+    parser.add_argument("--auto", action="store_true",
+                        help="apply the [policy] section from the config, prompt for the rest")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="report actions without changing anything")
+    parser.add_argument("--version", action="version", version=VERSION)
+    args = parser.parse_args()
+
+    try:
+        config = load_config(args.config)
+        roots = scan_paths(config, args.scan_path)
+        pending = find_apk_new(roots)
+        if not pending:
+            print("saphira-mergetool: no .apk-new files pending")
+            return 0
+
+        if args.diff:
+            for apk_new in pending:
+                if args.diff != "all" and apk_new != Path(args.diff):
+                    continue
+                original = pair_for(apk_new)
+                if original is None:
+                    print(f"=== {apk_new} (no installed original; orphan .apk-new)")
+                    continue
+                diff = unified_diff(original, apk_new)
+                print(f"=== {apk_new} vs {original}")
+                print(diff if diff else "(identical)")
+            return 0
+
+        if args.accept or args.keep or args.merge or args.auto:
+            for apk_new in pending:
+                action = None
+                if args.accept and (args.accept == "all" or apk_new == Path(args.accept)):
+                    action = "accept"
+                elif args.keep and (args.keep == "all" or apk_new == Path(args.keep)):
+                    action = "keep"
+                elif args.merge and apk_new == Path(args.merge):
+                    action = "merge"
+                elif args.auto:
+                    action = resolve_policy(apk_new, config)
+                    if action is None and sys.stdin.isatty():
+                        original = pair_for(apk_new)
+                        print(f"=== {apk_new} vs {original}")
+                        print(unified_diff(original, apk_new) if original else "(orphan .apk-new)")
+                        while True:
+                            answer = input("resolve? [a]ccept/[k]eep/[m]erge/[s]kip: ").strip().lower()
+                            if answer in ("a", "k", "m", "s"):
+                                break
+                        action = {"a": "accept", "k": "keep", "m": "merge", "s": None}[answer]
+                if action is None:
+                    print(f"pending (unresolved): {apk_new}")
+                    continue
+                if action == "merge":
+                    original = pair_for(apk_new)
+                    if original is None:
+                        print(accept(apk_new, dry_run=args.dry_run))
+                    else:
+                        print(merge_interactive(original, apk_new, dry_run=args.dry_run))
+                elif action == "accept":
+                    print(accept(apk_new, dry_run=args.dry_run))
+                elif action == "keep":
+                    print(keep(apk_new, dry_run=args.dry_run))
+            return 0
+
+        # default: list
+        for apk_new in pending:
+            original = pair_for(apk_new)
+            if original is None:
+                print(f"{apk_new}  (orphan; no installed original)")
+                continue
+            if apk_new.read_bytes() == original.read_bytes():
+                print(f"{apk_new}  (identical to installed)")
+            else:
+                print(f"{apk_new}  (differs from installed)")
+        return 0
+    except MergeError as exc:
+        print(f"saphira-mergetool: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

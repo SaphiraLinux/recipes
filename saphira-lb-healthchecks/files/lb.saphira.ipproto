@@ -1,0 +1,24 @@
+#!/bin/sh
+# lb.saphira.ipproto - generic raw IP protocol primitive (L3).
+# NOT a universal health verdict. Two documented modes:
+#   probe  (default): send the configured packet (LB_SAPHIRA_SEND_HEX /
+#          LB_SAPHIRA_SEND_FILE); healthy iff a reply from the peer
+#          matches LB_SAPHIRA_EXPECT (optional).
+#   accept: no request/reply model assumed (ESP/AH/OSPF-class). Healthy
+#          iff NO ICMP destination-unreachable (protocol rejected) is
+#          returned for the canary within the timeout. Absence of an
+#          ICMP error is evidence of acceptance, NOT proof of health.
+# Env: LB_SAPHIRA_IPPROTO (required, protocol number, e.g. 47 50 51 89),
+# LB_SAPHIRA_IPPROTO_MODE (probe|accept).
+# Requires CAP_NET_RAW (run as root; ldirectord does).
+# Copyright (c) 2026 AKADATA. MIT licensed.
+. /usr/share/saphira/lb-healthchecks/lib/lb-saphira-common.sh
+lb_init "$@"
+[ -n "${LB_SAPHIRA_IPPROTO:-}" ] || exit 2
+set -- ipproto --host "$LB_REAL" --timeout "$LB_TIMEOUT" \
+	--raw-proto "$LB_SAPHIRA_IPPROTO" \
+	--mode "${LB_SAPHIRA_IPPROTO_MODE:-probe}"
+[ -n "${LB_SAPHIRA_SEND_HEX:-}" ] && set -- "$@" --send-hex "$LB_SAPHIRA_SEND_HEX"
+[ -n "${LB_SAPHIRA_SEND_FILE:-}" ] && set -- "$@" --send-file "$LB_SAPHIRA_SEND_FILE"
+[ -n "${LB_SAPHIRA_EXPECT:-}" ] && set -- "$@" --expect "$LB_SAPHIRA_EXPECT"
+lb_probe "$@"

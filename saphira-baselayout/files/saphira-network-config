@@ -1,0 +1,393 @@
+#!/bin/sh
+
+set -eu
+
+CONFIG=${SAPHIRA_NETWORK_CONFIG:-/etc/network.conf}
+CONFIG_DIR=${SAPHIRA_NETWORK_DIR:-/etc/network.d}
+LEGACY_CONFIG=${SAPHIRA_LEGACY_NETWORK_CONFIG:-/etc/saphira-network.conf}
+STATE_DIR=${SAPHIRA_NETWORK_STATE_DIR:-/run/saphira-network}
+STATE=$STATE_DIR/state
+RESOLV_CONF=${SAPHIRA_RESOLV_CONF:-/etc/resolv.conf}
+TAB=$(printf '\t')
+
+fail()
+{
+	printf 'network: ERROR: %s\n' "$*" >&2
+	exit 1
+}
+
+apply()
+{
+	"$@" || fail "command failed: $*"
+}
+
+valid_mode()
+{
+	case $1 in off|static|dhcp) return 0 ;; esac
+	return 1
+}
+
+valid_metric()
+{
+	case ${1:-} in ''|*[!0-9]*) test -z "${1:-}" ;; *) return 0 ;; esac
+}
+
+valid_search()
+{
+	test -z "${1:-}" && return 0
+	printf '%s\n' "$1" | awk '
+		length($0) <= 253 && $0 !~ /^\./ && $0 !~ /\.$/ && $0 !~ /\.\./ {
+			n = split($0, label, ".")
+			for (i = 1; i <= n; i++)
+				if (length(label[i]) < 1 || length(label[i]) > 63 ||
+					label[i] !~ /^[[:alnum:]]([[:alnum:]-]*[[:alnum:]])?$/)
+					exit 1
+			exit 0
+		}'
+}
+
+valid_cidr()
+{
+	family=$1 value=$2
+	test -n "$value" && ip "-$family" route show to "$value" >/dev/null 2>&1
+}
+
+valid_gateway()
+{
+	family=$1 value=$2
+	test -n "$value" && ip "-$family" route show match "$value" >/dev/null 2>&1
+}
+
+list_configs()
+{
+	if test -n "${SAPHIRA_NETWORK_CONFIG:-}"; then
+		test -r "$CONFIG" || fail "configuration is unreadable: $CONFIG"
+		printf '%s\n' "$CONFIG"
+		return
+	fi
+	if test -d "$CONFIG_DIR"; then
+		find "$CONFIG_DIR" -maxdepth 1 -type f -name '*.conf' -print | LC_ALL=C sort
+	fi
+}
+
+migrate_legacy()
+{
+	test -z "${SAPHIRA_NETWORK_CONFIG:-}" || return 0
+	test -r "$LEGACY_CONFIG" || return 0
+	test -z "$(list_configs)" || return 0
+	unset INTERFACE IPV4_CIDR IPV4_GATEWAY IPV6_MODE IPV6_CIDR IPV6_GATEWAY
+	# The legacy file is root-owned administrative configuration.
+	# shellcheck disable=SC1090
+	. "$LEGACY_CONFIG"
+	test -n "${INTERFACE:-}" || fail "$LEGACY_CONFIG: INTERFACE is required"
+	mkdir -p "$CONFIG_DIR"
+	output=$CONFIG_DIR/10-legacy.conf
+	test ! -e "$output" || return 0
+	{
+		printf 'TYPE=physical\nINTERFACE=%s\n' "$INTERFACE"
+		if test -n "${IPV4_CIDR:-}"; then
+			printf 'IPV4_MODE=static\nIPV4_CIDR=%s\nIPV4_GATEWAY=%s\n' \
+				"$IPV4_CIDR" "${IPV4_GATEWAY:-}"
+		else
+			printf 'IPV4_MODE=off\n'
+		fi
+		printf 'IPV6_MODE=%s\nIPV6_CIDR=%s\nIPV6_GATEWAY=%s\n' \
+			"${IPV6_MODE:-off}" "${IPV6_CIDR:-}" "${IPV6_GATEWAY:-}"
+	} > "$output"
+	chmod 0644 "$output"
+	printf 'network: migrated deprecated %s to %s\n' "$LEGACY_CONFIG" "$output" >&2
+}
+
+reset_fields()
+{
+	unset TYPE INTERFACE IPV4_MODE IPV4_CIDR IPV4_GATEWAY IPV4_METRIC
+	unset IPV6_MODE IPV6_CIDR IPV6_GATEWAY IPV6_METRIC DNS_SERVERS
+	unset OVS_PORTS OVS_PROTOCOLS OVS_FAIL_MODE OVS_DATAPATH_TYPE OVS_BRIDGE DNS_SEARCH
+}
+
+validate_file()
+{
+	file=$1
+	reset_fields
+	# Configuration files are root-owned administrative configuration.
+	# shellcheck disable=SC1090
+	. "$file"
+	TYPE=${TYPE:-physical}
+	INTERFACE=${INTERFACE:-}
+	IPV4_MODE=${IPV4_MODE:-off}
+	IPV6_MODE=${IPV6_MODE:-off}
+	IPV4_CIDR=${IPV4_CIDR:-}
+	IPV4_GATEWAY=${IPV4_GATEWAY:-}
+	IPV4_METRIC=${IPV4_METRIC:-}
+	IPV6_CIDR=${IPV6_CIDR:-}
+	IPV6_GATEWAY=${IPV6_GATEWAY:-}
+	IPV6_METRIC=${IPV6_METRIC:-}
+	DNS_SERVERS=${DNS_SERVERS:-}
+	DNS_SEARCH=${DNS_SEARCH:-}
+	OVS_PORTS=${OVS_PORTS:-}
+	OVS_PROTOCOLS=${OVS_PROTOCOLS:-}
+	OVS_FAIL_MODE=${OVS_FAIL_MODE:-}
+	OVS_DATAPATH_TYPE=${OVS_DATAPATH_TYPE:-}
+	OVS_BRIDGE=${OVS_BRIDGE:-}
+
+	test -n "$INTERFACE" || fail "$file: INTERFACE is required"
+	case $TYPE in physical|ovs-bridge|ovs-port|ovs-internal) ;; *)
+		fail "$file: TYPE is invalid: $TYPE" ;; esac
+	valid_mode "$IPV4_MODE" || fail "$file: IPV4_MODE is invalid: $IPV4_MODE"
+	valid_mode "$IPV6_MODE" || fail "$file: IPV6_MODE is invalid: $IPV6_MODE"
+	valid_metric "$IPV4_METRIC" || fail "$file: IPV4_METRIC is invalid: $IPV4_METRIC"
+	valid_metric "$IPV6_METRIC" || fail "$file: IPV6_METRIC is invalid: $IPV6_METRIC"
+	valid_search "$DNS_SEARCH" || fail "$file: DNS_SEARCH is invalid: $DNS_SEARCH"
+	if test "$IPV4_MODE" = static; then
+		valid_cidr 4 "$IPV4_CIDR" || fail "$file: IPV4_CIDR is invalid: $IPV4_CIDR"
+		test -z "$IPV4_GATEWAY" || valid_gateway 4 "$IPV4_GATEWAY" ||
+			fail "$file: IPV4_GATEWAY is invalid: $IPV4_GATEWAY"
+	fi
+	if test "$IPV6_MODE" = static; then
+		valid_cidr 6 "$IPV6_CIDR" || fail "$file: IPV6_CIDR is invalid: $IPV6_CIDR"
+		test -z "$IPV6_GATEWAY" || valid_gateway 6 "$IPV6_GATEWAY" ||
+			fail "$file: IPV6_GATEWAY is invalid: $IPV6_GATEWAY"
+	fi
+	if test "$TYPE" = ovs-port; then
+		test -n "$OVS_BRIDGE" || fail "$file: OVS_BRIDGE is required for ovs-port"
+		test "$IPV4_MODE" = off && test "$IPV6_MODE" = off ||
+			fail "$file: ovs-port cannot carry IPv4 or IPv6 addressing"
+		ip link show dev "$INTERFACE" >/dev/null 2>&1 ||
+			fail "$file: INTERFACE does not exist: $INTERFACE"
+	fi
+	if test "$TYPE" = ovs-internal; then
+		test -n "$OVS_BRIDGE" || fail "$file: OVS_BRIDGE is required for ovs-internal"
+	fi
+	if test "$TYPE" = physical; then
+		ip link show dev "$INTERFACE" >/dev/null 2>&1 ||
+			fail "$file: INTERFACE does not exist: $INTERFACE"
+	fi
+	printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' \
+		"$file" "$TYPE" "$INTERFACE" "$IPV4_MODE" "$IPV4_CIDR" "$IPV4_GATEWAY" \
+		"$IPV4_METRIC" "$IPV6_MODE" "$IPV6_CIDR" "$IPV6_GATEWAY" "$IPV6_METRIC" \
+		"$DNS_SERVERS" "$OVS_PORTS" "$OVS_PROTOCOLS" "$OVS_FAIL_MODE" \
+		"$OVS_DATAPATH_TYPE" "$OVS_BRIDGE"
+}
+
+validate_all()
+{
+	work=${SAPHIRA_NETWORK_WORK_DIR:-/run}/saphira-network-validate.$$
+	mkdir -p "$work"
+	trap 'rm -rf "$work"' EXIT HUP INT TERM
+	migrate_legacy
+	configs=$(list_configs)
+	if test -z "$configs"; then
+		test -r "$CONFIG" || fail "configuration is unreadable: $CONFIG"
+		configs=$CONFIG
+	fi
+	: > "$work/records"
+	for file in $configs; do
+		validate_file "$file" >> "$work/records"
+	done
+	awk -F '|' '
+		seen[$3]++ { printf "%s: INTERFACE is duplicated: %s\n", $1, $3 > "/dev/stderr"; bad=1 }
+		function owner(port, bridge) { if (port != "" && bridge != "") assignment[port SUBSEP bridge]=1 }
+		$2 == "ovs-bridge" { for (i = 1; i <= split($13, listed, " "); i++) owner(listed[i], $3) }
+		$2 == "ovs-port" { owner($3, $17) }
+		END {
+			for (entry in assignment) { split(entry, value, SUBSEP); count[value[1]]++ }
+			for (port in count) if (count[port] > 1) { printf "network: ERROR: OVS port is assigned to more than one bridge: %s\n", port > "/dev/stderr"; bad=1 }
+			exit bad
+		}
+	' "$work/records" || exit 1
+	awk -F '|' '
+		$2 == "ovs-bridge" { bridge[$3]=1 }
+		$2 == "ovs-port" || $2 == "ovs-internal" {
+			if (!bridge[$17]) { printf "%s: OVS_BRIDGE is not declared: %s\n", $1, $17 > "/dev/stderr"; bad=1 }
+		}
+		END { exit bad }
+	' "$work/records" || exit 1
+	awk -F '|' '
+		$2 == "ovs-port" { declared[$3]=1 }
+		$2 == "ovs-bridge" {
+			n=split($13, ports, " ")
+			for (i = 1; i <= n; i++) if (ports[i] != "") print $1 "\t" ports[i]
+		}
+	' "$work/records" | while IFS='|' read -r file port; do
+		if ip link show dev "$port" >/dev/null 2>&1; then
+			:
+		elif awk -F '|' -v port="$port" '$2 == "ovs-port" && $3 == port { found=1 } END { exit !found }' "$work/records"; then
+			:
+		else
+			fail "$file: OVS_PORTS references missing or undeclared port: $port"
+		fi
+	done
+	awk -F '|' '
+		($4 == "static" && $6 != "") { gw4++; if ($7 == "") missing4=1 }
+		($8 == "static" && $10 != "") { gw6++; if ($11 == "") missing6=1 }
+		END { if (gw4 > 1 && missing4) { print "network: ERROR: IPV4_METRIC is required for multiple default gateways" > "/dev/stderr"; exit 1 }; if (gw6 > 1 && missing6) { print "network: ERROR: IPV6_METRIC is required for multiple default gateways" > "/dev/stderr"; exit 1 } }
+	' "$work/records" || exit 1
+	cat "$work/records"
+	rm -rf "$work"
+	trap - EXIT HUP INT TERM
+}
+
+record_state()
+{
+	printf '%s\t%s\t%s\t%s\n' "$@" >> "$STATE.new"
+}
+
+route_replace()
+{
+	family=$1 gateway=$2 interface=$3 metric=$4
+	if test -n "$metric"; then
+		apply ip "-$family" route replace default via "$gateway" dev "$interface" metric "$metric"
+	else
+		apply ip "-$family" route replace default via "$gateway" dev "$interface"
+	fi
+	record_state route "$family" "$interface" "$gateway|$metric"
+}
+
+configure_addresses()
+{
+	while IFS='|' read -r file type interface v4mode v4cidr v4gw v4metric v6mode v6cidr v6gw v6metric dns ports protocols fail_mode datapath bridge; do
+		case $type in ovs-port) continue ;; esac
+		apply ip link set dev "$interface" up
+		if test "$v4mode" = static; then
+			apply ip -4 address replace "$v4cidr" dev "$interface"
+			record_state address 4 "$interface" "$v4cidr"
+			test -z "$v4gw" || route_replace 4 "$v4gw" "$interface" "$v4metric"
+		fi
+		if test "$v6mode" = static; then
+			apply ip -6 address replace "$v6cidr" dev "$interface"
+			record_state address 6 "$interface" "$v6cidr"
+			test -z "$v6gw" || route_replace 6 "$v6gw" "$interface" "$v6metric"
+		fi
+		if test "$v4mode" = dhcp || test "$v6mode" = dhcp; then
+			flags=
+			if test "$v4mode" = dhcp && test "$v6mode" != dhcp; then flags=-4; fi
+			if test "$v4mode" != dhcp && test "$v6mode" = dhcp; then flags=-6; fi
+			# Word splitting is intentional for the optional family flag.
+			# shellcheck disable=SC2086
+			apply dhcpcd -q $flags "$interface"
+			record_state dhcp 0 "$interface" -
+		fi
+	done
+	return 0
+}
+
+configure_dns()
+{
+	records=$1
+	servers=
+	search=
+	file=
+	configured_search=
+	servers=$(awk -F '|' '{ n = split($12, value, " "); for (i = 1; i <= n; i++) if (value[i] != "" && !seen[value[i]]++) print value[i] }' "$records")
+	search=
+	while IFS='|' read -r file _rest; do
+		unset DNS_SEARCH
+		. "$file"
+		configured_search=${DNS_SEARCH:-}
+		test -z "$configured_search" || {
+			test -z "$search" || test "$search" = "$configured_search" ||
+				fail "multiple DNS search domains are not supported"
+			search=$configured_search
+		}
+	done < "$records"
+	test -n "$servers" || test -n "$search" || return 0
+	if test -e "$RESOLV_CONF"; then
+		cp "$RESOLV_CONF" "$STATE_DIR/resolv.conf.before"
+	else
+		: > "$STATE_DIR/resolv.conf.absent"
+	fi
+	temporary=$STATE_DIR/resolv.conf.new
+	: > "$temporary"
+	test -z "$search" || printf 'search %s\n' "$search" >> "$temporary"
+	for server in $servers; do printf 'nameserver %s\n' "$server" >> "$temporary"; done
+	chmod 0644 "$temporary"
+	apply mv "$temporary" "$RESOLV_CONF"
+	record_state dns 0 - -
+}
+
+configure_ovs()
+{
+	grep -Eq '^[^|]*\|ovs-' "$1" || return 0
+	command -v ovs-vsctl >/dev/null 2>&1 || fail "ovs-vsctl is required by OVS configuration"
+	while IFS='|' read -r file type bridge v4mode v4cidr v4gw v4metric v6mode v6cidr v6gw v6metric dns ports protocols fail_mode datapath ovs_bridge; do
+		test "$type" = ovs-bridge || continue
+		if ovs-vsctl br-exists "$bridge"; then created=no; else created=yes; fi
+		apply ovs-vsctl --may-exist add-br "$bridge"
+		test "$created" = no || record_state bridge "$bridge" - -
+	done < "$1"
+	while IFS='|' read -r file type bridge v4mode v4cidr v4gw v4metric v6mode v6cidr v6gw v6metric dns ports protocols fail_mode datapath ovs_bridge; do
+		test "$type" = ovs-bridge || continue
+		test -z "$protocols" || apply ovs-vsctl set bridge "$bridge" protocols="$protocols"
+		test -z "$fail_mode" || apply ovs-vsctl set-fail-mode "$bridge" "$fail_mode"
+		test -z "$datapath" || apply ovs-vsctl set bridge "$bridge" datapath_type="$datapath"
+		for port in $ports; do
+			ip link show dev "$port" >/dev/null 2>&1 || fail "$file: OVS_PORTS references missing interface: $port"
+			apply ip -4 address flush dev "$port" scope global
+			apply ip -6 address flush dev "$port" scope global
+			apply ip link set dev "$port" up
+			if ovs-vsctl port-to-br "$port" >/dev/null 2>&1; then added=no; else added=yes; fi
+			apply ovs-vsctl --may-exist add-port "$bridge" "$port"
+			test "$added" = no || record_state port "$bridge" "$port" -
+		done
+	done < "$1"
+	while IFS='|' read -r file type port v4mode v4cidr v4gw v4metric v6mode v6cidr v6gw v6metric dns ports protocols fail_mode datapath bridge; do
+		test "$type" = ovs-port || continue
+		apply ip -4 address flush dev "$port" scope global
+		apply ip -6 address flush dev "$port" scope global
+		apply ip link set dev "$port" up
+		if ovs-vsctl port-to-br "$port" >/dev/null 2>&1; then added=no; else added=yes; fi
+		apply ovs-vsctl --may-exist add-port "$bridge" "$port"
+		test "$added" = no || record_state port "$bridge" "$port" -
+	done < "$1"
+	while IFS='|' read -r file type port v4mode v4cidr v4gw v4metric v6mode v6cidr v6gw v6metric dns ports protocols fail_mode datapath bridge; do
+		test "$type" = ovs-internal || continue
+		if ovs-vsctl port-to-br "$port" >/dev/null 2>&1; then added=no; else added=yes; fi
+		apply ovs-vsctl --may-exist add-port "$bridge" "$port" -- set Interface "$port" type=internal
+		test "$added" = no || record_state port "$bridge" "$port" -
+	done < "$1"
+	return 0
+}
+
+start_network()
+{
+	records=$(validate_all)
+	mkdir -p "$STATE_DIR"
+	: > "$STATE.new"
+	printf '%s\n' "$records" > "$STATE_DIR/records"
+	configure_ovs "$STATE_DIR/records"
+	configure_addresses < "$STATE_DIR/records"
+	configure_dns "$STATE_DIR/records"
+	mv "$STATE.new" "$STATE"
+	printf 'network: configured %s interface definition(s)\n' "$(printf '%s\n' "$records" | wc -l)"
+}
+
+stop_network()
+{
+	test -r "$STATE" || return 0
+	while IFS=$TAB read -r kind family interface value; do
+		case $kind in
+			address) ip "-$family" address del "$value" dev "$interface" >/dev/null 2>&1 || true ;;
+			route)
+				gateway=${value%%|*}; metric=${value#*|}
+				if test -n "$metric"; then ip "-$family" route del default via "$gateway" dev "$interface" metric "$metric" >/dev/null 2>&1 || true
+				else ip "-$family" route del default via "$gateway" dev "$interface" >/dev/null 2>&1 || true; fi ;;
+		dhcp) command -v dhcpcd >/dev/null 2>&1 && dhcpcd -x "$interface" >/dev/null 2>&1 || true ;;
+			dns)
+			if test -e "$STATE_DIR/resolv.conf.before"; then
+				mv "$STATE_DIR/resolv.conf.before" "$RESOLV_CONF"
+			elif test -e "$STATE_DIR/resolv.conf.absent"; then
+				rm -f "$RESOLV_CONF" "$STATE_DIR/resolv.conf.absent"
+			fi ;;
+		esac
+	done < "$STATE"
+	awk -F '\t' '$1 == "port" { print $2 "\t" $3 }' "$STATE" | while IFS=$TAB read -r bridge port; do ovs-vsctl --if-exists del-port "$bridge" "$port" >/dev/null 2>&1 || true; done
+	awk -F '\t' '$1 == "bridge" { print $2 }' "$STATE" | while IFS= read -r bridge; do ovs-vsctl --if-exists del-br "$bridge" >/dev/null 2>&1 || true; done
+	rm -f "$STATE" "$STATE_DIR/records"
+}
+
+case ${1:-} in
+	start) start_network ;;
+	stop) stop_network ;;
+	validate) validate_all >/dev/null ;;
+	*) fail "usage: $0 {start|stop|validate}" ;;
+esac

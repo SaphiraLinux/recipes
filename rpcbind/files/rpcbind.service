@@ -1,0 +1,16 @@
+[Unit]
+Description=RPC port mapper (required for NFSv3 and other ONC RPC services)
+Documentation=man:rpcbind(8)
+After=network.target
+
+[Service]
+# Foreground per upstream (rpcbind -f); -w keeps warm-start state across
+# restarts. Upstream runs as root by default (--with-rpcuser=root).
+Type=simple
+ExecStart=/usr/sbin/rpcbind -f -w
+RuntimeDirectory=rpcbind
+RuntimeDirectoryMode=0755
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

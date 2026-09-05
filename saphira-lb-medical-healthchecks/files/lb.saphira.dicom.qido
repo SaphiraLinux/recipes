@@ -1,0 +1,18 @@
+#!/bin/sh
+# lb.saphira.dicom.qido - QIDO-RS query (DICOMweb, read-only, continuous-safe).
+# Proves the QIDO-RS service answers 200 with DICOM JSON for a synthetic
+# query. Configuration ($6 convenience; env/conf otherwise):
+#   $6  QIDO URL     LB_SAPHIRA_DICOM_QIDO_URL (required, full URL incl.
+#                    aets and query; per-VIP in dicom.qido/<service>.conf)
+#       LB_SAPHIRA_DICOMWEB_TLS_VERIFY=1 enforces cert checks.
+# Copyright (c) 2026 AKADATA. MIT licensed.
+. /usr/share/saphira/lb-healthchecks/lib/lb-saphira-common.sh
+lb_init "$@"
+URL="${6:-${LB_SAPHIRA_DICOM_QIDO_URL:-}}"
+[ -n "$URL" ] || exit 2
+V=""
+[ "${LB_SAPHIRA_DICOMWEB_TLS_VERIFY:-0}" = "1" ] || V="-k"
+out=$(curl $V -sS --max-time "$LB_TIMEOUT" -D - -o /dev/null \
+	-H 'Accept: application/dicom+json' "$URL") || exit 1
+printf '%s\n' "$out" | grep -qiE '^HTTP/[^ ]+ 200' || exit 1
+printf '%s\n' "$out" | grep -qi '^content-type:.*application/dicom\+json'

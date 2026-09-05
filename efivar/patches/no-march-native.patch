@@ -1,0 +1,12 @@
+--- a/src/include/defaults.mk
++++ b/src/include/defaults.mk
+@@ -75,9 +75,0 @@
+-ifneq ($(HOST_ARCH),ia64)
+-ifneq ($(HOST_ARCH),riscv64)
+-	HOST_MARCH=-march=native
+-else
+-	HOST_MARCH=
+-endif
+-else
+-	HOST_MARCH=
+-endif

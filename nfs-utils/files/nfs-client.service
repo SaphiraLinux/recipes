@@ -1,0 +1,17 @@
+[Unit]
+Description=NFS client daemons (statd for NFSv3 locking, idmapd for NFSv4)
+Documentation=man:rpc.statd(8) man:rpc.idmapd(8)
+After=network.target rpcbind.service
+Wants=rpcbind.service
+
+# Both daemons self-daemonize (upstream default); native oneshot semantics
+# with no fake foreground wrappers. NFSv3 mounts can also lazy-start statd
+# via the shipped start-statd helper.
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/rpc.statd
+ExecStart=/usr/sbin/rpc.idmapd
+
+[Install]
+WantedBy=multi-user.target

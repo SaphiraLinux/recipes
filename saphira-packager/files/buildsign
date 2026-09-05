@@ -1,0 +1,98 @@
+#!/bin/bash
+
+# buildsign: one-step build -> publish -> install for Saphira packages.
+# Copyright (c) 2026 AKADATA. MIT licensed.
+#
+# Usage:
+#   buildsign PACKAGE          buildpkg + sign-apk-repo PACKAGE + installpkg
+#   buildsign --sync PACKAGE   additionally rsync the published repo to the
+#                              public endpoint (saphira-build publish --sync)
+#   buildsign menu             interactive menu walking through the steps
+#
+# Order matters: installpkg installs from the published repository, so
+# sign-apk-repo must run first; this script enforces the correct order.
+# Bump hygiene: version bumps belong to bumppkg (which carries the
+# anti-loop guards) - do not bump from here without a proven defect.
+
+set -euo pipefail
+
+. "${SAPHIRA_CONFIG_FILE:-/etc/saphira/package_builder.sh}"
+
+usage()
+{
+	printf 'usage: buildsign [--sync] PACKAGE | buildsign menu\n' >&2
+	exit 1
+}
+
+build_one()
+{
+	local pkg=$1
+	printf '\n=== buildsign: [1/3] buildpkg %s\n' "$pkg"
+	buildpkg "$pkg"
+	printf '\n=== buildsign: [2/3] sign-apk-repo %s (publishes this package only)\n' "$pkg"
+	sudo sign-apk-repo "$pkg"
+	printf '\n=== buildsign: [3/3] installpkg %s\n' "$pkg"
+	sudo installpkg "$pkg"
+}
+
+sync_public()
+{
+	printf '\n=== buildsign: sync published repository to the public endpoint\n'
+	sudo saphira-build publish --sync
+}
+
+run_menu()
+{
+	while true; do
+		echo
+		echo "=== saphira buildsign menu ==="
+		echo "  1) build a package                (buildpkg PKG)"
+		echo "  2) build + sign + install         (buildsign PKG)"
+		echo "  3) sign + install existing build  (sign-apk-repo PKG + installpkg PKG)"
+		echo "  4) sync published repo to public  (saphira-build publish --sync)"
+		echo "  5) bump revisions                 (bumppkg - guarded, see below)"
+		echo "  6) bump status / history          (bumppkg status | history)"
+		echo "  q) quit"
+		echo
+		echo "Note: bumping publishes new revisions and can trigger large rebuilds."
+		echo "      bumppkg refuses churn (never-published packages, re-bumps within"
+		echo "      24h) and warns about world rebuilds; prefer targeted bumps."
+		read -rp "choice: " choice
+		case $choice in
+			1) read -rp "package: " p; buildpkg "$p" ;;
+			2) read -rp "package: " p; build_one "$p" ;;
+			3) read -rp "package: " p
+				sudo sign-apk-repo "$p"
+				sudo installpkg "$p" ;;
+			4) sync_public ;;
+			5) read -rp "package (or 'all'): " p
+				if [ "$p" = "all" ]; then bumppkg all; else bumppkg "$p"; fi ;;
+			6) bumppkg status
+				echo
+				bumppkg history ;;
+			q) return 0 ;;
+			*) echo "invalid choice" ;;
+		esac
+	done
+}
+
+[ "$EUID" -ne 0 ] || { echo "buildsign: run as an unprivileged user (sudo steps are explicit)" >&2; exit 1; }
+
+if [ "${1:-}" = "menu" ]; then
+	run_menu
+	exit 0
+fi
+
+sync=0
+pkg=""
+for arg in "$@"; do
+	case $arg in
+		--sync) sync=1 ;;
+		-*) usage ;;
+		*) [ -z "$pkg" ] || usage; pkg=$arg ;;
+	esac
+done
+[ -n "$pkg" ] || usage
+build_one "$pkg"
+[ "$sync" -eq 0 ] || sync_public
+printf '\nbuildsign: %s built, published and installed\n' "$pkg"

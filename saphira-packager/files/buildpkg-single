@@ -1,0 +1,278 @@
+#!/bin/bash
+
+set -euo pipefail
+
+. "${SAPHIRA_CONFIG_FILE:-/etc/saphira/package_builder.sh}"
+
+umask 022
+
+die()
+{
+	printf 'buildpkg-single: %s\n' "$*" >&2
+	exit 1
+}
+
+[ "$#" -ge 1 ] && [ "$#" -le 2 ] || die "usage: $0 PACKAGE [SOURCE]"
+[ "${SAPHIRA_ISOLATED_BUILD-}" = 1 ] || die "must run inside the isolated build namespace"
+
+PACKAGE=$1
+SOURCE=${2-}
+case $PACKAGE in
+	''|*[!A-Za-z0-9._+-]*) die "invalid package name: $PACKAGE" ;;
+esac
+
+RECIPE_DIR=$SAPHIRA_RECIPE_ROOT/$PACKAGE
+[ -f "$RECIPE_DIR/recipe.sh" ] || die "recipe not found: $RECIPE_DIR/recipe.sh"
+
+# Recipe code is authoritative and is executed only after the isolated root is
+# active. Metadata planning uses a separate no-network read-only sandbox.
+. "$RECIPE_DIR/recipe.sh"
+
+require_metadata()
+{
+	local name=$1 value
+	value=${!name-}
+	[ -n "$value" ] || die "recipe metadata is missing: $name"
+}
+
+for name in pkgname pkgver pkgrel pkgarch pkgdesc license origin repo url; do
+	require_metadata "$name"
+done
+[ "$pkgname" = "$PACKAGE" ] || die "recipe pkgname does not match PACKAGE"
+# House packaging policy: r0 packages are forbidden. Every recipe ships
+# pkgrel>=1; the initial publication of a package is r1.
+case $pkgrel in
+	''|*[!0-9]*) die "invalid pkgrel in recipe: $pkgrel" ;;
+esac
+[ "$pkgrel" -ge 1 ] || die "r0 packages are forbidden: pkgrel=$pkgrel in $PACKAGE (ship pkgrel>=1 - the initial publication of a package is r1)"
+depends=${depends-}
+makedepends=${makedepends-}
+subpackages=${subpackages-}
+source_url=${source-}
+source_sha256=${sha256-}
+
+if [ -n "$SOURCE" ]; then
+	[ -d "$SOURCE" ] || die "source directory does not exist: $SOURCE"
+elif [ -z "$source_url" ]; then
+	SOURCE=$RECIPE_DIR
+elif [ -z "$source_sha256" ]; then
+	die "recipe source requires sha256"
+fi
+
+work_dir=$SAPHIRA_BUILD_ROOT/$PACKAGE
+case $work_dir in
+	"$SAPHIRA_BUILD_ROOT"/*) ;;
+	*) die "staging path escapes build root: $work_dir" ;;
+esac
+SRC=$work_dir/source
+BUILDDIR=$work_dir/build
+PKGDEST=$work_dir/pkg
+SUBPKGDEST=$work_dir/subpkg
+logs=$work_dir/logs
+
+rm -rf -- "$work_dir"
+mkdir -p "$SRC" "$BUILDDIR" "$PKGDEST" "$SUBPKGDEST" "$logs"
+build_log=$logs/build.log
+: > "$build_log"
+exec 3>&1 4>&2
+exec >>"$build_log" 2>&1
+
+buildpkg_exit()
+{
+	status=$?
+	if [ "$status" -ne 0 ]; then
+		cat "$build_log" >&4
+	fi
+	exit "$status"
+}
+trap buildpkg_exit EXIT
+
+if [ -n "$SOURCE" ]; then
+	cp -a "$SOURCE"/. "$SRC"/
+else
+	command -v curl >/dev/null 2>&1 || die "curl is required to download source"
+	command -v sha256sum >/dev/null 2>&1 || die "sha256sum is required to verify source"
+	source_archive=$work_dir/source.archive
+	extract_dir=$work_dir/extract
+	mkdir -p "$extract_dir"
+	curl -fL --retry 3 --output "$source_archive" "$source_url"
+	printf '%s  %s\n' "$source_sha256" "$source_archive" | sha256sum -c -
+	case "$source_url" in
+		*.zip)
+			command -v unzip >/dev/null 2>&1 || die "unzip is required to extract ZIP sources"
+			unzip -q "$source_archive" -d "$extract_dir"
+			;;
+		*)
+			command -v tar >/dev/null 2>&1 || die "tar is required to extract source"
+			tar --no-same-owner -xf "$source_archive" -C "$extract_dir"
+			;;
+	esac
+	shopt -s nullglob dotglob
+	extracted=("$extract_dir"/*)
+	shopt -u nullglob dotglob
+	if [ "${#extracted[@]}" -eq 1 ] && [ -d "${extracted[0]}" ]; then
+		cp -a "${extracted[0]}"/. "$SRC"/
+	else
+		cp -a "$extract_dir"/. "$SRC"/
+	fi
+fi
+
+export SRC BUILDDIR PKGDEST RECIPE_DIR SUBPKGDEST
+export pkgname pkgver pkgrel pkgarch pkgdesc license origin repo url
+export depends makedepends subpackages DESTDIR="$PKGDEST"
+
+if [ -d "$RECIPE_DIR/patches" ]; then
+	for patch_file in "$RECIPE_DIR"/patches/*.patch; do
+		[ -f "$patch_file" ] || continue
+		patch -d "$SRC" -Np1 < "$patch_file"
+	done
+fi
+
+declare -F recipe_build >/dev/null || die "recipe_build is not defined"
+declare -F recipe_install >/dev/null || die "recipe_install is not defined"
+
+cd "$SRC"
+recipe_build
+recipe_install
+
+move_staged_file()
+{
+	local source_path=$1 subpackage=$2 relative destination
+	[ -e "$source_path" ] || [ -L "$source_path" ] || return 0
+	relative=${source_path#"$PKGDEST"/}
+	destination=$SUBPKGDEST/$subpackage/$relative
+	mkdir -p "$(dirname "$destination")"
+	mv "$source_path" "$destination"
+}
+
+move_staged_tree()
+{
+	local relative=$1 subpackage=$2 source_path destination
+	source_path=$PKGDEST/$relative
+	[ -d "$source_path" ] || return 0
+	destination=$SUBPKGDEST/$subpackage/$relative
+	mkdir -p "$(dirname "$destination")"
+	mv "$source_path" "$destination"
+}
+
+for subpackage in $subpackages; do
+	case $subpackage in
+		"$pkgname"-dev|"$pkgname"-doc|"$pkgname"-libs) ;;
+		*) die "unsupported subpackage: $subpackage (only -dev, -doc and -libs are supported)" ;;
+	esac
+done
+
+for subpackage in $subpackages; do
+	case $subpackage in
+		"$pkgname"-dev)
+			move_staged_tree usr/include "$subpackage"
+			move_staged_tree usr/lib/cmake "$subpackage"
+			move_staged_tree usr/share/cmake "$subpackage"
+			for root in "$PKGDEST/usr/lib" "$PKGDEST/lib"; do
+				[ -d "$root" ] || continue
+				while IFS= read -r -d '' file; do
+					move_staged_file "$file" "$subpackage"
+				done < <(find "$root" -type f \( -name '*.a' -o -name '*.la' -o -name '*.pc' \) -print0)
+				while IFS= read -r -d '' file; do
+					move_staged_file "$file" "$subpackage"
+				done < <(find "$root" -type l -name '*.so' -print0)
+			done
+			;;
+		"$pkgname"-doc)
+			move_staged_tree usr/share/man "$subpackage"
+			move_staged_tree usr/share/info "$subpackage"
+			move_staged_tree usr/share/doc "$subpackage"
+			;;
+		"$pkgname"-libs)
+			for root in "$PKGDEST/usr/lib" "$PKGDEST/lib"; do
+				[ -d "$root" ] || continue
+				while IFS= read -r -d '' file; do
+					move_staged_file "$file" "$subpackage"
+				done < <(find "$root" -type f -name '*.so.*' -print0)
+			done
+			;;
+	esac
+done
+
+[ -n "$(ls -A "$PKGDEST" 2>/dev/null)" ] || die "main package staging directory is empty"
+
+# /usr/share/info/dir is a per-install index generated by install-info;
+# every texinfo-built package ships its own copy and they collide in
+# shared roots. It is never package payload.
+rm -f "$PKGDEST/usr/share/info/dir"
+
+outputs_file=$work_dir/outputs.list
+main_dependencies=$(echo $depends)
+printf '%s\t%s\t%s\t%s\n' "$pkgname" pkg "$pkgdesc" "$main_dependencies" > "$outputs_file"
+for subpackage in $subpackages; do
+	payload=$SUBPKGDEST/$subpackage
+	[ -n "$(ls -A "$payload" 2>/dev/null)" ] || continue
+	# depends_dev (Alpine-style convention): extra runtime dependencies
+	# carried by the -dev subpackage, typically the -dev packages of the
+	# Requires.private entries in shipped .pc files, so pkg-config can
+	# resolve transitive requirements for consumers.
+	case $subpackage in
+		"$pkgname"-dev)
+			description="$pkgdesc development files"
+			dev_dependencies="$pkgname=$pkgver-r$pkgrel $(echo ${depends_dev-})"
+			;;
+		"$pkgname"-doc) description="$pkgdesc documentation" ;;
+		# -libs packages are STANDALONE runtime libraries: no parent pin.
+		# The parent depends on them, never the reverse - a parent pin
+		# made gcc-libs drag the full compiler (binutils, gmp, isl, mpc,
+		# mpfr) into every runtime consumer chain.
+		"$pkgname"-libs) description="$pkgdesc runtime libraries"; dev_dependencies="" ;;
+	esac
+	printf '%s\t%s\t%s\t%s\n' \
+		"$subpackage" "subpkg/$subpackage" "$description" \
+		"${dev_dependencies:-$pkgname=$pkgver-r$pkgrel}" >> "$outputs_file"
+	unset dev_dependencies
+done
+
+build_time=${SOURCE_DATE_EPOCH:-$(date +%s)}
+export SAPHIRA_MANIFEST_NAME=$pkgname
+export SAPHIRA_MANIFEST_VERSION=$pkgver-r$pkgrel
+export SAPHIRA_MANIFEST_ARCH=$pkgarch
+export SAPHIRA_MANIFEST_LICENSE=$license
+export SAPHIRA_MANIFEST_ORIGIN=$origin
+export SAPHIRA_MANIFEST_URL=$url
+export SAPHIRA_MANIFEST_BUILD_TIME=$build_time
+export SAPHIRA_MANIFEST_OUTPUTS=$outputs_file
+export SAPHIRA_MANIFEST_REPLACES=${replaces-}
+"$SAPHIRA_PYTHON" - "$work_dir/manifest.json" <<'PY'
+import json
+import os
+import sys
+
+outputs = []
+with open(os.environ["SAPHIRA_MANIFEST_OUTPUTS"], encoding="utf-8") as stream:
+    for line in stream:
+        name, payload, description, dependencies = line.rstrip("\n").split("\t", 3)
+        outputs.append({
+            "name": name,
+            "payload": payload,
+            "description": description,
+            "dependencies": dependencies.split(),
+        })
+manifest = {
+    "schema": "saphira-stage-manifest/v1",
+    "name": os.environ["SAPHIRA_MANIFEST_NAME"],
+    "version": os.environ["SAPHIRA_MANIFEST_VERSION"],
+    "arch": os.environ["SAPHIRA_MANIFEST_ARCH"],
+    "license": os.environ["SAPHIRA_MANIFEST_LICENSE"],
+    "origin": os.environ["SAPHIRA_MANIFEST_ORIGIN"],
+    "url": os.environ["SAPHIRA_MANIFEST_URL"],
+    "build_time": int(os.environ["SAPHIRA_MANIFEST_BUILD_TIME"]),
+    "replaces": [r for r in os.environ.get("SAPHIRA_MANIFEST_REPLACES", "").split() if r],
+    "outputs": outputs,
+}
+with open(sys.argv[1], "x", encoding="utf-8") as stream:
+    json.dump(manifest, stream, sort_keys=True, separators=(",", ":"))
+    stream.write("\n")
+PY
+rm -f -- "$outputs_file"
+
+cat "$build_log" >&3
+printf 'buildpkg-single: staged %s at %s\n' "$pkgname-$pkgver-r$pkgrel" "$work_dir" >&3
+trap - EXIT
+exec 3>&- 4>&-

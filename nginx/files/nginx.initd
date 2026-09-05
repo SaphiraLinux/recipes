@@ -1,0 +1,20 @@
+#!/sbin/openrc-run
+
+description="Saphira webDragon nginx"
+
+command="/usr/sbin/nginx"
+command_args="-g 'daemon off;'"
+supervisor="supervise-daemon"
+
+depend()
+{
+	need localmount
+	use net logger dns
+}
+
+start_pre()
+{
+	checkpath -d -o nginx:nginx -m 0755 /run/nginx /var/log/nginx
+	ebegin "Checking nginx configuration"
+	/usr/sbin/nginx -t
+}

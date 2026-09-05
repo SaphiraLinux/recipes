@@ -1,0 +1,21 @@
+#!/bin/sh
+# lb.saphira.gre - GRE encapsulated-packet loopback (L3, two-party contract).
+# RFC 2784/2890 define only the GRE header/key/sequence format; the
+# keepalive loop itself is the common tunnel-keepalive practice, not a
+# standard. Semantics: a GRE packet (optional key LB_SAPHIRA_GRE_KEY) is
+# sent to real:$3; its payload is an inner IP packet addressed back to the
+# checker. HEALTHY IFF the peer returns the encapsulated packet (any GRE
+# reply from the peer). Timeout means the GRE data path is broken.
+# Required env (no defaults invented - explicit two-party contract):
+#   LB_SAPHIRA_GRE_INNER_SRC  checker address as the peer routes it back
+#   LB_SAPHIRA_GRE_INNER_DST  peer-side inner destination address
+#   LB_SAPHIRA_GRE_INNER_PORT inner UDP port pair (default 33434)
+# Requires CAP_NET_RAW (run as root; ldirectord does).
+# Copyright (c) 2026 AKADATA. MIT licensed.
+. /usr/share/saphira/lb-healthchecks/lib/lb-saphira-common.sh
+lb_init "$@"
+[ -n "${LB_SAPHIRA_GRE_INNER_SRC:-}" ] || exit 2
+[ -n "${LB_SAPHIRA_GRE_INNER_DST:-}" ] || exit 2
+set -- gre --host "$LB_REAL" --timeout "$LB_TIMEOUT"
+[ -n "${LB_SAPHIRA_GRE_KEY:-}" ] && set -- "$@" --key "$LB_SAPHIRA_GRE_KEY"
+lb_probe "$@"

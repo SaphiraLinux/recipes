@@ -1,0 +1,23 @@
+iThis is the default Saphira Gopher page.
+iEdit /srv/gopher/gophermap to replace this content.
+iSee /usr/share/geomyidae/default/README for examples.
+i
+i-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+i
+i            S a p h i r a   L i n u x
+i
+i         So simple it hurts.
+i
+i-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-
+i
+iA small, musl-based, self-hosting Linux distribution.
+iThis Gopher menu is served by geomyidae on TCP/70.
+i
+1Documentation	/docs
+1Packages	/packages
+1Downloads	/downloads
+0About this server	/about.txt
+hWebsite	URL:https://saphira.vm2.uk/
+i
+iMenu entries above use geomyidae gph syntax: empty host and port
+ifields make the server fill in its own address.

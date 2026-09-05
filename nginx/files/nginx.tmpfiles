@@ -1,0 +1,2 @@
+# tmpfiles.d entry for the nginx service; /run is a fresh tmpfs every boot.
+d /run/nginx 0755 nginx nginx -

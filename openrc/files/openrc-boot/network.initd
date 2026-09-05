@@ -1,0 +1,26 @@
+#!/sbin/openrc-run
+
+description="Configure Akadata user-space networking"
+command=/sbin/saphira-network-config
+command_args=${network_args:-}
+
+depend()
+{
+	need localmount
+	before netmount
+	provide net
+}
+
+start()
+{
+	ebegin "Configuring Akadata networking"
+	"$command" start $command_args
+	eend $?
+}
+
+stop()
+{
+	ebegin "Stopping Akadata networking"
+	"$command" stop $command_args
+	eend $?
+}

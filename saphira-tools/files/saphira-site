@@ -1,0 +1,349 @@
+#!/bin/sh
+
+set -eu
+
+NGINX_DIR=${SAPHIRA_NGINX_DIR:-/etc/nginx/vhosts}
+ENABLED_DIR=${SAPHIRA_NGINX_ENABLED_DIR:-/etc/nginx/vhosts.enabled}
+PHP_DIR=${SAPHIRA_PHP_DIR:-/etc/php85/php-fpm.d}
+LOG_DIR=${SAPHIRA_LOG_DIR:-/var/log/nginx}
+SITE_BASE=${SAPHIRA_SITE_ROOT_BASE:-/srv}
+TMP=${TMPDIR:-/tmp}/saphira-site.$$
+HOST= TYPE= ROOT= SERVER_ROOT= POLICY= LISTENERS=
+PROXY4=no PROXY6=no TRUSTED= NODE_PORT= TLS=no
+SITE_FILE= POOL_FILE= OLD_SITE= OLD_POOL=
+
+finish() { rm -rf "$TMP"; }
+trap finish EXIT
+trap 'exit 130' HUP INT TERM
+mkdir -p "$TMP"
+say() { printf '%s\n' "$*"; }
+have() { command -v "$1" >/dev/null 2>&1; }
+die() { printf '%s\n' "$*" >&2; exit 1; }
+
+read_value()
+{
+	printf '%s ' "$1" >&2
+	IFS= read -r REPLY || exit 130
+	if test -z "$REPLY" && test $# -gt 1; then REPLY=$2; fi
+}
+
+yes_no()
+{
+	while :; do
+		read_value "$1 [y/N]" "$(test "${2:-No}" = Yes && printf y || printf n)"
+		case $REPLY in
+			y|Y|yes|Yes) return 0;;
+			n|N|no|No|'') return 1;;
+			*) say 'Please answer yes or no.' >&2;;
+		esac
+	done
+}
+
+valid_host()
+{
+	printf '%s\n' "$1" | awk '
+	BEGIN { bad=0 }
+	length($0)>253 || $0 !~ /^[A-Za-z0-9][A-Za-z0-9.-]*[A-Za-z0-9]$/ || $0 ~ /\.\.|(^|\.)-|-(\.|$)/ { bad=1 }
+	{ n=split($0,a,"."); for(i=1;i<=n;i++) if(length(a[i])>63) bad=1 }
+	END { exit bad }'
+}
+
+valid_ipv4()
+{
+	printf '%s\n' "$1" | awk -F. '
+	BEGIN { bad=0 }
+	NF != 4 { bad=1 }
+	{ for (i=1; i<=4; i++) if ($i !~ /^[0-9]+$/ || $i > 255) bad=1 }
+	END { exit bad }'
+}
+
+valid_ipv6()
+{
+	printf '%s\n' "$1" | awk '
+	BEGIN { bad=0 }
+	{
+		s=$0
+		if (s !~ /^[0-9A-Fa-f:]+$/ || s !~ /:/ || s ~ /:::/) bad=1
+		compressed=index(s,"::")
+		if (compressed && index(substr(s,compressed+2),"::")) bad=1
+		if (compressed) gsub(/::/,":",s)
+		n=split(s,a,":"); groups=0
+		for (i=1; i<=n; i++) if (a[i] != "") {
+			groups++
+			if (a[i] !~ /^[0-9A-Fa-f][0-9A-Fa-f]?[0-9A-Fa-f]?[0-9A-Fa-f]?$/) bad=1
+		}
+		if (compressed ? groups >= 8 : groups != 8) bad=1
+	}
+	END { exit bad }'
+}
+
+valid_ip()
+{
+	test -n "$1" || return 1
+	case $1 in
+		*[!0-9.]* ) valid_ipv6 "$1";;
+		*.*) valid_ipv4 "$1";;
+		*) return 1;;
+	esac
+}
+
+valid_port() { case $1 in ''|*[!0-9]*) return 1;; esac; test "$1" -ge 1 && test "$1" -le 65535; }
+under_host() { case $1 in "$SITE_BASE/$HOST"|"$SITE_BASE/$HOST"/*) return 0;; esac; return 1; }
+ensure_dir() { test -d "$1" || mkdir -p -m 0755 "$1"; }
+
+ask_hostname()
+{
+	while :; do
+		read_value 'Hostname:'
+		if valid_host "$REPLY"; then HOST=$REPLY; return; fi
+		say 'Invalid hostname; enter a DNS hostname and try again.' >&2
+	done
+}
+
+ask_type()
+{
+	while :; do
+		read_value 'Site type: 1 Static, 2 PHP, 3 Node' 1
+		case $REPLY in
+			1) TYPE=static; ROOT=$SITE_BASE/$HOST/htdocs; return;;
+			2)
+				TYPE=php
+				while :; do
+					say 'PHP site layout:'; say '1. Public + server (Recommended)'; say '2. PHP inside htdocs'; say '3. Custom'
+					read_value 'Choice' 1
+					case $REPLY in
+						1) ROOT=$SITE_BASE/$HOST/htdocs; SERVER_ROOT=$SITE_BASE/$HOST/server; break;;
+						2) ROOT=$SITE_BASE/$HOST/htdocs; break;;
+						3)
+							while :; do
+								read_value 'Document root' "$SITE_BASE/$HOST/htdocs"; ROOT=$REPLY
+								under_host "$ROOT" && break
+								say "Document root must be under $SITE_BASE/$HOST; try again." >&2
+							done
+							while :; do
+								read_value 'Optional application/server root' ''; SERVER_ROOT=$REPLY
+								test -z "$SERVER_ROOT" || under_host "$SERVER_ROOT" && break
+								say "Server root must be under $SITE_BASE/$HOST; try again." >&2
+							done
+							break;;
+						*) say 'Invalid PHP layout; choose 1, 2, or 3.' >&2;;
+					esac
+				done
+				have php-fpm85 || { say 'PHP-FPM IS NOT INSTALLED'; say 'This site type requires PHP-FPM.'; exit 1; }
+				return;;
+			3)
+				TYPE=node; ROOT=$SITE_BASE/$HOST/htdocs
+				while :; do
+					read_value 'Node localhost port' 3000; NODE_PORT=$REPLY
+					valid_port "$NODE_PORT" && break
+					say 'Invalid port; enter a number from 1 to 65535.' >&2
+				done
+				have node || { say 'NODE.JS IS NOT INSTALLED'; say 'This site type requires Node.js.'; exit 1; }
+				return;;
+			*) say 'Invalid site type; choose 1, 2, or 3.' >&2;;
+		esac
+	done
+}
+
+ask_listeners()
+{
+	while :; do
+		read_value 'Listeners: 1 IPv4, 2 IPv6, 3 Dual stack' 1
+		case $REPLY in 1) LISTENERS=4; return;; 2) LISTENERS=6; return;; 3) LISTENERS=both; return;; *) say 'Invalid listener selection; choose 1, 2, or 3.' >&2;; esac
+	done
+}
+
+ask_proxy()
+{
+	yes_no 'Behind HAProxy?' No || return 0
+	yes_no 'Does HAProxy use PROXY protocol?' No || return 0
+	while :; do
+		read_value 'Upstream proxy IP'
+		if valid_ip "$REPLY"; then TRUSTED=$REPLY; break; fi
+		say 'Invalid IP address; enter an IPv4 or IPv6 address without /CIDR.' >&2
+	done
+	case $LISTENERS in
+		4) PROXY4=yes;;
+		6) PROXY6=yes;;
+		both)
+			while :; do
+				read_value 'PROXY protocol listeners: 1 IPv4, 2 IPv6, 3 Both' 1
+				case $REPLY in 1) PROXY4=yes; return;; 2) PROXY6=yes; return;; 3) PROXY4=yes; PROXY6=yes; return;; *) say 'Invalid PROXY listener selection; choose 1, 2, or 3.' >&2;; esac
+			done;;
+	esac
+}
+
+ask_policy()
+{
+	while :; do
+		say 'Security: 1 Strict, 2 Relaxed, 3 Permissive'; read_value 'Security policy' 1
+		case $REPLY in 1) POLICY=Strict; return;; 2) POLICY=Relaxed; return;; 3) POLICY=Permissive; return;; *) say 'Invalid security policy; choose 1, 2, or 3.' >&2;; esac
+	done
+}
+
+headers()
+{
+	case $POLICY in
+		Strict) csp="default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'";;
+		Relaxed) csp="default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'self'; form-action 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' https:";;
+		Permissive) csp="default-src * data: blob: 'unsafe-inline' 'unsafe-eval'; frame-ancestors 'self'";;
+	esac
+	printf '    add_header Content-Security-Policy "%s" always;\n' "$csp"
+	printf '%s\n' '    add_header X-Content-Type-Options "nosniff" always;' '    add_header X-Frame-Options "SAMEORIGIN" always;' '    add_header Referrer-Policy "strict-origin-when-cross-origin" always;' '    add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;'
+	if test "${1:-no}" = yes; then printf '    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;\n'; fi
+}
+
+listeners()
+{
+	port=$1
+	case $LISTENERS in
+		4) test "$PROXY4" = yes && printf '    listen %s proxy_protocol;\n' "$port" || printf '    listen %s;\n' "$port";;
+		6) test "$PROXY6" = yes && printf '    listen [%s]:%s proxy_protocol;\n' '::' "$port" || printf '    listen [%s]:%s;\n' '::' "$port";;
+		both) test "$PROXY4" = yes && printf '    listen %s proxy_protocol;\n' "$port" || printf '    listen %s;\n' "$port"; test "$PROXY6" = yes && printf '    listen [%s]:%s proxy_protocol;\n' '::' "$port" || printf '    listen [%s]:%s;\n' '::' "$port";;
+	esac
+}
+
+common()
+{
+	secure=${1:-no}
+	printf '%s\n' "    server_name $HOST;" "    access_log $LOG_DIR/$HOST.access.log;" "    error_log $LOG_DIR/$HOST.error.log;"
+	headers "$secure"
+	if test "$PROXY4" = yes || test "$PROXY6" = yes; then printf '    real_ip_header proxy_protocol;\n    set_real_ip_from %s;\n' "$TRUSTED"; fi
+}
+
+body()
+{
+	printf '%s\n' '    location = /health {' '        access_log off;' '        default_type text/plain;' '        return 200 "ok\\n";' '    }'
+	printf '%s\n' '    location ^~ /.well-known/acme-challenge/ {' "        root $ROOT;" '        try_files $uri =404;' '    }'
+	case $TYPE in
+		static) printf '    root %s;\n    index index.html index.htm;\n' "$ROOT";;
+		php) printf '%s\n' "    root $ROOT;" '    index index.php index.html;' '    location ~ \\.php$ {' '        try_files $uri =404;' '        include fastcgi_params;' '        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;' "        fastcgi_pass unix:/run/php-fpm/$HOST.sock;" '    }';;
+		node) printf '%s\n' "    root $ROOT;" '    location / {' '        proxy_set_header Host $host;' '        proxy_set_header X-Real-IP $remote_addr;' '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;' '        proxy_set_header X-Forwarded-Proto $scheme;' "        proxy_pass http://127.0.0.1:$NODE_PORT;" '    }';;
+	esac
+}
+
+render()
+{
+	file=$1
+	printf '# Generated by saphira-site for %s.\nserver {\n' "$HOST" > "$file"
+	if test "$TLS" = yes; then
+		listeners 80 >> "$file"; common no >> "$file"; printf '%s\n' '    location ^~ /.well-known/acme-challenge/ {' "        root $ROOT;" '        try_files $uri =404;' '    }' '    return 301 https://$host$request_uri;' '}' 'server {' >> "$file"
+		listeners 443 >> "$file"; common yes >> "$file"; printf '%s\n' '    ssl on;' "    ssl_certificate /etc/letsencrypt/live/$HOST/fullchain.pem;" "    ssl_certificate_key /etc/letsencrypt/live/$HOST/privkey.pem;" >> "$file"; body >> "$file"
+	else
+		listeners 80 >> "$file"; common no >> "$file"; body >> "$file"
+	fi
+	printf '}\n' >> "$file"
+}
+
+make_pool()
+{
+	file=$1
+	printf '[%s]\nuser = php-fpm\ngroup = php-fpm\nlisten = /run/php-fpm/%s.sock\nlisten.owner = nginx\nlisten.group = nginx\npm = ondemand\npm.max_children = 10\n' "$HOST" "$HOST" > "$file"
+}
+
+review() { say 'Candidate configuration:'; sed 's/^/  /' "$1"; yes_no 'Install this configuration?' No; }
+
+validate_installed()
+{
+	test_link_path=$ENABLED_DIR/saphira-site-test-$$.conf
+	test -L "$ENABLED_DIR/$HOST.conf" && test "$(readlink "$ENABLED_DIR/$HOST.conf")" = "../vhosts/$HOST.conf" || {
+		ensure_dir "$ENABLED_DIR"
+		ln -s "../vhosts/$HOST.conf" "$test_link_path"
+		test_link=yes
+	}
+	status=0
+	nginx -t || status=1
+	if test -n "${pool_candidate-}" && ! php-fpm85 --test --fpm-config /etc/php85/php-fpm.conf; then status=1; fi
+	if test "${test_link-no}" = yes; then rm -f "$test_link_path"; fi
+	return "$status"
+}
+
+restore_transaction()
+{
+	if test "$had_site" = yes; then mv -f "$OLD_SITE" "$SITE_FILE"; else rm -f "$SITE_FILE"; fi
+	if test -n "${pool_candidate-}"; then if test "$had_pool" = yes; then mv -f "$OLD_POOL" "$POOL_FILE"; else rm -f "$POOL_FILE"; fi; fi
+	nginx -t || say 'NGINX CONFIGURATION TEST FAILED AFTER RESTORATION.' >&2
+}
+
+transaction()
+{
+	candidate=$1; pool_candidate=${2-}; SITE_FILE=$NGINX_DIR/$HOST.conf; POOL_FILE=$PHP_DIR/$HOST.conf; OLD_SITE=$TMP/old-site; OLD_POOL=$TMP/old-pool; had_site=no; had_pool=no; test_link=no
+	ensure_dir "$NGINX_DIR"; ensure_dir "$LOG_DIR"
+	if test -e "$SITE_FILE"; then cp -p "$SITE_FILE" "$OLD_SITE"; had_site=yes; fi
+	if test -n "$pool_candidate"; then ensure_dir "$PHP_DIR"; if test -e "$POOL_FILE"; then cp -p "$POOL_FILE" "$OLD_POOL"; had_pool=yes; fi; fi
+	install -m 0644 "$candidate" "$SITE_FILE.new.$$"; mv -f "$SITE_FILE.new.$$" "$SITE_FILE"
+	if test -n "$pool_candidate"; then install -m 0644 "$pool_candidate" "$POOL_FILE.new.$$"; mv -f "$POOL_FILE.new.$$" "$POOL_FILE"; fi
+	if validate_installed; then
+		say 'CONFIGURATION INSTALLED'; say 'NGINX CONFIGURATION TEST PASSED'
+		if rc-service nginx status >/dev/null 2>&1; then :; else say 'NGINX IS NOT RUNNING'; say 'CONFIGURATION IS VALID'; say 'SITE IS NOT ACTIVE'; fi
+		return 0
+	fi
+	say 'NGINX CONFIGURATION TEST FAILED; RESTORING PREVIOUS CONFIGURATION.' >&2
+	restore_transaction
+	return 1
+}
+
+enable_site()
+{
+	link=$ENABLED_DIR/$HOST.conf; created=no
+	ensure_dir "$ENABLED_DIR"
+	if test -L "$link" && test "$(readlink "$link")" = "../vhosts/$HOST.conf"; then :
+	elif test -e "$link" || test -L "$link"; then say "Cannot enable $HOST: $link is not the expected symlink." >&2; return 1
+	else ln -s "../vhosts/$HOST.conf" "$link"; created=yes; fi
+	if nginx -t; then say 'SITE ENABLED'; return 0; fi
+	if test "$created" = yes; then rm -f "$link"; fi
+	say 'NGINX CONFIGURATION TEST FAILED; SITE ENABLEMENT WAS ROLLED BACK.' >&2
+	return 1
+}
+
+reload_offer() { if yes_no 'Reload the currently running nginx service to activate this site now?' No; then rc-service nginx reload || say 'NGINX RELOAD FAILED' >&2; else say 'NOT ACTIVATED'; fi; }
+fetch_url() { if have curl; then curl -fsS --max-time 15 "$1"; elif have wget; then wget -qO- --timeout=15 "$1"; else return 1; fi; }
+
+webroot_check()
+{
+	token=saphira-site-test-$$-$(date +%s); file=$ROOT/.well-known/acme-challenge/$token; ensure_dir "$(dirname "$file")"; printf '%s\n' "$token" > "$file"
+	if body=$(fetch_url "http://$HOST/.well-known/acme-challenge/$token" 2>/dev/null) && test "$body" = "$token"; then result=OK; else result=FAILED; fi
+	rm -f "$file"; say "HTTP-01 path: $result"; test "$result" = OK
+}
+
+certbot_flow()
+{
+	yes_no 'Configure TLS with Let'"'"'s Encrypt / Certbot?' No || return 0
+	have certbot || { say 'CERTBOT IS NOT INSTALLED'; say 'Certificate issuance requires Certbot.'; return 0; }
+	while :; do read_value "Has DNS for $HOST already been pointed at this website/server? [Yes/No/Unsure]" Unsure; case $REPLY in No|no) say 'DNS must be configured first.'; return;; Yes|yes|Unsure|unsure) break;; *) say 'Choose Yes, No, or Unsure.' >&2;; esac; done
+	while :; do read_value 'Can public HTTP traffic reach this server on port 80? [Yes/No/Unsure]' Unsure; case $REPLY in No|no) return;; Yes|yes|Unsure|unsure) break;; *) say 'Choose Yes, No, or Unsure.' >&2;; esac; done
+	say '1. Webroot (Recommended when nginx is active)'; say '2. Standalone'; say '3. DNS-01'; say '4. Back'; read_value 'Certificate validation method' 1
+	case $REPLY in
+		1) webroot_check || { say 'The configuration is valid but nginx has not been reloaded, or the public ACME path is unreachable.'; yes_no 'Reload nginx to activate the HTTP site before requesting the certificate?' No || return; rc-service nginx reload || return; webroot_check || return; }; certbot certonly --webroot -w "$ROOT" -d "$HOST" || return;;
+		2) if have ss; then if ss -H -ltn | awk '$4 ~ /(^|:)80$/ { f=1 } END { exit f }'; then say 'STANDALONE NOT AVAILABLE'; say 'Port 80 is already in use.'; return; fi; else say 'STANDALONE NOT AVAILABLE'; say 'Port 80 cannot be inspected.'; return; fi; certbot certonly --standalone -d "$HOST" || return;;
+		3) certbot certonly --manual --preferred-challenges dns -d "$HOST" || return;;
+		*) return;;
+	esac
+	TLS=yes; render "$TMP/tls.conf"; review "$TMP/tls.conf" && transaction "$TMP/tls.conf" && reload_offer
+}
+
+ask_hostname
+ask_type
+ask_listeners
+ask_proxy
+ask_policy
+ensure_dir "$SITE_BASE/$HOST/htdocs/css"; ensure_dir "$SITE_BASE/$HOST/htdocs/js"; ensure_dir "$SITE_BASE/$HOST/htdocs/images"; ensure_dir "$SITE_BASE/$HOST/app"; test -z "${SERVER_ROOT-}" || ensure_dir "$SERVER_ROOT"
+render "$TMP/site.conf"
+if review "$TMP/site.conf"; then
+	while :; do
+		if test "$TYPE" = php; then
+			make_pool "$TMP/pool.conf"
+			if transaction "$TMP/site.conf" "$TMP/pool.conf"; then break; fi
+		else
+			if transaction "$TMP/site.conf"; then break; fi
+		fi
+		yes_no 'Retry configuration installation?' No || exit 1
+	done
+	if yes_no 'Enable this site now?' No; then
+		while :; do
+			if enable_site; then break; fi
+			yes_no 'Retry enabling this site?' No || exit 1
+		done
+	fi
+	certbot_flow
+fi

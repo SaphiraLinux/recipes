@@ -1,0 +1,243 @@
+--- a/ldirectord/ldirectord.in
++++ b/ldirectord/ldirectord.in
+@@ -2988,16 +2988,89 @@
+ 	return undef;
+ }
+ 
++
++# _check_http_tiny
++# Minimal HTTP/HTTPS negotiate check used when the LWP module chain
++# (LWP::UserAgent, Net::HTTP, URI) is not installed. Mirrors the
++# check_http() semantics: request $$r{url} with the virtual Host
++# header, match the optional receive string against the response
++# content and treat any transport error or non-success status as
++# SERVICE_DOWN. HTTPS requires IO::Socket::SSL; without it the
++# transport fails and the server is reported down.
++sub _check_http_tiny
++{
++	my ($v, $r) = @_;
++
++	my $virtualhost = (defined $$v{virtualhost} ? $$v{virtualhost} : $$r{server});
++	my $recstr = $$r{receive};
++
++	&ld_debug(2, "check_http(HTTP::Tiny fallback): url=\"$$r{url}\" "
++		. "virtualhost=\"$virtualhost\"");
++
++	require HTTP::Tiny;
++	my $http = HTTP::Tiny->new(
++		timeout => $$v{negotiatetimeout},
++		verify_SSL => 0,
++	);
++	my $response = eval {
++		local $SIG{'__DIE__'} = "DEFAULT";
++		local $SIG{'ALRM'} = sub { die "Timeout Alarm" };
++		alarm $$v{negotiatetimeout};
++		my $res = $http->get($$r{url},
++			{ headers => { Host => $virtualhost } });
++		alarm 0;
++		$res;
++	};
++
++	unless (defined($response)) {
++		&ld_debug(2, "check_http: timeout");
++		service_set($v, $r, "down", {do_log => 1}, "no response");
++		&ld_debug(2, "check_http: $$r{url} is down\n");
++		return $SERVICE_DOWN;
++	}
++
++	unless ($response->{success}) {
++		service_set($v, $r, "down", {do_log => 1},
++			($response->{status} // 0) . " "
++			. ($response->{reason} // ""));
++		&ld_debug(2, "check_http: $$r{url} is down\n");
++		return $SERVICE_DOWN;
++	}
++
++	if (!($recstr =~ /.+/) || $response->{content} =~ /$recstr/) {
++		service_set($v, $r, "up", {do_log => 1},
++			$response->{status} . " " . $response->{reason});
++		&ld_debug(2, "check_http: $$r{url} is up\n");
++		return $SERVICE_UP;
++	}
++
++	service_set($v, $r, "down", {do_log => 1},
++		$response->{status} . " " . $response->{reason});
++	&ld_debug(2, "check_http: $$r{url} is down\n");
++	return $SERVICE_DOWN;
++}
++
+ sub check_http
+ {
+-	use LWP::UserAgent;
+-	use LWP::Debug;
+-	use Net::HTTP;
+-	use URI;
+-	if($DEBUG > 2) {
++	my ($v, $r) = @_;
++
++	# LWP is optional: when the LWP/Net::HTTP/URI module chain is not
++	# installed, fall back to the core HTTP::Tiny module (identical
++	# check semantics). All references below are fully qualified, so
++	# runtime require is sufficient.
++	my $have_lwp = eval {
++		require LWP::UserAgent;
++		require LWP::Debug;
++		require Net::HTTP;
++		require URI;
++		1;
++	};
++	if ($DEBUG > 2 and $have_lwp) {
+ 		LWP::Debug::level('+');
+ 	}
+-	my ($v, $r) = @_;
++	unless ($have_lwp) {
++		return &_check_http_tiny($v, $r);
++	}
+ 
+ 	my $host = $$r{server};
+ 	my $virtualhost = (defined $$v{virtualhost} ? $$v{virtualhost} : $host);
+@@ -3006,7 +3079,7 @@
+ 		. "virtualhost=\"$virtualhost\"");
+ 
+ 	if (inet_pton(AF_INET6,&ld_strip_brackets($host))) {
+-		require Net::INET6Glue::INET_is_INET6;
++		eval { require Net::INET6Glue::INET_is_INET6; };
+ 	}
+ 
+ 	# Workaround for Net-HTTP IPv6 Address URLs Broken
+@@ -3107,8 +3180,12 @@
+ 
+ sub check_pop
+ {
+-	require Mail::POP3Client;
+ 	my ($v, $r, $ssl) = @_;
++	unless (eval { require Mail::POP3Client; 1 }) {
++		&ld_debug(1, "Mail::POP3Client not available, falling " .
++			"back to a connect check for $$r{server}");
++		return &check_connect($v, $r);
++	}
+ 	my $port = ld_checkport($v, $r);
+ 
+ 	&ld_debug(2, "Checking POP3 server=$$r{server} port=$port ssl=$ssl");
+@@ -3142,8 +3219,12 @@
+ 
+ sub check_imap
+ {
+-	require Net::IMAP::Simple;
+ 	my ($v, $r) = @_;
++	unless (eval { require Net::IMAP::Simple; 1 }) {
++		&ld_debug(1, "Net::IMAP::Simple not available, falling " .
++			"back to a connect check for $$r{server}");
++		return &check_connect($v, $r);
++	}
+ 	my $port = ld_checkport($v, $r);
+ 
+ 	&ld_debug(2, "Checking IMAP server=$$r{server} port=$port");
+@@ -3173,8 +3254,12 @@
+ 
+ sub check_imaps
+ {
+-	require Net::IMAP::Simple::SSL;
+ 	my ($v, $r) = @_;
++	unless (eval { require Net::IMAP::Simple::SSL; 1 }) {
++		&ld_debug(1, "Net::IMAP::Simple::SSL not available, " .
++			"falling back to a connect check for $$r{server}");
++		return &check_connect($v, $r);
++	}
+ 	my $port = ld_checkport($v, $r);
+ 
+ 	&ld_debug(2, "Checking IMAPS server=$$r{server} port=$port");
+@@ -3204,7 +3289,11 @@
+ sub check_ldap
+ {
+ 	my ($v, $r) = @_;
+-	require Net::LDAP;
++	unless (eval { require Net::LDAP; 1 }) {
++		&ld_debug(1, "Net::LDAP not available, falling back to a " .
++			"connect check for $$r{server}");
++		return &check_connect($v, $r);
++	}
+ 	my $port = ld_checkport($v, $r);
+ 
+ 	my $result;
+@@ -3280,8 +3369,16 @@
+ sub check_nntp
+ {
+ 	use IO::Socket;
+-	use IO::Socket::INET6;
+ 	use IO::Select;
++	# IO::Socket::INET6 is optional: IO::Socket::IP (core) covers IPv6
++	# and IO::Socket::INET (core) covers IPv4 only.
++	my $sock_class = eval {
++		require IO::Socket::INET6;
++		"IO::Socket::INET6";
++	} || eval {
++		require IO::Socket::IP;
++		"IO::Socket::IP";
++	} || "IO::Socket::INET";
+ 	my ($v, $r) = @_;
+ 	my $sock;
+ 	my $s;
+@@ -3291,7 +3388,7 @@
+ 
+ 	&ld_debug(2, "Checking NNTP server=$$r{server} port=$port");
+ 
+-	unless ($sock = IO::Socket::INET6->new(PeerAddr => $$r{server},
++	unless ($sock = $sock_class->new(PeerAddr => $$r{server},
+ 		PeerPort => $port, Proto => 'tcp',
+ 		TimeOut => $$v{negotiatetimeout})) {
+ 		service_set($v, $r, "down", {do_log => 1});
+@@ -3318,9 +3415,12 @@
+ 
+ sub check_radius
+ {
+-	require Authen::Radius;
+-
+ 	my ($v, $r) = @_;
++	unless (eval { require Authen::Radius; 1 }) {
++		&ld_debug(1, "Authen::Radius not available, falling " .
++			"back to a connect check for $$r{server}");
++		return &check_connect($v, $r);
++	}
+ 
+ 	&ld_debug(2, "Checking RADIUS");
+ 
+@@ -3383,8 +3483,12 @@
+ 
+ sub check_sql
+ {
+-	require DBI;
+ 	my ($v, $r, $dbd, $dbname) = @_;
++	unless (eval { require DBI; 1 }) {
++		&ld_debug(1, "DBI not available, falling back to a " .
++			"connect check for $$r{server}");
++		return &check_connect($v, $r);
++	}
+ 	my $port = ld_checkport($v, $r);
+ 	my ($dbh, $sth, $query, $rows, $result);
+ 	$result = $SERVICE_DOWN;
+@@ -3793,7 +3897,11 @@
+ 		local $SIG{'__DIE__'} = "DEFAULT";
+ 		# When fork=yes we need to ignore the child death
+ 		local $SIG{'CHLD'} = "IGNORE";
+-		require Net::DNS;
++	}
++	unless (eval { require Net::DNS; 1 }) {
++		&ld_debug(1, "Net::DNS not available, falling back to a " .
++			"connect check for $$r{server}");
++		return &check_connect($v, $r);
+ 	}
+ 	$res = new Net::DNS::Resolver;
+ 	if($DEBUG > 2) {
+@@ -4698,7 +4806,10 @@
+ 	my $emailfh;
+ 	my $status = 0;
+ 
+-	use Mail::Send;
++	unless (eval { require Mail::Send; 1 }) {
++		&ld_debug(1, "Mail::Send not available, email alert skipped");
++		return(0);
++	}
+ 
+ 	$emailmsg = new Mail::Send Subject=>$subject, To=>$to_addr;
+ 	$emailmsg->set('From', $EMAILALERTFROM) if ($EMAILALERTFROM);

@@ -1,0 +1,129 @@
+#!/bin/bash
+
+# promote-repo — REPAIR-ONLY tool: move an already-published immutable APK
+# between Saphira generation repositories (typically hatchling -> hatched)
+# without ever rebuilding it.
+#
+# Both repositories are normally populated by sign-apk-repo in a single
+# publication operation; promotion is NOT a normal publish path. Use this
+# only to repair generation lineage (a current revision missed by the
+# live view), restore a pruned revision, or recover from disaster. Never
+# promote a superseded revision forward into the live view.
+#
+# Usage: promote-repo FROM TO NVR...
+#   e.g.  sudo promote-repo hatchling hatched \
+#             saphira-kernel-7.1.5-r3 saphira-kernel-headers-7.1.5-r1
+#
+# Per NVR: verify the source APK, copy exact bytes (preserving identity),
+# refuse a destination filename whose bytes differ (published NVRs are
+# immutable), regenerate and sign the destination indexes through the
+# shared packager signing code, and record the promotion in the journal.
+# Re-promoting identical bytes is an idempotent no-op. The tool never
+# builds anything.
+#
+# Requires root; use sudo explicitly, exactly like sign-apk-repo.
+
+set -euo pipefail
+
+. "${SAPHIRA_CONFIG_FILE:-/etc/saphira/package_builder.sh}"
+
+lib_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+if [ -f "$lib_dir/repo-index.sh" ]; then
+	. "$lib_dir/repo-index.sh"
+elif [ -f /usr/lib/saphira-packager/repo-index.sh ]; then
+	. /usr/lib/saphira-packager/repo-index.sh
+else
+	printf 'promote-repo: shared index helper repo-index.sh not found\n' >&2
+	exit 1
+fi
+
+die()
+{
+	printf 'promote-repo: %s\n' "$*" >&2
+	exit 1
+}
+
+[ "$EUID" -eq 0 ] || die "must be run as root; use sudo explicitly"
+[ "$#" -ge 3 ] || die "usage: promote-repo FROM TO NVR..."
+
+from=$1
+to=$2
+shift 2
+[ "$from" != "$to" ] || die "source and destination generation are both: $to"
+
+NVR_RE='^[A-Za-z0-9][A-Za-z0-9._+-]*-r[0-9]+$'
+arch=$SAPHIRA_ARCH
+repo_root=$SAPHIRA_REPO_DIR
+trust_dir=${SAPHIRA_TRUST_KEY%/*}
+sign_key=$SAPHIRA_SIGN_KEY
+journal=$repo_root/promote-journal.jsonl
+
+for name in "$from" "$to"; do
+	printf '%s' "$name" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*$' \
+		|| die "invalid generation repository name: $name"
+done
+
+from_dir=$repo_root/$from/$arch
+to_dir=$repo_root/$to/$arch
+[ -f "$from_dir/Packages.adb" ] || die "source repository index is missing: $from_dir/Packages.adb"
+[ -d "$to_dir" ] || die "destination generation repository is not seeded: $to_dir (run seed-repo first)"
+
+# Ownership policy: published /out state belongs to the invoking user
+# with the repository group, even when invoked through sudo.
+normalize_ownership()
+{
+	if [ -n "${SUDO_UID:-}" ]; then
+		chown "${SUDO_UID}:${SAPHIRA_REPO_GROUP:-saphira-build}" "$@" 2>/dev/null || true
+	fi
+}
+
+promoted=0
+already=0
+chmod g+rws -- "$to_dir" 2>/dev/null || true
+workspace=$(mktemp -d "${TMPDIR:-/tmp}/promote-repo.XXXXXX")
+trap 'rm -rf -- "$workspace"' EXIT HUP INT TERM
+
+for nvr in "$@"; do
+	printf '%s' "$nvr" | grep -Eq "$NVR_RE" || die "invalid NVR (expected name-version-rN): $nvr"
+	source_apk=$from_dir/$nvr.apk
+	dest_apk=$to_dir/$nvr.apk
+	[ -f "$source_apk" ] || die "source package not found: $source_apk"
+	"$SAPHIRA_APK" verify --keys-dir "$trust_dir" "$source_apk" \
+		|| die "source package fails repository-key verification: $source_apk"
+	if [ -f "$dest_apk" ]; then
+		if cmp -s -- "$source_apk" "$dest_apk"; then
+			printf 'promote-repo: already present (identical bytes): %s\n' "$nvr"
+			already=$((already + 1))
+			continue
+		fi
+		die "published filename is immutable and has different content: $nvr (destination $to wins; no promotion performed)"
+	fi
+	# Exact-byte copy via the publishing temporary pattern; never rebuild.
+	temporary=$to_dir/$nvr.apk.promoting-$(date -u +%Y%m%dT%H%M%SZ)-$$
+	[ ! -e "$temporary" ] || die "promotion temporary already exists: $temporary"
+	cp -p -- "$source_apk" "$temporary"
+	"$SAPHIRA_APK" verify --keys-dir "$trust_dir" "$temporary" \
+		|| { rm -f -- "$temporary"; die "copied package fails verification: $temporary"; }
+	mv -- "$temporary" "$dest_apk"
+	normalize_ownership "$dest_apk"
+	promoted=$((promoted + 1))
+	printf 'promote-repo: promoted %s: %s -> %s\n' "$nvr" "$from" "$to"
+	printf '{"ts":"%s","action":"promoted","from":"%s","to":"%s","nvr":"%s","sha256":"%s"}\n' \
+		"$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$from" "$to" "$nvr" "$(sha256sum "$dest_apk" | cut -d' ' -f1)" \
+		>> "$journal"
+	normalize_ownership "$journal"
+done
+
+if [ "$promoted" -gt 0 ]; then
+	adb=$workspace/Packages.adb
+	tar=$workspace/APKINDEX.tar.gz
+	# shellcheck disable=SC2046
+	repo_generate_index "$SAPHIRA_APK" "$adb" "$tar" "$sign_key" "$trust_dir" \
+		$(find "$to_dir" -maxdepth 1 -name '*.apk' -print) \
+		|| die "destination index regeneration failed for $to"
+	repo_install_index "$to_dir" "$adb" "$tar"
+	normalize_ownership "$to_dir/Packages.adb" "$to_dir/APKINDEX.tar.gz"
+fi
+
+printf 'promote-repo: complete: %s promoted, %s already present (%s -> %s)\n' \
+	"$promoted" "$already" "$from" "$to"

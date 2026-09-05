@@ -1,0 +1,27 @@
+# Saphira OpenSSH server configuration
+Port 22
+AddressFamily any
+ListenAddress 0.0.0.0
+ListenAddress ::
+
+HostKey /etc/ssh/ssh_host_ed25519_key
+HostKey /etc/ssh/ssh_host_rsa_key
+
+SyslogFacility AUTHPRIV
+LogLevel INFO
+
+LoginGraceTime 120
+PermitRootLogin prohibit-password
+StrictModes yes
+MaxAuthTries 4
+
+PubkeyAuthentication yes
+PasswordAuthentication yes
+KbdInteractiveAuthentication no
+
+UseDNS no
+AllowTcpForwarding yes
+X11Forwarding no
+PrintMotd no
+AcceptEnv LANG LC_*
+Subsystem sftp /usr/lib/ssh/sftp-server

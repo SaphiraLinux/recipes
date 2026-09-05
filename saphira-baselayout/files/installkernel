@@ -1,0 +1,48 @@
+#!/bin/sh
+
+set -eu
+
+version=${1:?usage: installkernel VERSION IMAGE SYSTEM_MAP [INSTALL_PATH]}
+image=${2:?kernel image is required}
+system_map=${3:?System.map is required}
+install_path=${4:-/boot}
+config=${KERNEL_CONFIG:-}
+
+test -f "$image" || {
+	printf 'installkernel: missing kernel image: %s\n' "$image" >&2
+	exit 1
+}
+test -f "$system_map" || {
+	printf 'installkernel: missing System.map: %s\n' "$system_map" >&2
+	exit 1
+}
+if test -z "$config"; then
+	for candidate in "$(dirname "$image")/.config" /usr/src/linux/.config; do
+		if test -f "$candidate"; then
+			config=$candidate
+			break
+		fi
+	done
+fi
+test -n "$config" && test -f "$config" || {
+	printf 'installkernel: set KERNEL_CONFIG to the kernel .config\n' >&2
+	exit 1
+}
+
+mkdir -p "$install_path"
+for base in vmlinuz System.map config; do
+	if test -e "$install_path/$base-$version"; then
+		mv -f "$install_path/$base-$version" \
+			"$install_path/$base-$version.old"
+	fi
+done
+install -m 0644 "$image" "$install_path/vmlinuz-$version"
+install -m 0644 "$system_map" "$install_path/System.map-$version"
+install -m 0644 "$config" "$install_path/config-$version"
+
+if command -v grub-mkconfig >/dev/null 2>&1; then
+	grub-mkconfig -o "$install_path/grub/grub.cfg"
+else
+	printf 'installkernel: grub-mkconfig is unavailable; kernel installed but GRUB configuration was not regenerated\n' >&2
+	exit 1
+fi

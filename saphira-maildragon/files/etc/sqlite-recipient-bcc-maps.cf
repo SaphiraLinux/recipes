@@ -1,0 +1,3 @@
+# Postfix sqlite map: silent-copied recipients (BCC archive feature).
+dbpath = /var/lib/maildragon/mailserver.sqlite
+query = SELECT destination FROM virtual_recipient_copies WHERE source = '%s' AND active = 1

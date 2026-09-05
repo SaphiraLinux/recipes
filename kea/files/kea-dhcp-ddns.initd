@@ -1,0 +1,18 @@
+#!/sbin/openrc-run
+
+description="Kea DHCP-DDNS update server"
+
+command="/usr/sbin/kea-dhcp-ddns"
+command_args="-c /etc/kea/kea-dhcp-ddns.conf"
+command_background="yes"
+pidfile="/run/kea-dhcp-ddns.pid"
+
+depend()
+{
+	use net logger dns
+}
+
+start_pre()
+{
+	checkpath -d -m 0755 /run/kea
+}

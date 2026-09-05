@@ -1,0 +1,113 @@
+#!/bin/sh
+
+set -u
+
+usage()
+{
+	printf 'usage: saphira-bootstrap [-r REPOSITORY] TARGET [PROFILE]\n' >&2
+	exit 2
+}
+
+die()
+{
+	printf 'saphira-bootstrap: %s\n' "$*" >&2
+	exit 1
+}
+
+repository=${SAPHIRA_REPOSITORY:-}
+case ${1:-} in
+	-r|--repository)
+		test $# -ge 3 || usage
+		repository=$2
+		shift 2
+		;;
+	--repository=*) repository=${1#*=}; shift ;;
+esac
+test $# -ge 1 && test $# -le 2 || usage
+id_command=${SAPHIRA_ID:-id}
+test "$($id_command -u)" -eq 0 || die 'root privileges are required'
+
+target=$1
+profile=${2:-base}
+profile_root=${SAPHIRA_PROFILE_ROOT:-/usr/share/saphira/profiles}
+apk_command=${SAPHIRA_APK:-apk}
+
+case $profile in
+	base|network|server|build) ;;
+	*) die "unknown profile: $profile" ;;
+esac
+test -f "$profile_root/$profile" || die "profile is unavailable: $profile"
+test -n "$repository" || test -s /etc/apk/repositories ||
+	die 'host repository configuration is unavailable'
+test -d "$target" || die "target is not a directory: $target"
+target=$(readlink -f -- "$target") || die "cannot resolve target: $target"
+if find "$target" -mindepth 1 -maxdepth 1 ! -name lost+found -print -quit |
+	grep -q .; then
+	die 'target is not empty'
+fi
+
+packages_file=$(mktemp /tmp/saphira-bootstrap.packages.XXXXXX) ||
+	die 'cannot create package-list workspace'
+trap 'rm -f -- "$packages_file"' EXIT HUP INT TERM
+seen_profiles=
+
+expand_profile()
+{
+	current=$1
+	case " $seen_profiles " in
+		*" $current "*) die "profile reference cycle: $current" ;;
+	esac
+	seen_profiles="$seen_profiles $current"
+	while IFS= read -r entry || test -n "$entry"; do
+		case $entry in
+			''|'#'*) continue ;;
+			@akadata-stage4-*) expand_profile "${entry#@akadata-stage4-}" ;;
+			@*) expand_profile "${entry#@}" ;;
+			*[!A-Za-z0-9._+-]*) die "invalid package in profile $current: $entry" ;;
+			*) printf '%s\n' "$entry" >> "$packages_file" ;;
+		esac
+	done < "$profile_root/$current"
+}
+
+expand_profile "$profile"
+packages=$(awk '!seen[$0]++ { printf "%s%s", separator, $0; separator=" " }' \
+	"$packages_file")
+test -n "$packages" || die "profile is empty: $profile"
+
+if test "${SAPHIRA_BOOTSTRAP_PLAN:-0}" = 1; then
+	printf 'profile=%s\n' "$profile"
+	printf 'repository=%s\n' "${repository:-host}"
+	printf 'apk --root %s --initdb --keys-dir etc/apk/keys --repositories-file %s/etc/apk/repositories add %s\n' \
+		"$target" "$target" "$packages"
+	exit 0
+fi
+
+install -d -m 0755 "$target/etc/apk/keys" "$target/var/cache/apk" \
+	"$target/dev" "$target/proc" "$target/sys" "$target/run" \
+	"$target/boot" "$target/usr" "$target/var" "$target/etc"
+install -d -m 0700 "$target/root"
+install -d -m 1777 "$target/tmp"
+
+key_count=0
+if test -d /etc/apk/keys; then
+	for key in /etc/apk/keys/*.pub; do
+		test -f "$key" || continue
+		install -m 0644 "$key" "$target/etc/apk/keys/"
+		key_count=$((key_count + 1))
+	done
+fi
+test "$key_count" -gt 0 || die 'no repository public keys are installed on the host'
+if test -n "$repository"; then
+	printf '%s\n' "$repository" > "$target/etc/apk/repositories"
+else
+	install -m 0644 /etc/apk/repositories "$target/etc/apk/repositories"
+fi
+
+"$apk_command" --root "$target" --initdb \
+	--keys-dir etc/apk/keys \
+	--repositories-file "$target/etc/apk/repositories" add $packages
+test -x "$target/bin/sh" && test -e "$target/usr/lib/libc.so" ||
+	die 'installed profile did not provide a usable Saphira base system'
+if test ! -e "$target/etc/mtab" && test ! -L "$target/etc/mtab"; then
+	ln -s /proc/mounts "$target/etc/mtab"
+fi

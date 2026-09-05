@@ -1,0 +1,17 @@
+[Unit]
+Description=Valkey key/value datastore server
+Documentation=https://github.com/valkey-io/valkey-doc
+After=network.target
+
+[Service]
+Type=simple
+User=valkey
+Group=valkey
+WorkingDirectory=/var/lib/valkey
+LimitNOFILE=10032
+ExecStartPre=/usr/bin/install -d -m 0750 -o valkey -g valkey /var/lib/valkey
+ExecStart=/usr/bin/valkey-server /etc/valkey/valkey.conf --daemonize no
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

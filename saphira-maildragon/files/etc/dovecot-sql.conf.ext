@@ -1,0 +1,25 @@
+# Dovecot SQL auth for mailDragon.
+# Source: akadata-mailserver dovecot-sql.conf.ext; MariaDB replaced by
+# the packaged sqlite database.  Passwords are doveadm pw SHA512-CRYPT.
+driver = sqlite
+connect = /var/lib/maildragon/mailserver.sqlite
+default_pass_scheme = SHA512-CRYPT
+
+password_query = \
+  SELECT email AS user, password \
+  FROM virtual_users \
+  WHERE email = '%{user}' AND active = 1
+
+user_query = \
+  SELECT \
+    5000 AS uid, \
+    5000 AS gid, \
+    '/var/vmail/' || maildir AS home, \
+    CASE \
+      WHEN email LIKE '%@akadata.ltd' THEN '' \
+      ELSE 'aes-256-gcm-sha256' \
+    END AS userdb_crypt_write_algorithm \
+  FROM virtual_users \
+  WHERE email = '%{user}' AND active = 1
+
+iterate_query = SELECT email AS user FROM virtual_users WHERE active = 1

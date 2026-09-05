@@ -1,0 +1,15 @@
+#!/sbin/openrc-run
+# Saphira PROXY-protocol front proxy (one instance per config name).
+
+description="Saphira PROXY-protocol front proxy"
+
+command="/usr/bin/proxyto"
+command_args="--syslog ${proxyto_name:-geomyidae}"
+
+supervisor="supervise-daemon"
+
+depend()
+{
+	need localmount
+	use net logger dns
+}

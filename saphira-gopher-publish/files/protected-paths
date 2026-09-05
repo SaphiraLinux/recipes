@@ -1,0 +1,4 @@
+# saphira-gopher-publish: site-owned Gopher state survives upgrades.
+# A locally modified root menu is never overwritten; package updates land
+# as .apk-new alongside it.
++srv/gopher-source

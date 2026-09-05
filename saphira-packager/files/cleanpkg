@@ -1,0 +1,83 @@
+#!/bin/sh
+
+set -eu
+
+. "${SAPHIRA_CONFIG_FILE:-/etc/saphira/package_builder.sh}"
+
+die()
+{
+	printf 'cleanpkg: %s\n' "$*" >&2
+	exit 1
+}
+
+[ "$#" -ge 1 ] || die "usage: $0 PACKAGE..."
+
+kill_recorded_holder()
+{
+	# A failed workspace retains its overlay holder (it keeps the merged
+	# root mounted for diagnosis). Terminate it before removal so the
+	# OverlayFS mount and its workdir are released; the identity is verified
+	# against the holder marker to never kill an unrelated recycled pid.
+	record=$1/overlay-holder.json
+	[ -f "$record" ] && [ ! -L "$record" ] || return 0
+	pid=$(sed -n 's/.*"pid":\([0-9]*\).*/\1/p' "$record")
+	case $pid in
+		''|*[!0-9]*) return 0 ;;
+	esac
+	[ "$pid" -gt 1 ] || return 0
+	cmdline=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null) || return 0
+	case $cmdline in
+		*saphira-overlay-holder*"$1"*) ;;
+		*) return 0 ;;
+	esac
+	# The holder runs in its own session: kill the whole group so its poll
+	# children die too and the namespace (overlay mount with it) is torn
+	# down immediately instead of lingering on an orphaned sleeper.
+	kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || return 0
+	n=0
+	while [ "$n" -lt 100 ]; do
+		[ -d "/proc/$pid" ] || break
+		n=$((n + 1))
+		sleep 0.1
+	done
+	kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+}
+
+wait_overlay_gone()
+{
+	# Killing the holder leaves its orphaned poll children holding the
+	# namespace for a few seconds; the OverlayFS workdir refuses removal
+	# while the mount lives. Wait until no process still mounts it.
+	n=0
+	while [ "$n" -lt 100 ]; do
+		[ -z "$(grep -rls "upperdir=$1" /proc/[0-9]*/mountinfo 2>/dev/null)" ] && return 0
+		n=$((n + 1))
+		sleep 0.1
+	done
+	die "overlay for $1 is still mounted; refusing to remove the workspace"
+}
+
+for PACKAGE do
+	case $PACKAGE in
+		''|*[!A-Za-z0-9._+-]*) die "invalid package name: $PACKAGE" ;;
+	esac
+	workspace=$SAPHIRA_BUILD_ROOT/$PACKAGE.buildpkg
+	case $workspace in
+		"$SAPHIRA_BUILD_ROOT"/*.buildpkg) ;;
+		*) die "refusing workspace outside build root: $workspace" ;;
+	esac
+	[ -e "$workspace" ] || [ -L "$workspace" ] || continue
+	[ -d "$workspace" ] && [ ! -L "$workspace" ] || die "workspace is not a real directory: $workspace"
+	marker=$workspace/FAILED
+	[ -f "$marker" ] && [ ! -L "$marker" ] || die "refusing unmarked workspace: $workspace"
+	[ "$(cat "$marker")" = saphira-buildpkg-failed/v1 ] || die "FAILED marker is not trusted: $marker"
+	kill_recorded_holder "$workspace"
+	wait_overlay_gone "$workspace/upper"
+	# The kernel creates the overlay workdir's internal work/ directory with
+	# mode 0000; restoring owner permissions is required for host-side
+	# removal (buildpkg removes successful workspaces from inside its own
+	# namespace, where the capability check differs).
+	chmod -R u+rwX -- "$workspace" 2>/dev/null || true
+	rm -rf -- "$workspace"
+	printf 'cleanpkg: removed failed workspace %s\n' "$workspace"
+done

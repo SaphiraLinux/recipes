@@ -1,0 +1,29 @@
+#!/sbin/openrc-run
+
+description="hostapd IEEE 802.11 AP service (instance-aware)"
+
+# Instance-aware OpenRC counterpart of hostapd@.service: invoke as
+# hostapd.<iface> (e.g. rc-service hostapd.wlan0 start); the instance
+# selects /etc/hostapd/<iface>.conf.  A plain invocation without an
+# instance is refused - the interface/config is always explicit.
+# Nothing is auto-enabled at install; neither init wraps the other.
+iface="${RC_SVCNAME#hostapd.}"
+conf="/etc/hostapd/${iface}.conf"
+
+command="/usr/bin/hostapd"
+command_args="$conf"
+supervisor="supervise-daemon"
+required_files="$conf"
+
+depend()
+{
+	use net
+}
+
+start_pre()
+{
+	if [ "$RC_SVCNAME" = hostapd ]; then
+		eerror "hostapd requires an instance: rc-service hostapd.<iface> start"
+		return 1
+	fi
+}

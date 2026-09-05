@@ -1,0 +1,852 @@
+#!/usr/bin/env python3
+"""saphira-build: build queue orchestration around buildpkg.
+
+recipe system  = how one package is built (unchanged: recipes/<p>/recipe.sh)
+autobuilder    = decides what needs building, runs it, tests it, records result
+
+Queue is SQLite at $SAPHIRA_BUILD_STATE/queue.db (default /var/lib/saphira-build).
+Per-stage verdicts: BUILD INSTALL RUNTIME POLICY OPENRC SYSTEMD IDENTITY TEST.
+A package is PASS only when every applicable stage passes; PUBLISH is an
+explicit human-invoked step (sign-apk-repo is the privileged boundary).
+"""
+
+import calendar
+import hashlib
+import json
+import os
+import re
+import shutil
+import sqlite3
+import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+STATE = Path(os.environ.get("SAPHIRA_BUILD_STATE", "/var/lib/saphira-build"))
+RECIPES = Path(os.environ.get("SAPHIRA_RECIPES", "/recipes"))
+
+
+def _packager_conf(name, default):
+    """Read one packager config value: explicit env wins, else the
+    SAPHIRA_CONFIG_FILE default chain (/etc/saphira/package_builder.sh),
+    else the compiled-in default. Pure assignments file, safe to source."""
+    if name in os.environ:
+        return os.environ[name]
+    cfg = os.environ.get("SAPHIRA_CONFIG_FILE", "/etc/saphira/package_builder.sh")
+    try:
+        out = subprocess.run(
+            ["bash", "-c", "source /dev/stdin >/dev/null 2>&1; printf '%s' \"${" + name + ":-" + default + "}\""],
+            input=open(cfg).read() if os.path.isfile(cfg) else "",
+            capture_output=True, text=True, timeout=10)
+        if out.returncode == 0 and out.stdout:
+            return out.stdout
+    except Exception:
+        pass
+    return default
+
+
+def _live_repo_dir():
+    """Live generation repository: the LAST SAPHIRA_REPO_NAMES entry
+    (checkpkg rule). Explicit SAPHIRA_REPO stays a full-path escape
+    hatch (used by the test suites)."""
+    if "SAPHIRA_REPO" in os.environ:
+        return Path(os.environ["SAPHIRA_REPO"])
+    names = _packager_conf("SAPHIRA_REPO_NAMES", "hatchling").split()
+    live = names[-1] if names else "hatchling"
+    arch = _packager_conf("SAPHIRA_ARCH", "x86_64")
+    return Path(_packager_conf("SAPHIRA_REPO_DIR", "/out/stage4/packages")) / live / arch
+
+
+def _incoming_dir():
+    if "SAPHIRA_INCOMING" in os.environ:
+        return Path(os.environ["SAPHIRA_INCOMING"])
+    arch = _packager_conf("SAPHIRA_ARCH", "x86_64")
+    return Path(_packager_conf("SAPHIRA_INCOMING_DIR", "/out/stage4/incoming")) / arch
+
+
+INCOMING = _incoming_dir()
+REPO = _live_repo_dir()
+APK = os.environ.get("SAPHIRA_APK", "apk")
+BUILDCMD = os.environ.get("SAPHIRA_BUILDCMD", "buildpkg").split()
+TEST_ROOT_PARENT = Path(os.environ.get("SAPHIRA_TEST_ROOTS", "/build/saphira-build"))
+
+LOGNAME_RE = re.compile(r"^(?P<name>[A-Za-z0-9._+-]+)-(?P<ver>[0-9][^-]*)-r(?P<rel>[0-9]+)\.apk$")
+
+
+def db():
+    STATE.mkdir(parents=True, exist_ok=True)
+    (STATE / "logs").mkdir(exist_ok=True)
+    conn = sqlite3.connect(STATE / "queue.db")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS builds(
+            id INTEGER PRIMARY KEY,
+            package TEXT NOT NULL,
+            version TEXT, revision TEXT,
+            recipe_hash TEXT NOT NULL,
+            state TEXT NOT NULL,
+            result_json TEXT NOT NULL DEFAULT '{}',
+            log_dir TEXT,
+            commit_hash TEXT,
+            queued_at TEXT, started_at TEXT, finished_at TEXT,
+            published_at TEXT
+        )"""
+    )
+    return conn
+
+
+def now():
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def run(cmd, log=None, env=None):
+    e = dict(os.environ)
+    if env:
+        e.update(env)
+    if log:
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with open(log, "ab") as f:
+            f.write(f"\n$ {' '.join(map(str, cmd))}\n".encode())
+            return subprocess.run(list(map(str, cmd)), stdout=f, stderr=subprocess.STDOUT, env=e).returncode
+    return subprocess.run(list(map(str, cmd)), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=e).returncode
+
+
+def run_out(cmd, env=None):
+    e = dict(os.environ)
+    if env:
+        e.update(env)
+    return subprocess.run(list(map(str, cmd)), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=e, text=True)
+
+
+def recipe_dirs():
+    out = []
+    if not RECIPES.is_dir():
+        return out
+    for d in sorted(RECIPES.iterdir()):
+        if (d / "recipe.sh").is_file():
+            out.append(d)
+    return out
+
+
+def recipe_info(pkgdir):
+    script = (
+        '. "$1" >/dev/null 2>&1\n'
+        'printf "%s\\n" "name=$pkgname" "ver=$pkgver" "rel=$pkgrel"'
+        ' "disabled=${disabled-}" "reason=${disabled_reason-}"\n'
+        'printf "deps=%s\\n" "$depends $makedepends $subpackages"\n'
+    )
+    r = run_out(["/bin/sh", "-c", script, "sh", str(pkgdir / "recipe.sh")])
+    info = {"pkgdir": str(pkgdir), "deps": []}
+    for line in r.stdout.splitlines():
+        if "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        if k == "deps":
+            info["deps"] = v.split()
+        elif k == "ver":
+            info["version"] = v
+        elif k == "rel":
+            info["revision"] = v
+        elif k == "disabled":
+            info["disabled"] = v
+        elif k == "reason":
+            info["reason"] = v
+        elif k == "name" and v:
+            info["name"] = v
+    info.setdefault("name", pkgdir.name)
+    return info
+
+
+def recipe_hash(pkgdir):
+    h = hashlib.sha256()
+    for f in sorted(p for p in pkgdir.rglob("*") if p.is_file()):
+        h.update(str(f.relative_to(pkgdir)).encode() + b"\0" + f.read_bytes() + b"\0")
+    return h.hexdigest()[:16]
+
+
+def norm_dep(tok):
+    tok = re.split(r"[<>=]", tok)[0]
+    for suf in ("-dev", "-doc", "-static", "-openrc", "-lang"):
+        if tok.endswith(suf):
+            return tok[: -len(suf)]
+    return tok
+
+
+def published_versions(pkg):
+    if not REPO.is_dir():
+        return set()
+    out = set()
+    for f in REPO.glob(f"{pkg}-*"):
+        m = LOGNAME_RE.match(f.name)
+        if m and m.group("name") == pkg:
+            out.add(f"{m.group('ver')}-r{m.group('rel')}")
+    return out
+
+
+def latest(conn, pkg):
+    return conn.execute(
+        "SELECT * FROM builds WHERE package=? ORDER BY id DESC LIMIT 1", (pkg,)
+    ).fetchone()
+
+
+def commit_hash():
+    r = run_out(["git", "-C", RECIPES, "rev-parse", "--short", "HEAD"])
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
+def dep_state(conn, dep):
+    """-> (satisfied: bool, blocker: bool, reason: str)"""
+    rdir = RECIPES / dep
+    if (rdir / "recipe.sh").is_file():
+        row = latest(conn, dep)
+        if row is not None and row["state"] == "PASS":
+            return True, False, ""
+        # Repository-first: a dep whose recipe is already published in the
+        # repository satisfies consumers even when its queue row is stale,
+        # BLOCKED or FAIL. The actual version-constraint check happens in
+        # resolvepkg at build time (fail-closed with a visible error), so
+        # the queue must not block forever on stale rows.
+        if published_versions(dep):
+            return True, False, ""
+        if row is None:
+            return False, False, f"{dep}: recipe queued but not yet built"
+        if row["state"] == "FAIL":
+            return False, True, f"{dep}: last build FAILED"
+        if row["state"] == "BLOCKED":
+            return False, True, f"{dep}: BLOCKED"
+        return False, False, f"{dep}: {row['state']}"
+    if published_versions(dep):
+        return True, False, ""
+    return False, False, f"{dep}: no recipe and no repository package"
+
+
+def recompute_blocking(conn):
+    for row in conn.execute(
+        "SELECT * FROM builds WHERE state IN ('QUEUED','BLOCKED')"
+    ).fetchall():
+        info = recipe_info(RECIPES / row["package"])
+        blockers = []
+        for d in info["deps"]:
+            ok, hard, why = dep_state(conn, norm_dep(d))
+            if not ok:
+                blockers.append(why)
+                if hard:
+                    break
+        if blockers:
+            res = json.loads(row["result_json"])
+            res.setdefault("stages", {})["DEPENDENCIES"] = {
+                "status": "blocked", "detail": blockers,
+            }
+            conn.execute(
+                "UPDATE builds SET state='BLOCKED', result_json=? WHERE id=?",
+                (json.dumps(res), row["id"]),
+            )
+        elif row["state"] == "BLOCKED":
+            conn.execute("UPDATE builds SET state='QUEUED' WHERE id=?", (row["id"],))
+    conn.commit()
+
+
+REQUEUE_WARN_THRESHOLD = 5
+
+
+def cmd_scan(args):
+    conn = db()
+    ch = commit_hash()
+    requeue_failed = "--requeue-failed" in args
+    queued = failed = skipped = 0
+    for d in recipe_dirs():
+        info = recipe_info(d)
+        if info.get("disabled") == "yes":
+            reason = info.get("reason") or "no reason given"
+            print(f"scan: skipping disabled {info['name']}: {reason}")
+            skipped += 1
+            continue
+        h = recipe_hash(d)
+        row = latest(conn, info["name"])
+        if row and row["recipe_hash"] == h:
+            if row["state"] in ("PASS",):
+                skipped += 1
+                continue
+            if row["state"] == "FAIL":
+                if requeue_failed:
+                    conn.execute(
+                        """INSERT INTO builds(package,version,revision,recipe_hash,state,
+                               commit_hash,queued_at,result_json)
+                           SELECT package,version,revision,recipe_hash,'QUEUED',commit_hash,?,?
+                           FROM builds WHERE id=?""",
+                        (now(), json.dumps({"stages": {}, "requeued": "scan --requeue-failed"}), row["id"]),
+                    )
+                    queued += 1
+                else:
+                    failed += 1
+                continue
+            if row["state"] == "BUILDING":
+                skipped += 1
+                continue
+            recompute_blocking(conn)
+            continue
+        conn.execute(
+            """INSERT INTO builds(package,version,revision,recipe_hash,state,
+                   commit_hash,queued_at,result_json)
+               VALUES(?,?,?,?,?,?,?,?)""",
+            (
+                info["name"], info.get("version"), info.get("revision"), h,
+                "QUEUED", ch, now(),
+                json.dumps({"stages": {"DEPENDENCIES": {"status": "pending"}}}),
+            ),
+        )
+        queued += 1
+    recompute_blocking(conn)
+    print(f"scan: {queued} newly queued, {failed} left failed, {skipped} already proven/current")
+    q = conn.execute("SELECT count(*) c FROM builds WHERE state='QUEUED'").fetchone()["c"]
+    b = conn.execute("SELECT count(*) c FROM builds WHERE state='BLOCKED'").fetchone()["c"]
+    print(f"queue: {q} ready, {b} blocked")
+    for r in conn.execute(
+        """SELECT package, count(*) c FROM builds
+           WHERE queued_at >= datetime('now', '-1 day')
+           GROUP BY package HAVING c >= ? ORDER BY c DESC""",
+        (REQUEUE_WARN_THRESHOLD,),
+    ).fetchall():
+        print(
+            f"churn warning: {r['package']} requeued {r['c']}x in 24h "
+            f"(>= {REQUEUE_WARN_THRESHOLD}) - verify each pkgrel bump fixes "
+            "a proven defect; this is the r55555 smell"
+        )
+
+
+def pick_next(conn):
+    for row in conn.execute(
+        "SELECT * FROM builds WHERE state='QUEUED' ORDER BY id"
+    ).fetchall():
+        info = recipe_info(RECIPES / row["package"])
+        ready = True
+        for d in info["deps"]:
+            ok, _, _ = dep_state(conn, norm_dep(d))
+            if not ok:
+                ready = False
+                break
+        if ready:
+            return row, info
+    return None, None
+
+
+def ready_apk(ready_dir, pkg, ver_rel):
+    cands = list(ready_dir.glob(f"{pkg}-*-{ver_rel}.apk")) if ver_rel else list(ready_dir.glob(f"{pkg}-*.apk"))
+    if not cands:
+        cands = [p for p in ready_dir.glob("*.apk")]
+    return cands[0] if cands else None
+
+
+def evaluate_stages(root, payload, recipe_dir, log_dir):
+    stages = {}
+
+    lib_index = set()
+    for base in ("lib", "usr/lib"):
+        p = root / base
+        if p.is_dir():
+            lib_index |= {f.name for f in p.rglob("*") if f.is_file()}
+    lib_index |= {
+        "ld-musl-x86_64.so.1", "libc.musl-x86_64.so.1", "linux-vdso.so.1",
+        "libc.so",
+    }
+
+    missing = []
+    elfs = 0
+    for rel in payload:
+        f = root / rel
+        try:
+            if not f.is_file() or f.read_bytes()[:4] != b"\x7fELF":
+                continue
+        except OSError:
+            continue
+        elfs += 1
+        r = run_out(["readelf", "-d", f])
+        for m in re.finditer(r"\(NEEDED\).*\[(.+?)\]", r.stdout):
+            if m.group(1) not in lib_index:
+                missing.append(f"{rel}: {m.group(1)}")
+    stages["RUNTIME"] = (
+        {"status": "fail", "detail": missing[:10]}
+        if missing else {"status": "pass", "detail": f"{elfs} ELF files, closure resolved"}
+    )
+
+    bad = []
+    for rel in payload:
+        if "/lib64/" in f"/{rel}" or rel.startswith("lib64/") or rel.startswith("usr/lib64/"):
+            bad.append(f"forbidden layout path: {rel}")
+            continue
+        f = root / rel
+        try:
+            if not f.is_file() or f.stat().st_size == 0:
+                continue
+            chunk = f.read_bytes()[:524288]
+        except OSError:
+            continue
+        if b"\x00" in chunk:
+            continue
+        if b"/usr/bin/sh" in chunk:
+            bad.append(f"/usr/bin/sh reference: {rel}")
+    stages["POLICY"] = (
+        {"status": "fail", "detail": bad[:10]} if bad else {"status": "pass"}
+    )
+
+    has_openrc = any(rel.startswith("etc/init.d/") for rel in payload)
+    has_systemd = any(
+        rel.startswith("usr/lib/systemd/system/") and rel.endswith((".service", ".socket", ".timer", ".path", ".mount"))
+        for rel in payload
+    )
+    stages["OPENRC"] = (
+        {"status": "pass", "detail": str(sorted(r.split("/")[-1] for r in payload if r.startswith("etc/init.d/")))}
+        if has_openrc else {"status": "na"}
+    )
+    stages["SYSTEMD"] = (
+        {"status": "pass", "detail": f"{sum(1 for r in payload if r.startswith('usr/lib/systemd/system/'))} units"}
+        if has_systemd else {"status": "na"}
+    )
+
+    sysusers = sorted((root / "usr/lib/sysusers.d").glob("*.conf")) if (root / "usr/lib/sysusers.d").is_dir() else []
+    if not sysusers:
+        stages["IDENTITY"] = {"status": "na", "detail": "no sysusers.d in installed closure"}
+    else:
+        bin_host = shutil.which("systemd-sysusers")
+        if bin_host:
+            rc = run([bin_host, f"--root={root}"], log=log_dir / "identity.log")
+        elif (root / "usr/bin/systemd-sysusers").is_file() and shutil.which("bwrap"):
+            rc = run(["bwrap", "--bind", root, "/", "--dev", "/dev",
+                      "usr/bin/systemd-sysusers"], log=log_dir / "identity.log")
+        else:
+            rc = -1
+            stages["IDENTITY"] = {"status": "na", "detail": "no systemd-sysusers available to process declarations"}
+        if rc == 0:
+            passwd = (root / "etc/passwd").read_text() if (root / "etc/passwd").is_file() else ""
+            group = (root / "etc/group").read_text() if (root / "etc/group").is_file() else ""
+            want_u, want_g = [], []
+            for conf in sysusers:
+                for line in conf.read_text().splitlines():
+                    line = line.split("#")[0].split()
+                    if not line:
+                        continue
+                    if line[0] == "u":
+                        want_u.append(line[1])
+                    elif line[0] == "g":
+                        want_g.append(line[1])
+            u_miss = [u for u in want_u if f"\n{u}:" not in f"\n{passwd}" and not passwd.startswith(f"{u}:")]
+            g_miss = [g for g in want_g if f"\n{g}:" not in f"\n{group}" and not group.startswith(f"{g}:")]
+            mid = root / "etc/machine-id"
+            mid_ok = mid.is_file() and mid.stat().st_size > 0
+            if u_miss or g_miss:
+                stages["IDENTITY"] = {"status": "fail", "detail": {
+                    "missing_users": u_miss, "missing_groups": g_miss}}
+            else:
+                stages["IDENTITY"] = {"status": "pass", "detail": {
+                    "users": want_u, "groups": want_g, "machine_id": mid_ok}}
+        elif "IDENTITY" not in stages:
+            stages["IDENTITY"] = {"status": "fail", "detail": f"systemd-sysusers rc={rc}"}
+
+    tsh = recipe_dir / "test.sh"
+    if tsh.is_file():
+        rc = run(["/bin/sh", str(tsh)], log=log_dir / "test.log",
+                 env={"SAPHIRA_TEST_ROOT": str(root), "SAPHIRA_PKG": recipe_dir.name})
+        stages["TEST"] = {"status": "pass" if rc == 0 else "fail", "detail": f"test.sh rc={rc}"}
+
+    return stages
+
+
+def cmd_run(args):
+    limit = 1
+    for a in args:
+        if a.startswith("--limit="):
+            limit = int(a.split("=", 1)[1])
+        elif a == "--all":
+            limit = 10 ** 9
+    conn = db()
+    done = 0
+    while done < limit:
+        row, info = pick_next(conn)
+        if row is None:
+            break
+        pkg = row["package"]
+        ver_rel = "-".join(x for x in (info.get("version"), "r" + str(info.get("revision"))) if x and x != "r")
+        log_dir = STATE / "logs" / pkg / f"{ver_rel or 'unknown'}-{row['recipe_hash'][:8]}"
+        shutil.rmtree(log_dir, ignore_errors=True)
+        log_dir.mkdir(parents=True)
+        conn.execute("UPDATE builds SET state='BUILDING', started_at=?, log_dir=? WHERE id=?",
+                     (now(), str(log_dir), row["id"]))
+        conn.commit()
+        print(f"run: {pkg} {ver_rel or '(version unknown)'} building...")
+        rc = run(BUILDCMD + [pkg], log=log_dir / "build.log",
+                 env={"JOBS": os.environ.get("SAPHIRA_BUILD_JOBS", "8")})
+        result = {"stages": {"BUILD": {"status": "pass" if rc == 0 else "fail",
+                                       "detail": f"buildpkg rc={rc}"}}}
+        ready_dir = apk = None
+        if rc == 0:
+            cands = sorted(
+                (p for p in INCOMING.glob(f"{pkg}-*-ready") if p.is_dir()),
+                key=lambda p: p.stat().st_mtime,
+            )
+            if not cands or cands[-1].stat().st_mtime < row_start(conn, row["id"]):
+                result["stages"]["BUILD"] = {"status": "fail", "detail": "no new -ready transaction in incoming"}
+            else:
+                ready_dir = cands[-1]
+                apk = ready_apk(ready_dir, pkg, ver_rel)
+                if apk is None:
+                    result["stages"]["BUILD"] = {"status": "fail", "detail": f"no apk in {ready_dir.name}"}
+        if apk is not None:
+            result["stages"]["INSTALL"] = {"status": "pending"}
+            root = TEST_ROOT_PARENT / f"{pkg}-{row['recipe_hash'][:8]}"
+            shutil.rmtree(root, ignore_errors=True)
+            root.parent.mkdir(parents=True, exist_ok=True)
+            root.mkdir()
+            base_apk_args = [
+                APK, "--usermode", f"--root={root}", "--initdb", "--no-network",
+                "--allow-untrusted", "--force-non-repository",
+                f"--repository={REPO}/Packages.adb",
+            ]
+            run(base_apk_args + ["add", "saphira-base-abi"],
+                log=log_dir / "install.log")
+            irc = run(
+                base_apk_args + ["add", apk],
+                log=log_dir / "install.log",
+            )
+            if irc != 0:
+                result["stages"]["INSTALL"] = {"status": "fail", "detail": f"apk add rc={irc}"}
+            else:
+                result["stages"]["INSTALL"] = {"status": "pass"}
+                pl = run_out([APK, f"--root={root}", "info", "-L", pkg])
+                payload = [
+                    ln.strip() for ln in pl.stdout.splitlines()
+                    if ln.strip() and not ln.endswith("contains:")
+                ]
+                result["stages"].update(
+                    evaluate_stages(root, payload, RECIPES / pkg, log_dir)
+                )
+                shutil.rmtree(root, ignore_errors=True)
+        stages = result["stages"]
+        overall = "PASS" if all(s["status"] != "fail" for s in stages.values()) else "FAIL"
+        if overall == "FAIL":
+            failed_deps = [
+                (dep, why) for dep in {
+                    norm_dep(d) for d in recipe_info(RECIPES / pkg)["deps"]
+                }
+                for ok, hard, why in (dep_state(conn, dep),)
+                if not ok and why
+            ]
+            result["blockers"] = [w for _, w in failed_deps]
+        conn.execute(
+            "UPDATE builds SET state=?, finished_at=?, result_json=?, version=?, revision=? WHERE id=?",
+            (overall, now(), json.dumps(result), info.get("version"), info.get("revision"), row["id"]),
+        )
+        conn.commit()
+        recompute_blocking(conn)
+        if ver_rel and ver_rel in published_versions(pkg) and ready_dir is not None:
+            discarded = INCOMING / ".validation-discarded"
+            discarded.mkdir(parents=True, exist_ok=True)
+            os.replace(ready_dir, discarded / ready_dir.name)
+            result["artifact"] = (
+                "discarded: recipe version already published; rebuild kept for "
+                "validation only (immutable-filename rule)"
+            )
+            conn.execute("UPDATE builds SET result_json=? WHERE id=?",
+                         (json.dumps(result), row["id"]))
+            conn.commit()
+        stage_summary = ", ".join(
+            k + ":" + v["status"] for k, v in stages.items()
+        )
+        print(f"run: {pkg} -> {overall} ({stage_summary})")
+        done += 1
+    print(f"run: {done} package(s) processed")
+
+
+def row_start(conn, rid):
+    r = conn.execute("SELECT started_at FROM builds WHERE id=?", (rid,)).fetchone()
+    if not r or not r["started_at"]:
+        return 0
+    t = time.strptime(r["started_at"], "%Y-%m-%dT%H:%M:%SZ")
+    return calendar.timegm(t)
+
+
+def cmd_status(args):
+    conn = db()
+    rows = conn.execute(
+        """SELECT * FROM builds b WHERE id IN (
+               SELECT max(id) FROM builds GROUP BY package)
+           ORDER BY state, package"""
+    ).fetchall()
+    if not rows:
+        print("status: queue empty (run scan)")
+        return
+    print(f"{'PACKAGE':<28} {'VERSION':<18} {'STATE':<9} {'STAGES':<34} PUB SKEW")
+    for r in rows:
+        res = json.loads(r["result_json"])
+        st = res.get("stages", {})
+        s = " ".join(
+            {"pass": "+", "fail": "F", "na": "-", "pending": ".", "blocked": "B"}.get(
+                v.get("status"), "?") for k, v in
+            sorted(st.items(), key=lambda kv: ["BUILD", "INSTALL", "RUNTIME", "POLICY", "OPENRC", "SYSTEMD", "IDENTITY", "TEST", "DEPENDENCIES"].index(kv[0]) if kv[0] in ["BUILD", "INSTALL", "RUNTIME", "POLICY", "OPENRC", "SYSTEMD", "IDENTITY", "TEST", "DEPENDENCIES"] else 99)
+        )
+        pub = "yes" if r["published_at"] else ("built" if r["state"] == "PASS" else "no")
+        skew = ""
+        info = recipe_info(RECIPES / r["package"]) if (RECIPES / r["package"] / "recipe.sh").is_file() else {}
+        rv = "-".join(x for x in (info.get("version"), "r" + str(info.get("revision"))) if x and x != "r")
+        pv = published_versions(r["package"])
+        if rv and pv and rv not in pv and rv > max(pv):
+            skew = f"recipe {rv} ahead of repo"
+        print(f"{r['package']:<28} {rv or (r['version'] or '?'):<18} {r['state']:<9} {s:<34} {pub:<4} {skew}")
+
+
+def cmd_retry(args):
+    if not args:
+        die("retry: PACKAGE required")
+    conn = db()
+    pkg = args[0]
+    row = latest(conn, pkg)
+    if row is None:
+        die(f"retry: {pkg} not in queue")
+    if row["state"] not in ("FAIL", "BLOCKED"):
+        die(f"retry: {pkg} is {row['state']}, not FAIL/BLOCKED")
+    conn.execute(
+        """INSERT INTO builds(package,version,revision,recipe_hash,state,commit_hash,queued_at,result_json)
+           SELECT package,version,revision,recipe_hash,'QUEUED',commit_hash,?,? FROM builds WHERE id=?""",
+        (now(), json.dumps({"stages": {}, "retry_of": row["id"]}), row["id"]),
+    )
+    conn.commit()
+    recompute_blocking(conn)
+    print(f"retry: {pkg} requeued")
+
+
+def cmd_log(args):
+    conn = db()
+    pkg = args[0]
+    row = latest(conn, pkg)
+    if row is None or not row["log_dir"]:
+        die(f"log: no logs for {pkg}")
+    ld = Path(row["log_dir"])
+    for f in sorted(ld.glob("*")):
+        print(f"===== {f.name} =====")
+        print(f.read_text(errors="replace"))
+
+
+def cmd_queue(args):
+    conn = db()
+    for state in ("QUEUED", "BLOCKED", "BUILDING"):
+        rows = conn.execute(
+            "SELECT package,version,revision,result_json FROM builds WHERE state=? AND id IN (SELECT max(id) FROM builds GROUP BY package)",
+            (state,),
+        ).fetchall()
+        print(f"{state}: {len(rows)}")
+        for r in rows:
+            extra = ""
+            if state == "BLOCKED":
+                res = json.loads(r["result_json"])
+                d = res.get("stages", {}).get("DEPENDENCIES", {}).get("detail", [])
+                extra = "  # " + "; ".join(d)
+            print(f"  {r['package']} {r['version'] or ''}-r{r['revision'] or '?'}{extra}")
+
+
+def cmd_evaluate(args):
+    root = Path(args[0])
+    pkg = args[1]
+    rd = Path(args[2]) if len(args) > 2 else RECIPES / pkg
+    payload = [
+        ln.strip() for ln in run_out([APK, f"--root={root}", "info", "-L", pkg]).stdout.splitlines()
+        if ln.strip() and not ln.endswith("contains:")
+    ]
+    stages = evaluate_stages(root, payload, rd, STATE / "logs" / "_evaluate")
+    print(json.dumps(stages, indent=2))
+    return 0 if all(s["status"] != "fail" for s in stages.values()) else 1
+
+
+def cmd_daemon(args):
+    interval = 300
+    limit = 1
+    once = "--once" in args
+    for a in args:
+        if a.startswith("--interval="):
+            interval = int(a.split("=", 1)[1])
+        elif a.startswith("--limit="):
+            limit = int(a.split("=", 1)[1])
+    while True:
+        cmd_scan([])
+        cmd_run([f"--limit={limit}"])
+        if once:
+            break
+        time.sleep(interval)
+
+
+def cmd_publish(args):
+    sync = "--sync" in args
+    pkgs = [a for a in args if not a.startswith("--")]
+    conn = db()
+    rows = conn.execute(
+        """SELECT * FROM builds WHERE state='PASS' AND published_at IS NULL
+           AND id IN (SELECT max(id) FROM builds GROUP BY package) ORDER BY package"""
+    ).fetchall()
+    if pkgs:
+        rows = [r for r in rows if r["package"] in pkgs]
+    if not rows:
+        print("publish: nothing eligible (state PASS, unpublished)")
+        return
+    # One sign-apk-repo run publishes every ready transaction it finds,
+    # so a single batched call covers all rows (per-row calls would
+    # repeat the full O(repo) publication once per package).
+    rc = run(["sudo", "sign-apk-repo"])
+    if rc != 0:
+        for r in rows:
+            res = json.loads(r["result_json"])
+            res["stages"]["PUBLISH"] = {"status": "fail", "detail": f"sign-apk-repo rc={rc}"}
+            conn.execute("UPDATE builds SET result_json=? WHERE id=?", (json.dumps(res), r["id"]))
+        conn.commit()
+        print(f"publish: {len(rows)} package(s) FAILED (sign-apk-repo rc={rc})")
+        return
+    for r in rows:
+        conn.execute("UPDATE builds SET published_at=? WHERE id=?", (now(), r["id"]))
+    conn.commit()
+    print(f"publish: {len(rows)} package(s) signed+indexed")
+    if sync:
+        rc = run(["rsync", "-a", "--delete", f"{REPO}/", "homer:/srv/packages.saphira.vm2.uk/hatchling/x86_64/"])
+        print(f"publish: homer sync rc={rc}")
+
+
+RELEASE_STATE = Path(os.environ.get("SAPHIRA_RELEASE_STATE", str(STATE / "releases")))
+RELEASE_POLICY = os.environ.get("SAPHIRA_RELEASE_POLICY", "monotonic")
+
+REL_LINE_RE = re.compile(r"^pkgrel=([0-9]+)\s*$", re.MULTILINE)
+
+
+def release_log(action, package, version, old, new, reason=""):
+    RELEASE_STATE.mkdir(parents=True, exist_ok=True)
+    entry = {
+        "ts": now(), "action": action, "package": package,
+        "version": version, "from": f"r{old}", "to": f"r{new}",
+        "policy": RELEASE_POLICY, "reason": reason,
+    }
+    with (RELEASE_STATE / "releases.jsonl").open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(entry, sort_keys=True) + "\n")
+
+
+def rel_targets(args):
+    if not args or args == ["all"]:
+        return [recipe_info(d) for d in recipe_dirs()]
+    out = []
+    for name in args:
+        d = RECIPES / name
+        if not (d / "recipe.sh").is_file():
+            die(f"rel: no recipe for {name}")
+        out.append(recipe_info(d))
+    return out
+
+
+def published_rel_for(name, version):
+    best = 0
+    for entry in published_versions(name):
+        ver, _, rel = entry.rpartition("-r")
+        if ver == version:
+            best = max(best, int(rel))
+    return best
+
+
+def rel_rows(targets):
+    rows = []
+    for info in targets:
+        name, version = info["name"], info.get("version", "")
+        rel = int(info.get("revision") or 0)
+        pub = published_rel_for(name, version)
+        rows.append((name, version, rel, pub))
+    return rows
+
+
+def rel_set_rel(name, old, new, action, version, reason=""):
+    script = RECIPES / name / "recipe.sh"
+    text = script.read_text(encoding="utf-8")
+    new_text, count = REL_LINE_RE.subn(f"pkgrel={new}", text, count=1)
+    if count != 1:
+        die(f"rel: cannot update pkgrel in {script}")
+    if new_text != text:
+        script.write_text(new_text, encoding="utf-8")
+    release_log(action, name, version, old, new, reason)
+
+
+def cmd_rel_plan(args):
+    rows = rel_rows(rel_targets(args))
+    print(f"{'PACKAGE':<28} {'VERSION':<16} {'RECIPE':>7} {'PUBLISHED':>10} {'NEXT':>6}")
+    for name, version, rel, pub in rows:
+        nxt = max(rel, pub) + 1
+        pub_s = f"r{pub}" if pub else "-"
+        print(f"{name:<28} {version:<16} {'r' + str(rel):>7} {pub_s:>10} {'r' + str(nxt):>5}")
+
+
+def cmd_rel_status(args):
+    rows = rel_rows(rel_targets(args))
+    behind = [r for r in rows if r[3] > r[2]]
+    ahead = [r for r in rows if r[2] > r[3]]
+    print(f"policy={RELEASE_POLICY} state={RELEASE_STATE}")
+    print(
+        f"recipes={len(rows)} behind={len(behind)} ahead={len(ahead)} "
+        f"at-head={len(rows) - len(behind) - len(ahead)}"
+    )
+    for name, version, rel, pub in behind[:20]:
+        print(f"  behind: {name} {version} recipe r{rel} published r{pub}")
+    for name, version, rel, pub in ahead[:20]:
+        print(f"  ahead:  {name} {version} recipe r{rel} published r{pub}")
+
+
+def cmd_rel_bump(args):
+    if not args:
+        die("rel-bump: PACKAGE... or all required")
+    for name, version, rel, pub in rel_rows(rel_targets(args)):
+        new = max(rel, pub) + 1
+        if new <= rel:
+            continue
+        rel_set_rel(name, rel, new, "bump", version)
+        print(f"rel-bump: {name} {version} r{rel} -> r{new}")
+
+
+def cmd_rel_normalize(args):
+    if not args:
+        die("rel-normalize: PACKAGE... or all required")
+    for name, version, rel, pub in rel_rows(rel_targets(args)):
+        if pub <= rel:
+            continue
+        rel_set_rel(name, rel, pub, "normalize", version)
+        print(f"rel-normalize: {name} {version} r{rel} -> r{pub}")
+
+
+def die(msg):
+    print(f"saphira-build: {msg}", file=sys.stderr)
+    sys.exit(2)
+
+
+def main():
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except (AttributeError, ValueError):
+        pass
+    import signal
+    try:
+        signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+    except (AttributeError, ValueError):
+        pass
+    cmds = {
+        "scan": cmd_scan, "run": cmd_run, "status": cmd_status,
+        "retry": cmd_retry, "log": cmd_log, "queue": cmd_queue,
+        "evaluate": cmd_evaluate, "publish": cmd_publish,
+        "daemon": cmd_daemon,
+        "rel-plan": cmd_rel_plan, "rel-status": cmd_rel_status,
+        "rel-bump": cmd_rel_bump, "rel-normalize": cmd_rel_normalize,
+    }
+    if len(sys.argv) < 2 or sys.argv[1] not in cmds:
+        print(
+            "usage: saphira-build "
+            "scan | run [--limit=N|--all] | queue | status | retry PACKAGE | "
+            "log PACKAGE | publish [--sync] [PKG...] | evaluate ROOT PKG [RECIPE_DIR] | "
+            "daemon [--interval=S] [--limit=N] [--once] | "
+            "rel-plan [all|PKG...] | rel-status | rel-bump [all|PKG...] | "
+            "rel-normalize [all|PKG...]",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    sys.exit(cmds[sys.argv[1]](sys.argv[2:]) or 0)
+
+
+if __name__ == "__main__":
+    main()

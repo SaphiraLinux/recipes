@@ -1,0 +1,16 @@
+#!/sbin/openrc-run
+
+description="HAProxy load balancer"
+command="/usr/sbin/haproxy"
+cfgfile="${cfgfile:-/etc/haproxy/haproxy.cfg}"
+command_args="-db -f $cfgfile"
+command_background="yes"
+pidfile="/run/haproxy.pid"
+output_log="/var/log/haproxy/stdout.log"
+error_log="/var/log/haproxy/stderr.log"
+
+depend()
+{
+	need net
+	use logger
+}

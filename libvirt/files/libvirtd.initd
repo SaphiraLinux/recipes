@@ -1,0 +1,14 @@
+#!/sbin/openrc-run
+# OpenRC init for libvirtd (Saphira - monolithic daemon, KISS)
+
+description="Libvirt virtualization daemon"
+command="/usr/sbin/libvirtd"
+command_args="${LIBVIRTD_ARGS:--d}"
+pidfile="/run/libvirtd.pid"
+command_background="yes"
+
+depend() {
+	need localmount
+	after bootmisc
+	use dbus
+}

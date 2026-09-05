@@ -1,0 +1,12 @@
+#!/bin/sh
+# lb.saphira.dicom.echo - DICOM C-ECHO SCU round-trip (deep-application,
+# cheap, continuous-safe). Proves association negotiation + verification SCP.
+# Configuration ($6/$7 convenience for manual use; env/conf otherwise):
+#   $6  called AE    LB_SAPHIRA_DICOM_AEC (default ANY-SCP)
+#   $7  calling AE   LB_SAPHIRA_DICOM_AET (default SAPHIRA-HC)
+# Copyright (c) 2026 AKADATA. MIT licensed.
+. /usr/share/saphira/lb-healthchecks/lib/lb-saphira-common.sh
+lb_init "$@"
+AEC="${6:-${LB_SAPHIRA_DICOM_AEC:-ANY-SCP}}"
+AET="${7:-${LB_SAPHIRA_DICOM_AET:-SAPHIRA-HC}}"
+exec echoscu -aet "$AET" -aec "$AEC" -ta "$LB_TIMEOUT" "$LB_REAL" "${LB_RPORT:-104}"

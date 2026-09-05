@@ -1,0 +1,315 @@
+#!/usr/bin/python3
+
+"""seed-repo: birth a new generation repository from the oldest archive.
+
+A generation boundary (hatchling > hatched > ...) is a deliberate operator
+act with three steps: seed the new repository from the oldest archive
+(this tool), add the new name to SAPHIRA_REPO_NAMES, then publish. The
+seed copies the LATEST revision of every package as real files (never
+links), indexes the new repository, and signs both index files with the
+one repository key. Explicitly retired migration-era names listed in
+SAPHIRA_GENESIS_EXCLUDE stay behind as historical r0 artifacts in the
+source archive; obsolete names are never bumped to make a count zero.
+
+Packages that deliberately maintain parallel pkgver lines (for example
+saphira-kernel and saphira-kernel-headers at 7.1.5 and 7.2.2) are declared
+in the generic version-lines policy file (SAPHIRA_VERSION_LINES_FILE,
+default /etc/saphira/version-lines.conf): every declared line keeps its
+highest published revision instead of collapsing to latest-per-name.
+
+Requires root; use sudo explicitly, exactly like sign-apk-repo.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import NoReturn
+
+CONFIG_KEYS = (
+    "SAPHIRA_REPO_DIR",
+    "SAPHIRA_REPO_NAMES",
+    "SAPHIRA_GENESIS_EXCLUDE",
+    "SAPHIRA_VERSION_LINES_FILE",
+    "SAPHIRA_ARCH",
+    "SAPHIRA_APK",
+    "SAPHIRA_SIGN_KEY",
+    "SAPHIRA_TRUST_KEY",
+    "SAPHIRA_PACKAGE_TMP",
+    "SAPHIRA_PYTHON",
+)
+REPO_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+PACKAGE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
+VERSION_BASE_RE = re.compile(r"^(?P<base>.+)-r\d+$")
+DEFAULT_VERSION_LINES_FILE = "/etc/saphira/version-lines.conf"
+
+
+class SeedError(RuntimeError):
+    pass
+
+
+def die(message: str) -> NoReturn:
+    raise SeedError(message)
+
+
+def run(command: list[str], *, check: bool = True) -> subprocess.CompletedProcess[bytes]:
+    try:
+        return subprocess.run(command, check=check, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except FileNotFoundError:
+        die(f"required tool is missing: {command[0]}")
+    except subprocess.CalledProcessError as exc:
+        detail = exc.stderr.decode("utf-8", "replace").strip()
+        die(f"command failed: {command[0]}: {detail or exc.returncode}")
+
+
+def load_config() -> dict[str, str]:
+    config_path = os.environ.get("SAPHIRA_CONFIG_FILE", "/etc/saphira/package_builder.sh")
+    script = r'''
+set -eu
+set -a
+. "$1"
+shift
+for name do
+    value=${!name-}
+    builtin printf '%s\0%s\0' "$name" "$value"
+done
+'''
+    result = subprocess.run(
+        ["/bin/bash", "--noprofile", "--norc", "-c", script, "seed-repo-config", config_path, *CONFIG_KEYS],
+        check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    parts = result.stdout.split(b"\0")
+    values = {parts[index].decode(): parts[index + 1].decode() for index in range(0, len(parts) - 1, 2)}
+    optional = {"SAPHIRA_GENESIS_EXCLUDE", "SAPHIRA_VERSION_LINES_FILE"}
+    missing = [key for key in CONFIG_KEYS if key not in optional and not values.get(key)]
+    if missing:
+        die(f"missing configuration keys: {', '.join(missing)} ({config_path})")
+    return values
+
+
+def version_base(version: str) -> str:
+    """The pkgver base of an index version (pkgver-rN): '7.1.5-r1' -> '7.1.5'."""
+    match = VERSION_BASE_RE.fullmatch(version)
+    return match.group("base") if match else version
+
+
+def normalize_ownership(path: Path) -> None:
+    """Published /out state belongs to the invoking user with the
+    repository group, even when invoked through sudo. Directory modes keep
+    the setgid bit so group inheritance holds between writes."""
+    uid = os.environ.get("SUDO_UID")
+    if not uid:
+        return
+    import grp
+    import stat
+    group = os.environ.get("SAPHIRA_REPO_GROUP", "saphira-build")
+    gid = grp.getgrnam(group).gr_gid
+    os.chown(path, int(uid), gid)
+    if path.is_dir():
+        os.chmod(path, os.stat(path).st_mode | stat.S_ISGID | stat.S_IRWXG)
+
+
+def load_version_lines(config: dict[str, str]) -> dict[str, list[str]]:
+    """Deliberately parallel live version lines per package name.
+
+    Generic repo policy (not recipe metadata): names declared here keep the
+    highest published revision of EVERY declared pkgver base at a genesis
+    boundary instead of collapsing to latest-per-name. A missing default
+    file means an empty policy; an explicitly configured missing file is an
+    error."""
+    path = config.get("SAPHIRA_VERSION_LINES_FILE") or DEFAULT_VERSION_LINES_FILE
+    explicit = bool(config.get("SAPHIRA_VERSION_LINES_FILE"))
+    policy_path = Path(path)
+    if not policy_path.is_file():
+        if explicit:
+            die(f"SAPHIRA_VERSION_LINES_FILE does not exist: {policy_path}")
+        return {}
+    lines: dict[str, list[str]] = {}
+    for number, raw in enumerate(policy_path.read_text(encoding="utf-8").splitlines(), start=1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        fields = line.split()
+        if len(fields) < 2:
+            die(f"{policy_path}:{number}: expected 'name base [base ...]': {line}")
+        name, bases = fields[0], fields[1:]
+        if not PACKAGE_NAME_RE.fullmatch(name):
+            die(f"{policy_path}:{number}: invalid package name: {name}")
+        if name in lines:
+            die(f"{policy_path}:{number}: duplicate package name: {name}")
+        for base in bases:
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+~-]*", base):
+                die(f"{policy_path}:{number}: invalid version base: {base}")
+        if len(set(bases)) != len(bases):
+            die(f"{policy_path}:{number}: duplicate version base for {name}")
+        lines[name] = bases
+    return lines
+
+
+def version_compare(apk: str, left: str, right: str) -> int:
+    out = run([apk, "version", "-t", left, right]).stdout.decode().strip()
+    if out == ">":
+        return 1
+    if out == "<":
+        return -1
+    if out == "=":
+        return 0
+    die(f"unexpected version comparison result: {left} {out} {right}")
+
+
+def read_identities(apk: str, index: Path) -> dict[str, list[str]]:
+    dump = run([apk, "adbdump", str(index)]).stdout.decode("utf-8", "replace")
+    names = re.findall(r"^  - name: (\S+)$", dump, re.MULTILINE)
+    versions = re.findall(r"^    version: (\S+)$", dump, re.MULTILINE)
+    if len(names) != len(versions):
+        die(f"malformed repository index identities: {index}")
+    identities: dict[str, list[str]] = {}
+    for name, version in zip(names, versions):
+        identities.setdefault(name, []).append(version)
+    if not identities:
+        die(f"source repository index lists no packages: {index}")
+    return identities
+
+
+def main() -> int:
+    if len(sys.argv) != 2 or not REPO_NAME_RE.fullmatch(sys.argv[1]):
+        print(f"usage: {sys.argv[0]} NEW-REPOSITORY-NAME", file=sys.stderr)
+        return 1
+    if sys.argv[1] in ("keys", "latest", "main", "testing"):
+        die(f"reserved repository name: {sys.argv[1]}")
+    new_name = sys.argv[1]
+    try:
+        config = load_config()
+        arch = config["SAPHIRA_ARCH"]
+        apk = config["SAPHIRA_APK"]
+        repos = config["SAPHIRA_REPO_NAMES"].split()
+        if not repos or any(not REPO_NAME_RE.fullmatch(name) for name in repos):
+            die(f"invalid SAPHIRA_REPO_NAMES: {config['SAPHIRA_REPO_NAMES']!r}")
+        if new_name in repos:
+            die(f"{new_name} is already listed in SAPHIRA_REPO_NAMES; seeding refuses existing generations")
+        source_name = repos[0]
+        source_dir = Path(config["SAPHIRA_REPO_DIR"]) / source_name / arch
+        target_dir = Path(config["SAPHIRA_REPO_DIR"]) / new_name / arch
+        trust_dir = str(Path(config["SAPHIRA_TRUST_KEY"]).parent)
+        exclusions = set(config["SAPHIRA_GENESIS_EXCLUDE"].split())
+
+        if not (source_dir / "Packages.adb").is_file():
+            die(f"source repository index is missing: {source_dir / 'Packages.adb'}")
+        if target_dir.exists():
+            die(f"target repository already exists: {target_dir} (a partial seed is removed with: rm -rf '{target_dir}')")
+
+        identities = read_identities(apk, source_dir / "Packages.adb")
+        version_lines = load_version_lines(config)
+        latest: dict[str, str] = {}
+        for name, versions in sorted(identities.items()):
+            best = versions[0]
+            for version in versions[1:]:
+                if version_compare(apk, version, best) > 0:
+                    best = version
+            latest[name] = best
+
+        def best_of_line(name: str, base: str) -> str | None:
+            candidates = [version for version in identities[name] if version_base(version) == base]
+            if not candidates:
+                return None
+            best = candidates[0]
+            for version in candidates[1:]:
+                if version_compare(apk, version, best) > 0:
+                    best = version
+            return best
+
+        excluded = sorted(name for name in latest if name in exclusions)
+        for name in sorted(version_lines):
+            if name not in identities and name not in exclusions:
+                print(f"seed-repo: warning: version-lines name {name} is absent "
+                      "from the source repository", file=sys.stderr)
+        selected_pairs: list[tuple[str, str]] = []
+        applied_lines: dict[str, list[str]] = {}
+        for name in sorted(identities):
+            if name in exclusions:
+                continue
+            if name in version_lines:
+                chosen: list[str] = []
+                for base in version_lines[name]:
+                    best = best_of_line(name, base)
+                    if best is None:
+                        print(f"seed-repo: warning: declared version line {name} {base} "
+                              "has no package in the source repository", file=sys.stderr)
+                        continue
+                    chosen.append(best)
+                    selected_pairs.append((name, best))
+                if chosen:
+                    applied_lines[name] = sorted(version_lines[name])
+                continue
+            selected_pairs.append((name, latest[name]))
+        if not selected_pairs:
+            die("genesis selection is empty (every package is excluded); refusing to seed an empty repository")
+
+        missing = [
+            f"{name}-{version}.apk"
+            for name, version in sorted(selected_pairs)
+            if not (source_dir / f"{name}-{version}.apk").is_file()
+        ]
+        if missing:
+            die(f"source archive is missing latest packages: {', '.join(missing[:5])}{' ...' if len(missing) > 5 else ''}")
+
+        target_dir.mkdir(parents=True)
+        normalize_ownership(target_dir)
+        try:
+            for name, version in sorted(selected_pairs):
+                source_file = source_dir / f"{name}-{version}.apk"
+                shutil.copy2(source_file, target_dir / source_file.name)
+                normalize_ownership(target_dir / source_file.name)
+            for package in sorted(target_dir.glob("*.apk")):
+                run([apk, "verify", "--keys-dir", trust_dir, str(package)])
+
+            with tempfile.TemporaryDirectory(prefix="seed-repo-") as workspace:
+                packages_adb = Path(workspace) / "Packages.adb"
+                apkindex = Path(workspace) / "APKINDEX.tar.gz"
+                run([apk, "mkndx", "--allow-untrusted", "--hash", "sha256-160",
+                     "-o", str(packages_adb), *[str(p) for p in sorted(target_dir.glob("*.apk"))]])
+                shutil.copy2(packages_adb, apkindex)
+                for index in (packages_adb, apkindex):
+                    if not index.is_file() or index.stat().st_size == 0:
+                        die(f"generated index is empty: {index}")
+                    run([apk, "adbsign", "--allow-untrusted", "--sign-key", config["SAPHIRA_SIGN_KEY"], str(index)])
+                    run([apk, "verify", "--keys-dir", trust_dir, str(index)])
+                shutil.copy2(packages_adb, target_dir / "Packages.adb")
+                shutil.copy2(apkindex, target_dir / "APKINDEX.tar.gz")
+                normalize_ownership(target_dir / "Packages.adb")
+                normalize_ownership(target_dir / "APKINDEX.tar.gz")
+
+            receipt = {
+                "schema": "saphira-repo-genesis/v1",
+                "source": source_name,
+                "repository": new_name,
+                "arch": arch,
+                "package_count": len(selected_pairs),
+                "excluded": excluded,
+                "version_lines": applied_lines,
+                "created": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            }
+            (target_dir / "genesis.json").write_text(
+                json.dumps(receipt, sort_keys=True, indent=1) + "\n", encoding="utf-8")
+            normalize_ownership(target_dir / "genesis.json")
+        except BaseException:
+            print(f"seed-repo: seed failed; inspect or remove the partial target: {target_dir}", file=sys.stderr)
+            raise
+        print(f"seed-repo: birthed {new_name}/{arch} from {source_name} "
+              f"({len(selected_pairs)} packages, {len(excluded)} excluded retired names, "
+              f"{len(applied_lines)} parallel version lines)")
+        return 0
+    except SeedError as exc:
+        print(f"seed-repo: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

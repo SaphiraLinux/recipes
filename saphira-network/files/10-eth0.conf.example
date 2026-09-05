@@ -1,0 +1,21 @@
+# One interface configuration per file.  Files run in lexical order.
+TYPE=physical
+INTERFACE=eth0
+
+IPV4_MODE=static
+IPV4_CIDR=192.0.2.10/24
+IPV4_GATEWAY=192.0.2.1
+IPV4_METRIC=
+
+IPV6_MODE=off
+IPV6_CIDR=
+IPV6_GATEWAY=
+IPV6_METRIC=
+
+DNS_SERVERS="192.0.2.53 2001:db8::53"
+DNS_SEARCH=
+
+# TYPE also supports ovs-bridge, ovs-port and ovs-internal; IPV4_MODE and
+# IPV6_MODE accept static, dhcp or off.  A file is ACTIVE once renamed to
+# *.conf.  When this directory has no active .conf files, the legacy
+# /etc/network.d directory is read for compatibility.

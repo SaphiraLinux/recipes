@@ -1,0 +1,29 @@
+#!/sbin/openrc-run
+
+description="Open vSwitch"
+command=/usr/share/openvswitch/scripts/ovs-ctl
+
+depend()
+{
+	need localmount
+	before net
+}
+
+start()
+{
+	ebegin "Starting Open vSwitch"
+	"$command" ${ovs_options:---system-id=random} start
+	eend $?
+}
+
+stop()
+{
+	ebegin "Stopping Open vSwitch"
+	"$command" stop
+	eend $?
+}
+
+status()
+{
+	"$command" status
+}

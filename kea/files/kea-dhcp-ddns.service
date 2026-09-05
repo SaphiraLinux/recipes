@@ -1,0 +1,11 @@
+[Unit]
+Description=Kea DHCP-DDNS update server
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/kea-dhcp-ddns -c /etc/kea/kea-dhcp-ddns.conf
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

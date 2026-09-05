@@ -1,0 +1,20 @@
+#!/sbin/openrc-run
+
+description="PHP 8.5 FastCGI Process Manager"
+
+command="/usr/sbin/php-fpm85"
+command_args="-F"
+supervisor="supervise-daemon"
+
+depend()
+{
+	need localmount
+	use net logger dns
+}
+
+start_pre()
+{
+	checkpath -d -o php-fpm:php-fpm -m 0755 /run/php-fpm85 /var/log/php85
+	ebegin "Checking PHP-FPM configuration"
+	/usr/sbin/php-fpm85 --test
+}

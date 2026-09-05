@@ -1,0 +1,14 @@
+[Unit]
+Description=ClamAV virus signature updater (freshclam)
+After=network.target
+
+[Service]
+Type=forking
+User=clamav
+Group=clamav
+PIDFile=/run/clamav/freshclam.pid
+ExecStart=/usr/bin/freshclam --daemon --pid=/run/clamav/freshclam.pid
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

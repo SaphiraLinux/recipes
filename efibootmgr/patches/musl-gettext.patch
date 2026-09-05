@@ -1,0 +1,30 @@
+--- a/src/efibootdump.c
++++ b/src/efibootdump.c
+@@ -17 +16,0 @@
+-#include <libintl.h>
+@@ -30,3 +29,3 @@
+-#define  _(String) gettext (String)
+-#define Q_(String) dgettext (NULL, String)
+-#define C_(Context,String) dgettext (Context,String)
++#define  _(String) (String)
++#define Q_(String) (String)
++#define C_(Context,String) (String)
+@@ -119,3 +119,0 @@ main(int argc, char *argv[])
+-	setlocale(LC_ALL, "");
+-	bindtextdomain("efibootdump", LOCALEDIR);
+-	textdomain("efibootdump");
+--- a/src/eficonman.c
++++ b/src/eficonman.c
+@@ -15 +14,0 @@
+-#include <libintl.h>
+@@ -24,3 +23,3 @@
+-#define  _(String) gettext (String)
+-#define Q_(String) dgettext (NULL, String)
+-#define C_(Context,String) dgettext (Context,String)
++#define  _(String) (String)
++#define Q_(String) (String)
++#define C_(Context,String) (String)
+@@ -124,3 +124,0 @@ main(int argc, char *argv[])
+-	setlocale(LC_ALL, "");
+-	bindtextdomain("eficonman", LOCALEDIR);
+-	textdomain("eficonman");

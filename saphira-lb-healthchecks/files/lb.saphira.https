@@ -1,0 +1,22 @@
+#!/bin/sh
+# lb.saphira.https - HTTPS transaction against real:$4 (L7).
+# Certificate verification off by default (backend TLS terminates at the
+# real server with service certs); LB_SAPHIRA_TLS_VERIFY=1 enforces it.
+# Env: same knobs as lb.saphira.http.
+# Copyright (c) 2026 AKADATA. MIT licensed.
+. /usr/share/saphira/lb-healthchecks/lib/lb-saphira-common.sh
+lb_init "$@"
+PORT="${LB_RPORT:-$LB_VPORT}"
+PATH_URL="${LB_SAPHIRA_HTTP_PATH:-/}"
+HDRS=""
+[ -n "$LB_SAPHIRA_HTTP_HOST" ] && HDRS="-H Host:$LB_SAPHIRA_HTTP_HOST"
+INSECURE="-k"
+[ "${LB_SAPHIRA_TLS_VERIFY:-0}" = "1" ] && INSECURE=""
+if [ -n "$LB_SAPHIRA_HTTP_EXPECT" ]; then
+	body=$(curl $INSECURE -sS --max-time "$LB_TIMEOUT" -g $HDRS "https://${LB_REAL}:${PORT}${PATH_URL}" 2>/dev/null) || exit 1
+	printf '%s' "$body" | grep -qE -- "$LB_SAPHIRA_HTTP_EXPECT"
+else
+	code=$(curl $INSECURE -sS --max-time "$LB_TIMEOUT" -g -o /dev/null -w '%{http_code}' $HDRS "https://${LB_REAL}:${PORT}${PATH_URL}" 2>/dev/null) || exit 1
+	[ -n "$code" ] || exit 1
+	printf '%s' "$code" | grep -qE -- "${LB_SAPHIRA_HTTP_OK:-^(2|3)[0-9][0-9]$}"
+fi

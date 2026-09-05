@@ -1,0 +1,14 @@
+[Unit]
+Description=wpa_supplicant Wi-Fi supplicant on %i
+After=network.target
+
+[Service]
+Type=simple
+# Instance unit: %i is the interface; its configuration is
+# /etc/wpa_supplicant/%i.conf (systemd instance escape: systemd-escape first).
+ExecStart=/usr/bin/wpa_supplicant -i %i -c /etc/wpa_supplicant/%i.conf
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

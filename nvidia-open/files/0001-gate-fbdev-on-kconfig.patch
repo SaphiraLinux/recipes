@@ -1,0 +1,40 @@
+Saphira kernel 7.2.2 config: CONFIG_FB is unset and DRM fbdev
+emulation disabled, but NV_DRM_FBDEV_AVAILABLE was decided from header
+presence alone, producing an implicit declaration of
+drm_fb_helper_set_suspend_unlocked. All three conftest paths (generic,
+ttm, client) are gated on CONFIG_DRM_FBDEV_EMULATION like the kernel
+itself does. Real NVIDIA hosts wanting fbcon should enable CONFIG_FB +
+CONFIG_DRM_FBDEV_EMULATION in saphira-kernel.
+--- a/kernel-open/nvidia-drm/nvidia-drm-conftest.h
++++ b/kernel-open/nvidia-drm/nvidia-drm-conftest.h
+@@ -63,25 +63,25 @@
+ #endif
+ 
+ #if defined(NV_DRM_FBDEV_GENERIC_SETUP_PRESENT) &&                             \
+-    defined(NV_DRM_APERTURE_REMOVE_CONFLICTING_PCI_FRAMEBUFFERS_PRESENT)
++    defined(NV_DRM_APERTURE_REMOVE_CONFLICTING_PCI_FRAMEBUFFERS_PRESENT) &&    \
++    IS_ENABLED(CONFIG_DRM_FBDEV_EMULATION)
+ #define NV_DRM_FBDEV_AVAILABLE
+ #define NV_DRM_FBDEV_GENERIC_AVAILABLE
+ #endif
+ 
+ #if defined(NV_DRM_FBDEV_TTM_SETUP_PRESENT) &&                                 \
+     defined(NV_DRM_APERTURE_REMOVE_CONFLICTING_PCI_FRAMEBUFFERS_PRESENT)
+-#if IS_ENABLED(CONFIG_DRM_TTM_HELPER)
++#if IS_ENABLED(CONFIG_DRM_TTM_HELPER) && IS_ENABLED(CONFIG_DRM_FBDEV_EMULATION)
+ #define NV_DRM_FBDEV_AVAILABLE
+ #define NV_DRM_FBDEV_TTM_AVAILABLE
+ #endif
+ #endif
+ 
+ #if defined(NV_DRM_CLIENT_SETUP_PRESENT) &&                                    \
+-    (defined(NV_DRM_APERTURE_REMOVE_CONFLICTING_PCI_FRAMEBUFFERS_PRESENT) ||   \
+-     defined(NV_APERTURE_REMOVE_CONFLICTING_PCI_DEVICES_PRESENT))
++    (defined(NV_DRM_APERTURE_REMOVE_CONFLICTING_PCI_FRAMEBUFFERS_PRESENT) ||        defined(NV_APERTURE_REMOVE_CONFLICTING_PCI_DEVICES_PRESENT))
+ // XXX remove dependency on DRM_TTM_HELPER by implementing nvidia-drm's own
+ // .fbdev_probe callback that uses NVKMS kapi
+-#if IS_ENABLED(CONFIG_DRM_TTM_HELPER)
++#if IS_ENABLED(CONFIG_DRM_TTM_HELPER) && IS_ENABLED(CONFIG_DRM_FBDEV_EMULATION)
+ #define NV_DRM_FBDEV_AVAILABLE
+ #define NV_DRM_CLIENT_AVAILABLE
+ #endif

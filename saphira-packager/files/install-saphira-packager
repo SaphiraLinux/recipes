@@ -1,0 +1,48 @@
+#!/bin/sh
+
+set -eu
+
+die()
+{
+	printf 'install-saphira-packager: %s\n' "$*" >&2
+	exit 1
+}
+
+[ "$(id -u)" -eq 0 ] || die "must be run as root"
+
+source_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+target_bindir=${SAPHIRA_BINDIR:-/usr/bin}
+target_config=${SAPHIRA_CONFIG_FILE:-/etc/saphira/package_builder.sh}
+target_config_dir=${target_config%/*}
+target_bootstrap_manifest=${SAPHIRA_BOOTSTRAP_MANIFEST:-$target_config_dir/bootstrap-v0.1.paths}
+
+set -- \
+	buildpkg \
+	buildpkg-single \
+	resolvepkg \
+	checkpkg \
+	cleanpkg \
+	makepkg \
+	installpkg \
+	sign-apk-repo \
+	bumppkg \
+	buildsign \
+	saphira-build
+for tool do
+	[ -f "$source_dir/$tool" ] || die "missing source tool: $source_dir/$tool"
+done
+[ -f "$source_dir/package_builder.sh" ] ||
+	die "missing source configuration: $source_dir/package_builder.sh"
+[ -f "$source_dir/bootstrap-v0.1.paths" ] ||
+	die "missing bootstrap manifest: $source_dir/bootstrap-v0.1.paths"
+
+install -d -m 755 "$target_bindir" "$target_config_dir"
+for tool do
+	install -m 755 "$source_dir/$tool" "$target_bindir/$tool"
+done
+install -m 644 "$source_dir/package_builder.sh" "$target_config"
+install -m 644 "$source_dir/bootstrap-v0.1.paths" "$target_bootstrap_manifest"
+
+printf 'install-saphira-packager: installed bootstrap tools in %s\n' "$target_bindir"
+printf 'install-saphira-packager: installed configuration at %s\n' "$target_config"
+printf 'install-saphira-packager: installed bootstrap manifest at %s\n' "$target_bootstrap_manifest"

@@ -1,0 +1,13 @@
+[Unit]
+Description=vsftpd FTP daemon
+After=network.target
+
+[Service]
+Type=simple
+# The packaged /etc/vsftpd/vsftpd.conf ships listen=YES; -obackground=NO
+# pins foreground supervision without overriding operator conf choices.
+ExecStart=/usr/sbin/vsftpd -obackground=NO /etc/vsftpd/vsftpd.conf
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

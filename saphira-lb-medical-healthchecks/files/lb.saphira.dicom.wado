@@ -1,0 +1,18 @@
+#!/bin/sh
+# lb.saphira.dicom.wado - WADO-RS retrieve (DICOMweb, read-only,
+# continuous-safe). Proves the WADO-RS service returns a valid DICOM
+# media type for a configured object. Distinct capability from QIDO.
+# Configuration ($6 convenience; env/conf otherwise):
+#   $6  WADO URL     LB_SAPHIRA_DICOM_WADO_URL (required, full instance URL)
+#       LB_SAPHIRA_DICOMWEB_TLS_VERIFY=1 enforces cert checks.
+# Copyright (c) 2026 AKADATA. MIT licensed.
+. /usr/share/saphira/lb-healthchecks/lib/lb-saphira-common.sh
+lb_init "$@"
+URL="${6:-${LB_SAPHIRA_DICOM_WADO_URL:-}}"
+[ -n "$URL" ] || exit 2
+V=""
+[ "${LB_SAPHIRA_DICOMWEB_TLS_VERIFY:-0}" = "1" ] || V="-k"
+out=$(curl $V -sS --max-time "$LB_TIMEOUT" -D - -o /dev/null \
+	-H 'Accept: application/dicom' "$URL") || exit 1
+printf '%s\n' "$out" | grep -qiE '^HTTP/[^ ]+ 200' || exit 1
+printf '%s\n' "$out" | grep -qi '^content-type:.*application/dicom'

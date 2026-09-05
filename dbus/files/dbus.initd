@@ -1,0 +1,23 @@
+#!/sbin/openrc-run
+
+description="D-Bus system message bus daemon"
+
+# Foreground bus daemon under supervise-daemon (--nofork/--nopidfile);
+# the equivalent systemd unit ships in the same package.  Neither init
+# wraps the other; nothing is auto-enabled at install.
+command="/usr/bin/dbus-daemon"
+command_args="--system --nofork --nopidfile"
+supervisor="supervise-daemon"
+
+depend()
+{
+	need localmount
+	after bootmisc
+}
+
+start_pre()
+{
+	# /run is tmpfs: the system bus runtime directory must exist before
+	# the daemon creates its socket.
+	checkpath -d -m 0755 /run/dbus
+}

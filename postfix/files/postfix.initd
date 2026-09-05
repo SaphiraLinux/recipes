@@ -1,0 +1,25 @@
+#!/sbin/openrc-run
+
+description="Postfix Mail Transport Agent"
+
+command="/usr/libexec/postfix/master"
+pidfile="/run/postfix-master.pid"
+
+depend()
+{
+	use net logger dns
+}
+
+start_pre()
+{
+	checkpath -d -m 0755 /run/postfix
+	ebegin "Checking postfix configuration"
+	/usr/sbin/postfix check
+}
+
+stop_post()
+{
+	# Let postfix tear down its own queue daemons cleanly.
+	/usr/sbin/postfix stop >/dev/null 2>&1 || true
+	return 0
+}

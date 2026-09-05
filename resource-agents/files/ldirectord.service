@@ -1,0 +1,20 @@
+[Unit]
+Description=ldirectord load balancer director (Layer 4 LVS)
+After=network.target
+
+[Service]
+Type=forking
+# ldirectord is both the daemon and its LSB control script: start/stop/
+# reload drive /etc/ha.d/ldirectord.cf (the default configuration name;
+# per-configuration instances can be added as extra units later).
+# Runtime requirement: ipvsadm must be installed (ldirectord refuses to
+# start without it).
+PIDFile=/var/run/ldirectord.ldirectord.pid
+ExecStart=/usr/sbin/ldirectord ldirectord.cf start
+ExecStop=/usr/sbin/ldirectord ldirectord.cf stop
+ExecReload=/usr/sbin/ldirectord ldirectord.cf reload
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

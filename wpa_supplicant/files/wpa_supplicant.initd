@@ -1,0 +1,30 @@
+#!/sbin/openrc-run
+
+description="wpa_supplicant Wi-Fi supplicant (instance-aware)"
+
+# Instance-aware OpenRC counterpart of wpa_supplicant@.service: invoke
+# as wpa_supplicant.<iface> (e.g. rc-service wpa_supplicant.wlan0 start);
+# the instance names BOTH the interface (-i) and its configuration
+# /etc/wpa_supplicant/<iface>.conf.  A plain invocation without an
+# instance is refused - the interface/config is always explicit.
+# Nothing is auto-enabled at install; neither init wraps the other.
+iface="${RC_SVCNAME#wpa_supplicant.}"
+conf="/etc/wpa_supplicant/${iface}.conf"
+
+command="/usr/bin/wpa_supplicant"
+command_args="-i ${iface} -c ${conf}"
+supervisor="supervise-daemon"
+required_files="$conf"
+
+depend()
+{
+	use net
+}
+
+start_pre()
+{
+	if [ "$RC_SVCNAME" = wpa_supplicant ]; then
+		eerror "wpa_supplicant requires an instance: rc-service wpa_supplicant.<iface> start"
+		return 1
+	fi
+}

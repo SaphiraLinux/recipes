@@ -1,0 +1,19 @@
+#!/bin/sh
+# lb.saphira.tls - full TLS handshake completes with real:$4 (L7).
+# Optional: LB_SAPHIRA_TLS_MIN_DAYS fails when the certificate expires
+# within N days. A failed handshake fails the check (no port-open pass).
+# Copyright (c) 2026 AKADATA. MIT licensed.
+. /usr/share/saphira/lb-healthchecks/lib/lb-saphira-common.sh
+lb_init "$@"
+PORT="${LB_RPORT:-$LB_VPORT}"
+out=$(timeout "$LB_TIMEOUT" openssl s_client -connect "${LB_REAL}:${PORT}" \
+	${LB_SAPHIRA_SNI:+-servername "$LB_SAPHIRA_SNI"} </dev/null 2>/dev/null) || exit 1
+printf '%s' "$out" | grep -q -- '-----BEGIN CERTIFICATE-----' || exit 1
+if [ -n "${LB_SAPHIRA_TLS_MIN_DAYS:-}" ]; then
+	enddate=$(printf '%s\n' "$out" | openssl x509 -noout -enddate 2>/dev/null | cut -d= -f2)
+	[ -n "$enddate" ] || exit 1
+	endep=$(date -d "$enddate" +%s 2>/dev/null) || exit 1
+	now=$(date +%s)
+	[ $(( (endep - now) / 86400 )) -ge "$LB_SAPHIRA_TLS_MIN_DAYS" ] || exit 1
+fi
+exit 0

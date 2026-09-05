@@ -1,0 +1,62 @@
+#!/bin/sh
+
+set -u
+
+die()
+{
+	printf 'saphira-genfstab: %s\n' "$*" >&2
+	exit 1
+}
+
+test $# -eq 1 || {
+	printf 'usage: saphira-genfstab TARGET\n' >&2
+	exit 2
+}
+
+target=$1
+test -d "$target" || die "target is not a directory: $target"
+target=$(readlink -f -- "$target") || die "cannot resolve target: $target"
+findmnt_command=${SAPHIRA_FINDMNT:-findmnt}
+blkid_command=${SAPHIRA_BLKID:-blkid}
+
+mounts=$(mktemp /tmp/saphira-genfstab.mounts.XXXXXX) ||
+	die 'cannot create mount workspace'
+trap 'rm -f -- "$mounts"' EXIT HUP INT TERM
+"$findmnt_command" -Rrn -o TARGET --target "$target" | LC_ALL=C sort -u > "$mounts" ||
+	die 'cannot inspect mounted filesystems'
+
+while IFS= read -r mountpoint; do
+	test -n "$mountpoint" || continue
+	case $mountpoint in
+		"$target"|"$target"/*) ;;
+		*) continue ;;
+	esac
+	source=$($findmnt_command -rn -o SOURCE --target "$mountpoint") || continue
+	fstype=$($findmnt_command -rn -o FSTYPE --target "$mountpoint") || continue
+	options=$($findmnt_command -rn -o OPTIONS --target "$mountpoint") || continue
+	case $fstype in
+		proc|procfs|sysfs|devtmpfs|devpts|tmpfs|overlay|squashfs|ramfs|rootfs|securityfs|selinuxfs|debugfs|tracefs|configfs|fusectl|fuse.*|pstore|efivarfs|cgroup|cgroup2|autofs|mqueue|hugetlbfs|rpc_pipefs|binfmt_misc|nsfs|bpf) continue ;;
+	esac
+	case $source in
+		proc|sysfs|devtmpfs|devpts|tmpfs|overlay|none) continue ;;
+	esac
+	device=${source%%\[*}
+	uuid=$($blkid_command -s UUID -o value "$device" 2>/dev/null || :)
+	partuuid=$($blkid_command -s PARTUUID -o value "$device" 2>/dev/null || :)
+	if test -n "$uuid"; then
+		identifier=UUID=$uuid
+	elif test -n "$partuuid"; then
+		identifier=PARTUUID=$partuuid
+	else
+		identifier=$source
+	fi
+	if test "$mountpoint" = "$target"; then
+		mount_path=/
+	else
+		mount_path=/${mountpoint#"$target"/}
+	fi
+	pass=2
+	test "$mount_path" != / || pass=1
+	printf '%s\t%s\t%s\t%s\t0\t%s\n' \
+		"$identifier" "$mount_path" "$fstype" "$options" "$pass"
+done < "$mounts"

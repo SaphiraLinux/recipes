@@ -1,0 +1,11 @@
+[Unit]
+Description=Kea Control Agent (REST API)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/kea-ctrl-agent -c /etc/kea/kea-ctrl-agent.conf
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

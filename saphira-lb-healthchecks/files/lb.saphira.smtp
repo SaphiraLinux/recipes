@@ -1,0 +1,9 @@
+#!/bin/sh
+# lb.saphira.smtp - SMTP greeting + EHLO + QUIT; stops before DATA (L7).
+# No message state is created. Env: LB_SAPHIRA_SMTP_EHLO (default saphira).
+# Copyright (c) 2026 AKADATA. MIT licensed.
+. /usr/share/saphira/lb-healthchecks/lib/lb-saphira-common.sh
+lb_init "$@"
+PORT="${LB_RPORT:-25}"
+exec curl --silent --max-time "$LB_TIMEOUT" "smtp://${LB_REAL}:${PORT}/" \
+	--mail-from "healthcheck@${LB_SAPHIRA_SMTP_EHLO:-saphira.invalid}" >/dev/null
