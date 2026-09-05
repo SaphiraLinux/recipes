@@ -8,6 +8,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <time.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 
