@@ -5,7 +5,7 @@
 #   $6  QIDO URL     LB_SAPHIRA_DICOM_QIDO_URL (required, full URL incl.
 #                    aets and query; per-VIP in dicom.qido/<service>.conf)
 #       LB_SAPHIRA_DICOMWEB_TLS_VERIFY=1 enforces cert checks.
-# Copyright (c) 2026 AKADATA. MIT licensed.
+# Copyright (c) 2026 AKADATA LIMITED. BSL 1.1 licensed.
 . /usr/share/saphira/lb-healthchecks/lib/lb-saphira-common.sh
 lb_init "$@"
 URL="${6:-${LB_SAPHIRA_DICOM_QIDO_URL:-}}"

@@ -2,10 +2,10 @@
 
 pkgname=saphira-baselayout
 pkgver=0.1
-pkgrel=4
+pkgrel=6
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="Saphira filesystem skeleton and platform tools (init-system neutral)"
-license="MIT"
+license="BUSL-1.1"
 replaces="akadata-baselayout"
 origin=saphira-baselayout
 repo=main
@@ -15,6 +15,9 @@ depends=""
 
 makedepends=""
 
+# r5: accounts.tsv gained the proxyto:proxyto 19 reservation after r4
+# was cut (hatchling's r4 predates it, so promote-repo would publish
+# stale bytes under a live NVR - payload changed, revision bumps).
 # r0 of the saphira-baselayout name (continues akadata-baselayout r1):
 # r0: akadata-baselayout renamed to saphira-baselayout (Genesis rebrand).
 # Payload paths and env prefixes migrated (sbin/saphira-firstboot,
@@ -71,4 +74,6 @@ recipe_install()
 		"$PKGDEST/usr/share/saphira/accounts.tsv"
 	install -m 0755 "$RECIPE_DIR/files/libexec/configure-stage4-grub" \
 		"$PKGDEST/usr/libexec/saphira/configure-stage4-grub"
+	install -D -m 0644 "$RECIPE_DIR/files/LICENSE" \
+		"$PKGDEST/usr/share/licenses/saphira-baselayout/LICENSE"
 }

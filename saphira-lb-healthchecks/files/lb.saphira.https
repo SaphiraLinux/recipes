@@ -3,7 +3,7 @@
 # Certificate verification off by default (backend TLS terminates at the
 # real server with service certs); LB_SAPHIRA_TLS_VERIFY=1 enforces it.
 # Env: same knobs as lb.saphira.http.
-# Copyright (c) 2026 AKADATA. MIT licensed.
+# Copyright (c) 2026 AKADATA LIMITED. BSL 1.1 licensed.
 . /usr/share/saphira/lb-healthchecks/lib/lb-saphira-common.sh
 lb_init "$@"
 PORT="${LB_RPORT:-$LB_VPORT}"

@@ -11,7 +11,7 @@
 #   LB_SAPHIRA_GRE_INNER_DST  peer-side inner destination address
 #   LB_SAPHIRA_GRE_INNER_PORT inner UDP port pair (default 33434)
 # Requires CAP_NET_RAW (run as root; ldirectord does).
-# Copyright (c) 2026 AKADATA. MIT licensed.
+# Copyright (c) 2026 AKADATA LIMITED. BSL 1.1 licensed.
 . /usr/share/saphira/lb-healthchecks/lib/lb-saphira-common.sh
 lb_init "$@"
 [ -n "${LB_SAPHIRA_GRE_INNER_SRC:-}" ] || exit 2

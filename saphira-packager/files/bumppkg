@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """bumppkg: bump pkgrel in Saphira recipes, with human-error guards.
 
-Copyright (c) 2026 AKADATA. MIT licensed.
+Copyright (c) 2026 AKADATA LIMITED. BSL 1.1 licensed.
 
 Commands:
     bumppkg status [all|PKG...]   show recipe vs published revisions

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """lb-saphira-dicom-synth - generate a minimal synthetic DICOM object.
 
-Copyright (c) 2026 AKADATA. MIT licensed.
+Copyright (c) 2026 AKADATA LIMITED. BSL 1.1 licensed.
 
 Emits a valid DICOM Part-10 file (Implicit VR Little Endian, Secondary
 Capture, 2x2 px) containing ONLY synthetic healthcheck data to stdout.

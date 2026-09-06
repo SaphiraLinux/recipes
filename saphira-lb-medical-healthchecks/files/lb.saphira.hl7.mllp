@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """lb.saphira.hl7.mllp - HL7 v2 over MLLP query round-trip (deep-application).
 
-Copyright (c) 2026 AKADATA. MIT licensed.
+Copyright (c) 2026 AKADATA LIMITED. BSL 1.1 licensed.
 
 Sends a synthetic, read-only HL7 v2 QRY^A19 (patient query for a
 non-existent synthetic patient) over MLLP framing and verifies a valid

@@ -2,14 +2,14 @@
 #
 # ovs-lib - shared engine behind the saphira-network ovs-* commands.
 #
-# Copyright (c) 2026 AKADATA. MIT licensed.
+# Copyright (c) 2026 AKADATA LIMITED. BSL 1.1 licensed.
 #
 # One do-task per command, done well. Every mutating command:
 #   * pre-flights and REFUSES on data-loss conditions
 #   * records state of intent in /etc/ovs/switches.d/<bridge>.conf
 #   * snapshots undo material into /etc/ovs/undo/<ts>/ before applying
 #
-# SaphiraD (systemd-networkd) flavor. MIT: openers of gates.
+# SaphiraD (systemd-networkd) flavor. BSL 1.1: openers of gates.
 
 OVSCONF=/etc/ovs
 SWITCHES_D=$OVSCONF/switches.d

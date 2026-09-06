@@ -2,10 +2,10 @@
 
 pkgname=saphira-gopher-publish
 pkgver=0.1.0
-pkgrel=1
+pkgrel=2
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='Markdown to Gopher: walk a website and generate a geomyidae 0.99 Gopher tree'
-license='MIT'
+license='BUSL-1.1'
 origin=saphira-gopher-publish
 repo=saphira
 url=https://saphira.vm2.uk/
@@ -51,4 +51,6 @@ recipe_install() {
 	install -d -m 0755 "$PKGDEST/usr/share/doc/saphira-gopher-publish"
 	install -m 0644 "$RECIPE_DIR/files/README.md" \
 		"$PKGDEST/usr/share/doc/saphira-gopher-publish/README.md"
+	install -D -m 0644 "$RECIPE_DIR/files/LICENSE" \
+		"$PKGDEST/usr/share/licenses/saphira-gopher-publish/LICENSE"
 }

@@ -5,7 +5,7 @@
 # Configuration ($6 convenience; env/conf otherwise):
 #   $6  FHIR base    LB_SAPHIRA_FHIR_URL (required, e.g. https://host:port/fhir)
 #       LB_SAPHIRA_FHIR_TLS_VERIFY=1 enforces cert checks.
-# Copyright (c) 2026 AKADATA. MIT licensed.
+# Copyright (c) 2026 AKADATA LIMITED. BSL 1.1 licensed.
 . /usr/share/saphira/lb-healthchecks/lib/lb-saphira-common.sh
 lb_init "$@"
 BASE="${6:-${LB_SAPHIRA_FHIR_URL:-}}"

@@ -11,7 +11,7 @@
 # Env: LB_SAPHIRA_IPPROTO (required, protocol number, e.g. 47 50 51 89),
 # LB_SAPHIRA_IPPROTO_MODE (probe|accept).
 # Requires CAP_NET_RAW (run as root; ldirectord does).
-# Copyright (c) 2026 AKADATA. MIT licensed.
+# Copyright (c) 2026 AKADATA LIMITED. BSL 1.1 licensed.
 . /usr/share/saphira/lb-healthchecks/lib/lb-saphira-common.sh
 lb_init "$@"
 [ -n "${LB_SAPHIRA_IPPROTO:-}" ] || exit 2

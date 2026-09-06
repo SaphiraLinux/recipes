@@ -2,10 +2,10 @@
 
 pkgname=saphira-maildragon
 pkgver=0.2
-pkgrel=2
+pkgrel=3
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="mailDragon: sqlite-backed mail stack glue for Saphira (postfix/dovecot/rspamd/clamav)"
-license="MIT"
+license="BUSL-1.1"
 origin=saphira-maildragon
 repo=main
 url=https://saphira.vm2.uk/
@@ -65,4 +65,6 @@ recipe_install()
 	install -d -m 0755 "$PKGDEST/etc/init.d"
 	install -m 0755 "$RECIPE_DIR/files/maildragon-setup.initd" \
 		"$PKGDEST/etc/init.d/maildragon-setup"
+	install -D -m 0644 "$RECIPE_DIR/files/LICENSE" \
+		"$PKGDEST/usr/share/licenses/saphira-maildragon/LICENSE"
 }

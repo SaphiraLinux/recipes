@@ -2,10 +2,10 @@
 
 pkgname=saphira-proxyto
 pkgver=0.1.0
-pkgrel=1
+pkgrel=2
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='PROXY-protocol front proxy for non-aware applications (geomyidae)'
-license='MIT'
+license='BUSL-1.1'
 origin=saphira-proxyto
 repo=saphira
 url=https://saphira.vm2.uk/
@@ -49,4 +49,6 @@ recipe_install()
 		"$PKGDEST/etc/conf.d/proxyto"
 	install -D -m 0644 "$RECIPE_DIR/files/proxyto.service" \
 		"$PKGDEST/usr/lib/systemd/system/proxyto.service"
+	install -D -m 0644 "$RECIPE_DIR/files/LICENSE" \
+		"$PKGDEST/usr/share/licenses/saphira-proxyto/LICENSE"
 }

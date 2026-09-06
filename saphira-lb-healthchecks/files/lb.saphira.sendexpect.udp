@@ -2,7 +2,7 @@
 # lb.saphira.sendexpect.udp - raw UDP send-expect protocol check (L4/L7).
 # Same knobs as lb.saphira.sendexpect.tcp; ICMP port/host-unreachable
 # during the exchange fails the check.
-# Copyright (c) 2026 AKADATA. MIT licensed.
+# Copyright (c) 2026 AKADATA LIMITED. BSL 1.1 licensed.
 . /usr/share/saphira/lb-healthchecks/lib/lb-saphira-common.sh
 lb_init "$@"
 [ -n "${LB_SAPHIRA_SEND:-}${LB_SAPHIRA_SEND_HEX:-}${LB_SAPHIRA_SEND_FILE:-}" ] || exit 2

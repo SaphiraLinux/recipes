@@ -2,10 +2,10 @@
 
 pkgname=saphira-mergetool
 pkgver=0.1.0
-pkgrel=2
+pkgrel=3
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='Resolve apk .apk-new upgrade artifacts: diff, accept, keep, or merge'
-license='MIT'
+license='BUSL-1.1'
 origin=saphira-mergetool
 repo=saphira
 url=https://saphira.vm2.uk/
@@ -41,4 +41,6 @@ recipe_install() {
 	install -d -m 0755 "$PKGDEST/usr/share/man/man1"
 	install -m 0644 "$RECIPE_DIR/files/saphira-mergetool.1" \
 		"$PKGDEST/usr/share/man/man1/saphira-mergetool.1"
+	install -D -m 0644 "$RECIPE_DIR/files/LICENSE" \
+		"$PKGDEST/usr/share/licenses/saphira-mergetool/LICENSE"
 }

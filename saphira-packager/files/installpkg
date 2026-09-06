@@ -21,9 +21,26 @@ checkpkg=$SAPHIRA_BINDIR/checkpkg
 [ -x "$checkpkg" ] || die "required controller tool is missing: $checkpkg"
 "$checkpkg" "$PACKAGE"
 
+# Resolve the exact intended NVR from the live index: the newest indexed
+# version wins. A bare `apk add <name>` is a no-op when any version is
+# already installed (apk leaves it in place), so the atom is pinned
+# explicitly. Local publication is authoritative; no apksync coupling.
 index=$SAPHIRA_REPO_DIR/${SAPHIRA_REPO_NAMES##* }/$SAPHIRA_ARCH/Packages.adb
+[ -s "$index" ] || die "repository index is missing or empty: $index"
+target_version=""
+for candidate in $("$SAPHIRA_APK" adbdump "$index" | awk -v pkg="$PACKAGE" '
+	/^  - name: / { name=$3 }
+	/^    version: / && name == pkg { print $2; name="" }
+'); do
+	if [ -z "$target_version" ]; then
+		target_version=$candidate
+	elif [ "$("$SAPHIRA_APK" version -t "$candidate" "$target_version")" = ">" ]; then
+		target_version=$candidate
+	fi
+done
+[ -n "$target_version" ] || die "package is not present in Packages.adb: $PACKAGE"
 "$SAPHIRA_APK" --no-cache --repositories-file /dev/null \
-	--repository "$index" add "$PACKAGE"
-"$SAPHIRA_APK" info -e "$PACKAGE" >/dev/null || die "package was not installed: $PACKAGE"
-installed=$("$SAPHIRA_APK" info -v "$PACKAGE" | head -n 1)
-printf 'installpkg: installed %s\n' "$installed"
+	--repository "$index" add "$PACKAGE=$target_version"
+"$SAPHIRA_APK" info -e "$PACKAGE=$target_version" >/dev/null \
+	|| die "installed version is not the intended NVR: $PACKAGE-$target_version"
+printf 'installpkg: installed %s-%s\n' "$PACKAGE" "$target_version"

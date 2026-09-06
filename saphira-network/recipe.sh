@@ -2,10 +2,10 @@
 
 pkgname=saphira-network
 pkgver=0.1
-pkgrel=5
+pkgrel=6
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="Saphira static network configuration (per-interface files, dual init system)"
-license="MIT"
+license="BUSL-1.1"
 origin=saphira-network
 repo=main
 url=https://saphira.vm2.uk/
@@ -60,4 +60,6 @@ recipe_install()
 	} > "$PKGDEST/etc/saphira-network.conf"
 	install -m 0644 "$RECIPE_DIR/files/10-eth0.conf.example" \
 		"$PKGDEST/etc/saphira-network.d/10-eth0.conf.example"
+	install -D -m 0644 "$RECIPE_DIR/files/LICENSE" \
+		"$PKGDEST/usr/share/licenses/saphira-network/LICENSE"
 }

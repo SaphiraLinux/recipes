@@ -4,7 +4,7 @@
 # Capture, 2x2 px, synthetic AE data only - no upstream sample files).
 # Guard-gated: storage mutates PACS state.
 # Required env: LB_SAPHIRA_STATE_CHANGING=1
-# Copyright (c) 2026 AKADATA. MIT licensed.
+# Copyright (c) 2026 AKADATA LIMITED. BSL 1.1 licensed.
 . /usr/share/saphira/lb-healthchecks/lib/lb-saphira-common.sh
 lb_init "$@"
 [ "${LB_SAPHIRA_STATE_CHANGING:-0}" = "1" ] || exit 2

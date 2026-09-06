@@ -1,6 +1,6 @@
 #!/bin/sh
 # lb.saphira.tcp - TCP transport reachability of real:$4 (L4).
-# Copyright (c) 2026 AKADATA. MIT licensed.
+# Copyright (c) 2026 AKADATA LIMITED. BSL 1.1 licensed.
 . /usr/share/saphira/lb-healthchecks/lib/lb-saphira-common.sh
 lb_init "$@"
 lb_probe tcp --host "$LB_REAL" --port "${LB_RPORT:-$LB_VPORT}" --timeout "$LB_TIMEOUT"

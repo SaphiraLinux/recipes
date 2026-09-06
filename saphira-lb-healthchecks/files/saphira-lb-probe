@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """saphira-lb-probe v1 - raw/protocol probe engine for Saphira LB healthchecks.
 
-Copyright (c) 2026 AKADATA. MIT licensed. Clean-room implementation.
+Copyright (c) 2026 AKADATA LIMITED. BSL 1.1 licensed. Clean-room implementation.
 
 Stable CLI contract: a future compiled binary must implement the same
 interface and replace this payload. Checks calling this engine must not

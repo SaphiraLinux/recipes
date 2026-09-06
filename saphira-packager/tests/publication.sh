@@ -45,7 +45,7 @@ run_signer()
 	SAPHIRA_PACKAGE_TMP=$test_root/package-tmp SAPHIRA_SIGN_KEY=$test_root/test-repository.rsa \
 	SAPHIRA_TRUST_KEY=$keys/test-repository.rsa.pub SAPHIRA_REPO_NAMES=hatchling \
 	SUDO_UID=0 SAPHIRA_REPO_GROUP=root \
-		unshare --map-root-user "$sign_repo"
+		unshare --map-root-user "$sign_repo" "$@"
 }
 
 run_signer >/dev/null
@@ -60,6 +60,7 @@ test ! -e "$ready"
 [ "$(apk adbdump "$repo/Packages.adb" | awk '/^  - name: / { count++ } END { print count + 0 }')" -eq 1 ]
 SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
 SAPHIRA_REPO_DIR=$test_root/repository SAPHIRA_TRUST_KEY=$keys/test-repository.rsa.pub \
+SAPHIRA_REPO_NAMES=hatchling \
 	"$checkpkg" make >/dev/null
 
 # A pure-rebuild transaction (every package a same-NVR rebuild with
@@ -273,4 +274,231 @@ printf '%s\n' '{"schema":"saphira-build-artifacts/v1","target":"tar2","construct
 run_signer > "$test_root/handover.out" 2> "$test_root/handover.err"
 test -f "$repo/tar2-2-r0.apk"
 
-printf '%s\n' 'privileged ready-transaction publication, identity, immutability, automatic pure-rebuild retirement, mixed-transaction refusal, ownership-collision gate, and replaces-handover tests: OK'
+# Selective fast path: the full runs above warmed ownership.json, so a
+# fresh solo package must publish through persisted state (assert the
+# fresh marker, proving no full rescan ran). clash then shares a
+# live-owned path (tar's binary, no replaces) and must refuse, still via
+# the fast path - proving refusals don't need the full scan either.
+mkdir -p "$stage/solo/pkg/usr/bin" "$stage/clash/pkg/usr/bin"
+printf '%s\n' solo > "$stage/solo/pkg/usr/bin/solo"
+printf '%s\n' tar > "$stage/clash/pkg/usr/bin/tar"
+printf '%s\n' '{"arch":"x86_64","build_time":12,"license":"MIT","name":"solo","origin":"solo","outputs":[{"dependencies":[],"description":"solo","name":"solo","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r0"}' > "$stage/solo/manifest.json"
+printf '%s\n' '{"arch":"x86_64","build_time":13,"license":"MIT","name":"clash","origin":"clash","outputs":[{"dependencies":[],"description":"clash","name":"clash","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r0"}' > "$stage/clash/manifest.json"
+for fixture in solo clash; do
+	SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
+	SAPHIRA_BUILD_ROOT=$stage SAPHIRA_INCOMING_DIR=$artifacts \
+	SAPHIRA_PACKAGE_TMP=$test_root/makepkg-tmp SAPHIRA_FAKEROOT_BOOTSTRAP=1 \
+	SAPHIRA_BOOTSTRAP_TARGET=fakeroot "$makepkg" "$fixture" >/dev/null
+done
+solo_txn=$incoming/solo-ready
+mkdir "$solo_txn"
+cp "$artifacts/x86_64/solo-1-r0.apk" "$solo_txn/"
+printf '%s\n' solo > "$solo_txn/target"
+printf '%s\n' '{"schema":"saphira-bootstrap-seed/v1","generation":"test","manifest":"test","manifest_sha256":"test","entries":[]}' > "$solo_txn/bootstrap-seed.json"
+printf '%s\n' '{"schema":"saphira-build-artifacts/v1","target":"solo","constructors":[{"constructor":"makepkg","producer":"solo"}],"bootstrap_seed":{"schema":"saphira-bootstrap-seed/v1","generation":"test","manifest":"test","manifest_sha256":"test","entries":[]}}' > "$solo_txn/artifact-manifest.json"
+(CDPATH= cd -- "$solo_txn" && sha256sum solo-1-r0.apk > manifest.sha256)
+run_signer solo > "$test_root/solo.out" 2> "$test_root/solo.err"
+grep 'selective gate: ownership state fresh' "$test_root/solo.out" >/dev/null
+test -f "$repo/solo-1-r0.apk"
+test -f "$repo/ownership.json"
+python3 - "$repo/ownership.json" <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as stream:
+    state = json.load(stream)
+assert state["schema"] == "saphira-ownership/v1"
+assert ["solo", "1-r0"] in state["identities"]
+assert state["newest"]["solo"] == "1-r0"
+assert state["owners"]["usr/bin/solo"] == {"solo": "solo-1-r0"}
+PY
+clash_txn=$incoming/clash-ready
+mkdir "$clash_txn"
+cp "$artifacts/x86_64/clash-1-r0.apk" "$clash_txn/"
+printf '%s\n' clash > "$clash_txn/target"
+printf '%s\n' '{"schema":"saphira-bootstrap-seed/v1","generation":"test","manifest":"test","manifest_sha256":"test","entries":[]}' > "$clash_txn/bootstrap-seed.json"
+printf '%s\n' '{"schema":"saphira-build-artifacts/v1","target":"clash","constructors":[{"constructor":"makepkg","producer":"clash"}],"bootstrap_seed":{"schema":"saphira-bootstrap-seed/v1","generation":"test","manifest":"test","manifest_sha256":"test","entries":[]}}' > "$clash_txn/artifact-manifest.json"
+(CDPATH= cd -- "$clash_txn" && sha256sum clash-1-r0.apk > manifest.sha256)
+if run_signer clash > "$test_root/clash.out" 2> "$test_root/clash.err"; then
+	printf '%s\n' 'fast-path collision unexpectedly published' >&2
+	exit 1
+fi
+grep 'file ownership collision' "$test_root/clash.err" >/dev/null
+grep 'usr/bin/tar' "$test_root/clash.err" >/dev/null
+grep 'selective gate: ownership state fresh' "$test_root/clash.out" >/dev/null
+test ! -f "$repo/clash-1-r0.apk"
+# The correctly-refused transaction is discarded so later full runs are
+# not blocked by it (same pattern as the ownfix collision fixture).
+rm -rf "$clash_txn"
+
+# Stale-state fallback: a present-but-wrong ownership.json (solo identity
+# surgically removed) forces the selective run down the exit-9 path into
+# a full rescan, which heals by republishing and rewriting state.
+python3 - "$repo/ownership.json" <<'PY'
+import json
+import sys
+path = sys.argv[1]
+with open(path, encoding="utf-8") as stream:
+    state = json.load(stream)
+state["identities"] = [i for i in state["identities"] if i[0] != "solo"]
+with open(path, "w", encoding="utf-8") as stream:
+    json.dump(state, stream)
+    stream.write("\n")
+PY
+mkdir -p "$stage/lone/pkg/usr/bin"
+printf '%s\n' lone > "$stage/lone/pkg/usr/bin/lone"
+printf '%s\n' '{"arch":"x86_64","build_time":14,"license":"MIT","name":"lone","origin":"lone","outputs":[{"dependencies":[],"description":"lone","name":"lone","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r0"}' > "$stage/lone/manifest.json"
+SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
+SAPHIRA_BUILD_ROOT=$stage SAPHIRA_INCOMING_DIR=$artifacts \
+SAPHIRA_PACKAGE_TMP=$test_root/makepkg-tmp SAPHIRA_FAKEROOT_BOOTSTRAP=1 \
+SAPHIRA_BOOTSTRAP_TARGET=fakeroot "$makepkg" lone >/dev/null
+lone_txn=$incoming/lone-ready
+mkdir "$lone_txn"
+cp "$artifacts/x86_64/lone-1-r0.apk" "$lone_txn/"
+printf '%s\n' lone > "$lone_txn/target"
+printf '%s\n' '{"schema":"saphira-bootstrap-seed/v1","generation":"test","manifest":"test","manifest_sha256":"test","entries":[]}' > "$lone_txn/bootstrap-seed.json"
+printf '%s\n' '{"schema":"saphira-build-artifacts/v1","target":"lone","constructors":[{"constructor":"makepkg","producer":"lone"}],"bootstrap_seed":{"schema":"saphira-bootstrap-seed/v1","generation":"test","manifest":"test","manifest_sha256":"test","entries":[]}}' > "$lone_txn/artifact-manifest.json"
+(CDPATH= cd -- "$lone_txn" && sha256sum lone-1-r0.apk > manifest.sha256)
+run_signer lone > "$test_root/lone.out" 2> "$test_root/lone.err"
+grep 'full rescan' "$test_root/lone.out" >/dev/null
+test -f "$repo/lone-1-r0.apk"
+python3 - "$repo/ownership.json" <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as stream:
+    state = json.load(stream)
+assert state["schema"] == "saphira-ownership/v1"
+assert ["solo", "1-r0"] in state["identities"]
+assert ["lone", "1-r0"] in state["identities"]
+PY
+
+# Legacy-dirt exemption: the gate only refuses paths present in a STAGED
+# artifact. oldown r0 ships a shared path (published alone, single owner);
+# midown r0 ships the same path and is hand-placed into the repository to
+# simulate pre-gate archive dirt (both shell primitives, no fixture overlap
+# with the tar/cpio cases above). When oldown r1 drops the path, its
+# publication must succeed: nothing new enters, even though the staged NAME
+# still co-owns the path via its superseded archive version.
+mkdir -p "$stage/oldown/pkg/usr/libexec" "$stage/oldown/pkg/usr/bin" "$stage/midown/pkg/usr/libexec" "$stage/midown/pkg/usr/bin"
+printf '%s\n' shared > "$stage/oldown/pkg/usr/libexec/shared"
+printf '%s\n' oldown > "$stage/oldown/pkg/usr/bin/oldown"
+printf '%s\n' shared > "$stage/midown/pkg/usr/libexec/shared"
+printf '%s\n' midown > "$stage/midown/pkg/usr/bin/midown"
+printf '%s\n' '{"arch":"x86_64","build_time":6,"license":"MIT","name":"oldown","origin":"oldown","outputs":[{"dependencies":[],"description":"oldown","name":"oldown","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r0"}' > "$stage/oldown/manifest.json"
+printf '%s\n' '{"arch":"x86_64","build_time":6,"license":"MIT","name":"midown","origin":"midown","outputs":[{"dependencies":[],"description":"midown","name":"midown","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r0"}' > "$stage/midown/manifest.json"
+for fixture in oldown midown; do
+	SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
+	SAPHIRA_BUILD_ROOT=$stage SAPHIRA_INCOMING_DIR=$artifacts \
+	SAPHIRA_PACKAGE_TMP=$test_root/makepkg-tmp SAPHIRA_FAKEROOT_BOOTSTRAP=1 \
+	SAPHIRA_BOOTSTRAP_TARGET=fakeroot "$makepkg" "$fixture" >/dev/null
+done
+dirt=$incoming/dirt-ready
+mkdir "$dirt"
+cp "$artifacts/x86_64/oldown-1-r0.apk" "$dirt/"
+printf '%s\n' oldown > "$dirt/target"
+printf '%s\n' '{"schema":"saphira-bootstrap-seed/v1","generation":"test","manifest":"test","manifest_sha256":"test","entries":[]}' > "$dirt/bootstrap-seed.json"
+printf '%s\n' '{"schema":"saphira-build-artifacts/v1","target":"oldown","constructors":[{"constructor":"makepkg","producer":"oldown"}],"bootstrap_seed":{"schema":"saphira-bootstrap-seed/v1","generation":"test","manifest":"test","manifest_sha256":"test","entries":[]}}' > "$dirt/artifact-manifest.json"
+(CDPATH= cd -- "$dirt" && sha256sum oldown-1-r0.apk > manifest.sha256)
+run_signer > "$test_root/dirt.out" 2> "$test_root/dirt.err"
+test -f "$repo/oldown-1-r0.apk"
+apk adbsign --allow-untrusted --sign-key "$test_root/test-repository.rsa" "$artifacts/x86_64/midown-1-r0.apk"
+cp "$artifacts/x86_64/midown-1-r0.apk" "$repo/midown-1-r0.apk"
+rm -rf "$stage/oldown"
+mkdir -p "$stage/oldown/pkg/usr/bin"
+printf '%s\n' oldown > "$stage/oldown/pkg/usr/bin/oldown"
+printf '%s\n' '{"arch":"x86_64","build_time":7,"license":"MIT","name":"oldown","origin":"oldown","outputs":[{"dependencies":[],"description":"oldown","name":"oldown","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r1"}' > "$stage/oldown/manifest.json"
+SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
+SAPHIRA_BUILD_ROOT=$stage SAPHIRA_INCOMING_DIR=$artifacts \
+SAPHIRA_PACKAGE_TMP=$test_root/makepkg-tmp SAPHIRA_FAKEROOT_BOOTSTRAP=1 \
+SAPHIRA_BOOTSTRAP_TARGET=fakeroot "$makepkg" oldown >/dev/null
+dirt2=$incoming/dirt2-ready
+mkdir "$dirt2"
+cp "$artifacts/x86_64/oldown-1-r1.apk" "$dirt2/"
+printf '%s\n' oldown > "$dirt2/target"
+printf '%s\n' '{"schema":"saphira-bootstrap-seed/v1","generation":"test","manifest":"test","manifest_sha256":"test","entries":[]}' > "$dirt2/bootstrap-seed.json"
+printf '%s\n' '{"schema":"saphira-build-artifacts/v1","target":"oldown","constructors":[{"constructor":"makepkg","producer":"oldown"}],"bootstrap_seed":{"schema":"saphira-bootstrap-seed/v1","generation":"test","manifest":"test","manifest_sha256":"test","entries":[]}}' > "$dirt2/artifact-manifest.json"
+(CDPATH= cd -- "$dirt2" && sha256sum oldown-1-r1.apk > manifest.sha256)
+run_signer > "$test_root/dirt2.out" 2> "$test_root/dirt2.err"
+test -f "$repo/oldown-1-r1.apk"
+grep 'no file collisions' "$test_root/dirt2.out" >/dev/null
+
+# Newest-NVR ownership: superseded historical NVRs are archive history,
+# not ownership competitors. senior r0 ships a shared path and publishes;
+# senior r1 drops it and is hand-placed, so the archive holds both NVRs
+# with current = r1 (no path). A staged junior r0 claiming that path must
+# publish: the only live claimant is junior itself. Control: elder r0 is
+# hand-placed KEEPING the path (sole, current NVR) while staged youngster
+# r0 claims it - that must still refuse, proving the gate is not weakened
+# for current owners.
+mkdir -p "$stage/senior/pkg/usr/sbin" "$stage/senior/pkg/usr/bin" "$stage/junior/pkg/usr/sbin" "$stage/junior/pkg/usr/bin"
+printf '%s\n' shared > "$stage/senior/pkg/usr/sbin/shared"
+printf '%s\n' senior > "$stage/senior/pkg/usr/bin/senior"
+printf '%s\n' shared > "$stage/junior/pkg/usr/sbin/shared"
+printf '%s\n' junior > "$stage/junior/pkg/usr/bin/junior"
+printf '%s\n' '{"arch":"x86_64","build_time":8,"license":"MIT","name":"senior","origin":"senior","outputs":[{"dependencies":[],"description":"senior","name":"senior","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r0"}' > "$stage/senior/manifest.json"
+printf '%s\n' '{"arch":"x86_64","build_time":8,"license":"MIT","name":"junior","origin":"junior","outputs":[{"dependencies":[],"description":"junior","name":"junior","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r0"}' > "$stage/junior/manifest.json"
+for fixture in senior junior; do
+	SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
+	SAPHIRA_BUILD_ROOT=$stage SAPHIRA_INCOMING_DIR=$artifacts \
+	SAPHIRA_PACKAGE_TMP=$test_root/makepkg-tmp SAPHIRA_FAKEROOT_BOOTSTRAP=1 \
+	SAPHIRA_BOOTSTRAP_TARGET=fakeroot "$makepkg" "$fixture" >/dev/null
+done
+seniorpub=$incoming/seniorpub-ready
+mkdir "$seniorpub"
+cp "$artifacts/x86_64/senior-1-r0.apk" "$seniorpub/"
+printf '%s\n' senior > "$seniorpub/target"
+printf '%s\n' '{"schema":"saphira-bootstrap-seed/v1","generation":"test","manifest":"test","manifest_sha256":"test","entries":[]}' > "$seniorpub/bootstrap-seed.json"
+printf '%s\n' '{"schema":"saphira-build-artifacts/v1","target":"senior","constructors":[{"constructor":"makepkg","producer":"senior"}],"bootstrap_seed":{"schema":"saphira-bootstrap-seed/v1","generation":"test","manifest":"test","manifest_sha256":"test","entries":[]}}' > "$seniorpub/artifact-manifest.json"
+(CDPATH= cd -- "$seniorpub" && sha256sum senior-1-r0.apk > manifest.sha256)
+run_signer > "$test_root/seniorpub.out" 2> "$test_root/seniorpub.err"
+test -f "$repo/senior-1-r0.apk"
+rm -rf "$stage/senior"
+mkdir -p "$stage/senior/pkg/usr/bin"
+printf '%s\n' senior > "$stage/senior/pkg/usr/bin/senior"
+printf '%s\n' '{"arch":"x86_64","build_time":9,"license":"MIT","name":"senior","origin":"senior","outputs":[{"dependencies":[],"description":"senior","name":"senior","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r1"}' > "$stage/senior/manifest.json"
+SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
+SAPHIRA_BUILD_ROOT=$stage SAPHIRA_INCOMING_DIR=$artifacts \
+SAPHIRA_PACKAGE_TMP=$test_root/makepkg-tmp SAPHIRA_FAKEROOT_BOOTSTRAP=1 \
+SAPHIRA_BOOTSTRAP_TARGET=fakeroot "$makepkg" senior >/dev/null
+apk adbsign --allow-untrusted --sign-key "$test_root/test-repository.rsa" "$artifacts/x86_64/senior-1-r1.apk"
+cp "$artifacts/x86_64/senior-1-r1.apk" "$repo/senior-1-r1.apk"
+juniorpub=$incoming/juniorpub-ready
+mkdir "$juniorpub"
+cp "$artifacts/x86_64/junior-1-r0.apk" "$juniorpub/"
+printf '%s\n' junior > "$juniorpub/target"
+printf '%s\n' '{"schema":"saphira-bootstrap-seed/v1","generation":"test","manifest":"test","manifest_sha256":"test","entries":[]}' > "$juniorpub/bootstrap-seed.json"
+printf '%s\n' '{"schema":"saphira-build-artifacts/v1","target":"junior","constructors":[{"constructor":"makepkg","producer":"junior"}],"bootstrap_seed":{"schema":"saphira-bootstrap-seed/v1","generation":"test","manifest":"test","manifest_sha256":"test","entries":[]}}' > "$juniorpub/artifact-manifest.json"
+(CDPATH= cd -- "$juniorpub" && sha256sum junior-1-r0.apk > manifest.sha256)
+run_signer > "$test_root/juniorpub.out" 2> "$test_root/juniorpub.err"
+test -f "$repo/junior-1-r0.apk"
+grep 'no file collisions' "$test_root/juniorpub.out" >/dev/null
+mkdir -p "$stage/elder/pkg/usr/sbin" "$stage/elder/pkg/usr/bin" "$stage/youngster/pkg/usr/sbin" "$stage/youngster/pkg/usr/bin"
+printf '%s\n' shared > "$stage/elder/pkg/usr/sbin/shared"
+printf '%s\n' elder > "$stage/elder/pkg/usr/bin/elder"
+printf '%s\n' shared > "$stage/youngster/pkg/usr/sbin/shared"
+printf '%s\n' youngster > "$stage/youngster/pkg/usr/bin/youngster"
+printf '%s\n' '{"arch":"x86_64","build_time":10,"license":"MIT","name":"elder","origin":"elder","outputs":[{"dependencies":[],"description":"elder","name":"elder","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r0"}' > "$stage/elder/manifest.json"
+printf '%s\n' '{"arch":"x86_64","build_time":11,"license":"MIT","name":"youngster","origin":"youngster","outputs":[{"dependencies":[],"description":"youngster","name":"youngster","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r0"}' > "$stage/youngster/manifest.json"
+for fixture in elder youngster; do
+	SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
+	SAPHIRA_BUILD_ROOT=$stage SAPHIRA_INCOMING_DIR=$artifacts \
+	SAPHIRA_PACKAGE_TMP=$test_root/makepkg-tmp SAPHIRA_FAKEROOT_BOOTSTRAP=1 \
+	SAPHIRA_BOOTSTRAP_TARGET=fakeroot "$makepkg" "$fixture" >/dev/null
+done
+apk adbsign --allow-untrusted --sign-key "$test_root/test-repository.rsa" "$artifacts/x86_64/elder-1-r0.apk"
+cp "$artifacts/x86_64/elder-1-r0.apk" "$repo/elder-1-r0.apk"
+youngsterpub=$incoming/youngsterpub-ready
+mkdir "$youngsterpub"
+cp "$artifacts/x86_64/youngster-1-r0.apk" "$youngsterpub/"
+printf '%s\n' youngster > "$youngsterpub/target"
+printf '%s\n' '{"schema":"saphira-bootstrap-seed/v1","generation":"test","manifest":"test","manifest_sha256":"test","entries":[]}' > "$youngsterpub/bootstrap-seed.json"
+printf '%s\n' '{"schema":"saphira-build-artifacts/v1","target":"youngster","constructors":[{"constructor":"makepkg","producer":"youngster"}],"bootstrap_seed":{"schema":"saphira-bootstrap-seed/v1","generation":"test","manifest":"test","manifest_sha256":"test","entries":[]}}' > "$youngsterpub/artifact-manifest.json"
+(CDPATH= cd -- "$youngsterpub" && sha256sum youngster-1-r0.apk > manifest.sha256)
+if run_signer > "$test_root/youngsterpub.out" 2> "$test_root/youngsterpub.err"; then
+	printf '%s\n' 'current-owner collision unexpectedly published' >&2
+	exit 1
+fi
+grep 'file ownership collision' "$test_root/youngsterpub.err" >/dev/null
+grep 'usr/sbin/shared' "$test_root/youngsterpub.err" >/dev/null
+test ! -f "$repo/youngster-1-r0.apk"
+
+printf '%s\n' 'privileged ready-transaction publication, identity, immutability, automatic pure-rebuild retirement, mixed-transaction refusal, ownership-collision gate, replaces-handover, legacy-dirt exemption, newest-NVR ownership, and selective fast-path tests: OK'

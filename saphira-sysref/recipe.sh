@@ -2,10 +2,10 @@
 
 pkgname=saphira-sysref
 pkgver=0.1.0
-pkgrel=1
+pkgrel=2
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='Minimal local man-page context for AI agents (MCP/CLI sysref tool)'
-license='MIT'
+license='BUSL-1.1'
 origin=saphira-sysref
 repo=saphira
 url=https://saphira.vm2.uk/
@@ -57,4 +57,6 @@ recipe_install()
 	# Empty 0600 config skeleton, mirroring upstream install behavior
 	# under the rebranded path (APIKEY for webMCP goes here).
 	install -D -m 0600 /dev/null "$PKGDEST/etc/sysref/sysref.conf"
+	install -D -m 0644 "$RECIPE_DIR/files/akaman/LICENSE" \
+		"$PKGDEST/usr/share/licenses/saphira-sysref/LICENSE"
 }

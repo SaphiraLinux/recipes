@@ -1,10 +1,10 @@
 #!/bin/sh
 pkgname=saphira-base-abi
 pkgver=0.2
-pkgrel=1
+pkgrel=2
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='Saphira base ABI marker (Genesis transition; shrink-to-nothing target)'
-license='MIT'
+license='BUSL-1.1'
 origin=saphira-base-abi
 repo=saphira
 url=https://saphira.vm2.uk/
@@ -21,6 +21,8 @@ recipe_build()
 recipe_install()
 {
 	install -d "$PKGDEST/usr/share/saphira"
+	install -D -m 0644 "$RECIPE_DIR/files/LICENSE" \
+		"$PKGDEST/usr/share/licenses/saphira-base-abi/LICENSE"
 	cat > "$PKGDEST/usr/share/saphira/base-abi" <<'EOF'
 name=saphira-base-abi
 version=0.2

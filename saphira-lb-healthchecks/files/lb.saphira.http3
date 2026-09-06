@@ -6,7 +6,7 @@
 # fails, this check fails.
 # Env: LB_SAPHIRA_HTTP3_PATH (default /), LB_SAPHIRA_HTTP3_HOST,
 # LB_SAPHIRA_HTTP_OK (status class regex, default 2xx/3xx).
-# Copyright (c) 2026 AKADATA. MIT licensed.
+# Copyright (c) 2026 AKADATA LIMITED. BSL 1.1 licensed.
 . /usr/share/saphira/lb-healthchecks/lib/lb-saphira-common.sh
 lb_init "$@"
 PORT="${LB_RPORT:-443}"

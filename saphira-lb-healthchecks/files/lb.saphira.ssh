@@ -1,7 +1,7 @@
 #!/bin/sh
 # lb.saphira.ssh - SSH-2.0 protocol banner handshake (L7).
 # Credential-free by design: no authentication is attempted.
-# Copyright (c) 2026 AKADATA. MIT licensed.
+# Copyright (c) 2026 AKADATA LIMITED. BSL 1.1 licensed.
 . /usr/share/saphira/lb-healthchecks/lib/lb-saphira-common.sh
 lb_init "$@"
 lb_probe banner --host "$LB_REAL" --port "${LB_RPORT:-22}" --timeout "$LB_TIMEOUT" \
