@@ -19,10 +19,7 @@ is the starting point for new recipes.
 
 ## Sources
 
-Upstream source archives are **not stored in this repository**. Each `recipe.sh` pins its
-sources and verifies them by sha256; archives are resolved at build time from the local
-source mirror. To build from this checkout you need the Saphira builder controller and a
-populated source mirror.
+Upstream source archives are not stored in this repository. Each recipe.sh pins its sources and verifies them by SHA-256. Sources are fetched when required and stored in Saphira’s content-addressed verified source cache, so subsequent builds can reuse the verified archive without downloading it again. To build from this checkout you need the Saphira builder controller.
 
 ## Contributing
 
