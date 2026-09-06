@@ -39,13 +39,22 @@ if len(names) != len(versions):
 matches = [(package_name, version) for package_name, version in zip(names, versions) if package_name == name]
 if not matches:
     raise SystemExit(f"checkpkg: package is not present in Packages.adb: {name}")
+def _newer(a, b):
+    # Index order is filename glob order, not version order: compare with
+    # apk itself so the named newest is the true newest (r10 > r9, which
+    # plain string order gets wrong).
+    out = subprocess.run([apk, "version", "-t", a, b], check=True, text=True, capture_output=True).stdout.strip()
+    return out == ">"
+newest = matches[0][1]
+for _, version in matches[1:]:
+    if _newer(version, newest):
+        newest = version
 ready = sorted(Path(incoming).glob(f"{name}-*-ready")) if incoming else []
 if ready:
-    installed_version = matches[0][1]
     import sys as _sys
     print(
         f"checkpkg: WARNING: a built-but-unpublished transaction exists: {ready[-1].name}; "
-        f"installpkg will install the published version ({installed_version}) - "
+        f"installpkg will install the published version ({newest}) - "
         "run: sudo sign-apk-repo first if you want the new build",
         file=_sys.stderr,
     )

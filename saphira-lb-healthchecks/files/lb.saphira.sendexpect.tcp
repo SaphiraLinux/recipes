@@ -5,7 +5,7 @@
 #   LB_SAPHIRA_EXPECT   regex matched against the accumulated response
 #                       (required; healthy iff matched within timeout)
 #   LB_SAPHIRA_DELAY    seconds between connect and send (optional)
-# Copyright (c) 2026 AKADATA. MIT licensed.
+# Copyright (c) 2026 AKADATA LIMITED. BSL 1.1 licensed.
 . /usr/share/saphira/lb-healthchecks/lib/lb-saphira-common.sh
 lb_init "$@"
 [ -n "${LB_SAPHIRA_SEND:-}${LB_SAPHIRA_SEND_HEX:-}${LB_SAPHIRA_SEND_FILE:-}" ] || exit 2

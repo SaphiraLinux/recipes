@@ -2,10 +2,10 @@
 
 pkgname=saphira-install-tools
 pkgver=0.1
-pkgrel=1
+pkgrel=2
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='Saphira install/bootstrap helper tools (saphira-chroot, saphira-bootstrap, saphira-genfstab) and install profiles'
-license='MIT'
+license='BUSL-1.1'
 origin=saphira-install-tools
 repo=saphira
 url=https://saphira.vm2.uk/
@@ -48,4 +48,6 @@ recipe_install()
 		install -D -m 0644 "$RECIPE_DIR/files/profiles/$profile" \
 			"$PKGDEST/usr/share/saphira/profiles/$profile"
 	done
+	install -D -m 0644 "$RECIPE_DIR/files/LICENSE" \
+		"$PKGDEST/usr/share/licenses/saphira-install-tools/LICENSE"
 }

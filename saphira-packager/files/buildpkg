@@ -750,9 +750,26 @@ class Transaction:
         # Verified-source cache: host-persistent, content-addressed by
         # sha256. Bound read-write at a top-level namespace path (same
         # pattern as /ccache) so rebuilds never re-fetch.
-        source_cache_host = Path(os.environ.get(
-            "SAPHIRA_SOURCE_CACHE", "/var/cache/saphira/sources"))
-        source_cache_host.mkdir(parents=True, exist_ok=True)
+        # Fresh-host bootstrap: an unprivileged build cannot provision
+        # parents under root-owned paths (e.g. /var/cache when nothing
+        # created it yet). Fall back to a disposable per-build cache
+        # inside the writable stage rather than dying: verification and
+        # content-addressing are identical, only cross-build persistence
+        # is lost. Loud on purpose so a typo'd SAPHIRA_SOURCE_CACHE never
+        # hides silently behind the fallback.
+        source_cache_default = os.environ.get(
+            "SAPHIRA_SOURCE_CACHE", "/var/cache/saphira/sources")
+        try:
+            source_cache_host = Path(source_cache_default)
+            source_cache_host.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            fallback_note = (
+                f"WARNING: source cache {source_cache_default} not usable "
+                f"({exc}); using disposable per-build cache")
+            self.log(fallback_note)
+            print(fallback_note, file=sys.stderr)
+            source_cache_host = self.stage / "source-cache"
+            source_cache_host.mkdir(parents=True, exist_ok=True)
         source_cache_options = [
             "--dir", "/source-cache", "--bind", str(source_cache_host), "/source-cache",
             "--setenv", "SAPHIRA_SOURCE_CACHE", "/source-cache",

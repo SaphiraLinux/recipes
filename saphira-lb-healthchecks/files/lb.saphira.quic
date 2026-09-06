@@ -4,7 +4,7 @@
 # server must reply with a Version Negotiation packet (RFC 9000 section 6).
 # This proves the QUIC transport listener, NOT an HTTP/3 transaction -
 # use lb.saphira.http3 for that named capability.
-# Copyright (c) 2026 AKADATA. MIT licensed.
+# Copyright (c) 2026 AKADATA LIMITED. BSL 1.1 licensed.
 . /usr/share/saphira/lb-healthchecks/lib/lb-saphira-common.sh
 lb_init "$@"
 lb_probe quic --host "$LB_REAL" --port "${LB_RPORT:-443}" --timeout "$LB_TIMEOUT"

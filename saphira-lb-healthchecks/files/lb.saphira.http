@@ -4,7 +4,7 @@
 # LB_SAPHIRA_HTTP_OK (status class regex, default 2xx/3xx),
 # LB_SAPHIRA_HTTP_EXPECT (body regex). No silent degradation to tcp:
 # a failed HTTP transaction fails the check.
-# Copyright (c) 2026 AKADATA. MIT licensed.
+# Copyright (c) 2026 AKADATA LIMITED. BSL 1.1 licensed.
 . /usr/share/saphira/lb-healthchecks/lib/lb-saphira-common.sh
 lb_init "$@"
 PORT="${LB_RPORT:-$LB_VPORT}"

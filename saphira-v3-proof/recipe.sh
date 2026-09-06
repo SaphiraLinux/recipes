@@ -2,10 +2,10 @@
 
 pkgname=saphira-v3-proof
 pkgver=1.0.0
-pkgrel=2
+pkgrel=3
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='Saphira Genesis x86-64-v3 validation proof: AVX2/FMA/BMI2/F16C/LZCNT + pthreads benchmark/stress test'
-license='MIT'
+license='BUSL-1.1'
 origin=saphira-v3-proof
 repo=saphira
 url=https://saphira.vm2.uk/
@@ -36,4 +36,6 @@ recipe_build()
 recipe_install()
 {
 	make -C "$SRC" install DESTDIR="$PKGDEST" PREFIX=/usr
+	install -D -m 0644 "$RECIPE_DIR/files/LICENSE" \
+		"$PKGDEST/usr/share/licenses/saphira-v3-proof/LICENSE"
 }

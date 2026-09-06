@@ -31,7 +31,7 @@ run_buildpkg()
 	SAPHIRA_BOOTSTRAP_MANIFEST=$source_root/saphira-packager/files/bootstrap-v0.1.paths \
 	SAPHIRA_HOST_RESOLV_CONF=/etc/resolv.conf SAPHIRA_HOST_HOSTS_FILE=/etc/hosts \
 	SAPHIRA_BUILD_SEED='saphira-base-abi apk-tools bash libcap coreutils findutils pcre2 grep python3 ca-certificates curl tar' \
-	SAPHIRA_SOURCE_CACHE=$test_root/source-cache \
+	SAPHIRA_SOURCE_CACHE=${SAPHIRA_TEST_SOURCE_CACHE:-$test_root/source-cache} \
 		"$buildpkg" "$@"
 }
 
@@ -382,4 +382,29 @@ SAPHIRA_BUILD_ROOT=$build_root \
 	"$source_root/saphira-packager/files/cleanpkg" vendor-bad >/dev/null
 test ! -e "$build_root/vendor-bad.buildpkg"
 
-printf '%s\n' 'single-root isolation, graph-output, lifecycle, overlay base reuse, incoming transaction, and verified-source cache tests: OK'
+# --- source-cache fallback -------------------------------------------------
+# Fresh-host bootstrap: when the configured persistent cache cannot even
+# be provisioned (unwritable parent, e.g. sysfs here standing in for a
+# root-owned /var/cache on a fresh host), the build must fall back to a
+# disposable per-build cache - loudly - rather than dying with EACCES.
+mkdir -p "$test_root/fallback-content"
+printf '%s\n' fallback-payload > "$test_root/fallback-content/probe.txt"
+tar -C "$test_root" -cf "$recipes/.vendor-origin/vendor-fallback-1.tar" fallback-content
+fallback_sha=$(sha256sum "$recipes/.vendor-origin/vendor-fallback-1.tar" | cut -d' ' -f1)
+recipe_header vendor-fallback '' '' 1
+printf '%s\n' \
+	'vendor=file:///recipes/.vendor-origin/vendor-fallback-1.tar' \
+	"sha256=$fallback_sha" \
+	'recipe_build() { test -f probe.txt; }' \
+	'recipe_install() {' \
+	'	install -d "$DESTDIR/usr/bin"' \
+	'	printf "%s\n" "#!/bin/sh" "exit 0" > "$DESTDIR/usr/bin/vendor-fallback"' \
+	'	chmod 755 "$DESTDIR/usr/bin/vendor-fallback"' \
+	'}' >> "$recipes/vendor-fallback/recipe.sh"
+SAPHIRA_TEST_SOURCE_CACHE=/sys/saphira-source-cache-test \
+	run_buildpkg vendor-fallback >/dev/null 2> "$test_root/vendor-fallback.err"
+test -n "$(find "$incoming" -mindepth 3 -maxdepth 3 -name 'vendor-fallback-1-r1.apk')"
+grep 'disposable per-build cache' "$test_root/vendor-fallback.err" >/dev/null
+test ! -e /sys/saphira-source-cache-test
+
+printf '%s\n' 'single-root isolation, graph-output, lifecycle, overlay base reuse, incoming transaction, verified-source cache, and source-cache fallback tests: OK'

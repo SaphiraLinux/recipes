@@ -6,7 +6,7 @@
 #   $6  STOW URL     LB_SAPHIRA_DICOM_STOW_URL (required, full studies URL)
 #       LB_SAPHIRA_STATE_CHANGING=1 (required opt-in)
 #       LB_SAPHIRA_DICOMWEB_TLS_VERIFY=1 optional
-# Copyright (c) 2026 AKADATA. MIT licensed.
+# Copyright (c) 2026 AKADATA LIMITED. BSL 1.1 licensed.
 . /usr/share/saphira/lb-healthchecks/lib/lb-saphira-common.sh
 lb_init "$@"
 [ "${LB_SAPHIRA_STATE_CHANGING:-0}" = "1" ] || exit 2

@@ -4,7 +4,7 @@
 # LB_SAPHIRA_DNS_RCODE (expected RCODE, default 0 = NOERROR),
 # LB_SAPHIRA_DNS_TCP=1 for TCP transport, LB_SAPHIRA_DNS_EXPECT (regex over
 # the raw response, e.g. a specific record).
-# Copyright (c) 2026 AKADATA. MIT licensed.
+# Copyright (c) 2026 AKADATA LIMITED. BSL 1.1 licensed.
 . /usr/share/saphira/lb-healthchecks/lib/lb-saphira-common.sh
 lb_init "$@"
 [ -n "$LB_SAPHIRA_DNS_NAME" ] || exit 2

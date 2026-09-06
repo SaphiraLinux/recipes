@@ -14,7 +14,7 @@
 # A DICOM modality may need its own per-install configuration - set it in
 # /etc/saphira/lb-healthchecks.d/dicom.find.conf or per service under
 # dicom.find/<service>.conf; HAProxy needs no extra interface for this.
-# Copyright (c) 2026 AKADATA. MIT licensed.
+# Copyright (c) 2026 AKADATA LIMITED. BSL 1.1 licensed.
 . /usr/share/saphira/lb-healthchecks/lib/lb-saphira-common.sh
 lb_init "$@"
 PATIENT_ID="${6:-${LB_SAPHIRA_DICOM_PATIENT_ID:-SAPHIRA-SYNTHETIC-HEALTHCHECK}}"

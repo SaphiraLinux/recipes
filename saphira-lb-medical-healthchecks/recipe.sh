@@ -2,10 +2,10 @@
 
 pkgname=saphira-lb-medical-healthchecks
 pkgver=2026.09
-pkgrel=1
+pkgrel=2
 pkgarch=noarch
 pkgdesc='Saphira healthcare-specific LB healthchecks (DICOM/DICOMweb/HL7/FHIR under /var/lib/lb/saphira)'
-license=MIT
+license=BUSL-1.1
 origin=saphira-lb-medical-healthchecks
 repo=saphira
 url=https://saphira.vm2.uk/
@@ -42,5 +42,7 @@ recipe_install()
 		"$PKGDEST/usr/share/saphira/lb-medical-healthchecks/lib/lb-saphira-dicom-synth.py"
 	install -D -m 0644 "$RECIPE_DIR/files/README.md" \
 		"$PKGDEST/usr/share/doc/saphira-lb-medical-healthchecks/README.md"
+	install -D -m 0644 "$RECIPE_DIR/files/LICENSE" \
+		"$PKGDEST/usr/share/licenses/saphira-lb-medical-healthchecks/LICENSE"
 	find "$PKGDEST" -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
 }

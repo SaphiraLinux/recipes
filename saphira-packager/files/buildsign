@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # buildsign: one-step build -> publish -> install for Saphira packages.
-# Copyright (c) 2026 AKADATA. MIT licensed.
+# Copyright (c) 2026 AKADATA LIMITED. BSL 1.1 licensed.
 #
 # Usage:
 #   buildsign PACKAGE          buildpkg + sign-apk-repo PACKAGE + installpkg

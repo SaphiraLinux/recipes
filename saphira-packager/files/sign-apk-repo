@@ -96,6 +96,15 @@ if [ "$#" -gt 0 ]; then
 	ready_transactions=("${selected[@]}")
 fi
 
+# Fast selective path (targeted runs only): publishing named packages gates
+# just the staged set against persisted ownership state instead of
+# rescanning every historical APK. The no-target run stays the expensive
+# full audit/reconciliation path and refreshes the persisted state.
+selective=0
+if [ "$#" -gt 0 ]; then
+	selective=1
+fi
+
 "$SAPHIRA_PYTHON" - "${ready_transactions[@]}" <<'PY'
 import hashlib
 import json
@@ -141,8 +150,6 @@ for raw in sys.argv[1:]:
         if value != digest:
             raise SystemExit(f"package checksum mismatch: {transaction / name}")
 PY
-
-publication_id=$(date -u +%Y%m%dT%H%M%SZ)-$$
 
 # Automatic retirement of pure-rebuild transactions: when EVERY package in
 # a transaction content-conflicts with the same-NVR published copy in some
@@ -260,38 +267,25 @@ for package in "$packages_dir"/*.apk; do
 	"$SAPHIRA_APK" verify --keys-dir "$trust_dir" "$package"
 done
 
-for repo_name in "${repo_names[@]}"; do
-	repo_dir=$SAPHIRA_REPO_DIR/$repo_name/$SAPHIRA_ARCH
-	install_set=()
-	for name in "${!staged_sources[@]}"; do
-		[ -e "$repo_dir/$name" ] || install_set+=("$packages_dir/$name")
-	done
-	all_packages=("$repo_dir"/*.apk)
-	[ "${#install_set[@]}" -eq 0 ] || all_packages+=("${install_set[@]}")
-	[ "${#all_packages[@]}" -gt 0 ] || die "publication set contains no APK files"
-	for package in "$repo_dir"/*.apk; do
-		"$SAPHIRA_APK" verify --keys-dir "$trust_dir" "$package" >/dev/null
-	done
+publication_id=$(date -u +%Y%m%dT%H%M%SZ)-$$
 
-identities=$workspace/package-identities.json
-staged_list=$workspace/staged-packages.txt
-: > "$staged_list"
-for staged_file in "${!staged_sources[@]}"; do
-	printf '%s\n' "$staged_file" >> "$staged_list"
-done
-# Single adbdump per package: the identity pass (filename match, duplicate
-# detection) and the ownership gate share one dump each. Dumping twice
-# doubled process spawns over the full repo on every publication.
-#
-# Ownership gate precision: owners collapse by package NAME (routine
-# same-name version updates never fire), and only paths present in a
-# STAGED artifact are gated. A staged clean rebuild must publish even
-# when a superseded same-name version in the archive still carries the
-# dropped path (archive dirt from before the split was fixed): nothing
-# new enters, so nothing is refused. Genuinely new overlaps (a staged
-# artifact claims a path owned by another name) still refuse, unless
-# covered by replaces=.
-"$SAPHIRA_PYTHON" - "$SAPHIRA_APK" "$identities" "$staged_list" "${all_packages[@]}" <<'PY'
+# Ownership gate runner: one implementation, two modes. Full mode dumps
+# every package (the no-target audit path; also refreshes persisted
+# state). Fast mode gates only the staged set against persisted ownership
+# state (selective runs): it exits 9 when state is missing or stale so the
+# caller falls back to full, and dies loudly on real gate refusals.
+# Persisted state ($repo_dir/ownership.json) holds the newest-per-name
+# owner map plus the identity set it was derived from; it is written
+# afresh by full runs and merged forward by fast runs, installed
+# atomically next to the indexes, and independently reconstructable by
+# any full run (byte-identical for identical repositories).
+run_gate()
+{
+	local gate_mode=$1
+	local gate_state=$2
+	local gate_out=$3
+	shift 3
+	"$SAPHIRA_PYTHON" - "$SAPHIRA_APK" "$identities" "$staged_list" "$gate_mode" "$gate_state" "$gate_out" "$repo_dir/Packages.adb" "$trust_dir" "$@" <<'PY'
 import json
 import re
 import subprocess
@@ -299,11 +293,14 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-apk, identities_path, staged_list, *packages = sys.argv[1:]
+apk, identities_path, staged_list, mode, state_path, state_out, index_path, trust_dir, *packages = sys.argv[1:]
+if mode not in ("fast", "full"):
+    raise SystemExit(f"sign-apk-repo: unknown ownership gate mode: {mode}")
 staged_files = {line.strip() for line in Path(staged_list).read_text().splitlines() if line.strip()}
 DIR_RE = re.compile(r"^  - name: (\S+)$")
 FILE_RE = re.compile(r"^      - name: (\S+)$")
 TOP_RE = re.compile(r"^([A-Za-z][A-Za-z0-9_.-]*):")
+STATE_SCHEMA = "saphira-ownership/v1"
 
 def load(path):
     dump = subprocess.run([apk, "adbdump", str(path)], check=True, text=True, capture_output=True).stdout
@@ -344,59 +341,193 @@ def load(path):
         raise SystemExit(f"cannot read package identity: {path}")
     return name, version, files, replaces
 
-identities = []
-seen = set()
-owners = defaultdict(dict)  # path -> {package name: version label}
-staged_identities = set()
-staged_paths = defaultdict(set)  # (name, version) -> paths in that artifact
-staged_replaces = {}
-for raw in packages:
-    package = Path(raw)
-    name, version, files, replaces = load(package)
-    identity = (name, version)
-    if package.name != f"{identity[0]}-{identity[1]}.apk":
-        raise SystemExit(f"package filename does not match identity: {package}")
-    if identity in seen:
-        raise SystemExit(f"duplicate package identity: {identity[0]}={identity[1]}")
-    seen.add(identity)
-    identities.append({"name": identity[0], "version": identity[1]})
-    if package.name in staged_files:
-        staged_identities.add(identity)
-        staged_replaces[identity] = replaces
-        staged_paths[identity].update(files)
-    for f in files:
-        owners[f][name] = f"{name}-{version}"
-Path(identities_path).write_text(json.dumps(sorted(identities, key=lambda item: (item["name"], item["version"])), separators=(",", ":")) + "\n", encoding="utf-8")
+def read_state(path):
+    with open(path, encoding="utf-8") as stream:
+        data = json.load(stream)
+    if data.get("schema") != STATE_SCHEMA:
+        raise ValueError(f"unknown ownership state schema: {path}")
+    return (
+        {(item[0], item[1]) for item in data["identities"]},
+        dict(data["newest"]),
+        {p: dict(m) for p, m in data["owners"].items()},
+    )
 
-collisions = {}
-for path, name_versions in sorted(owners.items()):
-    if len(name_versions) < 2:
-        continue
-    names = set(name_versions)
-    # Only paths present in a staged artifact are gated: a staged clean
-    # rebuild must publish even when a superseded same-name version in
-    # the archive still carries the dropped path. Same-name versions
-    # collapse to one owner above, so routine updates never fire here.
-    staged_here = sorted(ident for ident in staged_identities if path in staged_paths[ident])
-    if not staged_here:
-        continue  # legacy pair, handled by the purge pass
-    for staged_identity in staged_here:
-        staged_name = staged_identity[0]
-        others = names - {staged_name}
-        if not others:
+def write_state(path, identities, newest, owners):
+    data = {
+        "schema": STATE_SCHEMA,
+        "identities": sorted([list(i) for i in identities]),
+        "newest": {name: newest[name] for name in sorted(newest)},
+        "owners": {p: {n: owners[p][n] for n in sorted(owners[p])} for p in sorted(owners) if owners[p]},
+    }
+    with open(path, "w", encoding="utf-8") as stream:
+        json.dump(data, stream, separators=(",", ":"))
+        stream.write("\n")
+
+def apk_newer(a, b):
+    out = subprocess.run([apk, "version", "-t", a, b], check=True, text=True, capture_output=True).stdout.strip()
+    return out == ">"
+
+def evaluate(owners, staged_identities, staged_paths, staged_replaces):
+    collisions = {}
+    for path, name_versions in sorted(owners.items()):
+        if len(name_versions) < 2:
             continue
-        if others <= staged_replaces.get(staged_identity, set()):
-            continue
-        detail = ", ".join(name_versions[n] for n in sorted(others))
-        collisions[path] = (name_versions[staged_name], detail)
-if collisions:
+        names = set(name_versions)
+        # Only paths present in a staged artifact are gated: a staged clean
+        # rebuild must publish even when a superseded same-name version in
+        # the archive still carries the dropped path. Same-name versions
+        # collapse to one owner above, so routine updates never fire here.
+        staged_here = sorted(ident for ident in staged_identities if path in staged_paths[ident])
+        if not staged_here:
+            continue  # legacy pair, handled by the purge pass
+        for staged_identity in staged_here:
+            staged_name = staged_identity[0]
+            others = names - {staged_name}
+            if not others:
+                continue
+            if others <= staged_replaces.get(staged_identity, set()):
+                continue
+            detail = ", ".join(name_versions[n] for n in sorted(others))
+            collisions[path] = (name_versions[staged_name], detail)
+    return collisions
+
+def refuse(collisions):
     lines = [f"{path}: claimed by {sv} and {dv}" for path, (sv, dv) in sorted(collisions.items())]
     raise SystemExit(
         "sign-apk-repo: file ownership collision - exactly one package must own a path; "
         "fix the recipe split (never --force-overwrite):\n  " + "\n  ".join(lines)
     )
-print(f"sign-apk-repo: ownership gate: {len(packages)} package(s) scanned, no file collisions")
+
+def load_checked(paths):
+    info = {}
+    seen_here = set()
+    staged_identities = set()
+    staged_paths = defaultdict(set)
+    staged_replaces = {}
+    for raw in paths:
+        package = Path(raw)
+        name, version, files, replaces = load(package)
+        identity = (name, version)
+        if package.name != f"{identity[0]}-{identity[1]}.apk":
+            raise SystemExit(f"package filename does not match identity: {package}")
+        if identity in seen_here:
+            raise SystemExit(f"duplicate package identity: {identity[0]}={identity[1]}")
+        seen_here.add(identity)
+        info[identity] = {"files": files, "replaces": replaces}
+        if package.name in staged_files:
+            staged_identities.add(identity)
+            staged_replaces[identity] = replaces
+            staged_paths[identity].update(files)
+    return info, seen_here, staged_identities, staged_paths, staged_replaces
+
+def write_identities(identities):
+    Path(identities_path).write_text(json.dumps(sorted([{"name": n, "version": v} for n, v in identities], key=lambda item: (item["name"], item["version"])), separators=(",", ":")) + "\n", encoding="utf-8")
+
+if mode == "fast":
+    try:
+        subprocess.run([apk, "verify", "--keys-dir", trust_dir, index_path],
+                       check=True, capture_output=True, text=True)
+        dump = subprocess.run([apk, "adbdump", index_path],
+                              check=True, capture_output=True, text=True).stdout
+        idx_names = re.findall(r"^  - name: (\S+)$", dump, re.MULTILINE)
+        idx_versions = re.findall(r"^    version: (\S+)$", dump, re.MULTILINE)
+        if len(idx_names) != len(idx_versions):
+            raise ValueError("malformed repository index identities")
+        state_identities, state_newest, state_owners = read_state(state_path)
+    except Exception as exc:
+        print(f"sign-apk-repo: ownership state stale or missing ({exc}); full rescan")
+        raise SystemExit(9)
+    if set(zip(idx_names, idx_versions)) != state_identities:
+        print(f"sign-apk-repo: ownership state stale (index holds {len(idx_names)} identities, state {len(state_identities)}); full rescan")
+        raise SystemExit(9)
+    print(f"sign-apk-repo: selective gate: ownership state fresh ({len(state_identities)} identities)")
+    info, _, staged_identities, staged_paths, staged_replaces = load_checked(packages)
+    newest = dict(state_newest)
+    owners = {p: dict(m) for p, m in state_owners.items()}
+    identities = set(state_identities)
+    for ident in sorted(staged_identities):
+        name, version = ident
+        current = newest.get(name)
+        if current is None or apk_newer(version, current):
+            newest[name] = version
+            for owned in owners.values():
+                owned.pop(name, None)
+            for f in info[ident]["files"]:
+                owners.setdefault(f, {})[name] = f"{name}-{version}"
+        identities.add(ident)
+    collisions = evaluate(owners, staged_identities, staged_paths, staged_replaces)
+    if collisions:
+        refuse(collisions)
+    write_identities(identities)
+    write_state(state_out, identities, newest, owners)
+    print(f"sign-apk-repo: ownership gate (selective, state fresh: {len(state_identities)} identities): {len(staged_identities)} staged package(s) checked, no file collisions")
+else:
+    info, seen, staged_identities, staged_paths, staged_replaces = load_checked(packages)
+    write_identities(seen)
+    versions_by_name = defaultdict(set)
+    for name, version in seen:
+        versions_by_name[name].add(version)
+    newest = {}
+    for name, versions in versions_by_name.items():
+        best = None
+        for version in sorted(versions):
+            if best is None or apk_newer(version, best):
+                best = version
+        newest[name] = best
+    owners = defaultdict(dict)
+    for name, version in newest.items():
+        for f in info[(name, version)]["files"]:
+            owners[f][name] = f"{name}-{version}"
+    collisions = evaluate(owners, staged_identities, staged_paths, staged_replaces)
+    if collisions:
+        refuse(collisions)
+    write_state(state_out, seen, newest, owners)
+    print(f"sign-apk-repo: ownership gate: {len(packages)} package(s) scanned, no file collisions (ownership state refreshed: {len(seen)} identities)")
 PY
+}
+
+for repo_name in "${repo_names[@]}"; do
+	repo_dir=$SAPHIRA_REPO_DIR/$repo_name/$SAPHIRA_ARCH
+	install_set=()
+	for name in "${!staged_sources[@]}"; do
+		[ -e "$repo_dir/$name" ] || install_set+=("$packages_dir/$name")
+	done
+	all_packages=("$repo_dir"/*.apk)
+	[ "${#install_set[@]}" -eq 0 ] || all_packages+=("${install_set[@]}")
+	[ "${#all_packages[@]}" -gt 0 ] || die "publication set contains no APK files"
+identities=$workspace/package-identities.json
+	staged_list=$workspace/staged-packages.txt
+	: > "$staged_list"
+	for staged_file in "${!staged_sources[@]}"; do
+		printf '%s\n' "$staged_file" >> "$staged_list"
+	done
+	state_file=$repo_dir/ownership.json
+	state_out=$workspace/$repo_name-ownership.json
+	# Selective fast path: gate only the staged set against persisted
+	# ownership state (no per-APK re-dump, no full re-verify of immutable
+	# history). Exit 9 from the gate means state is missing or stale, and
+	# the run falls back to the full audit below, which refreshes it. Any
+	# other non-zero exit is a real gate refusal and stops the run.
+	gate_mode=full
+	if [ "$selective" -eq 1 ] && [ -f "$state_file" ]; then
+		fast_packages=()
+		for name in "${!staged_sources[@]}"; do
+			fast_packages+=("${staged_sources[$name]}")
+		done
+		fast_status=0
+		run_gate fast "$state_file" "$state_out" ${fast_packages[@]+"${fast_packages[@]}"} || fast_status=$?
+		if [ "$fast_status" -eq 0 ]; then
+			gate_mode=fast
+		elif [ "$fast_status" -ne 9 ]; then
+			die "selective ownership gate failed for $repo_name (see above)"
+		fi
+	fi
+	if [ "$gate_mode" = full ]; then
+		for package in "$repo_dir"/*.apk; do
+			"$SAPHIRA_APK" verify --keys-dir "$trust_dir" "$package" >/dev/null
+		done
+		run_gate full "$state_file" "$state_out" "${all_packages[@]}"
+	fi
 
 packages_adb=$workspace/$repo_name-Packages.adb
 apkindex=$workspace/$repo_name-APKINDEX.tar.gz
@@ -421,7 +552,6 @@ for index in indexes:
         raise SystemExit(f"index identities/count do not match package set: {index}")
 PY
 
-publication_id=$(date -u +%Y%m%dT%H%M%SZ)-$$
 for package in ${install_set[@]+"${install_set[@]}"}; do
 	name=${package##*/}
 	temporary=$repo_dir/$name.publishing-$publication_id
@@ -430,6 +560,16 @@ for package in ${install_set[@]+"${install_set[@]}"}; do
 	mv -- "$temporary" "$repo_dir/$name"
 	normalize_ownership "$repo_dir/$name"
 done
+
+# Install the refreshed ownership state atomically next to the indexes; a
+# later selective run trusts it only while the index identities still
+# match it exactly, otherwise it falls back to a full rescan that
+# regenerates it (promote-repo and seed-repo only touch APKs+indexes, so
+# they can at worst force one healing full scan, never a wrong decision).
+state_tmp=$repo_dir/ownership.json.publishing-$publication_id
+install -m 644 -- "$state_out" "$state_tmp"
+mv -f -- "$state_tmp" "$repo_dir/ownership.json"
+normalize_ownership "$repo_dir/ownership.json"
 
 for index_name in Packages.adb APKINDEX.tar.gz; do
 	case $index_name in

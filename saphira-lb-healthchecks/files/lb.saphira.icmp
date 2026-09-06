@@ -1,6 +1,6 @@
 #!/bin/sh
 # lb.saphira.icmp - L3 reachability of the real server (echo request/reply).
-# Copyright (c) 2026 AKADATA. MIT licensed.
+# Copyright (c) 2026 AKADATA LIMITED. BSL 1.1 licensed.
 . /usr/share/saphira/lb-healthchecks/lib/lb-saphira-common.sh
 lb_init "$@"
 exec ping -n -c1 -W "$LB_TIMEOUT" "$LB_REAL"

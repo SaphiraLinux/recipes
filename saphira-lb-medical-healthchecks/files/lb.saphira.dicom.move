@@ -8,7 +8,7 @@
 #   $6  move destination AE  LB_SAPHIRA_DICOM_MOVE_DEST (REQUIRED)
 #       LB_SAPHIRA_STATE_CHANGING=1          explicit opt-in
 #       LB_SAPHIRA_DICOM_PATIENT_ID          synthetic query key
-# Copyright (c) 2026 AKADATA. MIT licensed.
+# Copyright (c) 2026 AKADATA LIMITED. BSL 1.1 licensed.
 . /usr/share/saphira/lb-healthchecks/lib/lb-saphira-common.sh
 lb_init "$@"
 [ "${LB_SAPHIRA_STATE_CHANGING:-0}" = "1" ] || exit 2

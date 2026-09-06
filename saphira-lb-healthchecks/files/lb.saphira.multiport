@@ -2,7 +2,7 @@
 # lb.saphira.multiport - compound TCP reachability across a port list (L4).
 # Port list: $4 (space/comma separated) or LB_SAPHIRA_MULTIPORT_PORTS.
 # Mode: all (default) or any, via LB_SAPHIRA_MULTIPORT_MODE.
-# Copyright (c) 2026 AKADATA. MIT licensed.
+# Copyright (c) 2026 AKADATA LIMITED. BSL 1.1 licensed.
 . /usr/share/saphira/lb-healthchecks/lib/lb-saphira-common.sh
 lb_init "$@"
 PORTS="${LB_SAPHIRA_MULTIPORT_PORTS:-$LB_RPORT}"

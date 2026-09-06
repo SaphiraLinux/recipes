@@ -2,10 +2,10 @@
 
 pkgname=saphira-lb-healthchecks
 pkgver=2026.09
-pkgrel=1
+pkgrel=2
 pkgarch=noarch
 pkgdesc='Saphira generic external LB healthcheck library (ldirectord/HAProxy checks under /var/lib/lb/saphira)'
-license=MIT
+license=BUSL-1.1
 origin=saphira-lb-healthchecks
 repo=saphira
 url=https://saphira.vm2.uk/
@@ -58,5 +58,7 @@ recipe_install()
 		"$PKGDEST/usr/share/saphira/lb-healthchecks/lib/lb-saphira-common.sh"
 	install -D -m 0644 "$RECIPE_DIR/files/README.md" \
 		"$PKGDEST/usr/share/doc/saphira-lb-healthchecks/README.md"
+	install -D -m 0644 "$RECIPE_DIR/files/LICENSE" \
+		"$PKGDEST/usr/share/licenses/saphira-lb-healthchecks/LICENSE"
 	find "$PKGDEST" -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
 }

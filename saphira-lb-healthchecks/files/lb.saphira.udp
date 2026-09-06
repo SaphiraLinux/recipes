@@ -3,7 +3,7 @@
 # Sends one datagram on a connected socket; an ICMP port/host-unreachable
 # return marks the listener absent. A reply (if any) must match
 # LB_SAPHIRA_EXPECT when set.
-# Copyright (c) 2026 AKADATA. MIT licensed.
+# Copyright (c) 2026 AKADATA LIMITED. BSL 1.1 licensed.
 . /usr/share/saphira/lb-healthchecks/lib/lb-saphira-common.sh
 lb_init "$@"
 set -- udp --host "$LB_REAL" --port "${LB_RPORT:-$LB_VPORT}" --timeout "$LB_TIMEOUT"

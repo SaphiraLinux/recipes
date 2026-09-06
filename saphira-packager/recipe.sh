@@ -1,9 +1,9 @@
 pkgname=saphira-packager
 pkgver=1.0
-pkgrel=36
+pkgrel=41
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='Native Saphira package builder tools'
-license=MIT
+license=BUSL-1.1
 origin=saphira-packager
 repo=saphira
 url=https://saphira.vm2.uk/
@@ -44,4 +44,5 @@ recipe_install()
 	install -m 755 "$RECIPE_DIR/files/saphira-build.initd" "$DESTDIR/etc/init.d/saphira-build"
 	install -m 644 "$RECIPE_DIR/files/saphira-build.confd" "$DESTDIR/etc/conf.d/saphira-build"
 	install -m 644 "$RECIPE_DIR/files/saphira-build.service" "$DESTDIR/usr/lib/systemd/system/saphira-build.service"
+	install -D -m 644 "$RECIPE_DIR/files/LICENSE" "$DESTDIR/usr/share/licenses/saphira-packager/LICENSE"
 }

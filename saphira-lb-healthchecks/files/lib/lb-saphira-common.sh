@@ -1,6 +1,6 @@
 #!/bin/sh
 # Saphira LB healthcheck common library.
-# Copyright (c) 2026 AKADATA. MIT licensed.
+# Copyright (c) 2026 AKADATA LIMITED. BSL 1.1 licensed.
 #
 # Caller ABI (ldirectord/HAProxy external checks) - NOTHING beyond these
 # five is ever assumed from a caller:
