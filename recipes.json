@@ -1,5 +1,5 @@
 {
-  "generated": "2026-09-09T14:05:40.671734+00:00",
+  "generated": "2026-09-09T14:36:24.060285+00:00",
   "source_tree": "/recipes",
   "repository": "hatched",
   "arch": "x86_64",
@@ -6109,8 +6109,8 @@
       "name": "saphira-gredist",
       "description": "Protocol 47/GRE distributor with HRW backend selection",
       "recipe_version": "0.1.0",
-      "recipe_revision": 1,
-      "license": "MIT",
+      "recipe_revision": 3,
+      "license": "BUSL-1.1",
       "homepage": "https://saphira.vm2.uk/",
       "origin": "saphira-gredist",
       "repo": "saphira",
@@ -6122,7 +6122,7 @@
       "hatched_nvr": "saphira-gredist-0.1.0-r1",
       "hatched_version": "0.1.0",
       "hatched_revision": 1,
-      "recipe_ahead_of_hatched": false
+      "recipe_ahead_of_hatched": true
     },
     {
       "name": "saphira-install-tools",

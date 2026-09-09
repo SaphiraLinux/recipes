@@ -1,4 +1,4 @@
-/* Saphira Linux (c) 2026 - MIT Licensed
+/* Saphira Linux (c) 2026 - BUSL-1.1, see LICENSE
  * gre-send - test tool to send GRE packet with/without key
  */
 #ifndef _DEFAULT_SOURCE

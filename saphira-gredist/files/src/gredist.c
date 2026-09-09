@@ -1,4 +1,4 @@
-/* Saphira Linux (c) 2026 - MIT Licensed
+/* Saphira Linux (c) 2026 - BUSL-1.1, see LICENSE
  * saphira-gredist - Protocol 47/GRE distributor
  *
  * Small userspace control service with kernel dataplane where practical.

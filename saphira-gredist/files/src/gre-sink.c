@@ -1,4 +1,4 @@
-/* Saphira Linux (c) 2026 - MIT Licensed
+/* Saphira Linux (c) 2026 - BUSL-1.1, see LICENSE
  * gre-sink - test backend that counts GRE packets
  */
 #ifndef _DEFAULT_SOURCE
