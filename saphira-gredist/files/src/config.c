@@ -1,4 +1,4 @@
-/* Saphira Linux (c) 2026 - MIT Licensed
+/* Saphira Linux (c) 2026 - BUSL-1.1, see LICENSE
  * saphira-gredist config parser - simple frontend/backend lines
  */
 #include "gredist.h"

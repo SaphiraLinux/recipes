@@ -1,5 +1,5 @@
 #!/bin/bash
-# Saphira Linux (c) 2026 - MIT Licensed - saphira-gredist lab harness
+# Saphira Linux (c) 2026 - BUSL-1.1, see LICENSE - saphira-gredist lab harness
 # Creates isolated GRE test environments using netns and bridge/OVS
 set -euo pipefail
 

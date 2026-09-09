@@ -1,5 +1,5 @@
 #!/bin/bash
-# Saphira Linux (c) 2026 - MIT Licensed - saphira-gredist test harness
+# Saphira Linux (c) 2026 - BUSL-1.1, see LICENSE - saphira-gredist test harness
 set -euo pipefail
 SRC_DIR="$(cd "$(dirname "$0")/../src" && pwd)"
 TESTS_DIR="$(cd "$(dirname "$0")" && pwd)"

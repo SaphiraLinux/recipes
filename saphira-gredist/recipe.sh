@@ -2,17 +2,19 @@
 
 pkgname=saphira-gredist
 pkgver=0.1.0
-pkgrel=1
+pkgrel=3
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='Protocol 47/GRE distributor with HRW backend selection'
-license='MIT'
+license='BUSL-1.1'
 origin=saphira-gredist
 repo=saphira
 url=https://saphira.vm2.uk/
 # Local source (no upstream, no git yet): payload lives in files/
 # (C11 control service + gre-sink/gre-send lab tools, man page,
-# example config, lab harness). Kernel reference files ip_gre.c /
-# ip6_gre.c at the recipe root are reference only, never built.
+# example config, lab harness), all Saphira-original under BUSL-1.1.
+# r2: license corrected MIT -> BUSL-1.1.
+# r3: kernel reference files removed (protocol reference only, never
+# part of the source); all remaining MIT headers switched to BUSL-1.1.
 
 depends="iputils"
 makedepends="

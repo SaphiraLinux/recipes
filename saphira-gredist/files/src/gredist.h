@@ -1,4 +1,4 @@
-/* Saphira Linux (c) 2026 - MIT Licensed
+/* Saphira Linux (c) 2026 - BUSL-1.1, see LICENSE
  * saphira-gredist - Protocol 47/GRE distributor
  * Reference: Linux net/ipv4/gre_demux.c and net/ipv6/ip6_gre.c
  *            net/gre.h, linux/if_tunnel.h

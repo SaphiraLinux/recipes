@@ -1,4 +1,4 @@
-/* Saphira Linux (c) 2026 - MIT Licensed
+/* Saphira Linux (c) 2026 - BUSL-1.1, see LICENSE
  * saphira-gredist GRE parsing - derived from Linux gre_demux.c
  */
 #include "gredist.h"
