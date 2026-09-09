@@ -1,0 +1,73 @@
+.TH SAPHIRA-REPO-STATE 8 "September 2026" "Saphira Linux" "System Administration"
+.SH NAME
+saphira-repo-state \- read-only repository.db viewer
+.SH SYNOPSIS
+.B saphira-repo-state
+.RB [ --gen " " NAME ]
+.RI COMMAND " [" ARGS ]
+.PP
+Commands:
+.BR summary ,
+.BR packages ,
+.BI package " NAME" ,
+.BI owner " PATH" ,
+.BR users ,
+.BI user " NAME" ,
+.BI gid " N" ,
+.BI history " NAME" ,
+.BR conflicts ,
+.BR audit .
+.SH DESCRIPTION
+.B saphira-repo-state
+is the human interface to
+.IR repository.db :
+package identities, file ownership, Unix-identity reservations and
+ledger history without writing SQL. It opens the database read-only
+and contains no write path; all state changes flow through
+.BR sign-apk-repo (8),
+.BR saphira-repo-migrate (8),
+.BR promote-repo
+and
+.BR seed-repo
+only.
+.B --gen
+defaults to the live generation.
+.B conflicts
+lists newest-view multi-owner paths (legacy pairs, tolerated until
+a staged package claims the path);
+.B audit
+verifies freshness read-only and never heals (healing is
+.IR "sign-apk-repo --full-audit" ).
+.SH OPTIONS
+.TP
+.BI --gen " NAME"
+Generation repository to inspect (default: the live one).
+.SH FILES
+.TP
+.I /out/stage4/packages/<generation>/$ARCH/repository.db
+The inspected database (never modified by this tool).
+.SH EXIT STATUS
+.TP
+.B 0
+Answered.
+.TP
+.B 1
+Unknown package, user, path, bad arguments, or unreadable database.
+.SH EXAMPLES
+.PP
+.RS
+saphira-repo-state summary
+.br
+saphira-repo-state owner usr/bin/ssh
+.br
+saphira-repo-state user sshd
+.br
+saphira-repo-state audit
+.RE
+.SH SEE ALSO
+.BR saphira (7),
+.BR sign-apk-repo (8),
+.BR saphira-repo-migrate (8),
+.BR saphira-accounts-bootstrap (8),
+.BR ensure-identity (8),
+.BR saphira-build (8)

@@ -2,7 +2,7 @@
 
 pkgname=inetutils
 pkgver=2.6
-pkgrel=2
+pkgrel=3
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="GNU network utilities (clients and servers)"
 license="GPL-3.0-or-later"
@@ -40,6 +40,14 @@ recipe_build()
 recipe_install()
 {
 	make -C "$BUILDDIR" DESTDIR="$PKGDEST" install
+	# Single-owner rule (sign-apk-repo ownership gate): logger, ping,
+	# traceroute and whois are owned by their dedicated packages
+	# (util-linux, iputils, traceroute, whois). inetutils must not ship
+	# them even though upstream builds them by default - same shape as
+	# the tar recipe deleting its bundled rmt copy (cpio owns it).
+	rm -f -- "$PKGDEST/usr/bin/logger" "$PKGDEST/usr/bin/ping" \
+		"$PKGDEST/usr/bin/traceroute" "$PKGDEST/usr/bin/whois" \
+		"$PKGDEST/usr/share/man/man1/whois.1"
 	# Dual-format service package: OpenRC script and systemd unit.
 	# telnetd/rlogind/rshd/talkd/tftpd are inetd-spawned; only inetd itself
 	# runs standalone.

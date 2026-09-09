@@ -1,0 +1,102 @@
+.TH SAPHIRA-BUILD 8 "September 2026" "Saphira Linux" "System Administration"
+.SH NAME
+saphira-build \- Saphira package builder daemon and queue
+.SH SYNOPSIS
+.B saphira-build
+.B scan
+|
+.B queue
+|
+.B status
+|
+.B run
+.RB [ --limit= N ]
+|
+.B retry
+.I PACKAGE
+|
+.B log
+.I PACKAGE
+|
+.B publish
+.RI [ PKG ...]
+|
+.B daemon
+.RB [ --once ]
+.SH DESCRIPTION
+.B saphira-build
+drives the Saphira package pipeline:
+.B scan
+detects recipes ahead of the repository,
+.B run
+builds them rootless through
+.BR buildpkg (1),
+successful builds land as signed,
+indexed packages via
+.B publish
+(selective ownership-gated publication), and a bare
+.BR sign-apk-repo (8)
+run remains the slow full-audit reconciler.
+.PP
+Builds run rootless; signing, publication and controller refresh
+are privileged admin boundaries (sudo), alongside
+.BR installpkg (8).
+.SS Fresh-machine bring-up
+A new build machine needs no tree surgery: install the controller
+and tooling from the repository, clone the recipes, enable the
+daemon.
+.SS Controller self-refresh (Egg only)
+The controller host rebuilds the builder with itself, so deploying
+controller fixes needs one explicit refresh: install the tree tools
+over
+.IR /usr/bin ,
+restart the daemon (it holds the old code in memory), then retry
+the failed package. This loop is Egg-only pathology. Fresh machines
+never need it: their first
+.B installpkg
+already carries current code.
+.SH OPTIONS
+Subcommands take no general options; see SYNOPSIS for per-command
+arguments.
+.SH FILES
+.TP
+.I /usr/bin/saphira-build
+Deployed controller (refreshed from the tree when fixed).
+.TP
+.I /var/lib/saphira-build/queue.db
+Build queue and results (controller state; never repository metadata).
+.TP
+.I /out/stage4/incoming/
+Unsigned
+.I *-ready
+transactions awaiting publication.
+.SH EXIT STATUS
+.TP
+.B 0
+Command completed.
+.TP
+.B 1
+Invalid invocation, failed build step, or daemon error.
+.SH EXAMPLES
+.PP
+.RS
+sudo rc-update add saphira-build default
+.br
+sudo rc-service saphira-build start
+.br
+saphira-build status
+.br
+saphira-build retry nginx
+.br
+saphira-build log nginx
+.RE
+.SH SEE ALSO
+.BR saphira (7),
+.BR recipe (5),
+.BR buildpkg (1),
+.BR resolvepkg (1),
+.BR cleanpkg (1),
+.BR bumppkg (1),
+.BR sign-apk-repo (8),
+.BR installpkg (8),
+.BR saphira-builder (8)

@@ -1,0 +1,7 @@
+# nginx runtime identity (canonical, fixed): user nginx UID 102,
+# primary group nginx GID 102. Required by the shipped server config
+# (nginx.conf: user nginx). UID 102 sits in the preferred 0..199
+# packaged range - never reuse it for another identity.
+user nginx 102 nginx /var/lib/nginx /sbin/nologin
+group nginx 102
+dir /var/lib/nginx 0755 nginx nginx

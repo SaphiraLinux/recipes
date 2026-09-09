@@ -2,7 +2,7 @@
 
 pkgname=openssh
 pkgver=10.3_p1
-pkgrel=6
+pkgrel=7
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="OpenBSD Secure Shell server and client"
 license="BSD-2-Clause"
@@ -65,4 +65,10 @@ recipe_install()
 	install -m 0644 "$RECIPE_DIR/files/sshd.service" \
 		"$PKGDEST/usr/lib/systemd/system/sshd.service"
 	find "$PKGDEST/etc/ssh" -type f -name 'ssh_host_*' -delete
+	# Runtime identity declaration: sshd:101 required by privilege
+	# separation. makepkg generates the install scripts from this
+	# fragment; the package creates its identity at install time.
+	# r7: fragment added (payload change, revision bumps).
+	install -D -m 0644 "$RECIPE_DIR/files/accounts.d/openssh" \
+		"$PKGDEST/usr/share/saphira/accounts.d/openssh"
 }

@@ -24,6 +24,24 @@ mkdir -p "$test_root/repository/hatchling/x86_64" "$test_root/repository/hatched
 openssl genrsa -traditional -out "$test_root/test-repository.rsa" 2048 >/dev/null 2>&1
 openssl rsa -in "$test_root/test-repository.rsa" -pubout -out "$keys/test-repository.rsa.pub" >/dev/null 2>&1
 
+# SQLite era: publishing generations need their repository.db before
+# the signer runs (test genesis, mirroring what seed-repo does in
+# production for the repositories it births).
+init_repo_db()
+{
+	python3 - "$source_root/saphira-packager/files/repo_db.py" "$1" "$2" "$3" <<'PY'
+import os
+import sys
+sys.path.insert(0, os.path.dirname(sys.argv[1]))
+import repo_db
+conn = repo_db.connect(os.path.join(sys.argv[2], "repository.db"))
+repo_db.init_db(conn, sys.argv[3], sys.argv[4] == "1")
+conn.commit()
+conn.close()
+PY
+}
+init_repo_db "$test_root/repository/hatchling/x86_64" hatchling 1
+
 build_and_stage()
 {
 	package=$1
@@ -41,8 +59,8 @@ build_and_stage()
 	mkdir "$ready"
 	cp "$artifacts/x86_64/$package-$version.apk" "$ready/"
 	printf '%s\n' "$producer" > "$ready/target"
-	printf '%s\n' '{"schema":"saphira-bootstrap-seed/v1","generation":"test","manifest":"test","manifest_sha256":"test","entries":[]}' > "$ready/bootstrap-seed.json"
-	printf '%s\n' "{\"schema\":\"saphira-build-artifacts/v1\",\"target\":\"$producer\",\"constructors\":[{\"constructor\":\"makepkg\",\"producer\":\"$producer\"}],\"bootstrap_seed\":{\"schema\":\"saphira-bootstrap-seed/v1\",\"generation\":\"test\",\"manifest\":\"test\",\"manifest_sha256\":\"test\",\"entries\":[]}}" > "$ready/artifact-manifest.json"
+	printf '%s\n' '{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}' > "$ready/package-seed.json"
+	printf '%s\n' "{\"schema\":\"saphira-build-artifacts/v1\",\"target\":\"$producer\",\"constructors\":[{\"constructor\":\"makepkg\",\"producer\":\"$producer\"}],\"package_seed\":{\"schema\":\"saphira-package-seed/v1\",\"generation\":\"test\",\"seed\":[\"test\"],\"resolved\":[]}}" > "$ready/artifact-manifest.json"
 	(CDPATH= cd -- "$ready" && sha256sum "$package-$version.apk" > manifest.sha256)
 }
 
@@ -104,9 +122,35 @@ run_signer >/dev/null
 cp "$test_root/repository/hatchling/x86_64/attr-1-r0.apk" "$test_root/repository/hatched/x86_64/"
 index_dir "$test_root/repository/hatched/x86_64"
 hatched=$test_root/repository/hatched/x86_64
+# hatched is a hand-seeded generation: give it a ledger matching its
+# contents (init + sync, no carriers — a current view, so history is
+# explicitly incomplete), mirroring seed-repo behavior.
+python3 - "$source_root/saphira-packager/files/repo_db.py" "$hatched" <<'PY'
+import os
+import sys
+sys.path.insert(0, os.path.dirname(sys.argv[1]))
+import repo_db
+repo = sys.argv[2]
+census_data = repo_db.census("apk", repo)
+assert repo_db.fragment_carriers(census_data) == []
+conn = repo_db.connect(os.path.join(repo, "repository.db"))
+repo_db.init_db(conn, "hatched", False)
+repo_db.sync_packages(conn, census_data, {}, "apk", repo_db.utcnow())
+repo_db.set_meta(conn, "last_audit", repo_db.utcnow())
+conn.commit()
+conn.close()
+PY
+chmod 664 "$hatched/repository.db"
 
 run_promoter hatchling hatched make-9-r1 > "$test_root/promote.out"
 cmp -s "$test_root/repository/hatchling/x86_64/make-9-r1.apk" "$hatched/make-9-r1.apk"
+python3 - "$hatched/repository.db" <<'PY'
+import sqlite3
+import sys
+conn = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+assert ("make", "9-r1") in {(r[0], r[1]) for r in conn.execute("SELECT name, version FROM packages")}
+assert ("attr", "1-r0") in {(r[0], r[1]) for r in conn.execute("SELECT name, version FROM packages")}
+PY
 apk verify --keys-dir "$keys" "$hatched/make-9-r1.apk"
 apk verify --keys-dir "$keys" "$hatched/Packages.adb"
 apk verify --keys-dir "$keys" "$hatched/APKINDEX.tar.gz"

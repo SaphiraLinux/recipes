@@ -8,12 +8,10 @@ import fcntl
 import hashlib
 import json
 import os
-import posixpath
 import re
 import shlex
 import shutil
 import signal
-import stat
 import subprocess
 import sys
 import time
@@ -33,7 +31,7 @@ CONFIG_KEYS = (
     "SAPHIRA_PACKAGE_TMP", "SAPHIRA_REPO_DIR", "SAPHIRA_INCOMING_DIR",
     "SAPHIRA_REPO_NAMES", "SAPHIRA_ARCH", "SAPHIRA_BINDIR", "SAPHIRA_BUILD_SEED", "SAPHIRA_APK",
     "SAPHIRA_BWRAP", "SAPHIRA_PYTHON", "SAPHIRA_TRUST_KEY",
-    "SAPHIRA_ROOT_SHELL", "SAPHIRA_BOOTSTRAP_ROOT", "SAPHIRA_BOOTSTRAP_MANIFEST",
+    "SAPHIRA_ROOT_SHELL",
     "SAPHIRA_HOST_RESOLV_CONF", "SAPHIRA_HOST_HOSTS_FILE",
     "SAPHIRA_SOURCE_DATE_EPOCH",
 )
@@ -215,7 +213,7 @@ class Transaction:
         self.package_tmp = self.workspace / "package-tmp"
         self.plan_path = self.workspace / "plan.json"
         self.artifact_manifest = self.workspace / "artifact-manifest.json"
-        self.bootstrap_receipt = self.workspace / "bootstrap-seed.json"
+        self.package_receipt = self.workspace / "package-seed.json"
         self.log_path = self.logs / "buildpkg.log"
         self.log_stream = None
         self.incoming_building: Path | None = None
@@ -250,10 +248,10 @@ class Transaction:
             self.logs, self.package_tmp,
         ):
             directory.mkdir(parents=True)
-        base_receipt = self.overlay_root / "state" / "bootstrap-seed.json"
+        base_receipt = self.overlay_root / "state" / "package-seed.json"
         if not base_receipt.is_file():
             die(f"canonical base root receipt is missing (run with SAPHIRA_BASE_REBUILD=1 to rebuild): {base_receipt}")
-        shutil.copy2(base_receipt, self.bootstrap_receipt)
+        shutil.copy2(base_receipt, self.package_receipt)
         self.log_stream = self.log_path.open("x", encoding="utf-8")
 
     def log(self, message: str) -> None:
@@ -409,7 +407,7 @@ class Transaction:
                 except (OSError, ProcessLookupError):
                     holder.kill()
                 holder.wait(timeout=10)
-        self.log("OVERLAY unmounted: holder terminated before workspace removal")
+        self.log("OVERLAY unmounted: holder terminated, merged root released")
 
     def _nsenter_prefix(self) -> list[str]:
         if self.holder_pid is None:
@@ -510,117 +508,44 @@ class Transaction:
         command.extend((self.config["SAPHIRA_APK"], "--force-overwrite", *apk_arguments))
         self.run(command)
 
-    @staticmethod
-    def _validated_bootstrap_path(raw_path: str) -> str:
-        if not raw_path.startswith("/") or raw_path == "/":
-            die(f"bootstrap manifest path must be an absolute file or tree: {raw_path}")
-        normalized = posixpath.normpath(raw_path)
-        if normalized != raw_path or normalized.startswith("/lib64") or normalized.startswith("/usr/lib64"):
-            die(f"unsafe or forbidden bootstrap manifest path: {raw_path}")
-        return normalized
-
-    @staticmethod
-    def _validate_link(path: str, link_target: str) -> None:
-        resolved = posixpath.normpath(
-            link_target if link_target.startswith("/") else posixpath.join(posixpath.dirname(path), link_target)
-        )
-        if not resolved.startswith("/") or resolved.startswith("/lib64") or resolved.startswith("/usr/lib64"):
-            die(f"bootstrap symlink escapes or references lib64: {path} -> {link_target}")
-
-    def seed_foundation(self) -> None:
-        source_root = Path(self.config["SAPHIRA_BOOTSTRAP_ROOT"])
-        manifest = Path(self.config["SAPHIRA_BOOTSTRAP_MANIFEST"])
-        if not source_root.is_absolute() or not source_root.is_dir():
-            die(f"bootstrap source root is not an absolute directory: {source_root}")
-        if not manifest.is_file() or manifest.is_symlink():
-            die(f"bootstrap manifest is missing or not a regular file: {manifest}")
-
-        selected: list[tuple[str, str]] = []
-        for line_number, raw_line in enumerate(manifest.read_text(encoding="utf-8").splitlines(), 1):
-            line = raw_line.partition("#")[0].strip()
-            if not line:
-                continue
-            fields = line.split()
-            if len(fields) != 2 or fields[0] not in ("path", "tree"):
-                die(f"invalid bootstrap manifest directive at {manifest}:{line_number}")
-            selected.append((fields[0], self._validated_bootstrap_path(fields[1])))
-        if not selected:
-            die("bootstrap manifest selected no foundational inputs")
-
-        entries: list[dict[str, object]] = []
-
-        def copy_one(absolute_path: str) -> None:
-            source = source_root / absolute_path.lstrip("/")
-            destination = self.root / absolute_path.lstrip("/")
-            try:
-                metadata = source.lstat()
-            except FileNotFoundError:
-                die(f"approved bootstrap input is absent from Egg v0.1: {absolute_path}")
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            if os.path.lexists(destination):
-                die(f"duplicate bootstrap manifest destination: {absolute_path}")
-            if stat.S_ISLNK(metadata.st_mode):
-                link_target = os.readlink(source)
-                self._validate_link(absolute_path, link_target)
-                destination.symlink_to(link_target)
-                digest = hashlib.sha256(link_target.encode()).hexdigest()
-                entry_type = "symlink"
-                size = len(link_target.encode())
-            elif stat.S_ISREG(metadata.st_mode):
-                shutil.copy2(source, destination, follow_symlinks=False)
-                digest = sha256_file(destination)
-                entry_type = "file"
-                size = metadata.st_size
-            else:
-                die(f"bootstrap input is neither a regular file nor symlink: {absolute_path}")
-            entries.append({
-                "path": absolute_path, "type": entry_type, "mode": stat.S_IMODE(metadata.st_mode),
-                "size": size, "sha256": digest,
-            })
-
-        copied: set[str] = set()
-        for directive, absolute_path in selected:
-            source = source_root / absolute_path.lstrip("/")
-            paths: list[str]
-            if directive == "path":
-                paths = [absolute_path]
-            else:
-                if not source.is_dir() or source.is_symlink():
-                    die(f"approved bootstrap tree is absent or not a real directory: {absolute_path}")
-                paths = []
-                for directory, directory_names, file_names in os.walk(source, followlinks=False):
-                    directory_names.sort()
-                    file_names.sort()
-                    relative_directory = Path(directory).relative_to(source_root)
-                    for name in file_names:
-                        paths.append("/" + (relative_directory / name).as_posix())
-                    # os.walk puts symlinked directories in directory_names; copy the
-                    # links themselves and do not descend through them.
-                    for name in list(directory_names):
-                        candidate = Path(directory) / name
-                        if candidate.is_symlink():
-                            paths.append("/" + (relative_directory / name).as_posix())
-                            directory_names.remove(name)
-            for path in paths:
-                self._validated_bootstrap_path(path)
-                if path in copied:
-                    die(f"duplicate bootstrap manifest input: {path}")
-                copy_one(path)
-                copied.add(path)
-
+    def write_package_receipt(self) -> None:
+        seed = shlex.split(self.config["SAPHIRA_BUILD_SEED"])
+        if not seed:
+            die("configured Saphira build seed is empty")
+        try:
+            text = (self.root / "lib/apk/db/installed").read_text(encoding="utf-8")
+        except OSError as exc:
+            die(f"cannot read installed package database in clean root: {exc}")
+        installed: dict[str, dict[str, str]] = {}
+        current: dict[str, str] = {}
+        for line in text.splitlines():
+            if line.startswith("P:"):
+                if "name" in current and "version" in current:
+                    installed[current["name"]] = current
+                current = {"name": line[2:]} if line[2:] else {}
+            elif line.startswith("V:") and "name" in current:
+                current["version"] = line[2:]
+            elif line.startswith("A:") and "name" in current:
+                current["arch"] = line[2:]
+        if "name" in current and "version" in current:
+            installed[current["name"]] = current
+        resolved = []
+        for name in seed:
+            entry = installed.get(name)
+            if entry is None:
+                die(f"seed package missing from clean root database: {name}")
+            resolved.append(entry)
         receipt = {
-            "schema": "saphira-bootstrap-seed/v1",
-            "generation": "Saphira-v0.1-to-v0.2",
-            "manifest": str(manifest),
-            "manifest_sha256": sha256_file(manifest),
-            "entries": sorted(entries, key=lambda item: str(item["path"])),
+            "schema": "saphira-package-seed/v1",
+            "generation": "Saphira-v0.2-package-seed",
+            "seed": seed,
+            "resolved": sorted(resolved, key=lambda item: item["name"]),
         }
-        with self.bootstrap_receipt.open("x", encoding="utf-8") as stream:
+        with self.package_receipt.open("x", encoding="utf-8") as stream:
             json.dump(receipt, stream, sort_keys=True, separators=(",", ":"))
             stream.write("\n")
         self.log(
-            f"BOOTSTRAP seeded {len(entries)} explicit Saphira v0.1 ABI/runtime inputs "
-            f"from manifest {receipt['manifest_sha256']}"
+            f"SEED installed {len(resolved)} repository packages into clean root"
         )
 
     def seed_root_packages(self) -> None:
@@ -962,7 +887,7 @@ class Transaction:
             "schema": "saphira-build-artifacts/v1",
             "target": self.target,
             "constructors": receipts,
-            "bootstrap_seed": json.loads(self.bootstrap_receipt.read_text(encoding="utf-8")),
+            "package_seed": json.loads(self.package_receipt.read_text(encoding="utf-8")),
         }
         with self.artifact_manifest.open("x", encoding="utf-8") as stream:
             json.dump(aggregate, stream, sort_keys=True, separators=(",", ":"))
@@ -1000,7 +925,7 @@ class Transaction:
             shutil.copy2(package, destination)
             manifest_lines.append(f"{sha256_file(destination)}  {package.name}")
         shutil.copy2(self.artifact_manifest, building / "artifact-manifest.json")
-        shutil.copy2(self.bootstrap_receipt, building / "bootstrap-seed.json")
+        shutil.copy2(self.package_receipt, building / "package-seed.json")
         (building / "target").write_text(self.target + "\n", encoding="utf-8")
         (building / "manifest.sha256").write_text("\n".join(manifest_lines) + "\n", encoding="utf-8")
         os.replace(building, ready)
@@ -1008,6 +933,14 @@ class Transaction:
         return ready
 
     def fail(self, message: str) -> None:
+        # Release the overlay holder first: the workspace (logs, plan,
+        # upper/work, holder record, recovery notes) is retained for
+        # diagnosis, but a retained FAILED marker must never pin a sleeping
+        # holder process and its private overlay mount. The holder script's
+        # workspace-existence loop remains only as a backstop for abnormal
+        # controller death; retry (prepare) and cleanpkg also terminate any
+        # recorded holder they find.
+        self.stop_overlay()
         if self.incoming_building and self.incoming_building.exists():
             shutil.rmtree(self.incoming_building)
         if self.log_stream and not self.log_stream.closed:
@@ -1016,9 +949,8 @@ class Transaction:
         if self.workspace.is_dir():
             (self.workspace / "FAILED").write_text(FAILED_MARKER, encoding="utf-8")
             # Failed workspaces stay diagnosable: the upper layer, workdir,
-            # logs, plan and the holder-recorded merged root are all retained.
-            # The holder (if alive) keeps the overlay mounted for inspection
-            # and self-terminates when the workspace is removed.
+            # logs, plan and holder record are all retained; re-mount the
+            # merged view for inspection per OVERLAY-RECOVER.txt.
             self._write_overlay_recover()
 
     def succeed(self) -> None:
@@ -1031,13 +963,12 @@ class Transaction:
 class BaseRoot:
     """The one canonical immutable build root backing every overlay workspace.
 
-    The base is created by reusing the exact per-workspace root-generation
-    logic (bootstrap manifest seeding + repository seed install) through a
+    The base is created by installing the repository package seed through a
     seeder Transaction pointed at visible staging, then swapped in. Its
-    identity is pinned by a fingerprint over the bootstrap manifest content,
-    the build seed, the bootstrap source root and the architecture, recorded
-    in a visible state file; buildpkg rebuilds the base when the fingerprint
-    no longer matches (or SAPHIRA_BASE_REBUILD=1 forces it)."""
+    identity is pinned by a fingerprint over the build seed and the
+    architecture, recorded in a visible state file; buildpkg rebuilds the
+    base when the fingerprint no longer matches (or SAPHIRA_BASE_REBUILD=1
+    forces it)."""
 
     schema = BASE_SCHEMA
     state_schema = BASE_STATE_SCHEMA
@@ -1050,21 +981,18 @@ class BaseRoot:
         self.staging = self.overlay_root / "base.new"
         self.state_dir = self.overlay_root / "state"
         self.state_path = self.state_dir / "base.json"
-        self.receipt_path = self.state_dir / "bootstrap-seed.json"
+        self.receipt_path = self.state_dir / "package-seed.json"
         self.seed_log = self.state_dir / "base-seed.log"
 
-    def fingerprint(self) -> tuple[str, str]:
-        manifest = Path(self.config["SAPHIRA_BOOTSTRAP_MANIFEST"])
-        manifest_sha = sha256_file(manifest)
+    def fingerprint(self) -> str:
         digest = hashlib.sha256()
         for part in (
             self.schema, self.config["SAPHIRA_ARCH"],
-            self.config["SAPHIRA_BUILD_SEED"], self.config["SAPHIRA_BOOTSTRAP_ROOT"],
-            manifest_sha,
+            self.config["SAPHIRA_BUILD_SEED"],
         ):
             digest.update(part.encode("utf-8"))
             digest.update(b"\0")
-        return digest.hexdigest(), manifest_sha
+        return digest.hexdigest()
 
     def intact(self) -> bool:
         shell = self.base / "bin/sh"
@@ -1080,7 +1008,7 @@ class BaseRoot:
     def ensure(self) -> None:
         self.overlay_root.mkdir(parents=True, exist_ok=True)
         self.state_dir.mkdir(parents=True, exist_ok=True)
-        fingerprint, manifest_sha = self.fingerprint()
+        fingerprint = self.fingerprint()
         with (self.state_dir / "base.lock").open("a+b") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             state = None
@@ -1099,20 +1027,23 @@ class BaseRoot:
                 print("buildpkg: SAPHIRA_BASE_REBUILD=1 forces a canonical base root rebuild", file=sys.stderr)
                 fresh = False
             if not fresh:
-                self._rebuild(fingerprint, manifest_sha)
+                self._rebuild(fingerprint)
             self._retire_stale_bases()
 
-    def _rebuild(self, fingerprint: str, manifest_sha: str) -> None:
+    def _rebuild(self, fingerprint: str) -> None:
         if self.staging.exists() or self.staging.is_symlink():
             shutil.rmtree(self.staging)
+        # Previously created implicitly by the foundation file copy;
+        # package seeding binds this directory into bwrap up front.
+        self.staging.mkdir(parents=True)
         seeder = Transaction(self.config, "rootfs-overlay-base", None, root=self.staging)
-        seeder.bootstrap_receipt = self.receipt_path
+        seeder.package_receipt = self.receipt_path
         if self.receipt_path.exists():
             self.receipt_path.unlink()
         seeder.log_stream = self.seed_log.open("a", encoding="utf-8")
         try:
-            seeder.seed_foundation()
             seeder.seed_root_packages()
+            seeder.write_package_receipt()
         finally:
             seeder.log_stream.close()
         if self.base.exists() or self.base.is_symlink():
@@ -1124,8 +1055,6 @@ class BaseRoot:
             "created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "arch": self.config["SAPHIRA_ARCH"],
             "seed": self.config["SAPHIRA_BUILD_SEED"],
-            "manifest": self.config["SAPHIRA_BOOTSTRAP_MANIFEST"],
-            "manifest_sha256": manifest_sha,
         }
         if self.state_path.exists():
             self.state_path.unlink()

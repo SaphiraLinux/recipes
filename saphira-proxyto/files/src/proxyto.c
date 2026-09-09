@@ -1169,8 +1169,20 @@ static void handle_client(int client_fd, struct config *cfg) {
     _exit(0);
 }
 
-static volatile sig_atomic_t do_reap=0;
-static void sigchld(int sig) { (void)sig; do_reap=1; }
+/* Reap exited children immediately inside the SIGCHLD handler.
+ * waitpid() is async-signal-safe, so this is safe, and errno is
+ * preserved for the interrupted code. Reaping here (rather than via
+ * a flag checked at the top of the accept loop) matters because
+ * SIGCHLD is installed with SA_RESTART: accept() is not interrupted,
+ * so a deferred reap would leave each most recently exited child as
+ * a zombie until the next connection arrives - an idle daemon must
+ * not retain zombies. */
+static void sigchld(int sig) {
+    int saved_errno = errno;
+    (void)sig;
+    while (waitpid(-1, NULL, WNOHANG) > 0) {}
+    errno = saved_errno;
+}
 
 /* Privilege drop: the daemon starts as root only to bind privileged
  * ports. After the listening socket exists, permanently become the
@@ -1358,12 +1370,9 @@ int main(int argc, char *argv[]) {
     signal(SIGINT, SIG_DFL);
     signal(SIGTERM, SIG_DFL);
 
-    // accept loop
+    // accept loop (exited children are reaped in the SIGCHLD
+    // handler itself, so no reap bookkeeping is needed here)
     for (;;) {
-        if (do_reap) {
-            while (waitpid(-1,NULL,WNOHANG)>0) {}
-            do_reap=0;
-        }
         struct sockaddr_storage cli;
         socklen_t clilen=sizeof(cli);
         int cfd = accept(listen_fd, (struct sockaddr*)&cli, &clilen);

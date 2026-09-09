@@ -1,0 +1,8 @@
+# valkey runtime identity (canonical, fixed): user valkey UID 116,
+# primary group valkey GID 116. Required by the shipped service units
+# (valkey.service User=valkey, valkey.initd command_user valkey:valkey).
+# UID 116 sits in the preferred 0..199 packaged range - never reuse it
+# for another identity. Data-directory mode 0750 mirrors recipe staging.
+user valkey 116 valkey /var/lib/valkey /sbin/nologin
+group valkey 116
+dir /var/lib/valkey 0750 valkey valkey

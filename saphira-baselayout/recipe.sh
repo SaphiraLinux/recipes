@@ -2,7 +2,7 @@
 
 pkgname=saphira-baselayout
 pkgver=0.1
-pkgrel=6
+pkgrel=11
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="Saphira filesystem skeleton and platform tools (init-system neutral)"
 license="BUSL-1.1"
@@ -18,6 +18,8 @@ makedepends=""
 # r5: accounts.tsv gained the proxyto:proxyto 19 reservation after r4
 # was cut (hatchling's r4 predates it, so promote-repo would publish
 # stale bytes under a live NVR - payload changed, revision bumps).
+# r10: ships usr/libexec/saphira/ensure-identity.sh, the additive live
+# account reconciler called from makepkg-generated package scripts.
 # r0 of the saphira-baselayout name (continues akadata-baselayout r1):
 # r0: akadata-baselayout renamed to saphira-baselayout (Genesis rebrand).
 # Payload paths and env prefixes migrated (sbin/saphira-firstboot,
@@ -68,10 +70,18 @@ recipe_install()
 	install -m 0755 "$RECIPE_DIR/files/nologin" "$PKGDEST/sbin/nologin"
 	install -m 0755 "$RECIPE_DIR/files/libexec/apply-accounts.sh" \
 		"$PKGDEST/usr/libexec/saphira/apply-accounts.sh"
+	install -m 0755 "$RECIPE_DIR/files/libexec/ensure-identity.sh" \
+		"$PKGDEST/usr/libexec/saphira/ensure-identity.sh"
 	install -m 0755 "$RECIPE_DIR/files/libexec/apply-network.sh" \
 		"$PKGDEST/usr/libexec/saphira/apply-network.sh"
 	install -m 0644 "$RECIPE_DIR/files/accounts.tsv" \
 		"$PKGDEST/usr/share/saphira/accounts.tsv"
+	# Seeds consumed by apply-accounts.sh when the historical
+	# stage4 source tree is absent (installer targets).
+	install -m 0644 "$RECIPE_DIR/files/root.profile" \
+		"$PKGDEST/usr/share/saphira/root.profile"
+	install -m 0644 "$RECIPE_DIR/files/00-loopback.conf" \
+		"$PKGDEST/usr/share/saphira/00-loopback.conf"
 	install -m 0755 "$RECIPE_DIR/files/libexec/configure-stage4-grub" \
 		"$PKGDEST/usr/libexec/saphira/configure-stage4-grub"
 	install -D -m 0644 "$RECIPE_DIR/files/LICENSE" \

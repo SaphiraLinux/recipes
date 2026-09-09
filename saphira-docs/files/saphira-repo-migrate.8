@@ -1,0 +1,70 @@
+.TH SAPHIRA-REPO-MIGRATE 8 "September 2026" "Saphira Linux" "System Administration"
+.SH NAME
+saphira-repo-migrate \- explicit legacy JSON to SQLite migration
+.SH SYNOPSIS
+.B saphira-repo-migrate
+.I REPO
+.br
+.B saphira-repo-migrate --reconcile
+.RB [ --from-history ]
+.I REPO
+.SH DESCRIPTION
+.B saphira-repo-migrate
+builds a generation repository's
+.I repository.db
+once, explicitly: full APK census, carrier payload declarations,
+cross-validation against
+.I ownership.json
+(owners map must match exactly), a full union collision check, then
+atomic install plus a
+.I migration.json
+manifest. The JSON files are frozen read-only as evidence and never
+consulted again; a missing
+.I accounts.json
+is recorded, never manufactured (its one historical exception is
+.BR saphira-accounts-bootstrap (8)).
+.B --reconcile
+rebuilds current tables and verifies the eternal ledger (legitimate
+drops tombstone loudly; tombstones are never deleted; unknown
+history fails closed).
+.B --from-history
+re-derives tombstones, but only where complete append-only history
+exists; on a current-view repository it refuses and points at the
+archive. Bare signing never migrates anything silently. Must be run
+as root; use sudo explicitly.
+.SH OPTIONS
+.TP
+.B --reconcile
+Rebuild and verify instead of fresh-migrating.
+.TP
+.B --from-history
+Re-derive tombstones (append-only history only).
+.SH FILES
+.TP
+.I /out/stage4/packages/<generation>/$ARCH/repository.db
+Created (migrate) or rebuilt (reconcile).
+.TP
+.I /out/stage4/packages/<generation>/$ARCH/migration.json
+Migration manifest and input hashes.
+.SH EXIT STATUS
+.TP
+.B 0
+Migrated or reconciled.
+.TP
+.B 1
+Refusal (already migrated, missing inputs, failed validation, held
+lock) or not root.
+.SH EXAMPLES
+.PP
+.RS
+sudo saphira-repo-migrate hatchling
+.br
+sudo saphira-repo-migrate --reconcile hatched
+.RE
+.SH SEE ALSO
+.BR saphira (7),
+.BR sign-apk-repo (8),
+.BR saphira-repo-state (8),
+.BR saphira-accounts-bootstrap (8),
+.BR ensure-identity (8),
+.BR saphira-build (8)

@@ -1,0 +1,64 @@
+.TH BUMPPKG 1 "September 2026" "Saphira Linux" "User Commands"
+.SH NAME
+bumppkg \- pkgrel and version bump workflow with guards
+.SH SYNOPSIS
+.B bumppkg status
+.RI [ all | PKG ...]
+.br
+.B bumppkg history
+.RI [ PKG ]
+.br
+.B bumppkg
+.RB [ bump ] " " PKG ...
+.br
+.B bumppkg all
+.br
+.B bumppkg set all max
+.SH DESCRIPTION
+.B bumppkg
+bumps packaging revisions with deliberate friction. Never-published
+packages are refused (bumping before first publish is churn; the
+first publish claims the filename). A package bumped within the last
+24 hours is refused (anti-loop; use
+.IR --force ).
+.B all
+and
+.B set all max
+print the world-rebuild consequence (a full rebuild, easily days)
+and require typing yes. Disabled recipes are never touched. Every
+change lands in the release ledger shared with
+.IR saphira-build " " rel-status .
+.SH OPTIONS
+.TP
+.B --dry-run
+Show, do not write.
+.TP
+.B --force
+Bypass anti-loop and never-published guards.
+.TP
+.B --yes
+Non-interactive confirmation.
+.SH FILES
+.TP
+.I $SAPHIRA_RELEASE_STATE/releases.jsonl
+Append-only release ledger.
+.SH EXIT STATUS
+.TP
+.B 0
+Bumped (or clean status/history output).
+.TP
+.B 1
+Guard refusal, invalid name, or user declined.
+.SH EXAMPLES
+.PP
+.RS
+bumppkg status nginx
+.br
+bumppkg --dry-run nginx
+.RE
+.SH SEE ALSO
+.BR recipe (5),
+.BR saphira (7),
+.BR buildpkg (1),
+.BR resolvepkg (1),
+.BR saphira-build (8)

@@ -1,0 +1,96 @@
+.TH SAPHIRA-PROFILES 5 "September 2026" "Saphira Linux" "File Formats"
+.SH NAME
+saphira-profiles \- install profile format for saphira-bootstrap
+.SH DESCRIPTION
+An install profile declares
+.B top-level package intentions
+for one kind of Saphira system. Profiles are consumed by
+.BR saphira-bootstrap (8),
+which installs them with the package manager into an empty target
+directory. Image creation
+.RB ( saphira-image )
+and disk installation
+.RB ( saphira-install )
+assemble their root filesystems from the same profiles through the
+same code path, so a profile that builds a working image always
+installs a working system.
+.SS Format
+One entry per line. Blank lines and lines starting with
+.B #
+are ignored. Any other line is either a package name or a profile
+include:
+.TP
+.I package
+A package name to install: letters, digits, dot, underscore, plus
+and hyphen only.
+.TP
+.IB @ name
+Include the profile called
+.IR name :
+its entries are expanded in place, recursively, with reference-cycle
+detection. The historical
+.IB @akadata-stage4- name
+spelling includes the profile called
+.IR name .
+.PP
+Duplicate packages across includes are installed once.
+.SS The profile invariant
+A profile lists
+.B only
+explicit intentions. It must never enumerate resolved dependencies:
+dependency closure belongs to APK metadata
+.RB ( depends ),
+not to the image definition. A profile that duplicates the package
+database rots the moment any dependency changes; a profile of
+intentions stays correct because the resolver re-proves it on every
+install. Validate a profile by resolving it against the repository
+index and proving every transitive dependency is satisfiable \-
+before touching image assembly.
+.SH PROFILES
+.TP
+.B base
+Minimal bootable skeleton: ABI marker, layout, shell and core tools.
+.TP
+.B network
+Base plus network diagnostics and firewalling.
+.TP
+.B server
+Network plus the hosted-service stack.
+.TP
+.B build
+Server plus compilers and packaging tools.
+.TP
+.B virtualisation-host
+First image-architecture profile: a boring x86-64 systemd
+virtualisation host.
+.RS
+.PP
+.nf
+saphira-base
+saphira-kernel
+systemd
+saphira-virtualisation
+saphira-network-host
+openssh
+.fi
+.PP
+.BR saphira-base ,
+.BR saphira-virtualisation
+and
+.B saphira-network-host
+are metapackages: they carry no payload and exist only to give a
+name, owned by APK metadata, to each dependency stack. The kernel
+and the init system are named here on purpose \-
+.B saphira-base
+stays kernel-agnostic and init-neutral so later profiles (for
+example an OpenRC image) can reuse it unchanged.
+.RE
+.SH FILES
+.TP
+.I /usr/share/saphira/profiles/
+Profile directory read by
+.BR saphira-bootstrap (8)
+(overridable with
+.BR SAPHIRA_PROFILE_ROOT ).
+.SH SEE ALSO
+.BR saphira-bootstrap (8)

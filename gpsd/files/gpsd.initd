@@ -1,0 +1,20 @@
+#!/sbin/openrc-run
+
+description="GPS daemon (gpsd)"
+
+# gpsd opens its devices as root and then drops to nobody by itself, so
+# the service runs rootless in effect but starts privileged. Foreground
+# (-N) under supervise-daemon; $OPTIONS/$DEVICES come from
+# /etc/conf.d/gpsd (same names gpsd.hotplug honors). Default device is
+# the /dev/gps0 symlink installed by 25-gpsd.rules. Neither init wraps
+# the other; nothing is auto-enabled at install.
+command="/usr/sbin/gpsd"
+command_args="-N -n $OPTIONS $DEVICES"
+supervisor="supervise-daemon"
+
+depend()
+{
+	use net
+	need localmount
+	after udev
+}

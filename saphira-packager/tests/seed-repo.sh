@@ -22,6 +22,25 @@ mkdir -p "$test_root/repository/hatchling/x86_64" "$incoming" "$artifacts" "$key
 openssl genrsa -traditional -out "$test_root/test-repository.rsa" 2048 >/dev/null 2>&1
 openssl rsa -in "$test_root/test-repository.rsa" -pubout -out "$keys/test-repository.rsa.pub" >/dev/null 2>&1
 
+# SQLite era: the source archive needs its repository.db before the
+# signer runs (test genesis, mirroring what seed-repo does in
+# production for the repositories it births). Seeded generations get
+# theirs from seed-repo itself.
+init_repo_db()
+{
+	python3 - "$source_root/saphira-packager/files/repo_db.py" "$1" "$2" <<'PY'
+import os
+import sys
+sys.path.insert(0, os.path.dirname(sys.argv[1]))
+import repo_db
+conn = repo_db.connect(os.path.join(sys.argv[2], "repository.db"))
+repo_db.init_db(conn, sys.argv[3], True)
+conn.commit()
+conn.close()
+PY
+}
+init_repo_db "$test_root/repository/hatchling/x86_64" hatchling
+
 build_and_stage()
 {
 	package=$1
@@ -39,8 +58,8 @@ build_and_stage()
 	mkdir "$ready"
 	cp "$artifacts/x86_64/$package-$version.apk" "$ready/"
 	printf '%s\n' "$producer" > "$ready/target"
-	printf '%s\n' '{"schema":"saphira-bootstrap-seed/v1","generation":"test","manifest":"test","manifest_sha256":"test","entries":[]}' > "$ready/bootstrap-seed.json"
-	printf '%s\n' "{\"schema\":\"saphira-build-artifacts/v1\",\"target\":\"$producer\",\"constructors\":[{\"constructor\":\"makepkg\",\"producer\":\"$producer\"}],\"bootstrap_seed\":{\"schema\":\"saphira-bootstrap-seed/v1\",\"generation\":\"test\",\"manifest\":\"test\",\"manifest_sha256\":\"test\",\"entries\":[]}}" > "$ready/artifact-manifest.json"
+	printf '%s\n' '{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}' > "$ready/package-seed.json"
+	printf '%s\n' "{\"schema\":\"saphira-build-artifacts/v1\",\"target\":\"$producer\",\"constructors\":[{\"constructor\":\"makepkg\",\"producer\":\"$producer\"}],\"package_seed\":{\"schema\":\"saphira-package-seed/v1\",\"generation\":\"test\",\"seed\":[\"test\"],\"resolved\":[]}}" > "$ready/artifact-manifest.json"
 	(CDPATH= cd -- "$ready" && sha256sum "$package-$version.apk" > manifest.sha256)
 }
 
@@ -82,6 +101,7 @@ test -f "$hatched/make-9-r1.apk"
 test -f "$hatched/Packages.adb"
 test -f "$hatched/APKINDEX.tar.gz"
 test -f "$hatched/genesis.json"
+test -f "$hatched/repository.db"
 test ! -e "$hatched/make-9-r0.apk"
 test ! -e "$hatched/bash-5.3-r1.apk"
 apk verify --keys-dir "$keys" "$hatched/make-9-r1.apk"

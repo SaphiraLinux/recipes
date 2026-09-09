@@ -2,7 +2,7 @@
 
 pkgname=geomyidae
 pkgver=0.99
-pkgrel=2
+pkgrel=3
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='Geomyidae: small C-based RFC 1436 Gopher server'
 license='MIT'
@@ -77,4 +77,10 @@ recipe_install()
 		"$PKGDEST/etc/init.d/geomyidae"
 	install -Dm0644 "$RECIPE_DIR/files/geomyidae.service" \
 		"$PKGDEST/usr/lib/systemd/system/geomyidae.service"
+	# Runtime identity declaration: gopher:123 required by the service
+	# account. makepkg generates the install scripts from this
+	# fragment; the package creates its identity at install time.
+	# r3: fragment added (payload change, revision bumps).
+	install -D -m 0644 "$RECIPE_DIR/files/accounts.d/geomyidae" \
+		"$PKGDEST/usr/share/saphira/accounts.d/geomyidae"
 }

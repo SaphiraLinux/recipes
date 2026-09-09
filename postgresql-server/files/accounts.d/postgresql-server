@@ -1,0 +1,9 @@
+# postgres runtime identity (canonical, fixed): user postgres
+# UID 122, primary group postgres GID 122. Required by the shipped
+# service units (postgresql.service User=postgres, postgresql.initd
+# command_user postgres:postgres). UID 122 sits in the preferred
+# 0..199 packaged range - never reuse it for another identity.
+# Data-directory mode 0700 mirrors recipe staging and the base seed.
+user postgres 122 postgres /var/lib/postgresql /sbin/nologin
+group postgres 122
+dir /var/lib/postgresql 0700 postgres postgres

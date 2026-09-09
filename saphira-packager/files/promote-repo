@@ -37,6 +37,13 @@ else
 	exit 1
 fi
 
+# Shared repository metadata library (SQLite). Same resolution rule as
+# repo-index.sh. promote-repo is a sanctioned repository writer: same
+# repository.db.lock, same repo_db library, same transaction rules.
+repo_db_lib=$lib_dir/repo_db.py
+[ -f "$repo_db_lib" ] || repo_db_lib=/usr/lib/saphira-packager/repo_db.py
+[ -f "$repo_db_lib" ] || die "repository metadata library repo_db.py not found"
+
 die()
 {
 	printf 'promote-repo: %s\n' "$*" >&2
@@ -79,9 +86,11 @@ normalize_ownership()
 
 promoted=0
 already=0
+promoted_nvrs=()
+db_lock_held=""
 chmod g+rws -- "$to_dir" 2>/dev/null || true
 workspace=$(mktemp -d "${TMPDIR:-/tmp}/promote-repo.XXXXXX")
-trap 'rm -rf -- "$workspace"' EXIT HUP INT TERM
+trap 'if [ -n "$db_lock_held" ]; then rmdir -- "$db_lock_held/repository.db.lock" 2>/dev/null || true; fi; rm -rf -- "$workspace"' EXIT HUP INT TERM
 
 for nvr in "$@"; do
 	printf '%s' "$nvr" | grep -Eq "$NVR_RE" || die "invalid NVR (expected name-version-rN): $nvr"
@@ -107,6 +116,7 @@ for nvr in "$@"; do
 	mv -- "$temporary" "$dest_apk"
 	normalize_ownership "$dest_apk"
 	promoted=$((promoted + 1))
+	promoted_nvrs+=("$nvr")
 	printf 'promote-repo: promoted %s: %s -> %s\n' "$nvr" "$from" "$to"
 	printf '{"ts":"%s","action":"promoted","from":"%s","to":"%s","nvr":"%s","sha256":"%s"}\n' \
 		"$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$from" "$to" "$nvr" "$(sha256sum "$dest_apk" | cut -d' ' -f1)" \
@@ -123,6 +133,68 @@ if [ "$promoted" -gt 0 ]; then
 		|| die "destination index regeneration failed for $to"
 	repo_install_index "$to_dir" "$adb" "$tar"
 	normalize_ownership "$to_dir/Packages.adb" "$to_dir/APKINDEX.tar.gz"
+	# The destination ledger travels with the promotion: same writer
+	# lock, same library, same apply semantics as sign-apk-repo (newest
+	# recompute, tombstone advances, loud notices). No database yet
+	# means explicit migration is still pending — say so, never invent.
+	if [ -f "$to_dir/repository.db" ]; then
+		if ! mkdir "$to_dir/repository.db.lock" 2>/dev/null; then
+			die "repository writer lock already held: $to_dir/repository.db.lock"
+		fi
+		db_lock_held=$to_dir
+		"$SAPHIRA_PYTHON" - "$repo_db_lib" "$SAPHIRA_APK" "$to_dir" \
+			"${promoted_nvrs[@]}" <<'PY' || die "repository.db promotion sync failed for $to (see above)"
+import os
+import sys
+import tempfile
+
+(lib_path, apk, to_dir, *nvrs) = sys.argv[1:]
+sys.path.insert(0, os.path.dirname(lib_path))
+import repo_db as rdb
+
+db_file = os.path.join(to_dir, "repository.db")
+try:
+    conn = rdb.connect(db_file)
+    rdb.check_schema(conn)
+except rdb.RepoDbError as exc:
+    print(f"promote-repo: {exc}", file=sys.stderr)
+    raise SystemExit(2)
+staged = {}
+carriers = []
+for nvr in nvrs:
+    dumped = rdb.dump_package(apk, os.path.join(to_dir, nvr + ".apk"))
+    filename = nvr + ".apk"
+    staged[filename] = {"name": dumped["name"], "version": dumped["version"],
+                        "files": sorted(dumped["files"]),
+                        "replaces": sorted(dumped["replaces"]), "accounts": None}
+    if any(f.startswith(rdb.FRAGMENT_PREFIX) for f in dumped["files"]):
+        carriers.append(filename)
+with tempfile.TemporaryDirectory(prefix="promote-repo-extract-") as tmp:
+    decls = rdb.extract_declarations(apk, to_dir, carriers, tmp)
+for filename, item in staged.items():
+    item["accounts"] = decls.get(filename, {"users": [], "groups": [], "dirs": []})
+notices = []
+conn.execute("BEGIN IMMEDIATE")
+try:
+    rdb.apply_staged(conn, apk, to_dir, staged, rdb.utcnow(), notices)
+    rdb.set_meta(conn, "last_audit", rdb.utcnow())
+    conn.commit()
+except rdb.RepoDbError as exc:
+    conn.rollback()
+    print(f"promote-repo: promotion transaction failed: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+for notice in notices:
+    print(f"promote-repo: notice: {notice}")
+print(f"promote-repo: repository.db transaction committed:"
+      f" {len(staged)} promoted package(s) applied")
+PY
+		normalize_ownership "$to_dir/repository.db"
+		rmdir -- "$to_dir/repository.db.lock" 2>/dev/null || true
+		db_lock_held=""
+	else
+		printf 'promote-repo: notice: no repository.db in %s (run saphira-repo-migrate %s)\n' \
+			"$to" "$to"
+	fi
 fi
 
 printf 'promote-repo: complete: %s promoted, %s already present (%s -> %s)\n' \

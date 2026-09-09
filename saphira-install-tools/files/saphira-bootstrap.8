@@ -1,0 +1,144 @@
+.TH SAPHIRA-BOOTSTRAP 8 "September 2026" "Saphira Linux" "System Administration"
+.SH NAME
+saphira-bootstrap \- install a Saphira profile into an empty directory
+.SH SYNOPSIS
+.B saphira-bootstrap
+.RB [ \-r
+.IR REPOSITORY ]
+.I TARGET
+.RI [ PROFILE ]
+.SH DESCRIPTION
+.B saphira-bootstrap
+assembles a Saphira root filesystem by installing an install
+.IR profile (5)
+into
+.IR TARGET .
+It copies the host repository keys, writes the repository
+configuration, and runs
+.B apk --root
+.I TARGET
+.B --initdb add
+with the profile's package list.
+.PP
+.I TARGET
+must be an existing, empty directory (a
+.I lost+found
+entry is tolerated for fresh filesystems).
+.B saphira-bootstrap
+requires root privileges: it creates device nodes' mount points and
+must own the resulting tree.
+.PP
+.I PROFILE
+defaults to
+.BR base .
+Any profile file present under the profile root is accepted; names
+are restricted to letters, digits, dot, underscore, plus and hyphen
+so a profile name can never escape the profile directory.
+Profile references are expanded recursively with cycle detection,
+and duplicate packages are installed once.
+.SH OPTIONS
+.TP
+.BR \-r ", " \-\-repository =\fIREPOSITORY
+Use
+.I REPOSITORY
+as the APK repository for the target instead of copying
+.IR /etc/apk/repositories .
+.TP
+.I TARGET
+Empty directory that receives the new system. Aborts unless
+.I TARGET/bin/sh
+is executable and
+.I TARGET/usr/lib/libc.so
+exists after installation. The installer itself provides the root
+shell convention
+.RI ( /bin/sh
+as a link to
+.BR bash ,
+and
+.I /usr/bin/env
+as a link to
+.IR /bin/env ),
+mirroring the package builder's root initialization; no package owns
+those links.
+.TP
+.I PROFILE
+Profile name as described in
+.BR saphira-profiles (5).
+.SH ENVIRONMENT
+.TP
+.B SAPHIRA_REPOSITORY
+Same effect as
+.BR \-r .
+.TP
+.B SAPHIRA_PROFILE_ROOT
+Directory holding profile files (default
+.IR /usr/share/saphira/profiles ).
+.TP
+.B SAPHIRA_APK
+APK binary to invoke (default
+.BR apk ).
+.TP
+.B SAPHIRA_ID
+.BR id (1)
+binary used for the root check (default
+.BR id ).
+.TP
+.B SAPHIRA_BOOTSTRAP_PLAN
+When set to
+.BR 1 ,
+print the profile name, repository and the exact
+.B apk
+invocation that would run, then exit without touching
+.IR TARGET .
+No privileges are needed in plan mode.
+.SH EXIT STATUS
+.TP
+.B 0
+The profile installed and the sanity checks passed.
+.TP
+.B 1
+Any failure: not root, target missing or non-empty, unknown or
+invalid profile, profile cycle, no repository keys, APK error, or a
+target without a usable
+.IR /bin/sh .
+.TP
+.B 2
+Usage error.
+.SH EXAMPLES
+Print what
+.B virtualisation-host
+would install, without privilege:
+.PP
+.RS
+SAPHIRA_PROFILE_ROOT=./profiles SAPHIRA_BOOTSTRAP_PLAN=1 \\
+    saphira-bootstrap /tmp/rootfs virtualisation-host
+.RE
+.PP
+Install the base profile from the live repositories:
+.PP
+.RS
+sudo saphira-bootstrap /mnt/saphira
+.RE
+.PP
+Install the virtualisation host from a pinned repository:
+.PP
+.RS
+sudo saphira-bootstrap \-r /out/stage4/packages/hatched/x86_64 \\
+    /mnt/saphira virtualisation-host
+.RE
+.SH FILES
+.TP
+.I /usr/share/saphira/profiles/
+Profile definitions; see
+.BR saphira-profiles (5).
+.TP
+.I TARGET/etc/apk/repositories
+Repository configuration written into the new system.
+.TP
+.I TARGET/etc/apk/keys/
+Repository public keys copied from the host.
+.SH SEE ALSO
+.BR saphira-profiles (5),
+.BR saphira-chroot (8),
+.BR saphira-genfstab (8),
+.BR apk (8)

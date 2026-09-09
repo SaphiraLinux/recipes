@@ -19,7 +19,7 @@ makedepends="
 recipe_build()
 {
 	# No configure step: a single C source compiled directly against the
-	# generation-zero musl headers. Reads the credential files as they are.
+	# repository musl headers in the clean root. Reads the credential files as they are.
 	gcc ${CFLAGS-} -static -Os -s -o getent "$RECIPE_DIR/files/getent.c"
 }
 

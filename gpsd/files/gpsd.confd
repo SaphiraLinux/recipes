@@ -1,0 +1,16 @@
+# /etc/conf.d/gpsd - read by /etc/init.d/gpsd and by gpsd.hotplug.
+
+# Static devices for the init script, space separated. The udev rules
+# (25-gpsd.rules) symlink matched receivers to /dev/gpsN - e.g. the
+# u-blox 7 (1546:01a7) on the kernel cdc_acm driver - and hotplug
+# manages USB add/remove itself via gpsdctl; serial receivers that are
+# always present belong here.
+DEVICES="/dev/gps0"
+
+# Extra gpsd flags for launch, e.g. "-G" to listen on all interfaces
+# instead of localhost only, "-S 2947" to change the port.
+OPTIONS=""
+
+# Control socket location for gpsdctl and hotplug. Empty means the
+# compiled default (/run/gpsd.sock).
+CONTROL_SOCKET=""

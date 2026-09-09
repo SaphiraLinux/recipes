@@ -1,0 +1,51 @@
+.TH CLEANPKG 1 "September 2026" "Saphira Linux" "User Commands"
+.SH NAME
+cleanpkg \- clean retained failed build state
+.SH SYNOPSIS
+.B cleanpkg
+.IR PACKAGE ...
+.SH DESCRIPTION
+.B cleanpkg
+removes failed
+.IR /build/PACKAGE.buildpkg
+workspaces through the trusted lifecycle: the workspace must exist
+as a real directory inside the build root and carry the exact
+marker content
+.IR saphira-buildpkg-failed/v1 ;
+anything else (unmarked workspaces, non-directories, symlinks,
+paths outside the build root, wrong markers) is refused, never
+blessed or overwritten.
+.PP
+A retained overlay holder is terminated first, but only after its
+recorded pid is verified against the holder marker and its live
+cmdline still names this workspace: recycled or unrelated pids are
+never killed. Vanished pids are silent. The whole operation runs
+unprivileged; cleanpkg never escalates and must stay non-root.
+.SH OPTIONS
+This command takes no options beyond the package names.
+.SH FILES
+.TP
+.I /build/PACKAGE.buildpkg/FAILED
+The trusted failure marker gate.
+.TP
+.I /build/PACKAGE.buildpkg/overlay-holder.json
+Recorded holder identity for verified termination.
+.SH EXIT STATUS
+.TP
+.B 0
+Removed (or nothing to do for a missing workspace).
+.TP
+.B 1
+Refusal (unmarked, untrusted marker, outside root, invalid name) or
+a mount that will not release.
+.SH EXAMPLES
+.PP
+.RS
+cleanpkg nginx
+.RE
+.SH SEE ALSO
+.BR recipe (5),
+.BR saphira (7),
+.BR buildpkg (1),
+.BR resolvepkg (1),
+.BR saphira-build (8)

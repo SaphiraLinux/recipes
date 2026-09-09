@@ -1,0 +1,297 @@
+.TH RECIPE 5 "September 2026" "Saphira Linux" "File Formats"
+.SH NAME
+recipe \- Saphira native package recipe file format (canonical contract)
+.SH SYNOPSIS
+.RS
+.I /recipes/<package>/recipe.sh
+.br
+.I /recipes/<package>/files/
+.RE
+.PP
+This page is the authoritative specification for
+.IR recipe.sh .
+README and website material derive from it; where they disagree, this
+page wins. The practical answer to "how does a Saphira recipe work?"
+is
+.BR "man recipe" .
+.SH DESCRIPTION
+A recipe is a POSIX shell fragment plus a payload tree. The builder
+sources it (never executes it directly) to learn what to build, then
+calls two functions inside disposable rootless containers:
+.BR recipe_build ,
+which compiles in
+.IR $SRC ,
+and
+.BR recipe_install ,
+which stages into
+.IR $PKGDEST .
+Splitting, signing, indexing and publication are platform machinery,
+not recipe code.
+.SS Source precedence
+When creating or porting a recipe, use the first basis that exists:
+.IP 1. 3
+An existing current
+.I /recipes
+recipe.
+.IP 2. 3
+A known-working Saphira v0 recipe in
+.IR /reference-package-recipes ,
+read-only, never edited or built directly.
+.IP 3. 3
+.I /cports
+for upstream guidance (dependency hints, patches, options). It must
+not override Saphira filesystem, musl, init or packaging policy.
+.IP 4. 3
+Upstream project sources and documentation.
+.SS Variables
+.TP
+.I pkgname, pkgver, pkgarch, pkgdesc, license, origin, repo, url
+Identity and provenance. All required.
+.I repo=
+is validated but inert (a historical component label; placement is
+always the single flat per-arch repository), and its non-empty
+presence is enforced.
+.TP
+.I pkgrel
+Packaging revision, an integer >= 1. There are no r0 packages: the
+first publication of a package is r1. Bump it when a payload change
+must reach the repository (filenames are immutable); never as a bug
+counter. Fixes that have not yet proven themselves batch into the
+next rebuild.
+.TP
+.I source=, sha256=
+Upstream source URL pinned with its SHA-256, verified before use.
+.TP
+.I vendor=, sha256=
+Fallback for the same purpose when no direct upstream archive fits.
+A recipe whose payload comes from its own
+.I files/
+tree (local/meta/controller recipes) does not invent an upstream
+archive merely to satisfy this rule.
+.TP
+.I depends=
+Runtime dependencies, accepting version operators
+.RB ( = ,
+.IR >= ,
+etc.).
+.TP
+.I makedepends=
+Build-time dependencies, same operators. Only these (plus the seed)
+enter the clean build root.
+.TP
+.I depends_dev=
+Alpine-style convention: extra dependencies carried by the
+.I -dev
+subpackage, typically the
+.I -dev
+packages of libraries whose headers yours include (so consumers get
+transitive headers automatically).
+.TP
+.I subpackages=
+Split outputs; only
+.I -dev
+(headers, cmake/pkg-config metadata, static archives, .so links),
+.I -doc
+(man/info/doc) and
+.I -libs
+(standalone runtime libraries, never pinned back to the parent) are
+supported. A
+.I -dev
+or
+.I -doc
+name resolves to the base recipe.
+.TP
+.I disabled=yes, disabled_reason='...'
+The builder skips the recipe (scan reports and skips, build refuses,
+resolution fails closed if a dependency would resolve from it).
+.SH FUNCTIONS
+.TP
+.I recipe_build()
+Compile in
+.IR $SRC .
+Network fetches here must be pinned (see
+.IR source= )
+and checksummed; the build sees only its declared closure.
+.TP
+.I recipe_install()
+Stage into
+.IR $PKGDEST .
+Remove what belongs to other splits (server binaries from a client
+recipe, upstream unit files replaced by house units, glibc-locale
+leftovers such as charset.alias). Never invent payload outside the
+upstream install plus house files.
+.PP
+Worker variables provided to both functions:
+.IR PKGDEST " (staging root), " SRC " (extracted source), " BUILDDIR ,
+.IR RECIPE_DIR ,
+.IR JOBS .
+.SH FILES TREE
+.I files/
+holds everything the recipe stages that upstream does not install:
+service units (both systemd and OpenRC where the package is a
+service), configuration, tmpfiles entries, and
+.IR accounts.d/ fragments.
+.SS Account declarations
+A service package owns its Unix identities by shipping
+.IR usr/share/saphira/accounts.d/<name> ,
+one stanza per line:
+.PP
+.RS
+user <name> <uid> <primary-group> <home> <shell>
+.br
+group <name> <gid>
+.br
+dir <path> <mode> <owner> <group>
+.RE
+.PP
+Packaged IDs fall in 0..887 (0..199 preferred; 200..887 are documented
+expansion exceptions; 888..999 are local services, 1000+ humans).
+The user
+.I root
+and UID 0 are never package-owned; the groups
+.IR root ,
+.IR wheel ,
+.I spokes
+and GIDs 0, 1, 2 are never package-owned, and no service user may
+take them as primary. A user primary group must be base-seeded or
+declared in the same fragment. One package owns each identity; IDs
+are never recycled, even after the declaring package stops shipping
+its fragment. The builder generates install/upgrade/deinstall callers
+from the fragment; the reconciler (see
+.BR ensure-identity (8))
+creates, converges, or (on removal) sanitizes the identities.
+.SH BUILD ROOTS AND /build
+Each build resolves its dependency closure repository-first into one
+disposable merged root (one visible workspace per top-level build:
+.IR /build/PACKAGE.buildpkg ).
+The seed (C library, headers, toolchain runtimes as named packages)
+is the sole foundation; no host file ever crosses into a build root.
+No sudo or root anywhere in the build path.
+.PP
+Failed workspaces are retained diagnostic evidence carrying the
+marker
+.IR saphira-buildpkg-failed/v1 .
+Retry requires that exact marker; unmarked collisions are refused.
+Never delete, bless, or overwrite an unmarked workspace (see
+.BR cleanpkg (1)).
+.SH FHS POLICY
+.TP
+.I /bin ", " /sbin ", " /lib
+Essential user binaries, essential system binaries, essential
+runtime libraries plus the dynamic loader. This triple must remain a
+self-contained essential runtime without
+.IR /usr .
+.TP
+.I /usr/bin ", " /usr/sbin ", " /usr/lib
+General binaries, libraries, modules and development-side library
+material.
+.PP
+The dependency rule: a binary in
+.I /bin
+or
+.I /sbin
+MUST NOT require anything under
+.IR /usr/lib ;
+a binary in
+.I /usr/bin
+or
+.I /usr/sbin
+MAY use both
+.I /usr/lib
+and
+.IR /lib .
+A library used by both
+.I /bin/foo
+and
+.I /usr/bin/bar
+belongs in
+.IR /lib ,
+and
+.I bar
+linking it there is correct. Development material (headers under
+.IR /usr/include ,
+pkg-config/CMake metadata under
+.IR /usr/lib/... )
+lives under
+.IR /usr
+even where the essential runtime
+.I .so.N
+lives in
+.IR /lib ;
+never duplicate a runtime library into
+.I /usr/lib
+for visual symmetry.
+/lib64 and /usr/lib64 are forbidden in seeds and payloads.
+.SH EXAMPLES
+Minimal tool recipe:
+.PP
+.RS
+pkgname=hello
+.br
+pkgver=1.0
+.br
+pkgrel=1
+.br
+recipe_build() { make -j${JOBS:-$(nproc)} CC=gcc; }
+.br
+recipe_install() { make DESTDIR="$PKGDEST" PREFIX=/usr install; }
+.RE
+.PP
+Service recipe: add dual init units, configuration, and an
+.I accounts.d/
+fragment as above; the builder generates the lifecycle callers.
+.SH OPTIONS
+This page takes no options; it specifies a file format.
+.SH FILES
+.TP
+.I /recipes/<package>/recipe.sh
+The specified file.
+.TP
+.I /recipes/<package>/files/
+Payload tree (units, config, fragments, vendored sources).
+.TP
+.I /reference-package-recipes/
+Read-only known-working v0 catalogue (port basis, never built).
+.TP
+.I /cports/
+Read-only upstream guidance (never overrides Saphira policy).
+.SH EXIT STATUS
+A recipe is sourced, never executed. Validation failures surface
+through the exit codes of
+.BR buildpkg (1),
+.BR makepkg ,
+.BR resolvepkg (1)
+and
+.BR checkpkg (1).
+.SH "DO NOT DO THIS"
+.IP \(bu 2
+No sudo or root anywhere in the build path.
+.IP \(bu 2
+No host files into build roots (names in the seed, never paths).
+.IP \(bu 2
+No manual copies anywhere (payload, tools, indexes, keys).
+.IP \(bu 2
+No r0 packages, ever.
+.IP \(bu 2
+No invented upstream source for local/meta recipes.
+.IP \(bu 2
+No new daemons, units, or fragments without owning the identity.
+.IP \(bu 2
+No deleting, blessing, or overwriting unmarked workspaces.
+.IP \(bu 2
+No glibc-locale machinery (localedef, locale-archive) on musl.
+.IP \(bu 2
+No duplicate runtime libraries across /lib and /usr/lib.
+.IP \(bu 2
+No X, no extra editors: the system stays a disciplined
+system/network/server distribution.
+.SH SEE ALSO
+.BR saphira (7),
+.BR buildpkg (1),
+.BR resolvepkg (1),
+.BR checkpkg (1),
+.BR cleanpkg (1),
+.BR bumppkg (1),
+.BR installpkg (8),
+.BR sign-apk-repo (8),
+.BR ensure-identity (8)

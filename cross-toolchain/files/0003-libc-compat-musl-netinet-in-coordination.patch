@@ -1,0 +1,35 @@
+--- a/include/uapi/linux/libc-compat.h
++++ b/include/uapi/linux/libc-compat.h
+@@ -152,6 +152,32 @@
+ 
+ #else /* !defined(__GLIBC__) */
+ 
++/* Coordinate with musl's netinet/in.h header.  musl uses the same
++ * _NETINET_IN_H guard as glibc, so the same suppression list applies:
++ * when the libc header was included first, the kernel UAPI must not
++ * redefine the structures that the libc already provided.  Without
++ * this, packages that include both <netinet/in.h> and kernel headers
++ * (libnetfilter_conntrack and friends) fail to compile on musl. */
++#if defined(_NETINET_IN_H)
++
++#define __UAPI_DEF_IN_ADDR		0
++#define __UAPI_DEF_IN_IPPROTO		0
++#define __UAPI_DEF_IN_PKTINFO		0
++#define __UAPI_DEF_IP_MREQ		0
++#define __UAPI_DEF_SOCKADDR_IN		0
++#define __UAPI_DEF_IN_CLASS		0
++
++#define __UAPI_DEF_IN6_ADDR		0
++#define __UAPI_DEF_IN6_ADDR_ALT		0
++#define __UAPI_DEF_SOCKADDR_IN6		0
++#define __UAPI_DEF_IPV6_MREQ		0
++#define __UAPI_DEF_IPPROTO_V6		0
++#define __UAPI_DEF_IPV6_OPTIONS		0
++#define __UAPI_DEF_IN6_PKTINFO		0
++#define __UAPI_DEF_IP6_MTUINFO		0
++
++#endif /* _NETINET_IN_H */
++
+ /* Definitions for if.h */
+ #ifndef __UAPI_DEF_IF_IFCONF
+ #define __UAPI_DEF_IF_IFCONF 1

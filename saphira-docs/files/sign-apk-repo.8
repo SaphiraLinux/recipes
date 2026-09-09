@@ -1,0 +1,69 @@
+.TH SIGN-APK-REPO 8 "September 2026" "Saphira Linux" "System Administration"
+.SH NAME
+sign-apk-repo \- repository publication and signing gate
+.SH SYNOPSIS
+.B sign-apk-repo
+.RB [ --full-audit ]
+.RI [ PKG ...]
+.SH DESCRIPTION
+.B sign-apk-repo
+publishes ready transactions into the generation repositories: it
+validates transaction integrity (manifests, seeds, canonical
+constructors, checksums), retires pure-rebuild conflicts
+automatically, gates file ownership and Unix identities against the
+indexed
+.I repository.db
+(fast path: staged set only), regenerates and signs both indexes,
+installs everything atomically, and renames transactions published.
+.PP
+Bare runs are the fast production path.
+.B --full-audit
+is the deliberate expensive reconstruction and verification path
+(census, ledger reconcile, tombstone verification -- tombstones are
+never destroyed from current-only state). A missing or unusable
+database refuses with a migration pointer; it is never silently
+recreated (see
+.BR saphira-repo-migrate (8)).
+Positional arguments are target filters only; they never select the
+gate algorithm. Must be run as root; use sudo explicitly.
+.SH OPTIONS
+.TP
+.B --full-audit
+Reconstruct and verify instead of fast-gating.
+.SH FILES
+.TP
+.I /out/stage4/incoming/
+Staging transactions
+.RI ( *-ready ,
+.IR *-published ).
+.TP
+.I /out/stage4/packages/<generation>/$ARCH/repository.db
+The gated metadata both modes trust or rebuild.
+.SH EXIT STATUS
+.TP
+.B 0
+Published (or nothing left after automatic retirement).
+.TP
+.B 1
+Gate refusal or publication failure; nothing partial is left behind.
+.TP
+.B 2
+Database missing or unusable: run the named migration or reconcile.
+.SH EXAMPLES
+.PP
+.RS
+sudo sign-apk-repo
+.br
+sudo sign-apk-repo --full-audit
+.RE
+.SH SEE ALSO
+.BR recipe (5),
+.BR saphira (7),
+.BR buildpkg (1),
+.BR checkpkg (1),
+.BR installpkg (8),
+.BR apksync (8),
+.BR saphira-build (8),
+.BR saphira-repo-state (8),
+.BR saphira-repo-migrate (8),
+.BR ensure-identity (8)

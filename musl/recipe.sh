@@ -42,27 +42,28 @@ recipe_build()
 	echo "$in6_patch_sha256  $P6" | sha256sum -c -
 	patch -d "$SRC" -Np1 -i "$P6"
 	cd "$SRC"
-	# Built against the generation-zero musl headers already present in
-	# the clean root: same-ABI rebuild, no cross toolchain involved.
+	# Built against the repository musl-dev headers installed in the
+	# clean root from the package seed: same-ABI rebuild, no cross
+	# toolchain and no host files involved.
 	./configure --prefix=/usr --syslibdir=/lib
 	make -j${JOBS:-$(nproc)}
 
-	# Generation-zero parity check: compare the freshly built dynamic
-	# loader and libc against the bootstrap copies this clean root runs
-	# from (staged via bootstrap-v0.1.paths). Differences are REPORTED,
-	# never hidden - this package is for clean v0.2 bases, and must not
-	# be blindly installed over a running system.
+	# Self-hosting parity check: compare the freshly built dynamic
+	# loader and libc against the repository copies this clean root
+	# runs from. Differences are REPORTED, never hidden - this package
+	# is for clean v0.2 bases, and must not be blindly installed over
+	# a running system.
 	for f in lib/libc.musl-x86_64.so.1 lib/ld-musl-x86_64.so.1; do
 		src="$SRC/lib/$(basename "$f")"
 		[ -f "$src" ] || src="/$f"
 		if [ -f "/$f" ]; then
 			if cmp -s "$src" "/$f"; then
-				echo "parity: $f matches generation-zero"
+				echo "parity: $f matches repository seed"
 			else
-				echo "parity: $f DIFFERS from generation-zero (expected for rebuild; do not overwrite running systems with this)"
+				echo "parity: $f DIFFERS from repository seed (expected for rebuild; do not overwrite running systems with this)"
 			fi
 		else
-			echo "parity: no generation-zero /$f in this root to compare"
+			echo "parity: no repository-seeded /$f in this root to compare"
 		fi
 	done
 }

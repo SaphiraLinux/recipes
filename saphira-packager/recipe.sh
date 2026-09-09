@@ -1,6 +1,9 @@
 pkgname=saphira-packager
 pkgver=1.0
-pkgrel=41
+# r50: provider selection matches exact package names (a -dev/-doc NVR
+# must never satisfy a base-name dependency during declaration
+# extraction); viewer conflicts output names its legacy-pair semantics.
+pkgrel=50
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='Native Saphira package builder tools'
 license=BUSL-1.1
@@ -33,11 +36,20 @@ recipe_install()
 	install -m 755 "$RECIPE_DIR/files/promote-repo" "$DESTDIR/usr/bin/promote-repo"
 	install -d "$DESTDIR/usr/lib/saphira-packager"
 	install -m 644 "$RECIPE_DIR/files/repo-index.sh" "$DESTDIR/usr/lib/saphira-packager/repo-index.sh"
+	install -m 644 "$RECIPE_DIR/files/repo_db.py" "$DESTDIR/usr/lib/saphira-packager/repo_db.py"
+	install -m 755 "$RECIPE_DIR/files/saphira-repo-migrate" "$DESTDIR/usr/bin/saphira-repo-migrate"
+	install -m 755 "$RECIPE_DIR/files/saphira-repo-state" "$DESTDIR/usr/bin/saphira-repo-state"
 	install -m 755 "$RECIPE_DIR/files/seed-repo" "$DESTDIR/usr/bin/seed-repo"
 	install -m 755 "$RECIPE_DIR/files/bumppkg" "$DESTDIR/usr/bin/bumppkg"
 	install -m 755 "$RECIPE_DIR/files/saphira-build" "$DESTDIR/usr/bin/saphira-build"
+	# The bootstrap exception ships too: once this package is
+	# installed, controller refreshes come from the installed copy
+	# (siblings resolved beside it in /usr/bin), never from tree
+	# paths. buildsign rides along: the refresh script expects it
+	# as a source and the payload lacked it identically.
+	install -m 755 "$RECIPE_DIR/files/install-saphira-packager" "$DESTDIR/usr/bin/install-saphira-packager"
+	install -m 755 "$RECIPE_DIR/files/buildsign" "$DESTDIR/usr/bin/buildsign"
 	install -m 644 "$RECIPE_DIR/files/package_builder.sh" "$DESTDIR/etc/saphira/package_builder.sh"
-	install -m 644 "$RECIPE_DIR/files/bootstrap-v0.1.paths" "$DESTDIR/etc/saphira/bootstrap-v0.1.paths"
 	install -m 644 "$RECIPE_DIR/files/version-lines.conf" "$DESTDIR/etc/saphira/version-lines.conf"
 	# Autobuilder service: dual init formats, per house convention.
 	install -d "$DESTDIR/etc/conf.d" "$DESTDIR/etc/init.d" "$DESTDIR/usr/lib/systemd/system"

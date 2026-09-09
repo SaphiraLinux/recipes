@@ -2,7 +2,7 @@
 
 pkgname=tar
 pkgver=1.35
-pkgrel=3
+pkgrel=4
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='GNU tar archiver (Genesis base, acl closure declared)'
 license='GPL-3.0-or-later'
@@ -13,6 +13,11 @@ url=https://www.gnu.org/software/tar/
 tar_sha256=4d62ff37342ec7aed748535323930c7cf94acf71c3591882b26a7ea50f3edc16
 
 depends="acl attr"
+# The retired tar-doc split (Stage4 generation) owned the info pages and
+# the tar man page. This recipe is now a monolith, so replaces is the
+# apk-tools v3 ownership handover for those paths (solver ignores
+# replaces; it is conflict metadata only).
+replaces="tar-doc"
 makedepends="
 	acl-dev
 	gawk

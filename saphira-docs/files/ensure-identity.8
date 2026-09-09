@@ -1,0 +1,52 @@
+.TH ENSURE-IDENTITY 8 "September 2026" "Saphira Linux" "System Administration"
+.SH NAME
+ensure-identity \- package service-identity lifecycle reconciler
+.SH SYNOPSIS
+.B ensure-identity
+.RI [ --disable ] " " FRAGMENT
+.SH DESCRIPTION
+.B ensure-identity
+is invoked only from makepkg-generated package scripts with the
+package's own
+.I accounts.d
+fragment, never by hand. Ensure mode (post-install, post-upgrade)
+creates every declared group, user, locked shadow entry and state
+directory; it never modifies, reorders, or rehashes anything already
+present, converges identical redeclarations, and refuses same-name
+or same-ID conflicts loudly. Disable mode
+.RB ( --disable ,
+post-deinstall) sanitizes without deleting: it locks shadow entries
+and forces nologin shells while preserving UIDs, GIDs, homes,
+groups, state directories and history (IDs are never recycled).
+Absent entries are silent no-ops, so repeats are harmless.
+.SH OPTIONS
+.TP
+.B --disable
+Sanitize mode for package removal (default is ensure mode).
+.SH FILES
+.TP
+.I /usr/share/saphira/accounts.d/
+Per-package declaration fragments (the single source of truth).
+.TP
+.I /usr/share/saphira/accounts.tsv
+Base-seed reservations (authority file, not the reconciler).
+.SH EXIT STATUS
+.TP
+.B 0
+Reconciled (or nothing to do).
+.TP
+.B 1
+Conflict, malformed fragment, unusable credential, or misuse.
+.SH EXAMPLES
+.PP
+.RS
+ensure-identity /usr/share/saphira/accounts.d/dbus
+.br
+ensure-identity --disable /tmp/saphira-identity.XXXXXX
+.RE
+.SH SEE ALSO
+.BR saphira (7),
+.BR recipe (5),
+.BR sign-apk-repo (8),
+.BR saphira-repo-state (8),
+.BR saphira-repo-migrate (8)

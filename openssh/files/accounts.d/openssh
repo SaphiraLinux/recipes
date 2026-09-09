@@ -1,0 +1,8 @@
+# openssh runtime identity (canonical, fixed): user sshd UID 101,
+# primary group sshd GID 101. Required by privilege separation
+# (configure --with-privsep-user=sshd --with-privsep-path=/var/empty).
+# UID 101 sits in the preferred 0..199 packaged range - never reuse it
+# for another identity. Home /var/empty is shared infrastructure (left
+# untouched by design); no dir stanza needed.
+user sshd 101 sshd /var/empty /sbin/nologin
+group sshd 101

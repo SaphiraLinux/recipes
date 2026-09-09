@@ -33,8 +33,7 @@ profile_root=${SAPHIRA_PROFILE_ROOT:-/usr/share/saphira/profiles}
 apk_command=${SAPHIRA_APK:-apk}
 
 case $profile in
-	base|network|server|build) ;;
-	*) die "unknown profile: $profile" ;;
+	*[^A-Za-z0-9._+-]*|'') die "invalid profile name: $profile" ;;
 esac
 test -f "$profile_root/$profile" || die "profile is unavailable: $profile"
 test -n "$repository" || test -s /etc/apk/repositories ||
@@ -77,7 +76,7 @@ test -n "$packages" || die "profile is empty: $profile"
 if test "${SAPHIRA_BOOTSTRAP_PLAN:-0}" = 1; then
 	printf 'profile=%s\n' "$profile"
 	printf 'repository=%s\n' "${repository:-host}"
-	printf 'apk --root %s --initdb --keys-dir etc/apk/keys --repositories-file %s/etc/apk/repositories add %s\n' \
+	printf 'apk --root %s --initdb --keys-dir etc/apk/keys --repositories-file %s/etc/apk/repositories add --no-scripts %s\n' \
 		"$target" "$target" "$packages"
 	exit 0
 fi
@@ -105,9 +104,27 @@ fi
 
 "$apk_command" --root "$target" --initdb \
 	--keys-dir etc/apk/keys \
-	--repositories-file "$target/etc/apk/repositories" add $packages
-test -x "$target/bin/sh" && test -e "$target/usr/lib/libc.so" ||
-	die 'installed profile did not provide a usable Saphira base system'
+	--repositories-file "$target/etc/apk/repositories" add --no-scripts $packages
+# Package install scripts cannot run here: apk executes them chrooted in
+# the target, which has no /bin/sh until bash lands and the link below
+# exists. saphira-assemble-rootfs replays every installed accounts.d
+# fragment explicitly through the host-run reconciler instead, so
+# assembly and live install converge on the same helper and data.
 if test ! -e "$target/etc/mtab" && test ! -L "$target/etc/mtab"; then
 	ln -s /proc/mounts "$target/etc/mtab"
 fi
+# Root shell convention (mirrors the builder's root initialization):
+# /bin/sh is always a link to bash; no package owns it, so the
+# installer creates it. Fail closed when bash is absent.
+if test ! -e "$target/bin/sh" && test ! -L "$target/bin/sh"; then
+	test -x "$target/bin/bash" ||
+		die 'installed profile did not provide /bin/bash for /bin/sh'
+	ln -s bash "$target/bin/sh" || die 'cannot link /bin/sh to bash'
+fi
+if test ! -e "$target/usr/bin/env" && test ! -L "$target/usr/bin/env"; then
+	test -x "$target/bin/env" ||
+		die 'installed profile did not provide /bin/env for /usr/bin/env'
+	ln -s /bin/env "$target/usr/bin/env" || die 'cannot link /usr/bin/env'
+fi
+test -x "$target/bin/sh" && test -e "$target/usr/lib/libc.so" ||
+	die 'installed profile did not provide a usable Saphira base system'

@@ -116,6 +116,12 @@ assert_contains "scan queues unknown recipes" "$TMP/scan.out" "newly queued"
 assert_contains "blocked set present pre-build" "$TMP/queue.out" "BLOCKED: 3"
 assert_contains "blocked reason names ghost" "$TMP/queue.out" "ghost-package"
 
+# Trust-anchor preflight: the run phase needs the repository index as its
+# plan-time trust anchor. Give the fixture repo a (dummy) index so the
+# stub builds below can proceed; the missing-index skip is tested after.
+mkdir -p "$TMP/repo"
+: > "$TMP/repo/Packages.adb"
+
 "$SAPHIRA_BUILD" run --limit=10 > "$TMP/run.out" 2>&1 || true
 assert_contains "stub build of base passes" "$TMP/run.out" "base -> PASS"
 assert_contains "dependent passes after base" "$TMP/run.out" "dependent -> PASS"
@@ -132,6 +138,15 @@ assert_contains "status shows dependent PASS" "$TMP/status.out" "dependent"
 assert_contains "log includes build.log" "$TMP/log.out" "build.log"
 
 "$SAPHIRA_BUILD" retry needsmissing > "$TMP/retry.out" 2>&1 || true
+
+# Trust-anchor preflight: with no repository index, the run phase skips
+# without consuming queue rows - a missing anchor is environmental, not
+# a package failure (regression: whole daemon batches once FAILED every
+# queued package against a missing Packages.adb).
+mkdir -p "$TMP/empty-repo"
+SAPHIRA_REPO="$TMP/empty-repo" "$SAPHIRA_BUILD" run --limit=10 > "$TMP/norun.out" 2>&1 || true
+assert_contains "missing index skips build phase" "$TMP/norun.out" "skipping build phase"
+assert_contains "missing index processes nothing" "$TMP/norun.out" "0 package(s) processed"
 
 mkdir -p "$TMP/evroot/lib" "$TMP/evroot/usr/bin"
 printf '\x7fELFfake' > "$TMP/evroot/usr/bin/prog"

@@ -1,0 +1,15 @@
+# Saphira virtualisation-host image profile.
+#
+# Top-level intentions ONLY: the package manager owns dependency
+# closure. Never enumerate resolved dependencies here; prove the
+# closure with the repository index instead (see saphira-profiles(5)).
+saphira-base
+saphira-kernel
+systemd
+saphira-virtualisation
+saphira-network-host
+openssh
+# Boot infrastructure is an explicit intention: a bootable host
+# carries its bootloader (in-target grub-install/grub-mkconfig for
+# image builds and later kernel upgrades).
+grub

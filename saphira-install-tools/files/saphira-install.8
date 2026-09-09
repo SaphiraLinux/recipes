@@ -1,0 +1,113 @@
+.TH SAPHIRA-INSTALL 8 "September 2026" "Saphira Linux" "System Administration"
+.SH NAME
+saphira-install \- install a Saphira profile into a mounted target
+.SH SYNOPSIS
+.B saphira-install
+.B --target
+.I TARGET
+.B --profile
+.I PROFILE
+.RB [ --reinstall ]
+.RB [ --repository
+.IR REPO ]
+.RB [ --hostname
+.IR NAME ]
+.SH DESCRIPTION
+.B saphira-install
+is the disk-targeting frontend to
+.BR saphira-assemble-rootfs (8):
+it installs a profile into the mounted filesystem at
+.IR TARGET .
+The assembled system is identical whether it lands on a disk image,
+a disk partition, or a plain directory \-
+one assembler, no separate installer package list, so a profile that
+builds a working image always installs a working system.
+.PP
+After assembly,
+.BR saphira-genfstab (8)
+entries for the target's live mounts are appended to
+.I TARGET/etc/fstab
+(skipped lines already present; plain directories yield no entries
+and are harmlessly skipped).
+.PP
+.B --reinstall
+wipes the target's contents first and reinstalls from scratch.
+Preservation options (keep users, keep data, keep config) are future
+work; for now reinstall keeps nothing.
+.PP
+Requires root privileges. Whole-disk partitioning, filesystem
+creation and bootloader installation belong to
+.BR saphira-image (8);
+this tool starts where the filesystem is already mounted.
+.SH OPTIONS
+.TP
+.BR --target " " \fITARGET
+Mounted target directory (required).
+.TP
+.BR --profile " " \fIPROFILE
+Profile name from
+.BR saphira-profiles (5)
+(required).
+.TP
+.B --reinstall
+Wipe a non-empty target and reinstall instead of refusing.
+.TP
+.BR --repository " " \fIREPO
+APK repository, passed through to the assembler (default: host
+configuration).
+.TP
+.BR --hostname " " \fINAME
+Hostname to write (default: the profile name).
+.SH ENVIRONMENT
+.TP
+.B SAPHIRA_PROFILE_ROOT
+Profile directory (default
+.IR /usr/share/saphira/profiles ).
+.TP
+.B SAPHIRA_REPOSITORY
+Same effect as
+.BR --repository .
+.TP
+.B SAPHIRA_HOSTNAME
+Same effect as
+.BR --hostname .
+.TP
+.B SAPHIRA_ROOT_PASSWORD
+Passed through to the assembler (boot-test images only).
+.TP
+.B SAPHIRA_ASSEMBLER
+Assembler binary (default: alongside this tool).
+.TP
+.B SAPHIRA_GENFSTAB
+.B saphira-genfstab
+binary (default: alongside this tool).
+.SH EXIT STATUS
+.TP
+.B 0
+Installed (and fstab updated where applicable).
+.TP
+.B 1
+Any failure; the target is left in place for diagnosis.
+.TP
+.B 2
+Usage error.
+.SH EXAMPLES
+Install the virtualisation host onto a mounted disk:
+.PP
+.RS
+sudo saphira-install --target /mnt/saphira \\
+    --profile virtualisation-host \\
+    --repository /out/stage4/packages/hatched
+.RE
+.PP
+Rebuild the same disk from installer media, keeping nothing:
+.PP
+.RS
+sudo saphira-install --target /mnt/saphira \\
+    --profile virtualisation-host --reinstall
+.RE
+.SH SEE ALSO
+.BR saphira-assemble-rootfs (8),
+.BR saphira-profiles (5),
+.BR saphira-bootstrap (8),
+.BR saphira-genfstab (8)

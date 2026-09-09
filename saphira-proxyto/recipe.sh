@@ -2,7 +2,7 @@
 
 pkgname=saphira-proxyto
 pkgver=0.1.0
-pkgrel=2
+pkgrel=4
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='PROXY-protocol front proxy for non-aware applications (geomyidae)'
 license='BUSL-1.1'
@@ -51,4 +51,14 @@ recipe_install()
 		"$PKGDEST/usr/lib/systemd/system/proxyto.service"
 	install -D -m 0644 "$RECIPE_DIR/files/LICENSE" \
 		"$PKGDEST/usr/share/licenses/saphira-proxyto/LICENSE"
+	# Runtime identity declaration: proxyto:19 required by the compiled
+	# service defaults. makepkg generates the install scripts from
+	# this fragment; the package creates its identity at install time.
+	# r3: fragment added (payload change, revision bumps).
+	# r4: reap exited children in the SIGCHLD handler (SA_RESTART left
+	#     accept() uninterruptible, so the deferred flag reap kept one
+	#     zombie while idle) + regression test + document deliberate
+	#     no-User= in the systemd unit.
+	install -D -m 0644 "$RECIPE_DIR/files/accounts.d/saphira-proxyto" \
+		"$PKGDEST/usr/share/saphira/accounts.d/saphira-proxyto"
 }

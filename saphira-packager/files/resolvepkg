@@ -278,10 +278,18 @@ class Planner:
 
     def _read_index(self, repo_dir: Path, repo_label: str, *, required: bool) -> dict[str, list[RepositoryPackage]]:
         index = repo_dir / "Packages.adb"
-        if not index.is_file():
+        if not index.exists() and not index.is_symlink():
             if required:
-                die(f"trusted repository index does not exist: {index}")
+                die(f"trusted repository index is missing: {index} (no publication has completed into {repo_label}; every index writer installs atomically, so this is absence, not a torn write)")
             print(f"resolvepkg: note: generation repository has no index, skipping: {repo_label}", file=sys.stderr)
+            return {}
+        if not index.is_file():
+            # Present but unusable: broken symlink, non-regular file, or
+            # unreadable (is_file() is False for all of these, including
+            # EACCES). Report it as such - never as merely missing.
+            if required:
+                die(f"trusted repository index is present but not a readable regular file: {index} (broken symlink? permissions?)")
+            print(f"resolvepkg: note: generation repository index is unusable, skipping: {repo_label}: {index}", file=sys.stderr)
             return {}
         keys_dir = str(Path(self.config["SAPHIRA_TRUST_KEY"]).parent)
         self._apk("verify", "--keys-dir", keys_dir, str(index))

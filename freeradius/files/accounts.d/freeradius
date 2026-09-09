@@ -1,0 +1,9 @@
+# radius runtime identity (canonical, fixed): user radius UID 121,
+# primary group radius GID 121. Required by the shipped service unit
+# (freeradius.service User=radius). UID 121 sits in the preferred
+# 0..199 packaged range - never reuse it for another identity.
+# Data-directory mode 0750 mirrors recipe staging. This fragment ships
+# in the freeradius main output; the filename must match the output.
+user radius 121 radius /var/lib/radius /sbin/nologin
+group radius 121
+dir /var/lib/radius 0750 radius radius

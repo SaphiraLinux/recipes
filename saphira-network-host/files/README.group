@@ -1,0 +1,12 @@
+Saphira network-host group
+===========================
+
+Installing this package installs a working Saphira network-host
+stack: the static network configuration framework, Open vSwitch
+tooling and a DHCP client.
+
+This package carries no payload of its own beyond this file. The
+authoritative member list is the `depends` field of this package's
+APK metadata (`apk info -a saphira-network-host`). Profiles and
+image definitions must name the group, never re-enumerate its
+closure.

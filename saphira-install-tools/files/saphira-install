@@ -1,0 +1,99 @@
+#!/bin/sh
+#
+# saphira-install --target TARGET --profile PROFILE [--reinstall]
+#
+# Disk-targeting frontend to saphira-assemble-rootfs: installs a
+# profile into a mounted target filesystem. Whole-disk partitioning
+# and bootloader installation belong to saphira-image; this tool
+# owns the mounted-filesystem install and, later, reinstall.
+
+set -u
+
+usage()
+{
+	printf 'usage: saphira-install --target TARGET --profile PROFILE [--reinstall] [--repository REPO] [--hostname NAME]\n' >&2
+	exit 2
+}
+
+die()
+{
+	printf 'saphira-install: %s\n' "$*" >&2
+	exit 1
+}
+
+target=
+profile=
+reinstall=0
+repository=${SAPHIRA_REPOSITORY:-}
+hostname=${SAPHIRA_HOSTNAME:-}
+while test $# -gt 0; do
+	case $1 in
+		--target) target=${2:?missing TARGET}; shift 2 ;;
+		--target=*) target=${1#*=}; shift ;;
+		--profile) profile=${2:?missing PROFILE}; shift 2 ;;
+		--profile=*) profile=${1#*=}; shift ;;
+		--reinstall) reinstall=1; shift ;;
+		--repository) repository=${2:?missing REPO}; shift 2 ;;
+		--repository=*) repository=${1#*=}; shift ;;
+		--hostname) hostname=${2:?missing NAME}; shift 2 ;;
+		--hostname=*) hostname=${1#*=}; shift ;;
+		--) shift; break ;;
+		-*) usage ;;
+		*) usage ;;
+	esac
+done
+test -n "$target" && test -n "$profile" || usage
+
+bindir=$(dirname -- "$0") || die 'cannot locate tool directory'
+assembler_command=${SAPHIRA_ASSEMBLER:-$bindir/saphira-assemble-rootfs}
+genfstab_command=${SAPHIRA_GENFSTAB:-$bindir/saphira-genfstab}
+profile_root=${SAPHIRA_PROFILE_ROOT:-/usr/share/saphira/profiles}
+
+test -d "$target" || die "target is not a directory: $target"
+target=$(readlink -f -- "$target") || die "cannot resolve target: $target"
+case $profile in
+	*[^A-Za-z0-9._+-]*|'') die "invalid profile name: $profile" ;;
+esac
+test -f "$profile_root/$profile" ||
+	die "profile is unavailable: $profile"
+
+if find "$target" -mindepth 1 -maxdepth 1 ! -name lost+found -print -quit |
+	grep -q .; then
+	if test "$reinstall" -eq 1; then
+		# Reinstall starts from an empty filesystem. Preservation
+		# options are future work; for now this keeps nothing.
+		find "$target" -mindepth 1 -maxdepth 1 \
+			! -name lost+found -exec rm -rf -- {} + ||
+			die 'cannot clear target for reinstall'
+	else
+		die 'target is not empty (use --reinstall to wipe and reinstall)'
+	fi
+fi
+
+# The assembled system is identical whether it lands on a disk
+# image, a disk partition, or a plain directory: one assembler,
+# no separate installer package list.
+if test -n "$hostname"; then
+	SAPHIRA_HOSTNAME="$hostname"
+	export SAPHIRA_HOSTNAME
+fi
+SAPHIRA_PROFILE_ROOT="$profile_root" SAPHIRA_REPOSITORY="$repository" \
+	"$assembler_command" "$target" "$profile" ||
+	die 'rootfs assembly failed'
+
+# Filesystem table from the live mounts when the target is really
+# mounted (plain directories yield no entries; harmlessly skipped).
+fstab_entries=$("$genfstab_command" "$target") ||
+	die 'saphira-genfstab failed'
+if test -n "$fstab_entries"; then
+	touch "$target/etc/fstab" || die 'cannot touch /etc/fstab'
+	while IFS= read -r line; do
+		test -n "$line" || continue
+		grep -qxF -- "$line" "$target/etc/fstab" 2>/dev/null ||
+			printf '%s\n' "$line" >> "$target/etc/fstab" ||
+			die 'cannot append to /etc/fstab'
+	done <<EOF
+$fstab_entries
+EOF
+fi
+printf 'saphira-install: %s installed to %s\n' "$profile" "$target"

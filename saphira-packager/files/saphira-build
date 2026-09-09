@@ -335,6 +335,15 @@ def ready_apk(ready_dir, pkg, ver_rel):
     cands = list(ready_dir.glob(f"{pkg}-*-{ver_rel}.apk")) if ver_rel else list(ready_dir.glob(f"{pkg}-*.apk"))
     if not cands:
         cands = [p for p in ready_dir.glob("*.apk")]
+    # Prefer the main package over splits: glob order is readdir
+    # order (nondeterministic), and installing e.g. grub-doc alone
+    # can never satisfy its versioned parent dep. Splits ride the
+    # same transaction and publish with it; they are not separately
+    # install-tested.
+    if ver_rel:
+        for p in cands:
+            if p.name == f"{pkg}-{ver_rel}.apk":
+                return p
     return cands[0] if cands else None
 
 
@@ -384,8 +393,12 @@ def evaluate_stages(root, payload, recipe_dir, log_dir):
             continue
         if b"\x00" in chunk:
             continue
-        if b"/usr/bin/sh" in chunk:
-            bad.append(f"/usr/bin/sh reference: {rel}")
+        # Needle built from parts: the contiguous bytes must not
+        # appear in this checker itself, or every controller payload
+        # carrying this code self-flags (Saphira is non-usrmerged:
+        # the shell lives in /bin, never under /usr/bin).
+        if b"/usr" + b"/bin/sh" in chunk:
+            bad.append(f"{'/usr'}/bin/sh reference: {rel}")
     stages["POLICY"] = (
         {"status": "fail", "detail": bad[:10]} if bad else {"status": "pass"}
     )
@@ -459,6 +472,16 @@ def cmd_run(args):
             limit = int(a.split("=", 1)[1])
         elif a == "--all":
             limit = 10 ** 9
+    index = REPO / "Packages.adb"
+    if not index.is_file():
+        # Environmental failure, not a package failure: the trusted index
+        # is the plan-time trust anchor for every buildpkg run. Starting
+        # builds without it only manufactures FAIL rows (and retained
+        # workspaces) that succeed on retry once the index is restored, so
+        # skip the phase with the queue untouched until it reappears.
+        print(f"run: trusted repository index is missing or unreadable: {index}; skipping build phase (environmental, queue untouched)")
+        print("run: 0 package(s) processed")
+        return
     conn = db()
     done = 0
     while done < limit:
@@ -703,7 +726,11 @@ def cmd_publish(args):
     conn.commit()
     print(f"publish: {len(rows)} package(s) signed+indexed")
     if sync:
-        rc = run(["rsync", "-a", "--delete", f"{REPO}/", "homer:/srv/packages.saphira.vm2.uk/hatchling/x86_64/"])
+        # Remote layout mirrors the local one (…/hatchling/<arch>/): derive
+        # the arch from the live repo path, never hardcode it, so aarch64
+        # (and later riscv64) publishes sync to their own generation dirs.
+        arch = REPO.name
+        rc = run(["rsync", "-a", "--delete", f"{REPO}/", f"homer:/srv/packages.saphira.vm2.uk/hatchling/{arch}/"])
         print(f"publish: homer sync rc={rc}")
 
 

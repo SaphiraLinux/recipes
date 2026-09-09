@@ -1,0 +1,13 @@
+Saphira virtualisation group
+==============================
+
+Installing this package installs a working Saphira virtualisation
+host stack: QEMU host emulation plus libvirt management (which in
+turn pulls its own storage, network and firmware helpers).
+
+This package carries no payload of its own beyond this file. The
+authoritative member list is the `depends` field of this package's
+APK metadata (`apk info -a saphira-virtualisation`). Profiles and
+image definitions must name the group, never re-enumerate its
+closure: no QEMU/libvirt plumbing knowledge belongs outside APK
+metadata.

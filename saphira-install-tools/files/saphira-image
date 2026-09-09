@@ -1,0 +1,184 @@
+#!/bin/sh
+#
+# saphira-image build --profile PROFILE --output IMAGE [options]
+#
+# Whole-disk image creation: partition, format, assemble via
+# saphira-install (which owns the mounted target through the shared
+# assembler), install GRUB from inside the target (version-consistent
+# core.img and modules), and emit raw or qcow2.
+
+set -u
+
+usage()
+{
+	printf 'usage: saphira-image build --profile PROFILE --output IMAGE [--size 4G] [--repository REPO] [--hostname NAME] [--root-password PW]\n' >&2
+	exit 2
+}
+
+die()
+{
+	printf 'saphira-image: %s\n' "$*" >&2
+	exit 1
+}
+
+test "${1:-}" = build || usage
+shift
+
+profile=
+output=
+size=4G
+repository=${SAPHIRA_REPOSITORY:-}
+hostname=
+root_password=${SAPHIRA_ROOT_PASSWORD:-}
+while test $# -gt 0; do
+	case $1 in
+		--profile) profile=${2:?missing PROFILE}; shift 2 ;;
+		--profile=*) profile=${1#*=}; shift ;;
+		--output) output=${2:?missing IMAGE}; shift 2 ;;
+		--output=*) output=${1#*=}; shift ;;
+		--size) size=${2:?missing SIZE}; shift 2 ;;
+		--size=*) size=${1#*=}; shift ;;
+		--repository) repository=${2:?missing REPO}; shift 2 ;;
+		--repository=*) repository=${1#*=}; shift ;;
+		--hostname) hostname=${2:?missing NAME}; shift 2 ;;
+		--hostname=*) hostname=${1#*=}; shift ;;
+		--root-password) root_password=${2:?missing PW}; shift 2 ;;
+		--root-password=*) root_password=${1#*=}; shift ;;
+		--) shift; break ;;
+		-*) usage ;;
+		*) usage ;;
+	esac
+done
+test -n "$profile" && test -n "$output" || usage
+case $profile in
+	*[^A-Za-z0-9._+-]*|'') die "invalid profile name: $profile" ;;
+esac
+case $size in
+	*[!0-9GMKgmKk]) die "invalid size: $size (examples: 4G, 512M)" ;;
+esac
+
+bindir=$(dirname -- "$0") || die 'cannot locate tool directory'
+install_command=${SAPHIRA_INSTALL:-$bindir/saphira-install}
+chroot_command=${SAPHIRA_CHROOT:-$bindir/saphira-chroot}
+profile_root=${SAPHIRA_PROFILE_ROOT:-/usr/share/saphira/profiles}
+test -f "$profile_root/$profile" ||
+	die "profile is unavailable: $profile"
+
+for tool in sfdisk losetup mkfs.ext4 grub-install; do
+	command -v "$tool" >/dev/null 2>&1 ||
+		die "host tool missing: $tool"
+done
+if command -v qemu-img >/dev/null 2>&1; then
+	have_qemu_img=1
+else
+	have_qemu_img=0
+fi
+
+case $output in
+	*.qcow2)
+		format=qcow2
+		raw_output=${output%.qcow2}.raw
+		if test "$have_qemu_img" -eq 0; then
+			die 'qcow2 requested but qemu-img is not on PATH (install qemu, or use a .raw output)'
+		fi
+		;;
+	*) format=raw; raw_output=$output ;;
+esac
+test ! -e "$output" || die "output exists: $output (remove it first)"
+test ! -e "$raw_output" || die "output exists: $raw_output (remove it first)"
+
+id_command=${SAPHIRA_ID:-id}
+test "$($id_command -u)" -eq 0 || die 'root privileges are required'
+
+work=$(mktemp -d /tmp/saphira-image.XXXXXX) ||
+	die 'cannot create image workspace'
+mnt=$work/mnt
+mkdir -p "$mnt" || die 'cannot create mountpoint'
+loop=
+mounted=
+
+cleanup()
+{
+	status=${1:-$?}
+	if test -n "$mounted"; then
+		umount -R -- "$mnt" >/dev/null 2>&1 ||
+			umount -l -- "$mnt" >/dev/null 2>&1 || :
+	fi
+	if test -n "$loop"; then
+		# No `--` separator: this losetup parses it as the device
+		# name (yields detach of literal /dev/--). Device paths
+		# from --show never start with `-`, so bare is safe.
+		losetup -d "$loop" >/dev/null 2>&1 || :
+	fi
+	# A half-written disk is never left behind: only outputs this
+	# run created are removed (pre-existing paths were refused).
+	if test "$status" -ne 0; then
+		rm -f -- "$raw_output"
+		test "$raw_output" = "$output" || rm -f -- "$output"
+	fi
+	rm -rf -- "$work"
+	exit "$status"
+}
+trap 'cleanup $?' EXIT
+trap 'cleanup 129' HUP
+trap 'cleanup 130' INT
+trap 'cleanup 143' TERM
+
+printf 'saphira-image: creating %s raw disk\n' "$size"
+truncate -s "$size" "$raw_output" ||
+	die 'cannot allocate raw image'
+
+# GPT: 1 MiB bios-boot for GRUB i386-pc, remainder Linux root.
+# EFI later adds an ESP beside these; no re-layout required.
+sfdisk --label gpt "$raw_output" <<'EOF' ||
+label: gpt
+start=2048, size=2048, type=21686148-6449-6E6F-744E-656564454649, name="bios-boot"
+start=4096, type=4F68BCE3-E8CD-4DB1-96E7-FBCAF984B709, name="root"
+EOF
+	die 'partitioning failed'
+
+loop=$(losetup --find --show --partscan -- "$raw_output") ||
+	die 'cannot attach loop device'
+mkfs.ext4 -q -L saphira-root "${loop}p2" ||
+	die 'cannot format root partition'
+mount -o noatime "${loop}p2" "$mnt" || die 'cannot mount root'
+mounted=1
+
+# The installed system is identical to a plain saphira-install:
+# one assembler, no separate image package list. Configuration
+# travels by environment (no word-splitting hazards); the target
+# is freshly formatted, so no --reinstall is needed.
+if test -z "$hostname"; then
+	hostname=$profile
+fi
+SAPHIRA_PROFILE_ROOT="$profile_root" SAPHIRA_REPOSITORY="$repository" \
+	SAPHIRA_HOSTNAME="$hostname" SAPHIRA_ROOT_PASSWORD="$root_password" \
+	"$install_command" --target "$mnt" --profile "$profile" ||
+	die 'installation into image failed'
+
+# Bootloader from INSIDE the target: core.img and modules come
+# from the same grub package, never mixed host/target versions.
+"$chroot_command" "$mnt" /usr/sbin/grub-install \
+	--target=i386-pc --recheck "$loop" ||
+	die 'grub-install failed'
+"$chroot_command" "$mnt" /usr/sbin/grub-mkconfig \
+	-o /boot/grub/grub.cfg ||
+	die 'grub-mkconfig failed'
+test -s "$mnt/boot/grub/grub.cfg" || die 'grub.cfg empty'
+grep -q "vmlinuz" "$mnt/boot/grub/grub.cfg" ||
+	die 'grub.cfg has no kernel entry'
+
+umount -R -- "$mnt" || die 'cannot unmount root'
+mounted=
+losetup -d "$loop" || die 'cannot detach loop device'
+loop=
+
+if test "$format" = qcow2; then
+	qemu-img convert -p -O qcow2 -- "$raw_output" "$output" ||
+		die 'qcow2 conversion failed'
+	rm -f -- "$raw_output"
+	printf 'saphira-image: %s ready\n' "$output"
+else
+	printf 'saphira-image: %s ready\n' "$output"
+fi
+cleanup 0

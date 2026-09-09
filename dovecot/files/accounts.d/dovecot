@@ -1,0 +1,13 @@
+# dovecot runtime identities (canonical, fixed): user dovecot
+# UID 114 and user dovenull UID 115, primary groups matching. Required
+# by upstream compiled defaults un-overridden by the shipped config
+# (default_internal_user dovecot, default_login_user dovenull) - a
+# stock dovecot refuses to start without them. UIDs 114-115 sit in the
+# preferred 0..199 packaged range - never reuse them for other
+# identities. Home /var/empty entries are shared infrastructure (left
+# untouched by design); no dir stanza needed for dovenull.
+user dovecot 114 dovecot /var/lib/dovecot /sbin/nologin
+group dovecot 114
+user dovenull 115 dovenull /var/empty /sbin/nologin
+group dovenull 115
+dir /var/lib/dovecot 0755 dovecot dovecot

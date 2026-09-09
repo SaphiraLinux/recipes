@@ -1,7 +1,7 @@
 #!/bin/sh
 pkgname=wendzelnntpd
 pkgver=2.2.0_alpha
-pkgrel=1
+pkgrel=2
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="WendzelNNTPd NNTP server: IPv4/IPv6, TLS/NNTPS, AUTHINFO, ACL/RBAC (SQLite backend)"
 license="GPL-3.0-or-later"
@@ -82,4 +82,11 @@ recipe_install()
 	install -d -m 0755 "$PKGDEST/etc/letsencrypt/renewal-hooks/deploy"
 	install -D -m 0755 "$RECIPE_DIR/files/wendzelnntpd-deploy-hook" \
 		"$PKGDEST/etc/letsencrypt/renewal-hooks/deploy/wendzelnntpd"
+	# Runtime identity declaration: news:12 required by the service
+	# setup and spool layout. makepkg generates the install scripts
+	# from this fragment; the package creates its identity at install
+	# time.
+	# r2: fragment added (payload change, revision bumps).
+	install -D -m 0644 "$RECIPE_DIR/files/accounts.d/wendzelnntpd" \
+		"$PKGDEST/usr/share/saphira/accounts.d/wendzelnntpd"
 }

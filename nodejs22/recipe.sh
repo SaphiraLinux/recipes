@@ -2,7 +2,9 @@
 
 pkgname=nodejs22
 pkgver=22.23.2
-pkgrel=2
+# r3: npx joins the side-by-side renaming (both Node lines shipped
+# bare usr/bin/npx; co-owned path refused at publish/install).
+pkgrel=3
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='Node.js 22 LTS JavaScript runtime, side-by-side with the main nodejs (binaries suffixed: node22)'
 license='MIT AND Apache-2.0 AND BSD-3-Clause AND ISC AND Zlib'
@@ -52,6 +54,7 @@ recipe_install()
 	# paths under the immutable-filename rule).
 	mv "$PKGDEST/usr/bin/node" "$PKGDEST/usr/bin/node22"
 	[ -e "$PKGDEST/usr/bin/npm" ] && mv "$PKGDEST/usr/bin/npm" "$PKGDEST/usr/bin/npm22"
+	[ -e "$PKGDEST/usr/bin/npx" ] && mv "$PKGDEST/usr/bin/npx" "$PKGDEST/usr/bin/npx22"
 	[ -e "$PKGDEST/usr/bin/corepack" ] && mv "$PKGDEST/usr/bin/corepack" "$PKGDEST/usr/bin/corepack22"
 	[ -d "$PKGDEST/usr/lib/node_modules/npm" ] && \
 		mv "$PKGDEST/usr/lib/node_modules/npm" "$PKGDEST/usr/lib/node_modules/npm22"
@@ -62,10 +65,21 @@ recipe_install()
 	[ -d "$PKGDEST/usr/include/node" ] && \
 		mv "$PKGDEST/usr/include/node" "$PKGDEST/usr/include/node22"
 
+	# Debugger helpers and the node(1) page live under shared paths
+	# the main nodejs-doc package already owns: relocate to node22.
+	[ -d "$PKGDEST/usr/share/doc/node" ] && \
+		mv "$PKGDEST/usr/share/doc/node" "$PKGDEST/usr/share/doc/node22"
+	[ -e "$PKGDEST/usr/share/man/man1/node.1" ] && mv "$PKGDEST/usr/share/man/man1/node.1" \
+		"$PKGDEST/usr/share/man/man1/node22.1"
+
 	# The npm/corepack bin shims are symlinks into node_modules; repoint
 	# them at the renamed library directories.
 	[ -e "$PKGDEST/usr/bin/npm22" ] && ln -sf ../lib/node_modules/npm22/bin/npm-cli.js \
 		"$PKGDEST/usr/bin/npm22"
+	[ -e "$PKGDEST/usr/lib/node_modules/npm22/bin/npx-cli.js" ] && ln -sf ../lib/node_modules/npm22/bin/npx-cli.js \
+		"$PKGDEST/usr/bin/npx22"
+	[ -e "$PKGDEST/usr/share/man/man1/npx.1" ] && mv "$PKGDEST/usr/share/man/man1/npx.1" \
+		"$PKGDEST/usr/share/man/man1/npx22.1"
 	[ -e "$PKGDEST/usr/lib/node_modules/corepack22" ] && [ -e "$PKGDEST/usr/bin/corepack22" ] && \
 		ln -sf ../lib/node_modules/corepack22/dist/corepack.js "$PKGDEST/usr/bin/corepack22"
 

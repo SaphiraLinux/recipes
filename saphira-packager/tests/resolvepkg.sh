@@ -388,4 +388,22 @@ if run_resolver sha-malformed > "$test_root/sha-malformed.json" 2> "$test_root/s
 fi
 grep 'sha256= is not a 64-hex digest' "$test_root/sha-malformed.log" >/dev/null
 
+# Trust-anchor diagnostics: a missing live index and a present-but-unusable
+# one (broken symlink here) must fail with distinct messages - the old
+# single "does not exist" error hid unreadable-index incidents behind a
+# missing-file story.
+recipe indexprobe 1 ''
+if SAPHIRA_TEST_REPO_DIR=$test_root/nonexistent-repo run_resolver indexprobe > "$test_root/index-missing.json" 2> "$test_root/index-missing.log"; then
+	printf '%s\n' 'missing index unexpectedly planned' >&2
+	exit 1
+fi
+grep 'trusted repository index is missing' "$test_root/index-missing.log" >/dev/null
+mkdir -p "$test_root/broken-repo/hatchling/x86_64"
+ln -s nowhere "$test_root/broken-repo/hatchling/x86_64/Packages.adb"
+if SAPHIRA_TEST_REPO_DIR=$test_root/broken-repo run_resolver indexprobe > "$test_root/index-broken.json" 2> "$test_root/index-broken.log"; then
+	printf '%s\n' 'broken index unexpectedly planned' >&2
+	exit 1
+fi
+grep 'present but not a readable regular file' "$test_root/index-broken.log" >/dev/null
+
 printf '%s\n' 'resolvepkg closure, repository precedence, sandbox, and vendor-pair tests: OK'

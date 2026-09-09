@@ -1,0 +1,11 @@
+# man-db runtime identity (canonical, fixed): user man UID 65,
+# primary group man GID 13 (base-seeded). Upstream builds with
+# MAN_OWNER=man (cache files owned by man).
+# UID 65 sits in the preferred 0..199 packaged range - never reuse it
+# for another identity.
+# Ordering note: any historical manual man entry with a different UID
+# (e.g. a local 999 bodge) must be removed BEFORE the first install of
+# this package - a same-name/different-UID entry is a fatal conflict.
+user man 65 man /var/cache/man /sbin/nologin
+group man 13
+dir /var/cache/man 0755 man man

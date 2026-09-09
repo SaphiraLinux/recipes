@@ -1,0 +1,7 @@
+# lldpd privilege-separation identity (canonical, fixed): user and
+# group _lldpd, UID/GID 124. Matches the configure --with-privsep-*
+# user/group and the default chroot/run directory. UID 124 sits in the
+# preferred 0..199 packaged range - never reuse it for another identity.
+user _lldpd 124 _lldpd /run/lldpd /sbin/nologin
+group _lldpd 124
+dir /run/lldpd 0755 _lldpd _lldpd

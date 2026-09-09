@@ -1,0 +1,49 @@
+.TH MAKEPKG 1 "September 2026" "Saphira Linux" "User Commands"
+.SH NAME
+makepkg \- construct APKs from staged payloads
+.SH SYNOPSIS
+.B makepkg
+.I PRODUCER
+.SH DESCRIPTION
+.B makepkg
+is the sole APK constructor: it validates the staged payload
+(identities, splits, scripts, metadata), embeds file ownership and
+account declarations, generates the install/upgrade/deinstall
+callers from
+.I accounts.d
+fragments, and emits unsigned APKs plus the build receipts the
+publication gate re-verifies. It never installs anything (see
+.BR installpkg (8))
+and never publishes (see
+.BR sign-apk-repo (8)).
+It is normally driven inside
+.BR buildpkg (1)
+namespaces, not by hand.
+.SH OPTIONS
+This command takes no options beyond the producer name; behavior
+comes from the stage manifest plus configuration.
+.SH FILES
+.TP
+.I $SAPHIRA_INCOMING_DIR
+Where constructed artifacts land for staging.
+.SH EXIT STATUS
+.TP
+.B 0
+Constructed and receipted.
+.TP
+.B 1
+Validation, split, identity, or construction failure.
+.SH EXAMPLES
+.PP
+.RS
+makepkg nginx
+.RE
+.SH SEE ALSO
+.BR recipe (5),
+.BR saphira (7),
+.BR buildpkg (1),
+.BR resolvepkg (1),
+.BR checkpkg (1),
+.BR installpkg (8),
+.BR sign-apk-repo (8),
+.BR ensure-identity (8)

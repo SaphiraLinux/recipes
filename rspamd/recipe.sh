@@ -2,7 +2,7 @@
 
 pkgname=rspamd
 pkgver=4.1.4
-pkgrel=1
+pkgrel=2
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="Rapid spam filtering system"
 license="Apache-2.0"
@@ -78,4 +78,10 @@ recipe_install()
 		"$PKGDEST/etc/init.d/rspamd"
 	install -m 0644 "$RECIPE_DIR/files/worker-normal.inc" \
 		"$PKGDEST/etc/rspamd/local.d/worker-normal.inc"
+	# Runtime identity declaration: rspamd:117 required by the shipped
+	# service unit. makepkg generates the install scripts from this
+	# fragment; the package creates its identity at install time.
+	# r2: fragment added (payload change, revision bumps).
+	install -D -m 0644 "$RECIPE_DIR/files/accounts.d/rspamd" \
+		"$PKGDEST/usr/share/saphira/accounts.d/rspamd"
 }

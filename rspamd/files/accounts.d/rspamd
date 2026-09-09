@@ -1,0 +1,7 @@
+# rspamd runtime identity (canonical, fixed): user rspamd UID 117,
+# primary group rspamd GID 117. Required by the shipped service unit
+# (rspamd.service User=rspamd). UID 117 sits in the preferred 0..199
+# packaged range - never reuse it for another identity.
+user rspamd 117 rspamd /var/lib/rspamd /sbin/nologin
+group rspamd 117
+dir /var/lib/rspamd 0755 rspamd rspamd

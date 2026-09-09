@@ -1,7 +1,7 @@
 #!/bin/sh
 pkgname=dbus
 pkgver=1.16.0
-pkgrel=3
+pkgrel=4
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='D-Bus message bus system'
 license='GPL-2.0-or-later AFL-2.1'
@@ -30,4 +30,10 @@ recipe_install() {
 	# is auto-enabled.
 	install -D -m 0755 "$RECIPE_DIR/files/dbus.initd" \
 		"$PKGDEST/etc/init.d/dbus"
+	# Runtime identity declaration: messagebus:81 required by the
+	# system bus. makepkg generates the install scripts from this
+	# fragment; the package creates its identity at install time.
+	# r4: fragment added (payload change, revision bumps).
+	install -D -m 0644 "$RECIPE_DIR/files/accounts.d/dbus" \
+		"$PKGDEST/usr/share/saphira/accounts.d/dbus"
 }

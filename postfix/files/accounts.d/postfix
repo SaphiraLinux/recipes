@@ -1,0 +1,13 @@
+# postfix runtime identities (canonical, fixed): user postfix
+# UID 112 and group postdrop GID 113. Required by the MTA master
+# (mail_owner postfix, setgid postdrop; the shipped main.cf template
+# enables both). UIDs 112-113 sit in the preferred 0..199 packaged
+# range - never reuse them for other identities. The shared mail
+# group (GID 11, owns /var/spool/mail) is base infrastructure and is
+# deliberately NOT declared here. Queue/data paths mirror the
+# recipe_install directory layout.
+user postfix 112 postfix /var/spool/postfix /sbin/nologin
+group postfix 112
+group postdrop 113
+dir /var/spool/postfix 0755 postfix postfix
+dir /var/lib/postfix 0755 postfix postfix

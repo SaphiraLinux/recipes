@@ -1,6 +1,6 @@
 pkgname=grub
 pkgver=2.12
-pkgrel=5
+pkgrel=6
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='GRUB 2 boot loader (BIOS/i386-pc and EFI/x86_64-efi platforms, tools and scripts)'
 license='GPL-3.0-or-later'
@@ -11,7 +11,15 @@ url=https://www.gnu.org/software/grub/
 # https://ftp.gnu.org/gnu/grub/grub-2.12.tar.xz
 grub_sha256=f3c97391f7c4eaa677a78e090c7e97e6dc47b16f655f04683ebd37bef7fe0faa
 
-depends=""
+# grub-mkconfig and /etc/grub.d/10_linux are shell: they require
+# sed and grep at RUNTIME (proven by image-build failure without
+# them: "10_linux: line 35: sed: command not found"). cut/sort/tr
+# come from coreutils via the base group; gettext_printf falls back
+# inside grub-mkconfig_lib, so gettext stays out.
+depends="
+	sed
+	grep
+"
 makedepends="gcc make bison flex gawk"
 # Transition from the historical Stage4 split packages: a machine carrying
 # grub-common/grub-bios/grub-efi must migrate to this monolith through

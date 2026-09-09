@@ -1,0 +1,42 @@
+--- a/include/netinet/in.h
++++ b/include/netinet/in.h
+@@ -20,6 +20,11 @@
+ 	uint8_t sin_zero[8];
+ };
+ 
++/* Coordinate with kernel UAPI headers (linux/in6.h): when those were
++ * included first, they already provided the IPv6 address structures.
++ * glibc does the same via __USE_KERNEL_IPV6_DEFS.  Kernel definitions
++ * are layout-compatible by design (see linux/libc-compat.h). */
++#if !defined(_LINUX_IN6_H)
+ struct in6_addr {
+ 	union {
+ 		uint8_t __s6_addr[16];
+@@ -27,10 +32,19 @@
+ 		uint32_t __s6_addr32[4];
+ 	} __in6_union;
+ };
++#endif
++#if defined(_LINUX_IN6_H)
++/* kernel struct uses __in6_u member names */
++#define s6_addr __in6_u.__u6_addr8
++#define s6_addr16 __in6_u.__u6_addr16
++#define s6_addr32 __in6_u.__u6_addr32
++#else
+ #define s6_addr __in6_union.__s6_addr
+ #define s6_addr16 __in6_union.__s6_addr16
+ #define s6_addr32 __in6_union.__s6_addr32
++#endif
+ 
++#if !defined(_LINUX_IN6_H)
+ struct sockaddr_in6 {
+ 	sa_family_t     sin6_family;
+ 	in_port_t       sin6_port;
+@@ -43,6 +57,7 @@
+ 	struct in6_addr ipv6mr_multiaddr;
+ 	unsigned        ipv6mr_interface;
+ };
++#endif
+ 
+ #define INADDR_ANY        ((in_addr_t) 0x00000000)
+ #define INADDR_BROADCAST  ((in_addr_t) 0xffffffff)

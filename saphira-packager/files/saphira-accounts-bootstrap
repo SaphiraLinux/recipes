@@ -1,0 +1,527 @@
+#!/usr/bin/python3
+
+"""saphira-accounts-bootstrap: one-time legacy accounts.json bootstrap.
+
+Crosses r48 -> r49. The first account-aware signer (r48) reconstructs
+its account registry only via a full repository census, which fails
+closed on the historical fragment-carrying NVRs (man-db r4, openssh r7)
+that predate the registry. This tool performs exactly that census ONCE,
+ahead of publication, and atomically emits the exact r48
+``saphira-accounts/v1`` registry the installed r48 signer accepts —
+after which r48 publishes r49 normally.
+
+Per repository in SAPHIRA_REPO_NAMES:
+  1. verify the index signature (trust anchor; read-only);
+  2. census every published APK (adbdump identity + file list);
+  3. recover every historical accounts.d declaration from published
+     payload bytes (isolated tmp-root install, dependency closure
+     resolved offline from the same repository — never Git, never the
+     recipe tree, never staged transactions);
+  4. validate every declaration with the INSTALLED r48 makepkg fragment
+     parser and run r48's own account/TSV union + reservation rules
+     (ported verbatim from the deployed signer);
+  5. emit accounts.json atomically (temp file + rename).
+
+Default is DRY-RUN (validates everything, writes nothing). Pass
+--write to emit. Refuses if accounts.json already exists (one-time:
+never overwrite), if a signer writer lock is held, or if a
+repository.db already exists (r49 world: wrong tool).
+
+Does NOT sign, publish, move APKs, rewrite indexes, rename staged
+transactions, or touch incoming/ at all. After r49 is deployed and
+repository.db migration succeeds, this accounts.json is frozen
+alongside ownership.json as migration evidence; JSON repository state
+is never written again.
+
+Requires root; use sudo explicitly, exactly like sign-apk-repo.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+CONFIG_KEYS = (
+    "SAPHIRA_REPO_DIR",
+    "SAPHIRA_REPO_NAMES",
+    "SAPHIRA_INCOMING_DIR",
+    "SAPHIRA_ARCH",
+    "SAPHIRA_APK",
+    "SAPHIRA_TRUST_KEY",
+    "SAPHIRA_REPO_GROUP",
+)
+ACCOUNT_SCHEMA = "saphira-accounts/v1"
+FRAGMENT_PREFIX = "usr/share/saphira/accounts.d/"
+INSTALLED_MAKEPKG = "/usr/bin/makepkg"
+DIR_RE = re.compile(r"^  - name: (\S+)$")
+FILE_RE = re.compile(r"^      - name: (\S+)$")
+TOP_RE = re.compile(r"^([A-Za-z][A-Za-z0-9_.-]*):")
+DEP_ATOM_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
+DEFAULT_TSV = "/usr/share/saphira/accounts.tsv"
+
+
+class BootstrapError(RuntimeError):
+    pass
+
+
+def load_config() -> dict[str, str]:
+    config_path = os.environ.get("SAPHIRA_CONFIG_FILE", "/etc/saphira/package_builder.sh")
+    script = r'''
+set -eu
+set -a
+. "$1"
+shift
+for name do
+    value=${!name-}
+    builtin printf '%s\0%s\0' "$name" "$value"
+done
+'''
+    result = subprocess.run(
+        ["/bin/bash", "--noprofile", "--norc", "-c", script,
+         "saphira-accounts-bootstrap-config", config_path, *CONFIG_KEYS],
+        check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    parts = result.stdout.split(b"\0")
+    values = {parts[i].decode(): parts[i + 1].decode() for i in range(0, len(parts) - 1, 2)}
+    for key in ("SAPHIRA_REPO_DIR", "SAPHIRA_REPO_NAMES", "SAPHIRA_ARCH",
+                "SAPHIRA_APK", "SAPHIRA_TRUST_KEY"):
+        if not values.get(key):
+            raise BootstrapError(f"missing configuration key: {key} ({config_path})")
+    values.setdefault("SAPHIRA_INCOMING_DIR", "/out/stage4/incoming")
+    return values
+
+
+def installed_makepkg() -> object:
+    """The DEPLOYED r48 fragment parser: identical validation to what the
+    r48 publish path enforces. Refuse rather than guess if unavailable."""
+    import importlib.machinery
+    import importlib.util
+
+    candidate = Path(INSTALLED_MAKEPKG)
+    if not candidate.is_file():
+        raise BootstrapError(f"installed makepkg not found: {INSTALLED_MAKEPKG}")
+    loader = importlib.machinery.SourceFileLoader("saphira_makepkg_r48", str(candidate))
+    spec = importlib.util.spec_from_file_location(
+        "saphira_makepkg_r48", str(candidate), loader=loader)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    for attr in ("parse_accounts_fragment", "MAX_PACKAGED_ID", "PREFERRED_MAX_ID",
+                 "RESERVED_USER_NAMES", "RESERVED_GROUP_NAMES", "RESERVED_GIDS"):
+        if not hasattr(module, attr):
+            raise BootstrapError(
+                f"installed makepkg lacks {attr} (is r48 really deployed?)")
+    return module
+
+
+MK = None
+
+
+def run(command: list[str]) -> str:
+    try:
+        proc = subprocess.run(command, check=True, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, text=True)
+    except FileNotFoundError:
+        raise BootstrapError(f"required tool is missing: {command[0]}")
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or "").strip()
+        raise BootstrapError(f"command failed: {' '.join(command)}: {detail or exc.returncode}")
+    return proc.stdout
+
+
+def apk_newer(apk: str, a: str, b: str) -> bool:
+    return run([apk, "version", "-t", a, b]).strip() == ">"
+
+
+def parse_tsv(path: str) -> tuple[dict[str, int], dict[str, int]] | None:
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except OSError:
+        return None
+    users: dict[str, int] = {}
+    groups: dict[str, int] = {}
+    for lineno, raw in enumerate(text.splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        fields = line.split("\t")
+        if len(fields) < 3:
+            raise BootstrapError(f"malformed accounts.tsv line {lineno}")
+        name, kind, ident = fields[0], fields[1], fields[2]
+        if kind == "user":
+            users[name] = int(ident)
+        elif kind == "group":
+            groups[name] = int(ident)
+        else:
+            raise BootstrapError(f"malformed accounts.tsv line {lineno}: {kind}")
+    return users, groups
+
+
+def package_files(apk: str, path: Path) -> tuple[str, str, list[str]]:
+    """Identity + file list from adbdump (same parsing the r48 gate uses)."""
+    dump = run([apk, "adbdump", str(path)])
+    name = version = None
+    section, cur, files = None, None, []
+    for line in dump.splitlines():
+        top = TOP_RE.match(line)
+        if top:
+            section, cur = top.group(1), None
+            continue
+        if section == "info":
+            m = re.match(r"^  name: (\S+)$", line)
+            if m:
+                name = m.group(1)
+            m = re.match(r"^  version: (\S+)$", line)
+            if m:
+                version = m.group(1)
+        elif section == "paths":
+            m = DIR_RE.match(line)
+            if m:
+                cur = m.group(1)
+                continue
+            m = FILE_RE.match(line)
+            if m and cur:
+                files.append(f"{cur}/{m.group(1)}")
+    if not name or not version:
+        raise BootstrapError(f"cannot read package identity: {path}")
+    return name, version, files
+
+
+def check_union(tsv_users: dict[str, int], tsv_groups: dict[str, int],
+                decls: list[tuple[str, dict]]) -> None:
+    """r48's own union + reservation rules, ported verbatim from the
+    deployed signer: packaged IDs 0..887; TSV convergence vs conflict;
+    fragment duplicates collide; root/wheel/spokes + UID 0 + GIDs 0/1/2
+    refused; primaries must be base-seeded or same-fragment."""
+    max_id = MK.MAX_PACKAGED_ID
+    reserved_users = MK.RESERVED_USER_NAMES
+    reserved_groups = MK.RESERVED_GROUP_NAMES
+    reserved_gids = MK.RESERVED_GIDS
+    users, uids, groups, gids = {}, {}, {}, {}
+    errors = []
+    for owner, decl in decls:
+        for entry in decl.get("groups", []):
+            name, gid = entry["name"], int(entry["gid"])
+            if name in reserved_groups or gid in reserved_gids:
+                errors.append(f"group {name}: {owner} declares reserved foundation identity (groups root/wheel/spokes and GIDs 0/1/2 are never package-owned)")
+            elif gid > max_id:
+                errors.append(f"group {name}: {owner} GID {gid} is outside the packaged range 0..{max_id} (888..999 are local-user-service territory, 1000+ human)")
+            elif name in tsv_groups:
+                if tsv_groups[name] != gid:
+                    errors.append(f"group {name}: {owner} GID {gid} conflicts with base seed GID {tsv_groups[name]}")
+            elif name in groups:
+                errors.append(f"group {name}: claimed by {groups[name][0]} and {owner}")
+            elif gid in tsv_groups.values():
+                clash = sorted(n for n, g in tsv_groups.items() if g == gid)[0]
+                errors.append(f"GID {gid}: {owner} group {name} collides with base seed {clash}")
+            elif gid in gids:
+                errors.append(f"GID {gid}: {owner} group {name} collides with {gids[gid][0]} group {gids[gid][1]}")
+            else:
+                groups[name] = (owner, gid)
+                gids[gid] = (owner, name)
+        own_groups = {entry["name"] for entry in decl.get("groups", [])}
+        for entry in decl.get("users", []):
+            name = entry["name"]
+            uid = int(entry["uid"])
+            primary = entry["primary"]
+            if name in reserved_users or uid == 0:
+                errors.append(f"user {name}: {owner} declares reserved system identity (user root and UID 0 are never package-owned)")
+            elif primary in reserved_groups:
+                errors.append(f"user {name}: {owner} primary group {primary} is a reserved foundation group; service users must not be anchored to it")
+            elif uid > max_id:
+                errors.append(f"user {name}: {owner} UID {uid} is outside the packaged range 0..{max_id} (888..999 are local-user-service territory, 1000+ human)")
+            elif name in tsv_users:
+                if tsv_users[name] != uid:
+                    errors.append(f"user {name}: {owner} UID {uid} conflicts with base seed UID {tsv_users[name]}")
+                elif primary not in tsv_groups and primary not in own_groups:
+                    errors.append(f"user {name}: {owner} primary group {primary} is neither base-seeded nor declared in the same fragment")
+            elif name in users:
+                errors.append(f"user {name}: claimed by {users[name][0]} and {owner}")
+            elif uid in tsv_users.values():
+                clash = sorted(n for n, u in tsv_users.items() if u == uid)[0]
+                errors.append(f"UID {uid}: {owner} user {name} collides with base seed {clash}")
+            elif uid in uids:
+                errors.append(f"UID {uid}: {owner} user {name} collides with {uids[uid][0]} user {uids[uid][1]}")
+            elif primary not in tsv_groups and primary not in own_groups:
+                errors.append(f"user {name}: {owner} primary group {primary} is neither base-seeded nor declared in the same fragment")
+            else:
+                users[name] = (owner, uid)
+                uids[uid] = (owner, name)
+    if errors:
+        raise BootstrapError(
+            "account identity collision - one package owns each declared identity; "
+            "packaged IDs must fall in 0..887 and must not conflict with the base seed or each other:\n  "
+            + "\n  ".join(sorted(errors))
+        )
+
+
+def census(apk: str, repo_dir: Path) -> dict[str, dict]:
+    """Every published APK: identity + file list. No payload reads."""
+    result = {}
+    for path in sorted(repo_dir.glob("*.apk")):
+        if path.is_symlink() or not path.is_file():
+            continue
+        name, version, files = package_files(apk, path)
+        if path.name != f"{name}-{version}.apk":
+            raise BootstrapError(f"package filename does not match identity: {path}")
+        result[path.name] = {"name": name, "version": version, "files": files}
+    if not result:
+        raise BootstrapError(f"repository holds no APK files: {repo_dir}")
+    return result
+
+
+def extract_declarations(apk: str, repo_dir: Path, filenames: list[str],
+                         work_tmp: Path) -> dict[str, dict]:
+    """Recover declarations from published payload bytes: isolated
+    tmp-root install, dependency closure resolved offline from the same
+    repository (bare package-name atoms only; anything else fails
+    closed). Carriers only — never a full-repository extraction."""
+    if not filenames:
+        return {}
+    cache: dict[str, dict] = {}
+
+    def dumped(filename: str) -> dict:
+        if filename not in cache:
+            name, version, files = package_files(apk, repo_dir / filename)
+            depends: list[str] = []
+            dump = run([apk, "adbdump", str(repo_dir / filename)])
+            section, in_dep = None, False
+            for line in dump.splitlines():
+                top = TOP_RE.match(line)
+                if top:
+                    section, in_dep = top.group(1), False
+                    continue
+                if section == "info" and re.match(r"^  depends:", line):
+                    in_dep = True
+                    continue
+                if in_dep:
+                    m = re.match(r"^    +- (\S+)$", line) or re.match(r"^    +- name: (\S+)$", line)
+                    if m:
+                        depends.append(m.group(1))
+                        continue
+                    if re.match(r"^  \S", line):
+                        in_dep = False
+            cache[filename] = {"name": name, "version": version, "files": files,
+                               "depends": depends}
+        return cache[filename]
+
+    def newest_provider(pkgname: str) -> str:
+        matches = []
+        for path in repo_dir.glob(f"{pkgname}-*.apk"):
+            if not path.is_file() or path.is_symlink():
+                continue
+            info = dumped(path.name)
+            # Filename prefix is not identity: gdbm-*.apk also matches
+            # gdbm-dev-*.apk. Only the exact package name provides it.
+            if info["name"] == pkgname:
+                matches.append(path.name)
+        if not matches:
+            raise BootstrapError(
+                f"cannot resolve dependency {pkgname} for declaration extraction"
+                " (rebuild and re-publish the package)")
+        best = matches[0]
+        for candidate in matches[1:]:
+            if apk_newer(apk, dumped(candidate)["version"], dumped(best)["version"]):
+                best = candidate
+        return best
+
+    closure = set(filenames)
+    queue = list(filenames)
+    while queue:
+        current = queue.pop()
+        for atom in dumped(current)["depends"]:
+            bare = atom.split("<")[0].split(">")[0].split("=")[0].split("~")[0]
+            if atom.startswith("so:") or atom.startswith("cmd:") or not DEP_ATOM_RE.match(bare):
+                raise BootstrapError(
+                    f"cannot resolve dependency {atom} of {current} "
+                    "for declaration extraction (rebuild and re-publish the package)")
+            provider = newest_provider(bare)
+            if provider not in closure:
+                closure.add(provider)
+                queue.append(provider)
+    root = work_tmp / "extract-root"
+    if root.exists():
+        shutil.rmtree(root)
+    root.mkdir(parents=True)
+    copies = work_tmp / "extract-apks"
+    copies.mkdir(parents=True, exist_ok=True)
+    for filename in sorted(closure):
+        shutil.copy2(repo_dir / filename, copies / filename)
+    proc = subprocess.run(
+        [apk, "--root", str(root), "--initdb", "--allow-untrusted",
+         "--no-scripts", "--no-cache", "--force-non-repository",
+         "add", *[str(copies / f) for f in sorted(closure)]],
+        text=True, capture_output=True)
+    if proc.returncode != 0:
+        raise BootstrapError(
+            "isolated declaration-extraction install failed: "
+            + ((proc.stderr or "").strip() or (proc.stdout or "").strip()
+               or str(proc.returncode)))
+    decls = {}
+    frag_dir = root / FRAGMENT_PREFIX
+    for filename in filenames:
+        info = dumped(filename)
+        frag_files = sorted({f[len(FRAGMENT_PREFIX):] for f in info["files"]
+                             if f.startswith(FRAGMENT_PREFIX)})
+        merged = {"users": [], "groups": [], "dirs": []}
+        for frag in frag_files:
+            path = frag_dir / frag
+            if not path.is_file():
+                raise BootstrapError(
+                    f"{filename} lists fragment {frag} but it did not install "
+                    "(rebuild and re-publish the package)")
+            decl, _notices = MK.parse_accounts_fragment(path)
+            for key in ("users", "groups", "dirs"):
+                merged[key].extend(decl[key])
+        if not merged["users"] and not merged["groups"]:
+            raise BootstrapError(
+                f"{filename} ships an accounts.d fragment with no parseable "
+                "declaration (rebuild and re-publish the package)")
+        decls[filename] = merged
+    return decls
+
+
+def normalize_ownership(path: Path, config: dict) -> None:
+    uid = os.environ.get("SUDO_UID")
+    if not uid:
+        return
+    import grp
+
+    group = config.get("SAPHIRA_REPO_GROUP") or os.environ.get("SAPHIRA_REPO_GROUP", "saphira-build")
+    os.chown(path, int(uid), grp.getgrnam(group).gr_gid)
+
+
+def build_registry_text(entries: list[tuple[str, str, dict]]) -> str:
+    data = {
+        "schema": ACCOUNT_SCHEMA,
+        "entries": [
+            {"package": name, "version": version, "declaration": decl}
+            for name, version, decl in sorted(entries)
+        ],
+    }
+    return json.dumps(data, separators=(",", ":")) + "\n"
+
+
+def bootstrap_repo(config: dict, repo: str, write: bool) -> str:
+    arch = config["SAPHIRA_ARCH"]
+    apk = config["SAPHIRA_APK"]
+    repo_dir = Path(config["SAPHIRA_REPO_DIR"]) / repo / arch
+    trust_dir = str(Path(config["SAPHIRA_TRUST_KEY"]).parent)
+    tsv_path = os.environ.get("SAPHIRA_ACCOUNTS_TSV", DEFAULT_TSV)
+    if not repo_dir.is_dir():
+        raise BootstrapError(f"repository does not exist: {repo_dir}")
+    registry_path = repo_dir / "accounts.json"
+    if registry_path.exists():
+        raise BootstrapError(
+            f"{registry_path} already exists (one-time tool: never overwrite)")
+    if (repo_dir / "repository.db").exists():
+        raise BootstrapError(
+            f"{repo_dir}/repository.db already exists (r49 world: run saphira-repo-migrate)")
+    index = repo_dir / "Packages.adb"
+    if not index.is_file():
+        raise BootstrapError(f"repository index is missing: {index}")
+    run([apk, "verify", "--keys-dir", trust_dir, str(index)])
+
+    print(f"saphira-accounts-bootstrap: census of {repo_dir} ...", flush=True)
+    census_data = census(apk, repo_dir)
+    carriers = sorted(
+        filename for filename, info in census_data.items()
+        if any(f.startswith(FRAGMENT_PREFIX) for f in info["files"]))
+    print(f"saphira-accounts-bootstrap: {len(census_data)} APK identities,"
+          f" {len(carriers)} fragment carriers", flush=True)
+    with tempfile.TemporaryDirectory(prefix="saphira-accounts-bootstrap-") as tmp:
+        declarations = extract_declarations(apk, repo_dir, carriers, Path(tmp))
+
+    tsv = parse_tsv(tsv_path)
+    if tsv is None:
+        raise BootstrapError(
+            f"accounts authority is missing: {tsv_path} "
+            "(set SAPHIRA_ACCOUNTS_TSV or install saphira-baselayout)")
+    tsv_users, tsv_groups = tsv
+    # Same-name collapse to the newest declaration, exactly as the r48
+    # full audit governs (superseded fragments no longer govern).
+    newest: dict[str, tuple[str, dict]] = {}
+    for filename in carriers:
+        info = census_data[filename]
+        name, version = info["name"], info["version"]
+        if name not in newest or apk_newer(apk, version, newest[name][0]):
+            newest[name] = (version, declarations[filename])
+    decls = [(f"{name}-{version}", decl) for name, (version, decl) in sorted(newest.items())]
+    check_union(tsv_users, tsv_groups, decls)
+    for name, (version, decl) in sorted(newest.items()):
+        for entry in decl.get("groups", []):
+            if int(entry["gid"]) > MK.PREFERRED_MAX_ID:
+                print(f"saphira-accounts-bootstrap: notice: {name}-{version} group"
+                      f" {entry['name']} GID {entry['gid']} is in the 200..887 expansion range")
+        for entry in decl.get("users", []):
+            if int(entry["uid"]) > MK.PREFERRED_MAX_ID:
+                print(f"saphira-accounts-bootstrap: notice: {name}-{version} user"
+                      f" {entry['name']} UID {entry['uid']} is in the 200..887 expansion range")
+
+    entries = [(census_data[f]["name"], census_data[f]["version"], declarations[f])
+               for f in carriers]
+    text = build_registry_text(entries)
+    digest = hashlib.sha256(text.encode()).hexdigest()
+    if write:
+        staging = repo_dir / f"accounts.json.bootstrap-{os.getpid()}"
+        staging.write_text(text, encoding="utf-8")
+        os.chmod(staging, 0o644)
+        normalize_ownership(staging, config)
+        os.rename(staging, registry_path)
+        normalize_ownership(registry_path, config)
+        print(f"saphira-accounts-bootstrap: {repo}: registry emitted"
+              f" ({len(entries)} declarations, sha256:{digest[:16]}…)")
+    else:
+        print(f"saphira-accounts-bootstrap: {repo}: DRY RUN"
+              f" ({len(entries)} declarations, sha256:{digest[:16]}…); pass --write to emit")
+    return text
+
+
+def main() -> int:
+    if os.geteuid() != 0:
+        print("saphira-accounts-bootstrap: must be run as root; use sudo explicitly",
+              file=sys.stderr)
+        return 1
+    args = sys.argv[1:]
+    write = False
+    if args and args[0] == "--write":
+        write = True
+        args = args[1:]
+    if args:
+        print("usage: saphira-accounts-bootstrap [--write]", file=sys.stderr)
+        return 1
+    try:
+        global MK
+        config = load_config()
+        MK = installed_makepkg()
+        repos = config["SAPHIRA_REPO_NAMES"].split()
+        if not repos:
+            raise BootstrapError("SAPHIRA_REPO_NAMES is empty")
+        # Refuse to interleave with a live publication run: incoming is
+        # otherwise never touched by this tool.
+        incoming_lock = Path(config["SAPHIRA_INCOMING_DIR"]) / config["SAPHIRA_ARCH"] / "sign-apk-repo.lock"
+        if incoming_lock.exists():
+            raise BootstrapError(
+                f"publication lock is held ({incoming_lock}); run while no signer is active")
+        texts = {}
+        for repo in repos:
+            texts[repo] = bootstrap_repo(config, repo, write)
+        if not write:
+            for repo, text in texts.items():
+                print(f"--- {repo}/accounts.json (would-be, exact bytes) ---")
+                print(text, end="")
+    except BootstrapError as exc:
+        print(f"saphira-accounts-bootstrap: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

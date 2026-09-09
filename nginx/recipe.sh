@@ -2,7 +2,13 @@
 
 pkgname=nginx
 pkgver=1.30.4
-pkgrel=3
+# r5: Arch-parity dynamic module set (all ten reference families):
+# brotli, cache_purge (new, vendored), geoip v1 (new, libgeoip),
+# geoip2, headers-more, image_filter (new, gd), memc (new, vendored),
+# perl (new, static libperl baked in - no perl rebuild needed),
+# stream set, xslt. sub_filter mandatory for AZ2 realtime-price
+# rewriting (kept static, always present). mail stays static.
+pkgrel=5
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="Saphira webDragon HTTP server and reverse proxy"
 license="BSD-2-Clause"
@@ -14,6 +20,8 @@ sha256=4261dc90e9e47c1c4041276e9aaa3d48ebe2e664f728e14fa95ae6c67d57a08b
 
 depends="
     brotli
+    gd
+    libgeoip
     libmaxminddb
     libxslt
     pcre2
@@ -25,11 +33,14 @@ makedepends="
     binutils
     brotli-dev
     gcc
+    gd-dev
+    libgeoip
     libmaxminddb-dev
     libxslt-dev
     make
     openssl-dev
     pcre2-dev
+    perl
     zlib-dev
 "
 
@@ -41,28 +52,37 @@ recipe_build()
 {
 	# Dual-format service package: systemd unit under /usr/lib/systemd/system,
 	# OpenRC script under /etc/init.d (see files/). Third-party dynamic
-	# modules headers-more (v0.34), geoip2 (v3.4) and brotli are enabled,
-	# plus the zero-dependency static set (addition, dav, degradation,
-	# flv, mp4, random_index, sub), mail proxy (+ssl) and dynamic xslt;
-	# http v2/v3 (quic), ssl, realip, slice and the stream set were
-	# already on. perl/image_filter stay deferred (no perl-dev/gd yet;
-	# geoip v1 superseded by geoip2).
-	# ngx_brotli has no release tarball: pinned to upstream master commit
-	# a71f9312c2deb28875acc7bacfdd5695a111aa53 (sha256 below covers the
-	# exact bytes; not a floating branch).
+	# modules headers-more (v0.34), geoip2 (v3.4), brotli, memc (v0.21)
+	# and cache_purge (v2.3) are enabled, plus geoip v1, image_filter
+	# and perl as dynamic modules, the zero-dependency static set
+	# (addition, dav, degradation, flv, mp4, random_index, sub),
+	# mail proxy (+ssl) and dynamic xslt; http v2/v3 (quic), ssl,
+	# realip, slice and the stream set were already on.
+	# perl links the static libperl into its .so (no perl rebuild:
+	# perl r1 ships static-only libperl.a, which is exactly what a
+	# self-contained dynamic module wants). =dynamic support for
+	# geoip/image_filter/perl verified against upstream auto/options.
 	headers_more_sha256=0c0d2ced2ce895b3f45eb2b230cd90508ab2a773299f153de14a43e44c1209b3
 	geoip2_sha256=ad72fc23348d715a330994984531fab9b3606e160483236737f9a4a6957d9452
 	ngx_brotli_sha256=1d21be34f3b7b6d05a8142945e59b3a47665edcdfe0f3ee3d3dbef121f90c08c
+	memc_sha256=6eb85655475506c577f86c0c6d902419000f66876215461e10411206a4dc554e
+	cache_purge_sha256=cb7d5f22919c613f1f03341a1aeb960965269302e9eb23425ccaabd2f5dcbbec
 	echo "$headers_more_sha256  $RECIPE_DIR/files/headers-more-0.34.tar.gz" | sha256sum -c -
 	echo "$geoip2_sha256  $RECIPE_DIR/files/ngx-geoip2-3.4.tar.gz" | sha256sum -c -
 	echo "$ngx_brotli_sha256  $RECIPE_DIR/files/ngx-brotli-a71f931.tar.gz" | sha256sum -c -
+	echo "$memc_sha256  $RECIPE_DIR/files/memc-0.21.tar.gz" | sha256sum -c -
+	echo "$cache_purge_sha256  $RECIPE_DIR/files/cache-purge-2.3.tar.gz" | sha256sum -c -
 	mkdir -p "$SRC/modules"
 	tar --no-same-owner -C "$SRC/modules" -xf "$RECIPE_DIR/files/headers-more-0.34.tar.gz"
 	tar --no-same-owner -C "$SRC/modules" -xf "$RECIPE_DIR/files/ngx-geoip2-3.4.tar.gz"
 	tar --no-same-owner -C "$SRC/modules" -xf "$RECIPE_DIR/files/ngx-brotli-a71f931.tar.gz"
+	tar --no-same-owner -C "$SRC/modules" -xf "$RECIPE_DIR/files/memc-0.21.tar.gz"
+	tar --no-same-owner -C "$SRC/modules" -xf "$RECIPE_DIR/files/cache-purge-2.3.tar.gz"
 	mv "$SRC/modules"/headers-more-nginx-module-0.34 "$SRC/modules/headers-more"
 	mv "$SRC/modules"/ngx_http_geoip2_module-3.4 "$SRC/modules/geoip2"
 	mv "$SRC/modules"/ngx_brotli-a71f9312c2deb28875acc7bacfdd5695a111aa53 "$SRC/modules/ngx_brotli"
+	mv "$SRC/modules"/memc-nginx-module-0.21 "$SRC/modules/memc"
+	mv "$SRC/modules"/ngx_cache_purge-2.3 "$SRC/modules/cache_purge"
 	# ngx_brotli builds against brotli sources at deps/brotli (headers);
 	# it links the system libbrotlienc at runtime. Stage the exact
 	# vendored brotli bytes so headers match the packaged library.
@@ -98,11 +118,16 @@ recipe_build()
 		--with-http_mp4_module \
 		--with-http_random_index_module \
 		--with-http_sub_module \
+		--with-http_geoip_module=dynamic \
+		--with-http_image_filter_module=dynamic \
+		--with-http_perl_module=dynamic \
 		--with-mail --with-mail_ssl_module \
 		--with-http_xslt_module=dynamic \
 		--add-dynamic-module="$SRC/modules/headers-more" \
 		--add-dynamic-module="$SRC/modules/geoip2" \
 		--add-dynamic-module="$SRC/modules/ngx_brotli" \
+		--add-dynamic-module="$SRC/modules/memc" \
+		--add-dynamic-module="$SRC/modules/cache_purge" \
 		--with-stream=dynamic --with-stream_ssl_module \
 		--with-stream_realip_module --with-stream_ssl_preread_module \
 		--with-cc-opt="${CPPFLAGS-} ${CFLAGS-}" --with-ld-opt="${LDFLAGS-}"
@@ -135,4 +160,10 @@ recipe_install()
 		"$PKGDEST/etc/nginx/conf.d/default.conf"
 	printf '<h1>Saphira webDragon seed</h1>\n' > \
 		"$PKGDEST/var/www/localhost/htdocs/index.html"
+	# Runtime identity declaration: nginx:102 required by the shipped
+	# server config. makepkg generates the install scripts from this
+	# fragment; the package creates its identity at install time.
+	# r4: fragment added (payload change, revision bumps).
+	install -D -m 0644 "$RECIPE_DIR/files/accounts.d/nginx" \
+		"$PKGDEST/usr/share/saphira/accounts.d/nginx"
 }

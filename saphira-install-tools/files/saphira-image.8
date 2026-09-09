@@ -1,0 +1,112 @@
+.TH SAPHIRA-IMAGE 8 "September 2026" "Saphira Linux" "System Administration"
+.SH NAME
+saphira-image \- build bootable Saphira disk images from a profile
+.SH SYNOPSIS
+.B saphira-image build
+.B --profile
+.I PROFILE
+.B --output
+.I IMAGE
+.RB [ --size
+.IR 4G ]
+.RB [ --repository
+.IR REPO ]
+.RB [ --hostname
+.IR NAME ]
+.RB [ --root-password
+.IR PW ]
+.SH DESCRIPTION
+.B saphira-image build
+creates a bootable disk image for
+.IR PROFILE :
+a GPT-partitioned raw disk (1 MiB bios-boot for GRUB i386-pc plus a
+Linux root partition), formatted ext4, filled by
+.BR saphira-install (8)
+through the shared assembler, with GRUB installed from inside the
+target so core.img and modules always come from the same grub
+package. Output ending in
+.I .qcow2
+is converted with
+.BR qemu-img ;
+anything else stays raw.
+.PP
+Layout reserves EFI from day one: a later ESP partition slots beside
+bios-boot and root with no re-layout, and
+.B --target=i386-pc
+gains an
+.B x86_64-efi
+sibling then. BIOS-only is the first milestone, not the format.
+.PP
+Requires root privileges (loop devices, mkfs, mounts, GRUB to a
+device) and host tools
+.BR sfdisk ,
+.BR losetup ,
+.BR mkfs.ext4
+and
+.BR grub-install ;
+.B qemu-img
+is required only for
+.I .qcow2
+output. Like
+.BR installpkg ,
+this is a privileged admin boundary: it never belongs in the
+rootless package build path.
+.SH OPTIONS
+.TP
+.BR --profile " " \fIPROFILE
+Profile name from
+.BR saphira-profiles (5)
+(required).
+.TP
+.BR --output " " \fIIMAGE
+Output path (required, must not exist).
+.I .qcow2
+suffix selects qcow2 conversion.
+.TP
+.BR --size " " \fI4G
+Raw disk size (default
+.BR 4G ;
+.BR G / M / K
+suffixes).
+.TP
+.BR --repository " " \fIREPO
+APK repository, passed through to the install.
+.TP
+.BR --hostname " " \fINAME
+Hostname to write (default: the profile name).
+.TP
+.BR --root-password " " \fIPW
+Root password for automated boot-test images (default: locked,
+firstboot owns accounts). Throwaway only; rotate on first real use.
+.SH EXIT STATUS
+.TP
+.B 0
+Image ready; loop detached, workspace removed.
+.TP
+.B 1
+Any failure; partial image removed, loop detached. The raw file is
+deleted on failure (a half-written disk is never left behind).
+.TP
+.B 2
+Usage error.
+.SH EXAMPLES
+Boot-testable virtualisation host, 4 GiB qcow2:
+.PP
+.RS
+sudo saphira-image build --profile virtualisation-host \\
+    --output virt-host.qcow2 --repository /out/stage4/packages/hatched \\
+    --root-password test
+.RE
+.PP
+ Raw image for dd to a USB stick:
+.PP
+.RS
+sudo saphira-image build --profile virtualisation-host \\
+    --output virt-host.raw --size 8G
+.RE
+.SH SEE ALSO
+.BR saphira-install (8),
+.BR saphira-assemble-rootfs (8),
+.BR saphira-profiles (5),
+.BR grub-install (8),
+.BR qemu-img (1)

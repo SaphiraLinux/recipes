@@ -13,6 +13,7 @@ ACCOUNTS=${2:?accounts.tsv path is required}
 ROOT=${SAPHIRA_ROOT:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)}
 
 [[ $ROOTFS == "$ROOT/out/stage4/rootfs" ]] ||
+[[ ${SAPHIRA_INSTALLER_ROOT:-} == "$ROOTFS" && -n $ROOTFS ]] ||
 	{ printf 'apply-accounts: unsafe rootfs: %s\n' "$ROOTFS" >&2; exit 1; }
 test -d "$ROOTFS" || {
 	printf 'apply-accounts: derived rootfs is absent\n' >&2
@@ -55,9 +56,14 @@ cleanup_staging()
 	rm -f -- "$passwd_new" "$group_new" "$shadow_new"
 }
 trap cleanup_staging EXIT
+# Fresh installer targets have no account files yet: treat absence
+# as "no existing humans to preserve" instead of failing.
 old_passwd=$ROOTFS/etc/passwd
+test -e "$old_passwd" || old_passwd=/dev/null
 old_group=$ROOTFS/etc/group
+test -e "$old_group" || old_group=/dev/null
 old_shadow=$ROOTFS/etc/shadow
+test -e "$old_shadow" || old_shadow=/dev/null
 firstboot_required=0
 : > "$passwd_new"
 : > "$group_new"
@@ -151,15 +157,33 @@ done < "$old_group"
 install -m 0644 "$passwd_new" "$ROOTFS/etc/passwd"
 install -m 0644 "$group_new" "$ROOTFS/etc/group"
 install -m 0600 "$shadow_new" "$ROOTFS/etc/shadow"
-install -D -m 0755 "$ROOT/stage4/baselayout/saphira-firstboot" \
-	"$ROOTFS/sbin/saphira-firstboot"
-install -D -m 0644 "$ROOT/stage4/baselayout/root.profile" \
-	"$ROOTFS/root/.profile"
+# Seeds come from the historical stage4 source tree when present;
+# otherwise from the installed baselayout payload (installer targets
+# have no stage4 tree, but carry the same bytes via the package).
+if test -f "$ROOT/stage4/baselayout/saphira-firstboot"; then
+	install -D -m 0755 "$ROOT/stage4/baselayout/saphira-firstboot" \
+		"$ROOTFS/sbin/saphira-firstboot"
+elif test ! -x "$ROOTFS/sbin/saphira-firstboot"; then
+	printf 'apply-accounts: saphira-firstboot unavailable\n' >&2
+	exit 1
+fi
+if test -f "$ROOT/stage4/baselayout/root.profile"; then
+	install -D -m 0644 "$ROOT/stage4/baselayout/root.profile" \
+		"$ROOTFS/root/.profile"
+else
+	install -D -m 0644 "$ROOTFS/usr/share/saphira/root.profile" \
+		"$ROOTFS/root/.profile"
+fi
 chmod 0700 "$ROOTFS/root"
 ln -sfn ../usr/bin/passwd "$ROOTFS/bin/passwd"
 install -d -m 0700 "$ROOTFS/var/lib/saphira-firstboot"
-install -D -m 0644 "$ROOT/stage4/config/network.d/00-loopback.conf" \
-	"$ROOTFS/etc/network.d/00-loopback.conf"
+if test -f "$ROOT/stage4/config/network.d/00-loopback.conf"; then
+	install -D -m 0644 "$ROOT/stage4/config/network.d/00-loopback.conf" \
+		"$ROOTFS/etc/network.d/00-loopback.conf"
+else
+	install -D -m 0644 "$ROOTFS/usr/share/saphira/00-loopback.conf" \
+		"$ROOTFS/etc/network.d/00-loopback.conf"
+fi
 if test "$firstboot_required" = 1; then
 	install -m 0600 /dev/null "$ROOTFS/etc/saphira-firstboot-required"
 else

@@ -1,0 +1,13 @@
+#!/sbin/openrc-run
+# OpenRC init for glusterd (Saphira)
+
+description="GlusterFS management daemon"
+command="/usr/sbin/glusterd"
+command_args="${GLUSTERD_ARGS:--p /run/glusterd.pid}"
+pidfile="/run/glusterd.pid"
+command_background="yes"
+
+depend() {
+	need localmount net
+	after bootmisc firewall
+}
