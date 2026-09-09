@@ -1,0 +1,131 @@
+.TH SAPHIRA-ASSEMBLE-ROOTFS 8 "September 2026" "Saphira Linux" "System Administration"
+.SH NAME
+saphira-assemble-rootfs \- build a complete Saphira root filesystem from a profile
+.SH SYNOPSIS
+.B saphira-assemble-rootfs
+.I TARGET PROFILE
+.SH DESCRIPTION
+.B saphira-assemble-rootfs
+is the shared rootfs assembly path: the single code path consumed by
+image creation
+.RB ( saphira-image )
+and disk installation
+.RB ( saphira-install ).
+Both entry points call this tool; neither reimplements it, so a
+profile that builds a working image always installs a working
+system.
+.PP
+Assembly runs six stages:
+.TP
+.B 1. Package install
+.BR saphira-bootstrap (8)
+installs
+.IR PROFILE (5)
+into empty directory
+.IR TARGET .
+.TP
+.B 2. Machine identity
+Writes
+.I /etc/hostname
+(default: the profile name, overridable with
+.BR SAPHIRA_HOSTNAME )
+and loopback
+.IR /etc/hosts .
+.TP
+.B 3. System accounts
+Runs the base layout's
+.B apply-accounts
+against the target with an explicit installer opt-in, creating
+passwd/group/shadow from
+.I accounts.tsv
+and arming firstboot when root is locked.
+.TP
+.B 4. Trust store
+Runs
+.B update-ca-certificates
+inside the target, mirroring the package builder's root
+initialization.
+.TP
+.B 5. Root credential
+With
+.B SAPHIRA_ROOT_PASSWORD
+set, assigns it to root via
+.B chpasswd
+(for automated boot-test images only; rotate on first real use).
+Otherwise locks root with
+.BR "usermod -p '!'" ,
+leaving account setup to firstboot.
+.TP
+.B 6. Service enables
+Reads
+.IR profiles/ PROFILE .services
+(one systemd unit per line,
+.B #
+comments) and enables each unit offline with the target's own
+.BR "systemctl --root=/" .
+Unit files come from the packages; the selection comes from the
+profile. Socket cascades follow automatically through
+.I [Install]
+sections.
+.PP
+Requires root privileges throughout (device setup, chroot mounts,
+target ownership).
+.SH ENVIRONMENT
+.TP
+.B SAPHIRA_PROFILE_ROOT
+Profile directory (default
+.IR /usr/share/saphira/profiles ).
+.TP
+.B SAPHIRA_REPOSITORY
+APK repository for the target; passed through to
+.BR saphira-bootstrap .
+When empty, the host repository configuration is used.
+.TP
+.B SAPHIRA_BOOTSTRAP
+.B saphira-bootstrap
+binary (default: alongside this tool).
+.TP
+.B SAPHIRA_CHROOT
+.B saphira-chroot
+binary (default: alongside this tool).
+.TP
+.B SAPHIRA_HOSTNAME
+Hostname to write (default: the profile name).
+.TP
+.B SAPHIRA_ROOT_PASSWORD
+Root password for boot-test images (default: empty, root locked).
+.SH EXIT STATUS
+.TP
+.B 0
+All six stages completed.
+.TP
+.B 1
+Any stage failed; the target is left in place for diagnosis.
+.TP
+.B 2
+Usage error.
+.SH EXAMPLES
+Assemble the virtualisation host into scratch from a pinned repo:
+.PP
+.RS
+sudo SAPHIRA_REPOSITORY=/out/stage4/packages/hatched \\
+    saphira-assemble-rootfs /tmp/saphtest-root virtualisation-host
+.RE
+.PP
+Same, with a throwaway root password for an automated boot-test:
+.PP
+.RS
+sudo SAPHIRA_REPOSITORY=/out/stage4/packages/hatched \\
+    SAPHIRA_ROOT_PASSWORD=test \\
+    saphira-assemble-rootfs /tmp/saphtest-root virtualisation-host
+.RE
+.SH FILES
+.TP
+.I /usr/share/saphira/profiles/
+Profiles and per-profile
+.I .services
+sidecars.
+.SH SEE ALSO
+.BR saphira-profiles (5),
+.BR saphira-bootstrap (8),
+.BR saphira-chroot (8)

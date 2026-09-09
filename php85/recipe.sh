@@ -2,7 +2,7 @@
 
 pkgname=php85
 pkgver=8.5.9
-pkgrel=7
+pkgrel=8
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="PHP 8.5 language runtime: CLI, FPM, opcache and shared extensions"
 license="PHP-3.01"
@@ -108,4 +108,10 @@ recipe_install()
 		>> "$PKGDEST/etc/php85/conf.d/20_xml.ini"
 	install_extension_ini xmlreader xmlreader
 	install_extension_ini xmlwriter xmlwriter
+	# Runtime identity declaration: php-fpm:103 required by the shipped
+	# pool config. makepkg generates the install scripts from this
+	# fragment; the package creates its identity at install time.
+	# r8: fragment added (payload change, revision bumps).
+	install -D -m 0644 "$RECIPE_DIR/files/accounts.d/php85" \
+		"$PKGDEST/usr/share/saphira/accounts.d/php85"
 }

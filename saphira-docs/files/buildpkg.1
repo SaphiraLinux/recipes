@@ -1,0 +1,73 @@
+.TH BUILDPKG 1 "September 2026" "Saphira Linux" "User Commands"
+.SH NAME
+buildpkg \- request and run a native package build
+.SH SYNOPSIS
+.B buildpkg
+.I PACKAGE
+.RI [ SOURCE ]
+.SH DESCRIPTION
+.B buildpkg
+is the normal build frontend: it resolves the dependency closure
+repository-first (see
+.BR resolvepkg (1)),
+assembles one disposable merged root for the top-level package, and
+runs the recipe's
+.BR recipe_build " and " recipe_install
+(see
+.BR recipe (5))
+inside rootless containers. An explicit top-level request always
+builds the current native recipe; dependencies are never rebuilt or
+upgraded merely because a newer recipe exists.
+.PP
+There is no sudo and no root anywhere in the build path. One visible
+workspace per top-level build appears at
+.IR /build/PACKAGE.buildpkg .
+A failed run retains its workspace as diagnostic evidence carrying
+the marker content
+.IR saphira-buildpkg-failed/v1 ;
+retry requires that exact marker and unmarked collisions are refused.
+Never delete, bless, or overwrite an unmarked workspace.
+.SH OPTIONS
+This command takes no options beyond the package name and optional
+source override; build behavior comes from the recipe plus
+configuration, not flags.
+.SH FILES
+.TP
+.I /build/PACKAGE.buildpkg
+The evolving disposable root (merged view plus upper/work layers)
+and retained logs/
+.IR plan.json .
+.TP
+.I /build/rootfs_overlay/base
+The canonical immutable base root all workspaces share.
+.TP
+.I /out/stage4/incoming/
+Where successful builds land as unsigned
+.I *-ready
+transactions for publication (see
+.BR sign-apk-repo (8)).
+.SH EXIT STATUS
+.TP
+.B 0
+Built and staged successfully.
+.TP
+.B 1
+Build failed; the workspace is retained with its failure marker for
+diagnosis (see
+.BR cleanpkg (1)
+for the trusted removal lifecycle).
+.SH EXAMPLES
+.PP
+.RS
+buildpkg libxslt
+.br
+buildpkg nginx
+.RE
+.SH SEE ALSO
+.BR recipe (5),
+.BR saphira (7),
+.BR resolvepkg (1),
+.BR checkpkg (1),
+.BR cleanpkg (1),
+.BR sign-apk-repo (8),
+.BR saphira-build (8)

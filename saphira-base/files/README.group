@@ -1,0 +1,14 @@
+Saphira base group
+===================
+
+Installing this package installs a working Saphira base system:
+ABI marker, filesystem layout, C library, shell, account management
+and package tooling.
+
+This package carries no payload of its own beyond this file. The
+authoritative member list is the `depends` field of this package's
+APK metadata (`apk info -a saphira-base`). Profiles and image
+definitions must name the group, never re-enumerate its closure.
+
+Deliberately kernel-agnostic and init-neutral: the image profile
+owns the kernel and init-system choice.

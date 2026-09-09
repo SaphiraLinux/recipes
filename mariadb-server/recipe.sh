@@ -5,7 +5,7 @@
 
 pkgname=mariadb-server
 pkgver=11.8.8
-pkgrel=1
+pkgrel=2
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="MariaDB database server"
 license="GPL-2.0-or-later"
@@ -91,4 +91,11 @@ recipe_install()
 		"$PKGDEST/usr/lib/systemd/system/mariadb.service"
 	install -d -m 0750 "$PKGDEST/var/lib/mysql" \
 		"$PKGDEST/var/log/mysql"
+	# Runtime identity declaration: mysql:106 required by the shipped
+	# service units and data directory. makepkg generates the install
+	# scripts from this fragment; the package creates its identity at
+	# install time.
+	# r2: fragment added (payload change, revision bumps).
+	install -D -m 0644 "$RECIPE_DIR/files/accounts.d/mariadb-server" \
+		"$PKGDEST/usr/share/saphira/accounts.d/mariadb-server"
 }

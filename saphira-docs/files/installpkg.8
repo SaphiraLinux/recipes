@@ -1,0 +1,48 @@
+.TH INSTALLPKG 8 "September 2026" "Saphira Linux" "System Administration"
+.SH NAME
+installpkg \- controlled exact-NVR live-system installation
+.SH SYNOPSIS
+.B installpkg
+.I PACKAGE
+.SH DESCRIPTION
+.B installpkg
+installs exactly one package on the live system at the newest NVR
+carried by the live generation index. A bare
+.I apk add name
+is a no-op when any version is installed, so the atom is pinned
+explicitly and the installed version is verified to be the intended
+NVR afterwards; local publication is authoritative, with no apksync
+coupling. This is one of the two privileged admin boundaries (with
+.BR sign-apk-repo (8));
+.BR makepkg (1)
+is the sole APK constructor and never installs.
+.PP
+Exact installs record their constraint in the package world; prefer
+bare names afterwards unless a hold is intended, or the next upgrade
+will silently skip the package.
+.SH OPTIONS
+This command takes no options beyond the package name. Must be run
+as root; use sudo explicitly.
+.SH FILES
+.TP
+.I /etc/apk/world
+Wanted-package list (exact pins held here show up on upgrade).
+.SH EXIT STATUS
+.TP
+.B 0
+Installed the intended NVR.
+.TP
+.B 1
+Missing index, absent package, version mismatch, or not root.
+.SH EXAMPLES
+.PP
+.RS
+sudo installpkg nginx
+.RE
+.SH SEE ALSO
+.BR recipe (5),
+.BR saphira (7),
+.BR checkpkg (1),
+.BR sign-apk-repo (8),
+.BR apksync (8),
+.BR saphira-build (8)

@@ -1,0 +1,50 @@
+.TH SAPHIRA-ACCOUNTS-BOOTSTRAP 8 "September 2026" "Saphira Linux" "System Administration"
+.SH NAME
+saphira-accounts-bootstrap \- one-time legacy accounts.json bootstrap
+.SH SYNOPSIS
+.B saphira-accounts-bootstrap
+.RB [ --write ]
+.SH DESCRIPTION
+.B saphira-accounts-bootstrap
+crossed r48 to r49 and is otherwise retired: the first account-aware
+signer reconstructed its registry only via a full census, which
+fails closed on historical fragment-carrying NVRs that predate the
+registry. This tool performs that census once per repository ahead
+of publication (payload declarations recovered from published bytes,
+validated with the deployed makepkg parser and the signer's own
+union rules) and atomically emits the exact registry schema.
+.PP
+Default is dry-run (validates everything, writes nothing).
+.B --write
+emits. Refuses if the registry exists, if a signer lock is held, or
+in an r49 (database) world. It never signs, publishes, moves APKs,
+rewrites indexes, renames staged transactions, or reads Git or the
+recipe tree. Must be run as root; use sudo explicitly.
+.SH OPTIONS
+.TP
+.B --write
+Emit the registries (default is dry-run).
+.SH FILES
+.TP
+.I /out/stage4/packages/<generation>/$ARCH/accounts.json
+Emitted once, then frozen as migration evidence.
+.SH EXIT STATUS
+.TP
+.B 0
+Validated (dry-run) or emitted.
+.TP
+.B 1
+Refusal, validation failure, or not root.
+.SH EXAMPLES
+.PP
+.RS
+sudo saphira-accounts-bootstrap
+.br
+sudo saphira-accounts-bootstrap --write
+.RE
+.SH SEE ALSO
+.BR saphira (7),
+.BR sign-apk-repo (8),
+.BR saphira-repo-state (8),
+.BR saphira-repo-migrate (8),
+.BR ensure-identity (8)

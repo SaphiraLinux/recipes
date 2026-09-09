@@ -1,0 +1,7 @@
+# Units enabled by default on virtualisation-host systems.
+# One systemd unit per line; resolved through [Install] sections,
+# so socket cascades (libvirt) come along automatically.
+saphira-network
+sshd
+libvirtd
+openvswitch

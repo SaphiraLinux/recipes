@@ -1,0 +1,18 @@
+Saphira layout policy: the primary multilib osdir is /lib, not
+/lib64 - /lib64 and /usr/lib64 are forbidden on Saphira. AArch64
+equivalent of the native 0002-m64 patch (which covers i386/t-linux64):
+without this, --with-toolexeclibdir=<sysroot>/lib is rewritten to
+<sysroot>/lib/../lib64 and target runtimes land in a forbidden lib64.
+
+--- a/gcc/config/aarch64/t-aarch64-linux
++++ b/gcc/config/aarch64/t-aarch64-linux
+@@ -22,7 +22,7 @@
+ LIB1ASMFUNCS = _aarch64_sync_cache_range
+ 
+ AARCH_BE = $(if $(findstring TARGET_BIG_ENDIAN_DEFAULT=1, $(tm_defines)),_be)
+-MULTILIB_OSDIRNAMES = mabi.lp64=../lib64$(call if_multiarch,:aarch64$(AARCH_BE)-linux-gnu)
++MULTILIB_OSDIRNAMES = mabi.lp64=../lib$(call if_multiarch,:aarch64$(AARCH_BE)-linux-gnu)
+ MULTIARCH_DIRNAME = $(call if_multiarch,aarch64$(AARCH_BE)-linux-gnu)
+ 
+ MULTILIB_OSDIRNAMES += mabi.ilp32=../libilp32$(call if_multiarch,:aarch64$(AARCH_BE)-linux-gnu_ilp32)
+

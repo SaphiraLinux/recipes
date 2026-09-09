@@ -26,6 +26,161 @@ CONFIG_KEYS = (
     "SAPHIRA_APK",
 )
 PACKAGE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
+ACCOUNT_NAME_RE = re.compile(r"^[A-Za-z0-9_.][A-Za-z0-9_.-]*$")
+ACCOUNT_ID_RE = re.compile(r"^[0-9]+$")
+ACCOUNT_MODE_RE = re.compile(r"^0*[1-7][0-7]{2,3}$")
+# root, wheel, spokes, and IDs 0-2 are foundation reservations, typed
+# by kind: the USER root and UID 0 are refused; the GROUPS root, wheel
+# and spokes and GIDs 0, 1 and 2 are refused, as is anchoring any
+# service user to those groups as primary. (spokes is group-only: a
+# user merely named spokes is not forbidden.) Root provisioning
+# belongs exclusively to the base seed and firstboot. The helper and
+# the publish gate re-check this independently (defense in depth).
+RESERVED_USER_NAMES = frozenset({"root"})
+RESERVED_GROUP_NAMES = frozenset({"root", "wheel", "spokes"})
+RESERVED_GIDS = frozenset({0, 1, 2})
+ACCOUNTS_DIR = PurePosixPath("usr/share/saphira/accounts.d")
+IDENTITY_HELPER = "/usr/libexec/saphira/ensure-identity.sh"
+IDENTITY_PROVIDER = "saphira-baselayout"
+# UID/GID namespace policy (operator-locked):
+#   0..199    preferred packaged system/service identities.
+#   200..887  reserved package/system expansion and documented legacy
+#             exceptions: accepted, but the build emits a notice and the
+#             fragment must document the exception (comment + recipe note).
+#   888..999  reserved for locally-compiled user services (useradd and
+#             hand-provisioned fixed IDs such as qmail's live here; the
+#             repository never hands these out, and the live reconciler
+#             never creates in them - but a pre-existing local account
+#             with attributes matching a declaration converges silently
+#             instead of blocking the install).
+#   1000..    human users (firstboot territory, never packages).
+# Fixed IDs are the norm, not an exception: a recipe declares whatever
+# stable ID its service needs inside 0..199 (or a documented 200..887
+# exception), and the publish gate keeps the union collision-free. The
+# gate re-checks these tiers (defense in depth); makepkg fails the
+# build fast on anything outside 0..887.
+MAX_PACKAGED_ID = 887
+PREFERRED_MAX_ID = 199
+# The generated scripts exec the platform reconciler under /bin/sh and use
+# coreutils (stat/mkdir/chown/chmod/dirname); apk installs dependencies
+# first, so declaring these orders the shell and tools before any script
+# can run — including mid-assembly, where the target has no shell yet.
+IDENTITY_DEPS = ("saphira-baselayout", "bash", "coreutils")
+
+
+def parse_accounts_fragment(path: Path) -> tuple[dict[str, list[dict[str, str]]], list[str]]:
+    """Strictly validate a package account declaration fragment.
+
+    Recipe authors declare identities only; makepkg generates the
+    install scripts from this. Anything malformed fails the build.
+    Returns the parsed declaration plus range notices (200..887
+    expansion IDs must be documented exceptions - the notice names
+    them so the build log carries the reminder).
+    """
+    users: list[dict[str, str]] = []
+    groups: list[dict[str, str]] = []
+    dirs: list[dict[str, str]] = []
+    notices: list[str] = []
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        die(f"cannot read account fragment: {path}")
+        raise AssertionError("unreachable")
+    for lineno, raw in enumerate(text.splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split()
+        kind = parts[0]
+        if kind == "group" and len(parts) == 3:
+            name, gid = parts[1], parts[2]
+            if not ACCOUNT_NAME_RE.fullmatch(name):
+                die(f"account fragment {path}:{lineno}: invalid group name")
+            if not ACCOUNT_ID_RE.fullmatch(gid) or not 0 <= int(gid) <= MAX_PACKAGED_ID:
+                die(f"account fragment {path}:{lineno}: GID must be 0..{MAX_PACKAGED_ID} (preferred 0..{PREFERRED_MAX_ID}; 888..999 are local-user-service territory, 1000+ human)")
+            if name in RESERVED_GROUP_NAMES or int(gid) in RESERVED_GIDS:
+                die(f"account fragment {path}:{lineno}: group '{name}'/{int(gid)} is a reserved foundation identity and must never be package-declared")
+            if not ACCOUNT_ID_RE.fullmatch(gid) or not 0 <= int(gid) <= MAX_PACKAGED_ID:
+                die(f"account fragment {path}:{lineno}: GID must be 0..{MAX_PACKAGED_ID} (preferred 0..{PREFERRED_MAX_ID}; 888..999 are local-user-service territory, 1000+ human)")
+            if int(gid) > PREFERRED_MAX_ID:
+                notices.append(f"account fragment {path}:{lineno}: GID {int(gid)} is in the 200..887 expansion range (preferred 0..{PREFERRED_MAX_ID}; expansion IDs must be documented exceptions)")
+            groups.append({"name": name, "gid": str(int(gid))})
+        elif kind == "user" and len(parts) == 6:
+            _, name, uid, primary, home, shell = parts
+            if not ACCOUNT_NAME_RE.fullmatch(name):
+                die(f"account fragment {path}:{lineno}: invalid user name")
+            if not ACCOUNT_NAME_RE.fullmatch(primary):
+                die(f"account fragment {path}:{lineno}: invalid primary group")
+            if not ACCOUNT_ID_RE.fullmatch(uid) or not 0 <= int(uid) <= MAX_PACKAGED_ID:
+                die(f"account fragment {path}:{lineno}: UID must be 0..{MAX_PACKAGED_ID} (preferred 0..{PREFERRED_MAX_ID}; 888..999 are local-user-service territory, 1000+ human)")
+            if name in RESERVED_USER_NAMES or int(uid) == 0:
+                die(f"account fragment {path}:{lineno}: user '{name}' is a reserved system identity (root/UID 0) and must never be package-declared")
+            if primary in RESERVED_GROUP_NAMES:
+                die(f"account fragment {path}:{lineno}: primary group '{primary}' is a reserved foundation group; service users must not be anchored to it")
+            if not ACCOUNT_ID_RE.fullmatch(uid) or not 0 <= int(uid) <= MAX_PACKAGED_ID:
+                die(f"account fragment {path}:{lineno}: UID must be 0..{MAX_PACKAGED_ID} (preferred 0..{PREFERRED_MAX_ID}; 888..999 are local-user-service territory, 1000+ human)")
+            if int(uid) > PREFERRED_MAX_ID:
+                notices.append(f"account fragment {path}:{lineno}: UID {int(uid)} is in the 200..887 expansion range (preferred 0..{PREFERRED_MAX_ID}; expansion IDs must be documented exceptions)")
+            if not home.startswith("/") or not shell.startswith("/"):
+                die(f"account fragment {path}:{lineno}: home and shell must be absolute")
+            users.append({"name": name, "uid": str(int(uid)), "primary": primary,
+                          "home": home, "shell": shell})
+        elif kind == "dir" and len(parts) == 5:
+            _, dirpath, mode, owner, group = parts
+            if not dirpath.startswith("/"):
+                die(f"account fragment {path}:{lineno}: dir path must be absolute")
+            if not ACCOUNT_MODE_RE.fullmatch(mode):
+                die(f"account fragment {path}:{lineno}: invalid mode")
+            dirs.append({"path": dirpath, "mode": mode, "owner": owner, "group": group})
+        else:
+            die(f"account fragment {path}:{lineno}: malformed stanza")
+    return ({"users": users, "groups": groups, "dirs": dirs}, notices)
+
+
+def identity_scripts(fragment_rel: str, temp_root: Path, name: str,
+                       fragment_text: str) -> tuple[list[str], Path, Path, Path]:
+    """Generate the thin install/upgrade/deinstall callers for a fragment.
+
+    Package scripts may only invoke the platform reconciler; the
+    declaration fragment is the single source of truth. The
+    post-deinstall caller embeds the validated declaration text
+    because apk runs it after the payload (including the fragment
+    file itself) has been removed.
+    """
+    body = (f"#!/bin/sh\n"
+            f"# Generated by saphira makepkg from {fragment_rel}.\n"
+            f"# Package scripts may only invoke the platform identity reconciler.\n"
+            f"set -eu\n"
+            f"exec {IDENTITY_HELPER} \"/{fragment_rel}\"\n")
+    post_install = temp_root / f"post-install-{name}"
+    post_upgrade = temp_root / f"post-upgrade-{name}"
+    post_install.write_text(body, encoding="utf-8")
+    post_upgrade.write_text(body, encoding="utf-8")
+    post_install.chmod(0o755)
+    post_upgrade.chmod(0o755)
+    marker = "SAPHIRA_IDENTITY_EOF"
+    if marker in fragment_text:
+        die(f"account fragment embeds the reserved marker: {marker}")
+    if not fragment_text.endswith("\n"):
+        fragment_text += "\n"
+    deinstall_body = (f"#!/bin/sh\n"
+                      f"# Generated by saphira makepkg from {fragment_rel}.\n"
+                      f"# Package scripts may only invoke the platform identity reconciler.\n"
+                      f"# The declaration is embedded: apk runs post-deinstall after\n"
+                      f"# the payload fragment file itself has been removed.\n"
+                      f"set -eu\n"
+                      f"fragment=$(mktemp \"${{TMPDIR:-/tmp}}/saphira-identity.XXXXXX\") || exit 1\n"
+                      f"trap 'rm -f -- \"$fragment\"' EXIT HUP INT TERM\n"
+                      f"cat > \"$fragment\" <<'{marker}'\n"
+                      f"{fragment_text}"
+                      f"{marker}\n"
+                      f"exec {IDENTITY_HELPER} --disable \"$fragment\"\n")
+    post_deinstall = temp_root / f"post-deinstall-{name}"
+    post_deinstall.write_text(deinstall_body, encoding="utf-8")
+    post_deinstall.chmod(0o755)
+    return (["-s", f"post-install:{post_install}", "-s", f"post-upgrade:{post_upgrade}",
+             "-s", f"post-deinstall:{post_deinstall}"],
+            post_install, post_upgrade, post_deinstall)
 
 
 class PackageError(RuntimeError):
@@ -339,6 +494,34 @@ def main() -> int:
                 payload_copy = temp_root / f"payload-{name}"
                 copy_payload(payload, payload_copy)
                 stripped = strip_payload(payload_copy)
+                # Account identities: a fragment accounts.d/<output-name>
+                # is the recipe's whole declaration. makepkg validates it,
+                # generates the thin install/upgrade callers, and adds the
+                # helper dependency. Stray fragments (owned by nobody or by
+                # another output) fail the build: one package owns each
+                # declared identity.
+                payload_accounts = payload_copy / ACCOUNTS_DIR
+                stray = []
+                if payload_accounts.is_dir():
+                    for entry in sorted(payload_accounts.iterdir()):
+                        if entry.is_file() and entry.name != name:
+                            stray.append(entry.name)
+                if stray:
+                    die(f"payload carries foreign account fragments: {', '.join(stray)}")
+                fragment_rel = (ACCOUNTS_DIR / name).as_posix()
+                fragment_path = payload_copy / fragment_rel
+                accounts: dict[str, list[dict[str, str]]] = {"users": [], "groups": [], "dirs": []}
+                script_arguments: list[str] = []
+                if fragment_path.is_file():
+                    accounts, range_notices = parse_accounts_fragment(fragment_path)
+                    for notice in range_notices:
+                        print(f"makepkg: notice: {notice}")
+                    try:
+                        fragment_text = fragment_path.read_text(encoding="utf-8")
+                    except OSError:
+                        die(f"cannot read account fragment: {fragment_path}")
+                    script_arguments, _, _, _ = identity_scripts(
+                        fragment_rel, temp_root, name, fragment_text)
                 artifact = artifact_dir / f"{name}-{manifest['version']}.apk"
                 if artifact.exists() or artifact.is_symlink():
                     die(f"artifact already exists in private transaction: {artifact}")
@@ -354,6 +537,14 @@ def main() -> int:
                     "--info", f"build-time:{manifest['build_time']}",
                 ]
                 dependencies = output.get("dependencies", [])
+                if accounts["users"] or accounts["groups"]:
+                    # The generated scripts exec the baselayout helper, so
+                    # its provider plus a shell and coreutils must be
+                    # installed first: apk orders by dependency, and the
+                    # scripts fail closed without them.
+                    for requirement in IDENTITY_DEPS:
+                        if name != requirement and requirement not in dependencies:
+                            dependencies = [*dependencies, requirement]
                 if dependencies:
                     arguments.extend(("--info", f"depends:{' '.join(dependencies)}"))
                 replaces = manifest.get("replaces") or []
@@ -364,9 +555,15 @@ def main() -> int:
                     # takeover silently fails - see grub r4).
                     arguments.extend(("--info", f"replaces:{' '.join(replaces)}"))
                 arguments.extend(("-o", str(temporary_artifact)))
+                arguments.extend(script_arguments)
                 backend = construct(config["SAPHIRA_APK"], payload_copy, arguments, producer)
                 run([config["SAPHIRA_APK"], "verify", "--allow-untrusted", str(temporary_artifact)])
                 metadata, recorded_dependencies = metadata_from_apk(config["SAPHIRA_APK"], temporary_artifact)
+                dump = run([config["SAPHIRA_APK"], "adbdump", str(temporary_artifact)]).stdout
+                if accounts["users"] or accounts["groups"]:
+                    for script in ("post-install", "post-upgrade", "post-deinstall"):
+                        if script not in dump:
+                            die(f"constructed APK is missing generated identity script {script}: {temporary_artifact}")
                 expected = {
                     "name": name,
                     "version": manifest["version"],
@@ -383,7 +580,8 @@ def main() -> int:
                     die(f"constructed APK dependencies differ from normalized manifest: {temporary_artifact}")
                 os.replace(temporary_artifact, artifact)
                 digest = sha256_file(artifact)
-                receipts.append({"name": name, "artifact": str(artifact), "sha256": digest, "backend": backend})
+                receipts.append({"name": name, "artifact": str(artifact), "sha256": digest,
+                                 "backend": backend, "accounts": accounts})
         finally:
             shutil.rmtree(temp_root)
 

@@ -2,9 +2,9 @@
 
 pkgname=saphira-install-tools
 pkgver=0.1
-pkgrel=2
+pkgrel=12
 pkgarch=${SAPHIRA_ARCH:-x86_64}
-pkgdesc='Saphira install/bootstrap helper tools (saphira-chroot, saphira-bootstrap, saphira-genfstab) and install profiles'
+pkgdesc='Saphira image/install tooling (bootstrap, chroot, genfstab, assembler, installer, imager) and install profiles'
 license='BUSL-1.1'
 origin=saphira-install-tools
 repo=saphira
@@ -41,13 +41,27 @@ recipe_build()
 
 recipe_install()
 {
-	for tool in saphira-chroot saphira-bootstrap saphira-genfstab; do
+	for tool in saphira-chroot saphira-bootstrap saphira-genfstab saphira-assemble-rootfs saphira-install saphira-image; do
 		install -D -m 0755 "$RECIPE_DIR/files/$tool" "$PKGDEST/usr/bin/$tool"
 	done
-	for profile in base build network server; do
+	for profile in base build network server virtualisation-host; do
 		install -D -m 0644 "$RECIPE_DIR/files/profiles/$profile" \
 			"$PKGDEST/usr/share/saphira/profiles/$profile"
 	done
+	for sidecar in "$RECIPE_DIR"/files/profiles/*.services; do
+		install -D -m 0644 "$sidecar" \
+			"$PKGDEST/usr/share/saphira/profiles/$(basename "$sidecar")"
+	done
+	install -D -m 0644 "$RECIPE_DIR/files/saphira-bootstrap.8" \
+		"$PKGDEST/usr/share/man/man8/saphira-bootstrap.8"
+	install -D -m 0644 "$RECIPE_DIR/files/saphira-profiles.5" \
+		"$PKGDEST/usr/share/man/man5/saphira-profiles.5"
+	install -D -m 0644 "$RECIPE_DIR/files/saphira-assemble-rootfs.8" \
+		"$PKGDEST/usr/share/man/man8/saphira-assemble-rootfs.8"
+	install -D -m 0644 "$RECIPE_DIR/files/saphira-install.8" \
+		"$PKGDEST/usr/share/man/man8/saphira-install.8"
+	install -D -m 0644 "$RECIPE_DIR/files/saphira-image.8" \
+		"$PKGDEST/usr/share/man/man8/saphira-image.8"
 	install -D -m 0644 "$RECIPE_DIR/files/LICENSE" \
 		"$PKGDEST/usr/share/licenses/saphira-install-tools/LICENSE"
 }

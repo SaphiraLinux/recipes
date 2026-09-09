@@ -2,7 +2,7 @@
 
 pkgname=freeradius
 pkgver=3.2.10
-pkgrel=1
+pkgrel=2
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="RADIUS authentication, authorization and accounting server"
 license="GPL-2.0-or-later"
@@ -69,4 +69,10 @@ recipe_install()
 		"$PKGDEST/usr/lib/systemd/system/freeradius.service"
 	install -d -m 0750 "$PKGDEST/var/lib/radius" \
 		"$PKGDEST/var/log/radius"
+	# Runtime identity declaration: radius:121 required by the shipped
+	# service unit. makepkg generates the install scripts from this
+	# fragment; the package creates its identity at install time.
+	# r2: fragment added (payload change, revision bumps).
+	install -D -m 0644 "$RECIPE_DIR/files/accounts.d/freeradius" \
+		"$PKGDEST/usr/share/saphira/accounts.d/freeradius"
 }

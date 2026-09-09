@@ -1,0 +1,47 @@
+.TH CHECKPKG 1 "September 2026" "Saphira Linux" "User Commands"
+.SH NAME
+checkpkg \- validate a package against the live repository
+.SH SYNOPSIS
+.B checkpkg
+.I PACKAGE
+.SH DESCRIPTION
+.B checkpkg
+verifies that
+.I PACKAGE
+is really what the repository claims: present in
+.IR Packages.adb ,
+newest resolved by true version comparison (r10 > r9, which plain
+string order gets wrong), every indexed artifact file present,
+signatures valid, and on-disk metadata identity matching the index.
+If a built-but-unpublished transaction exists for the package it
+warns that
+.BR installpkg (8)
+will install the published version, and points at
+.BR sign-apk-repo (8)
+first.
+.SH OPTIONS
+This command takes no options beyond the package name.
+.SH FILES
+.TP
+.I $SAPHIRA_REPO_DIR/<generation>/$SAPHIRA_ARCH/Packages.adb
+The trusted index everything is checked against.
+.SH EXIT STATUS
+.TP
+.B 0
+Verified (a warning about unpublished staged work does not fail).
+.TP
+.B 1
+Missing index, bad signature, missing artifact, identity mismatch,
+or invalid package name.
+.SH EXAMPLES
+.PP
+.RS
+checkpkg nginx
+.RE
+.SH SEE ALSO
+.BR recipe (5),
+.BR saphira (7),
+.BR buildpkg (1),
+.BR resolvepkg (1),
+.BR installpkg (8),
+.BR sign-apk-repo (8)

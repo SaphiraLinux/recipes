@@ -1,0 +1,103 @@
+.TH SAPHIRA 7 "September 2026" "Saphira Linux" "Overview"
+.SH NAME
+saphira \- Saphira Linux native packaging concepts and tooling
+.SH SYNOPSIS
+.B man recipe
+.RS
+The recipe file format,
+.BR recipe (5),
+is the canonical contract.
+.RE
+.SH DESCRIPTION
+Saphira Linux builds itself from native package recipes (see
+.BR recipe (5)).
+A recipe plus its
+.I files/
+tree compiles, in a disposable rootless container, into one or more
+immutable signed APKs published to a generation repository.
+.PP
+Generations are append-only archives that become the live view:
+.I hatchling
+holds full history (including retired r0 artifacts),
+.I hatched
+is the current view. A published NVR (name-version-release) is
+immutable: the published copy always wins, rebuilds retire as evidence,
+and package revisions start at r1 (r0 is forbidden outside hatchling
+history).
+.PP
+Builds resolve dependencies repository-first and install only into
+their own merged root; nothing is ever copied from the controller
+host into a build. Publication is gated (file ownership, Unix
+identities, reservations) and indexed; installation on targets is
+exact-NVR and service identities are created at install time by the
+packaged declarations, never by hand.
+.PP
+Essential runtime lives in
+.IR /bin ,
+.IR /sbin ,
+.IR /lib ;
+general material lives under
+.IR /usr .
+A binary in
+.I /bin
+or
+.I /sbin
+must not require anything under
+.IR /usr/lib ;
+a binary in
+.I /usr/bin
+may use both
+.I /lib
+and
+.IR /usr/lib .
+Development material (headers, pkg-config/CMake metadata) lives under
+.IR /usr .
+.SH OPTIONS
+This page takes no options; it is a concept overview.
+.SH FILES
+.TP
+.I /recipes
+Recipe tree (one directory per package, each with
+.IR recipe.sh ).
+.TP
+.I /build
+Scratch build workspaces (one per top-level build; failures retained
+as diagnostic evidence).
+.TP
+.I /out/stage4/packages/
+Generation repositories per architecture, with indexes and the
+.I repository.db
+metadata database.
+.TP
+.I /out/stage4/incoming/
+Unsigned
+.I *-ready
+staging transactions awaiting publication.
+.SH EXIT STATUS
+Not applicable (documentation only).
+.SH EXAMPLES
+Read the contract first, then the tool for the job at hand:
+.PP
+.RS
+man 5 recipe
+.br
+man 1 buildpkg
+.br
+man 8 sign-apk-repo
+.RE
+.SH SEE ALSO
+.BR recipe (5),
+.BR buildpkg (1),
+.BR resolvepkg (1),
+.BR checkpkg (1),
+.BR cleanpkg (1),
+.BR bumppkg (1),
+.BR installpkg (8),
+.BR sign-apk-repo (8),
+.BR apksync (8),
+.BR saphira-build (8),
+.BR saphira-builder (8),
+.BR saphira-repo-state (8),
+.BR saphira-repo-migrate (8),
+.BR saphira-accounts-bootstrap (8),
+.BR ensure-identity (8)

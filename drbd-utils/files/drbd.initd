@@ -1,0 +1,29 @@
+#!/sbin/openrc-run
+
+description="DRBD replicated block devices"
+
+depend()
+{
+	need localmount
+	use net udev
+	after bootmisc
+}
+
+start()
+{
+	ebegin "Bringing up DRBD resources"
+	/usr/sbin/drbdadm up all || { eend 1 "drbdadm up failed (no resources defined yet?)"; return 1; }
+	eend 0
+}
+
+stop()
+{
+	ebegin "Taking down DRBD resources"
+	/usr/sbin/drbdadm down all
+	eend $?
+}
+
+status()
+{
+	/usr/sbin/drbdadm status
+}

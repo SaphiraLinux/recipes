@@ -78,6 +78,13 @@ recipe_install()
 	make -C "$BUILDDIR" DESTDIR="$PKGDEST" install
 	rm -rf "$PKGDEST/usr/lib/systemd"
 	rm -f "$PKGDEST/etc/init.d/mysql"
+	# Server split ownership: mariadbd and the install/upgrade tools
+	# ship from the mariadb-server recipe (which depends on this
+	# client package). Leaving them here would co-own the same paths
+	# from two package names and the publication gate would refuse.
+	# Mirror mariadb-server's keep-list exactly.
+	rm -f "$PKGDEST/usr/sbin/mariadbd" "$PKGDEST/usr/sbin/mysqld" \
+		"$PKGDEST/usr/bin/mariadb-install-db" "$PKGDEST/usr/bin/mariadb-upgrade"
 	install -D -m 0644 "$RECIPE_DIR/files/my.cnf" \
 		"$PKGDEST/etc/my.cnf"
 	install -D -m 0644 "$RECIPE_DIR/files/client.cnf" \

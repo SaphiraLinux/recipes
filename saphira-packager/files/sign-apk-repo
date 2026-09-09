@@ -16,6 +16,13 @@ else
 	exit 1
 fi
 
+# Shared repository metadata library (SQLite, single-file). Same
+# resolution rule as repo-index.sh: beside this script first (source
+# tree and tests), installed location second.
+repo_db_lib=$lib_dir/repo_db.py
+[ -f "$repo_db_lib" ] || repo_db_lib=/usr/lib/saphira-packager/repo_db.py
+[ -f "$repo_db_lib" ] || die "repository metadata library repo_db.py not found"
+
 die()
 {
 	printf 'sign-apk-repo: %s\n' "$*" >&2
@@ -61,6 +68,9 @@ mkdir "$packages_dir"
 
 cleanup()
 {
+	if [ -n "${db_lock_held-}" ]; then
+		rmdir -- "$db_lock_held/repository.db.lock" 2>/dev/null || true
+	fi
 	rm -rf -- "$workspace"
 	rmdir "$lock" 2>/dev/null || true
 }
@@ -70,10 +80,25 @@ shopt -s nullglob
 ready_transactions=("$incoming_dir"/*-ready)
 [ "${#ready_transactions[@]}" -gt 0 ] || die "no complete ready transactions in $incoming_dir"
 
-# Optional selective publication: when package names are given as
-# arguments, only transactions whose target matches are published. This
-# lets an operator unblock themselves without touching unrelated pending
-# transactions. Without arguments, all ready transactions publish.
+# Publication mode: full repository audit only on explicit request.
+# Otherwise the indexed repository.db gates just the staged set (fast
+# when the fingerprint is fresh; automatic full audit when stale). A
+# missing or unusable database refuses with a migration pointer — bare
+# signing never silently creates repository metadata.
+# Positional arguments are target filters only; they never select
+# the algorithm. No valid package target starts with `-`, so the
+# exact-match flag below cannot collide with a filter.
+force_full=0
+if [ "${1:-}" = "--full-audit" ]; then
+	force_full=1
+	shift
+fi
+
+# Target filters only: when package names are given as arguments, only
+# transactions whose target matches are published. This lets an operator
+# unblock themselves without touching unrelated pending transactions.
+# Without arguments, all ready transactions publish. Filters never
+# select the gate algorithm; see --full-audit above.
 if [ "$#" -gt 0 ]; then
 	for pkg in "$@"; do
 		case $pkg in
@@ -96,14 +121,12 @@ if [ "$#" -gt 0 ]; then
 	ready_transactions=("${selected[@]}")
 fi
 
-# Fast selective path (targeted runs only): publishing named packages gates
-# just the staged set against persisted ownership state instead of
-# rescanning every historical APK. The no-target run stays the expensive
-# full audit/reconciliation path and refreshes the persisted state.
-selective=0
-if [ "$#" -gt 0 ]; then
-	selective=1
-fi
+# Fast path (default): gate only the staged set against persisted
+# ownership state (no per-APK re-dump, no full re-verify of immutable
+# history). Exit 9 from the gate means state is missing or stale, and
+# the run falls back to the full audit below, which refreshes it. Any
+# other non-zero exit is a real gate refusal and stops the run.
+# Only --full-audit rescans every historical APK.
 
 "$SAPHIRA_PYTHON" - "${ready_transactions[@]}" <<'PY'
 import hashlib
@@ -117,7 +140,7 @@ for raw in sys.argv[1:]:
     transaction = Path(raw)
     if transaction.is_symlink() or not transaction.is_dir() or not transaction.name.endswith("-ready"):
         raise SystemExit(f"invalid ready transaction: {transaction}")
-    required = ("target", "manifest.sha256", "artifact-manifest.json", "bootstrap-seed.json")
+    required = ("target", "manifest.sha256", "artifact-manifest.json", "package-seed.json")
     for name in required:
         path = transaction / name
         if path.is_symlink() or not path.is_file():
@@ -125,12 +148,12 @@ for raw in sys.argv[1:]:
     target = (transaction / "target").read_text(encoding="utf-8").strip()
     with (transaction / "artifact-manifest.json").open(encoding="utf-8") as stream:
         artifact_manifest = json.load(stream)
-    with (transaction / "bootstrap-seed.json").open(encoding="utf-8") as stream:
-        bootstrap = json.load(stream)
+    with (transaction / "package-seed.json").open(encoding="utf-8") as stream:
+        seed = json.load(stream)
     if artifact_manifest.get("schema") != "saphira-build-artifacts/v1" or artifact_manifest.get("target") != target:
         raise SystemExit(f"artifact manifest identity mismatch: {transaction}")
-    if artifact_manifest.get("bootstrap_seed") != bootstrap or bootstrap.get("schema") != "saphira-bootstrap-seed/v1":
-        raise SystemExit(f"bootstrap receipt mismatch: {transaction}")
+    if artifact_manifest.get("package_seed") != seed or seed.get("schema") != "saphira-package-seed/v1":
+        raise SystemExit(f"package seed receipt mismatch: {transaction}")
     constructors = artifact_manifest.get("constructors")
     if not isinstance(constructors, list) or not constructors or any(item.get("constructor") != "makepkg" for item in constructors):
         raise SystemExit(f"transaction did not use canonical makepkg exclusively: {transaction}")
@@ -149,6 +172,45 @@ for raw in sys.argv[1:]:
         value = hashlib.sha256((transaction / name).read_bytes()).hexdigest()
         if value != digest:
             raise SystemExit(f"package checksum mismatch: {transaction / name}")
+PY
+
+# Account declarations staged for publication: map staged APK filename to
+# the makepkg-validated fragment declaration carried in the transaction
+# artifact manifest (constructors[].artifacts[].accounts). The publish
+# account gate reads this; the declarations themselves ship inside the
+# packages as usr/share/saphira/accounts.d fragments.
+staged_accounts=$workspace/staged-accounts.json
+"$SAPHIRA_PYTHON" - "$staged_accounts" "${ready_transactions[@]}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+out_path = Path(sys.argv[1])
+merged = {}
+for raw in sys.argv[2:]:
+    transaction = Path(raw)
+    with (transaction / "artifact-manifest.json").open(encoding="utf-8") as stream:
+        manifest = json.load(stream)
+    for receipt in manifest.get("constructors", []):
+        if receipt.get("constructor") != "makepkg":
+            raise SystemExit(f"transaction did not use canonical makepkg exclusively: {transaction}")
+        for artifact in receipt.get("artifacts", []):
+            filename = Path(artifact["artifact"]).name
+            name = artifact["name"]
+            # Filenames match name-version.apk by construction (the
+            # ownership gate enforces it); the version rides along here
+            # so the account gate can collapse superseded declarations.
+            if not filename.startswith(name + "-") or not filename.endswith(".apk"):
+                raise SystemExit(f"staged filename does not match artifact name: {filename}")
+            version = filename[len(name) + 1:-len(".apk")]
+            accounts = artifact.get("accounts", {"users": [], "groups": [], "dirs": []})
+            entry = {"name": name, "version": version, "accounts": accounts}
+            if filename in merged and merged[filename] != entry:
+                raise SystemExit(f"conflicting staged receipts for filename: {filename}")
+            merged[filename] = entry
+with out_path.open("w", encoding="utf-8") as stream:
+    json.dump(merged, stream, sort_keys=True, separators=(",", ":"))
+    stream.write("\n")
 PY
 
 # Automatic retirement of pure-rebuild transactions: when EVERY package in
@@ -269,222 +331,165 @@ done
 
 publication_id=$(date -u +%Y%m%dT%H%M%SZ)-$$
 
-# Ownership gate runner: one implementation, two modes. Full mode dumps
-# every package (the no-target audit path; also refreshes persisted
-# state). Fast mode gates only the staged set against persisted ownership
-# state (selective runs): it exits 9 when state is missing or stale so the
-# caller falls back to full, and dies loudly on real gate refusals.
-# Persisted state ($repo_dir/ownership.json) holds the newest-per-name
-# owner map plus the identity set it was derived from; it is written
-# afresh by full runs and merged forward by fast runs, installed
-# atomically next to the indexes, and independently reconstructable by
-# any full run (byte-identical for identical repositories).
-run_gate()
+# Repository metadata (SQLite) gate runner: one implementation, two modes.
+# Fast mode (default) evaluates only the staged set against indexed
+# repository.db rows (no per-APK re-dump, no full re-verify of immutable
+# history). A missing database or schema mismatch REFUSES with an
+# explicit migration pointer (exit 2) — bare signing never silently
+# creates or migrates repository metadata. A stale fingerprint falls
+# back to the full audit (exit 9), which reconciles the ledger before
+# publishing. Only --full-audit reconstructs from the actual APKs, and
+# even it never destroys or recreates eternal reservation tombstones
+# from current-only state. Any other non-zero exit is a real gate
+# refusal and stops the run.
+# On success the staged set's validated file and account data lands in
+# $staged_info for the publication transaction below; the database
+# itself is updated exactly once, atomically, after the APKs and
+# indexes are installed.
+db_gate()
 {
-	local gate_mode=$1
-	local gate_state=$2
-	local gate_out=$3
-	shift 3
-	"$SAPHIRA_PYTHON" - "$SAPHIRA_APK" "$identities" "$staged_list" "$gate_mode" "$gate_state" "$gate_out" "$repo_dir/Packages.adb" "$trust_dir" "$@" <<'PY'
+	local gate_mode=$1 db_file=$2 staged_info=$3 index_path=$4
+	shift 4
+	"$SAPHIRA_PYTHON" - "$repo_db_lib" "$SAPHIRA_APK" "$db_file" "$gate_mode" \
+		"$staged_accounts" "$staged_list" "$staged_info" \
+		"${SAPHIRA_ACCOUNTS_TSV:-/usr/share/saphira/accounts.tsv}" \
+		"$repo_dir" "$index_path" "$trust_dir" "$identities" "$@" <<'PY'
 import json
-import re
-import subprocess
+import os
 import sys
-from collections import defaultdict
+import tempfile
 from pathlib import Path
 
-apk, identities_path, staged_list, mode, state_path, state_out, index_path, trust_dir, *packages = sys.argv[1:]
-if mode not in ("fast", "full"):
-    raise SystemExit(f"sign-apk-repo: unknown ownership gate mode: {mode}")
-staged_files = {line.strip() for line in Path(staged_list).read_text().splitlines() if line.strip()}
-DIR_RE = re.compile(r"^  - name: (\S+)$")
-FILE_RE = re.compile(r"^      - name: (\S+)$")
-TOP_RE = re.compile(r"^([A-Za-z][A-Za-z0-9_.-]*):")
-STATE_SCHEMA = "saphira-ownership/v1"
+(lib_path, apk, db_file, mode, staged_accounts_path, staged_list_path,
+ staged_info_path, tsv_path, repo_dir, index_path, trust_dir,
+ identities_path, *packages) = sys.argv[1:]
+sys.path.insert(0, os.path.dirname(lib_path))
+import repo_db as rdb
 
-def load(path):
-    dump = subprocess.run([apk, "adbdump", str(path)], check=True, text=True, capture_output=True).stdout
-    name = version = None
-    files, replaces = [], set()
-    section, cur, in_replaces = None, None, False
-    for line in dump.splitlines():
-        top = TOP_RE.match(line)
-        if top:
-            section, cur, in_replaces = top.group(1), None, False
-            continue
-        if section == "info":
-            if re.match(r"^  replaces:", line):
-                in_replaces = True
-                continue
-            if in_replaces:
-                m = re.match(r"^    +- (\S+)$", line) or re.match(r"^    +- name: (\S+)$", line)
-                if m:
-                    replaces.add(m.group(1))
-                    continue
-                if re.match(r"^  \S", line):
-                    in_replaces = False
-            m = re.match(r"^  name: (\S+)$", line)
-            if m:
-                name = m.group(1)
-            m = re.match(r"^  version: (\S+)$", line)
-            if m:
-                version = m.group(1)
-        elif section == "paths":
-            m = DIR_RE.match(line)
-            if m:
-                cur = m.group(1)
-                continue
-            m = FILE_RE.match(line)
-            if m and cur:
-                files.append(f"{cur}/{m.group(1)}")
-    if not name or not version:
-        raise SystemExit(f"cannot read package identity: {path}")
-    return name, version, files, replaces
+staged_files = {line.strip() for line in Path(staged_list_path).read_text().splitlines()
+                if line.strip()}
 
-def read_state(path):
-    with open(path, encoding="utf-8") as stream:
-        data = json.load(stream)
-    if data.get("schema") != STATE_SCHEMA:
-        raise ValueError(f"unknown ownership state schema: {path}")
-    return (
-        {(item[0], item[1]) for item in data["identities"]},
-        dict(data["newest"]),
-        {p: dict(m) for p, m in data["owners"].items()},
-    )
+try:
+    if not os.path.exists(db_file):
+        raise FileNotFoundError(db_file)
+    conn = rdb.connect(db_file)
+except Exception:
+    print(f"sign-apk-repo: repository.db is missing or unreadable: {db_file}"
+          " (run saphira-repo-migrate <repo>)", file=sys.stderr)
+    raise SystemExit(2)
+try:
+    rdb.check_schema(conn)
+except rdb.RepoDbError as exc:
+    print(f"sign-apk-repo: {exc}", file=sys.stderr)
+    raise SystemExit(2)
 
-def write_state(path, identities, newest, owners):
-    data = {
-        "schema": STATE_SCHEMA,
-        "identities": sorted([list(i) for i in identities]),
-        "newest": {name: newest[name] for name in sorted(newest)},
-        "owners": {p: {n: owners[p][n] for n in sorted(owners[p])} for p in sorted(owners) if owners[p]},
-    }
-    with open(path, "w", encoding="utf-8") as stream:
-        json.dump(data, stream, separators=(",", ":"))
-        stream.write("\n")
-
-def apk_newer(a, b):
-    out = subprocess.run([apk, "version", "-t", a, b], check=True, text=True, capture_output=True).stdout.strip()
-    return out == ">"
-
-def evaluate(owners, staged_identities, staged_paths, staged_replaces):
-    collisions = {}
-    for path, name_versions in sorted(owners.items()):
-        if len(name_versions) < 2:
-            continue
-        names = set(name_versions)
-        # Only paths present in a staged artifact are gated: a staged clean
-        # rebuild must publish even when a superseded same-name version in
-        # the archive still carries the dropped path. Same-name versions
-        # collapse to one owner above, so routine updates never fire here.
-        staged_here = sorted(ident for ident in staged_identities if path in staged_paths[ident])
-        if not staged_here:
-            continue  # legacy pair, handled by the purge pass
-        for staged_identity in staged_here:
-            staged_name = staged_identity[0]
-            others = names - {staged_name}
-            if not others:
-                continue
-            if others <= staged_replaces.get(staged_identity, set()):
-                continue
-            detail = ", ".join(name_versions[n] for n in sorted(others))
-            collisions[path] = (name_versions[staged_name], detail)
-    return collisions
-
-def refuse(collisions):
-    lines = [f"{path}: claimed by {sv} and {dv}" for path, (sv, dv) in sorted(collisions.items())]
-    raise SystemExit(
-        "sign-apk-repo: file ownership collision - exactly one package must own a path; "
-        "fix the recipe split (never --force-overwrite):\n  " + "\n  ".join(lines)
-    )
-
-def load_checked(paths):
-    info = {}
-    seen_here = set()
-    staged_identities = set()
-    staged_paths = defaultdict(set)
-    staged_replaces = {}
-    for raw in paths:
-        package = Path(raw)
-        name, version, files, replaces = load(package)
-        identity = (name, version)
-        if package.name != f"{identity[0]}-{identity[1]}.apk":
-            raise SystemExit(f"package filename does not match identity: {package}")
-        if identity in seen_here:
-            raise SystemExit(f"duplicate package identity: {identity[0]}={identity[1]}")
-        seen_here.add(identity)
-        info[identity] = {"files": files, "replaces": replaces}
-        if package.name in staged_files:
-            staged_identities.add(identity)
-            staged_replaces[identity] = replaces
-            staged_paths[identity].update(files)
-    return info, seen_here, staged_identities, staged_paths, staged_replaces
-
-def write_identities(identities):
-    Path(identities_path).write_text(json.dumps(sorted([{"name": n, "version": v} for n, v in identities], key=lambda item: (item["name"], item["version"])), separators=(",", ":")) + "\n", encoding="utf-8")
-
-if mode == "fast":
+if mode == "full":
+    print("sign-apk-repo: full audit: census of repository APKs ...")
+    census_data = rdb.census(apk, repo_dir)
+    carriers = rdb.fragment_carriers(census_data)
+    with tempfile.TemporaryDirectory(prefix="sign-apk-repo-audit-") as tmp:
+        declarations = rdb.extract_declarations(apk, repo_dir, carriers, tmp)
+    history_complete = rdb.get_meta(conn, "history_complete") == "1"
+    notices = []
     try:
-        subprocess.run([apk, "verify", "--keys-dir", trust_dir, index_path],
-                       check=True, capture_output=True, text=True)
-        dump = subprocess.run([apk, "adbdump", index_path],
-                              check=True, capture_output=True, text=True).stdout
-        idx_names = re.findall(r"^  - name: (\S+)$", dump, re.MULTILINE)
-        idx_versions = re.findall(r"^    version: (\S+)$", dump, re.MULTILINE)
-        if len(idx_names) != len(idx_versions):
-            raise ValueError("malformed repository index identities")
-        state_identities, state_newest, state_owners = read_state(state_path)
-    except Exception as exc:
-        print(f"sign-apk-repo: ownership state stale or missing ({exc}); full rescan")
-        raise SystemExit(9)
-    if set(zip(idx_names, idx_versions)) != state_identities:
-        print(f"sign-apk-repo: ownership state stale (index holds {len(idx_names)} identities, state {len(state_identities)}); full rescan")
-        raise SystemExit(9)
-    print(f"sign-apk-repo: selective gate: ownership state fresh ({len(state_identities)} identities)")
-    info, _, staged_identities, staged_paths, staged_replaces = load_checked(packages)
-    newest = dict(state_newest)
-    owners = {p: dict(m) for p, m in state_owners.items()}
-    identities = set(state_identities)
-    for ident in sorted(staged_identities):
-        name, version = ident
-        current = newest.get(name)
-        if current is None or apk_newer(version, current):
-            newest[name] = version
-            for owned in owners.values():
-                owned.pop(name, None)
-            for f in info[ident]["files"]:
-                owners.setdefault(f, {})[name] = f"{name}-{version}"
-        identities.add(ident)
-    collisions = evaluate(owners, staged_identities, staged_paths, staged_replaces)
-    if collisions:
-        refuse(collisions)
-    write_identities(identities)
-    write_state(state_out, identities, newest, owners)
-    print(f"sign-apk-repo: ownership gate (selective, state fresh: {len(state_identities)} identities): {len(staged_identities)} staged package(s) checked, no file collisions")
+        rdb.sync_packages(conn, census_data, declarations, apk, rdb.utcnow())
+        if history_complete:
+            conn.execute("DELETE FROM reservations")
+            for row in rdb.derive_ledger(apk, census_data, declarations, notices):
+                conn.execute(
+                    "INSERT INTO reservations(kind, name, numeric_id, owning_package,"
+                    " first_nvr, last_nvr, status, declaration_sha256)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?)", row)
+        else:
+            rdb.advance_reservations(conn, rdb.active_declarations(conn), False, notices)
+        conn.commit()
+    except rdb.RepoDbError as exc:
+        conn.rollback()
+        print(f"sign-apk-repo: full audit refused: {exc}", file=sys.stderr)
+        raise SystemExit(1)
+    for notice in notices:
+        print(f"sign-apk-repo: notice: {notice}")
+    print(f"sign-apk-repo: full audit: {len(census_data)} APK identities scanned,"
+          " ledger verified")
 else:
-    info, seen, staged_identities, staged_paths, staged_replaces = load_checked(packages)
-    write_identities(seen)
-    versions_by_name = defaultdict(set)
-    for name, version in seen:
-        versions_by_name[name].add(version)
-    newest = {}
-    for name, versions in versions_by_name.items():
-        best = None
-        for version in sorted(versions):
-            if best is None or apk_newer(version, best):
-                best = version
-        newest[name] = best
-    owners = defaultdict(dict)
-    for name, version in newest.items():
-        for f in info[(name, version)]["files"]:
-            owners[f][name] = f"{name}-{version}"
-    collisions = evaluate(owners, staged_identities, staged_paths, staged_replaces)
-    if collisions:
-        refuse(collisions)
-    write_state(state_out, seen, newest, owners)
-    print(f"sign-apk-repo: ownership gate: {len(packages)} package(s) scanned, no file collisions (ownership state refreshed: {len(seen)} identities)")
+    fresh, reason = rdb.freshness(conn, apk, repo_dir, index_path, trust_dir)
+    if not fresh:
+        print(f"sign-apk-repo: repository state stale ({reason}); full audit")
+        raise SystemExit(9)
+    print(f"sign-apk-repo: selective gate: repository state fresh ({reason})")
+
+try:
+    staged, notices = rdb.gate_staged(conn, apk, staged_accounts_path,
+                                      staged_files, packages, tsv_path)
+except rdb.RepoDbError as exc:
+    print(f"sign-apk-repo: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+for notice in notices:
+    print(f"sign-apk-repo: notice: {notice}")
+
+with open(staged_info_path, "w", encoding="utf-8") as stream:
+    json.dump(staged, stream, sort_keys=True)
+    stream.write("\n")
+db_idents = {(r["name"], r["version"]) for r in conn.execute(
+    "SELECT name, version FROM packages").fetchall()}
+for filename, item in staged.items():
+    db_idents.add((item["name"], item["version"]))
+Path(identities_path).write_text(json.dumps(
+    [{"name": n, "version": v} for n, v in sorted(db_idents)],
+    separators=(",", ":")) + "\n", encoding="utf-8")
+
+active = conn.execute(
+    "SELECT COUNT(*) c FROM reservations WHERE status='ACTIVE'").fetchone()["c"]
+print(f"sign-apk-repo: staged gate: {len(staged)} staged package(s) checked"
+      f" against {len(db_idents) - len(staged)} repository APK identities"
+      f" and {active} active Unix-identity reservations:"
+      " no file collisions, no identity collisions")
 PY
 }
+
+# Publication transaction: apply the staged set to repository.db
+# atomically (BEGIN IMMEDIATE) after the APKs and indexes are installed.
+# A crash between install and COMMIT surfaces as a stale fingerprint on
+# the next run, which refuses and points at --full-audit to heal.
+db_apply()
+{
+	local db_file=$1 staged_info=$2
+	shift 2
+	"$SAPHIRA_PYTHON" - "$repo_db_lib" "$SAPHIRA_APK" "$db_file" "$staged_info" \
+		"$repo_dir" "$@" <<'PY'
+import json
+import os
+import sys
+
+(lib_path, apk, db_file, staged_info_path, repo_dir) = sys.argv[1:]
+sys.path.insert(0, os.path.dirname(lib_path))
+import repo_db as rdb
+
+try:
+    conn = rdb.connect(db_file)
+    rdb.check_schema(conn)
+except rdb.RepoDbError as exc:
+    print(f"sign-apk-repo: {exc}", file=sys.stderr)
+    raise SystemExit(2)
+with open(staged_info_path, encoding="utf-8") as stream:
+    staged = json.load(stream)
+notices = []
+conn.execute("BEGIN IMMEDIATE")
+try:
+    rdb.apply_staged(conn, apk, repo_dir, staged, rdb.utcnow(), notices)
+    rdb.set_meta(conn, "last_audit", rdb.utcnow())
+    conn.commit()
+except rdb.RepoDbError as exc:
+    conn.rollback()
+    print(f"sign-apk-repo: publication transaction failed: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+for notice in notices:
+    print(f"sign-apk-repo: notice: {notice}")
+print(f"sign-apk-repo: repository.db transaction committed:"
+      f" {len(staged)} staged package(s) applied")
+PY
+}
+
 
 for repo_name in "${repo_names[@]}"; do
 	repo_dir=$SAPHIRA_REPO_DIR/$repo_name/$SAPHIRA_ARCH
@@ -501,32 +506,44 @@ identities=$workspace/package-identities.json
 	for staged_file in "${!staged_sources[@]}"; do
 		printf '%s\n' "$staged_file" >> "$staged_list"
 	done
-	state_file=$repo_dir/ownership.json
-	state_out=$workspace/$repo_name-ownership.json
-	# Selective fast path: gate only the staged set against persisted
-	# ownership state (no per-APK re-dump, no full re-verify of immutable
-	# history). Exit 9 from the gate means state is missing or stale, and
-	# the run falls back to the full audit below, which refreshes it. Any
-	# other non-zero exit is a real gate refusal and stops the run.
+	db_file=$repo_dir/repository.db
+	staged_info=$workspace/$repo_name-staged.json
+	# Fast path by default: evaluate only the staged set against indexed
+	# repository.db rows (no per-APK re-dump, no full re-verify of
+	# immutable history). --full-audit skips straight to the full audit.
+	# Exit 9 from the gate means the fingerprint is stale and the run
+	# falls back to the full audit, which reconciles. Exit 2 means the
+	# database is missing or unusable: refuse with a migration pointer,
+	# never a silent fallback. Any other non-zero exit is a real gate
+	# refusal and stops the run.
+	# Writer lock: the same repository.db.lock every sanctioned writer
+	# takes (see repo_db.db_lock_path). mkdir is atomic; failure dies
+	# loudly rather than queueing silently.
+	db_lock_held=""
+	if ! mkdir "$repo_dir/repository.db.lock" 2>/dev/null; then
+		die "repository writer lock already held for $repo_name: $repo_dir/repository.db.lock"
+	fi
+	db_lock_held=$repo_dir
+	staged_paths=()
+	for name in "${!staged_sources[@]}"; do
+		staged_paths+=("${staged_sources[$name]}")
+	done
 	gate_mode=full
-	if [ "$selective" -eq 1 ] && [ -f "$state_file" ]; then
-		fast_packages=()
-		for name in "${!staged_sources[@]}"; do
-			fast_packages+=("${staged_sources[$name]}")
-		done
-		fast_status=0
-		run_gate fast "$state_file" "$state_out" ${fast_packages[@]+"${fast_packages[@]}"} || fast_status=$?
-		if [ "$fast_status" -eq 0 ]; then
+	if [ "$force_full" -eq 0 ]; then
+		gate_status=0
+		db_gate fast "$db_file" "$staged_info" "$repo_dir/Packages.adb" "${staged_paths[@]}" || gate_status=$?
+		if [ "$gate_status" -eq 0 ]; then
 			gate_mode=fast
-		elif [ "$fast_status" -ne 9 ]; then
-			die "selective ownership gate failed for $repo_name (see above)"
+		elif [ "$gate_status" -ne 9 ]; then
+			die "repository gate failed for $repo_name (see above)"
 		fi
 	fi
 	if [ "$gate_mode" = full ]; then
 		for package in "$repo_dir"/*.apk; do
 			"$SAPHIRA_APK" verify --keys-dir "$trust_dir" "$package" >/dev/null
 		done
-		run_gate full "$state_file" "$state_out" "${all_packages[@]}"
+		db_gate full "$db_file" "$staged_info" "$repo_dir/Packages.adb" "${staged_paths[@]}" \
+			|| die "full audit failed for $repo_name (see above)"
 	fi
 
 packages_adb=$workspace/$repo_name-Packages.adb
@@ -549,7 +566,7 @@ for index in indexes:
     versions = re.findall(r"^    version: (\S+)$", dump, re.MULTILINE)
     actual = set(zip(names, versions))
     if len(names) != len(versions) or len(actual) != len(names) or actual != expected:
-        raise SystemExit(f"index identities/count do not match package set: {index}")
+        raise SystemExit(f"index APK identities/count do not match package set: {index}")
 PY
 
 for package in ${install_set[@]+"${install_set[@]}"}; do
@@ -561,16 +578,6 @@ for package in ${install_set[@]+"${install_set[@]}"}; do
 	normalize_ownership "$repo_dir/$name"
 done
 
-# Install the refreshed ownership state atomically next to the indexes; a
-# later selective run trusts it only while the index identities still
-# match it exactly, otherwise it falls back to a full rescan that
-# regenerates it (promote-repo and seed-repo only touch APKs+indexes, so
-# they can at worst force one healing full scan, never a wrong decision).
-state_tmp=$repo_dir/ownership.json.publishing-$publication_id
-install -m 644 -- "$state_out" "$state_tmp"
-mv -f -- "$state_tmp" "$repo_dir/ownership.json"
-normalize_ownership "$repo_dir/ownership.json"
-
 for index_name in Packages.adb APKINDEX.tar.gz; do
 	case $index_name in
 		Packages.adb) source_index=$packages_adb ;;
@@ -581,6 +588,16 @@ for index_name in Packages.adb APKINDEX.tar.gz; do
 	mv -f -- "$temporary" "$repo_dir/$index_name"
 	normalize_ownership "$repo_dir/$index_name"
 done
+# Apply the staged set to repository.db atomically (BEGIN IMMEDIATE),
+# last of all, so the database never runs ahead of the installed APKs
+# and indexes. A crash before COMMIT surfaces as a stale fingerprint
+# on the next run, which refuses and points at --full-audit to heal.
+# The frozen ownership.json beside the database is migration evidence
+# only and is never written here.
+db_apply "$db_file" "$staged_info" || die "repository.db transaction failed for $repo_name (see above)"
+normalize_ownership "$repo_dir/repository.db"
+rmdir -- "$repo_dir/repository.db.lock" 2>/dev/null || true
+db_lock_held=""
 chmod g+rws -- "$repo_dir" 2>/dev/null || true
 
 printf 'sign-apk-repo: published and indexed %s verified APK files in %s\n' \

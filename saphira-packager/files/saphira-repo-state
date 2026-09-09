@@ -1,0 +1,306 @@
+#!/usr/bin/python3
+
+"""saphira-repo-state: human interface to repository.db.
+
+Reads one generation repository's SQLite metadata and prints human
+answers — no SQL required. Permanently read-only: the database is
+opened mode=ro, and this tool contains no write code path. All state
+changes flow through sign-apk-repo, saphira-repo-migrate, promote-repo
+and seed-repo only.
+
+Usage: saphira-repo-state [--gen NAME] <command> [args]
+    --gen defaults to the last (live) name in SAPHIRA_REPO_NAMES.
+
+Commands:
+    summary              counts: APK identities, paths, Unix identities, reservations
+    packages             newest-per-name NVR list
+    package <name>       every NVR + declaration summary
+    owner <path>         which packages own a file path
+    users                active + tombstoned user reservations
+    user <name>          one user reservation in full
+    gid <n>              groups holding a GID
+    history <name>       NVR ledger + reservation transitions for a package
+    conflicts            newest-view multi-owner paths (healthy: none)
+    audit                read-only freshness verification (never heals)
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import sys
+from pathlib import Path
+
+COMMANDS = ("summary", "packages", "package", "owner", "users", "user",
+            "gid", "history", "conflicts", "audit")
+
+
+class StateError(RuntimeError):
+    pass
+
+
+def lib() -> object:
+    here = Path(__file__).resolve().parent
+    for candidate in (here / "repo_db.py", Path("/usr/lib/saphira-packager/repo_db.py")):
+        if candidate.is_file():
+            import importlib.machinery
+            import importlib.util
+
+            loader = importlib.machinery.SourceFileLoader("repo_db", str(candidate))
+            spec = importlib.util.spec_from_file_location("repo_db", str(candidate), loader=loader)
+            assert spec is not None and spec.loader is not None
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return module
+    raise StateError("cannot locate repo_db.py")
+
+
+def load_config() -> dict[str, str]:
+    import subprocess
+
+    keys = ("SAPHIRA_REPO_DIR", "SAPHIRA_REPO_NAMES", "SAPHIRA_ARCH",
+            "SAPHIRA_APK", "SAPHIRA_TRUST_KEY")
+    config_path = os.environ.get("SAPHIRA_CONFIG_FILE", "/etc/saphira/package_builder.sh")
+    script = r'''
+set -eu
+set -a
+. "$1"
+shift
+for name do
+    value=${!name-}
+    builtin printf '%s\0%s\0' "$name" "$value"
+done
+'''
+    result = subprocess.run(
+        ["/bin/bash", "--noprofile", "--norc", "-c", script,
+         "saphira-repo-state-config", config_path, *keys],
+        check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    parts = result.stdout.split(b"\0")
+    return {parts[i].decode(): parts[i + 1].decode() for i in range(0, len(parts) - 1, 2)}
+
+
+def resolve_repo(config: dict[str, str], gen: str | None) -> Path:
+    names = config.get("SAPHIRA_REPO_NAMES", "").split()
+    if gen is None:
+        if not names:
+            raise StateError("SAPHIRA_REPO_NAMES is empty (pass --gen NAME)")
+        gen = names[-1]
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", gen):
+        raise StateError(f"invalid generation repository name: {gen}")
+    repo_dir = Path(config["SAPHIRA_REPO_DIR"]) / gen / config["SAPHIRA_ARCH"]
+    if not repo_dir.is_dir():
+        raise StateError(f"repository does not exist: {repo_dir}")
+    db_path = repo_dir / "repository.db"
+    if not db_path.is_file():
+        raise StateError(f"no repository.db in {repo_dir} (run saphira-repo-migrate {gen})")
+    lock = repo_dir / "repository.db.lock"
+    if lock.exists():
+        print(f"note: writer lock present ({lock}); output may be mid-publication",
+              file=sys.stderr)
+    return db_path
+
+
+def cmd_summary(rdb: object, conn: object, out: list[str]) -> None:
+    summary = rdb.q_summary(conn)
+    history = rdb.get_meta(conn, "history_complete")
+    last = rdb.get_meta(conn, "last_audit")
+    out.append(f"APK identities:             {summary['apk_identities']}")
+    out.append(f"newest package names:       {summary['newest_names']}")
+    out.append(f"owned file paths:           {summary['owned_paths']}")
+    out.append(f"declared Unix users:        {summary['declared_users']}")
+    out.append(f"declared Unix groups:       {summary['declared_groups']}")
+    out.append(f"active reservations:        {summary['active_reservations']}")
+    out.append(f"tombstoned reservations:    {summary['tombstoned_reservations']}")
+    out.append(f"history complete:           {'yes' if history == '1' else 'no (current view)'}")
+    out.append(f"last audit:                 {last or 'never'}")
+
+
+def cmd_packages(rdb: object, conn: object, out: list[str]) -> None:
+    for row in conn.execute(
+            "SELECT name, version FROM packages WHERE is_newest=1 ORDER BY name").fetchall():
+        out.append(f"{row['name']}-{row['version']}")
+
+
+def cmd_package(rdb: object, conn: object, out: list[str], name: str) -> None:
+    rows = conn.execute(
+        "SELECT version, apk_sha256, is_newest, published_at FROM packages"
+        " WHERE name=? ORDER BY version", (name,)).fetchall()
+    if not rows:
+        raise StateError(f"unknown package: {name}")
+    for row in rows:
+        out.append(f"{name}-{row['version']} {'[newest]' if row['is_newest'] else ''}"
+                   f" sha256:{row['apk_sha256'][:16]}… published:{row['published_at'] or '?'}")
+        pid = conn.execute("SELECT package_id FROM packages WHERE name=? AND version=?",
+                           (name, row["version"])).fetchone()["package_id"]
+        for u in conn.execute("SELECT name, uid, primary_group FROM users"
+                              " WHERE package_id=? ORDER BY name", (pid,)).fetchall():
+            out.append(f"  user: {u['name']} uid={u['uid']} primary={u['primary_group']}")
+        for g in conn.execute("SELECT name, gid FROM groups WHERE package_id=? ORDER BY name",
+                              (pid,)).fetchall():
+            out.append(f"  group: {g['name']} gid={g['gid']}")
+
+
+def cmd_owner(rdb: object, conn: object, out: list[str], path: str) -> None:
+    rows = rdb.q_owner(conn, path)
+    if not rows:
+        out.append(f"{path}: owned by no repository package")
+        return
+    for row in rows:
+        out.append(f"{path}: {row['name']}-{row['version']}"
+                   f"{'' if row['is_newest'] else ' (superseded)'}")
+
+
+def cmd_users(rdb: object, conn: object, out: list[str]) -> None:
+    rows = conn.execute(
+        "SELECT kind, name, numeric_id, owning_package, status FROM reservations"
+        " WHERE kind='user' ORDER BY numeric_id, name").fetchall()
+    if not rows:
+        out.append("no user reservations")
+        return
+    for row in rows:
+        out.append(f"user {row['name']} uid={row['numeric_id']}"
+                   f" package={row['owning_package']} [{row['status']}]")
+
+
+def cmd_user(rdb: object, conn: object, out: list[str], name: str) -> None:
+    row = conn.execute(
+        "SELECT kind, name, numeric_id, owning_package, first_nvr, last_nvr, status,"
+        " declaration_sha256 FROM reservations WHERE kind='user' AND name=?",
+        (name,)).fetchone()
+    if row is None:
+        raise StateError(f"unknown user reservation: {name}")
+    out.append(f"user {row['name']} uid={row['numeric_id']} [{row['status']}]")
+    out.append(f"  owning package: {row['owning_package']}")
+    out.append(f"  first seen:     {row['first_nvr']}")
+    out.append(f"  last seen:      {row['last_nvr']}")
+    out.append(f"  declaration:    sha256:{row['declaration_sha256'][:16]}…")
+
+
+def cmd_gid(rdb: object, conn: object, out: list[str], gid: str) -> None:
+    try:
+        number = int(gid)
+    except ValueError:
+        raise StateError(f"invalid GID: {gid}")
+    rows = conn.execute(
+        "SELECT name, owning_package, status FROM reservations"
+        " WHERE kind='group' AND numeric_id=? ORDER BY name", (number,)).fetchall()
+    if not rows:
+        out.append(f"gid {number}: held by no reservation")
+        return
+    for row in rows:
+        out.append(f"gid {number}: group {row['name']}"
+                   f" package={row['owning_package']} [{row['status']}]")
+
+
+def cmd_history(rdb: object, conn: object, out: list[str], name: str) -> None:
+    data = rdb.q_history(conn, name)
+    if not data["nvrs"] and not data["reservations"]:
+        raise StateError(f"unknown package: {name}")
+    out.append(f"ledger for {name}:")
+    for nvr in data["nvrs"]:
+        out.append(f"  {name}-{nvr['version']}")
+    for res in data["reservations"]:
+        out.append(f"  {res['kind']} {res['name']} id={res['numeric_id']}"
+                   f" [{res['status']}] first={res['first_nvr']} last={res['last_nvr']}")
+
+
+def cmd_conflicts(rdb: object, conn: object, out: list[str]) -> None:
+    found = rdb.q_conflicts(conn)
+    if not found:
+        out.append("no newest-view multi-owner paths")
+        return
+    out.append(f"{len(found)} newest-view multi-owner path(s) (legacy pairs:"
+               " tolerated until a staged package claims the path, then the gate refuses)")
+    for item in found:
+        owners = ", ".join(f"{n}={v}" for n, v in sorted(item["owners"].items()))
+        out.append(f"{item['path']}: {owners}")
+
+
+def cmd_audit(rdb: object, conn: object, out: list[str], config: dict,
+              repo_dir: Path) -> None:
+    sidecars = sorted(str(p) for p in repo_dir.glob("repository.db-*"))
+    if sidecars:
+        out.append(f"FAIL: database sidecars present (single-file mode violated): {sidecars}")
+        return
+    try:
+        fresh, reason = rdb.freshness(conn, config["SAPHIRA_APK"], str(repo_dir),
+                                      str(repo_dir / "Packages.adb"),
+                                      str(Path(config["SAPHIRA_TRUST_KEY"]).parent))
+    except Exception as exc:
+        out.append(f"FAIL: cannot verify freshness: {exc}")
+        return
+    out.append(f"{'OK' if fresh else 'STALE'}: {reason}")
+    if not fresh:
+        out.append("heal with: sign-apk-repo --full-audit (reconciles; never silently)")
+
+
+def main() -> int:
+    args = sys.argv[1:]
+    gen = None
+    if args[:1] == ["--gen"]:
+        if len(args) < 3:
+            print("usage: saphira-repo-state [--gen NAME] <command> [args]", file=sys.stderr)
+            return 1
+        gen = args[1]
+        args = args[2:]
+    if not args or args[0] not in COMMANDS:
+        print(f"usage: saphira-repo-state [--gen NAME] ({'|'.join(COMMANDS)}) [args]",
+              file=sys.stderr)
+        return 1
+    command, rest = args[0], args[1:]
+    try:
+        rdb = lib()
+        config = load_config()
+        # Direct environment overrides (test harnesses sign fixture
+        # indexes with throwaway keys; same pattern as the signer).
+        if os.environ.get("SAPHIRA_TRUST_KEY"):
+            config["SAPHIRA_TRUST_KEY"] = os.environ["SAPHIRA_TRUST_KEY"]
+        db_path = resolve_repo(config, gen)
+        repo_dir = db_path.parent
+        conn = rdb.connect_readonly(str(db_path))
+        try:
+            rdb.check_schema(conn)
+        except Exception as exc:
+            print(f"saphira-repo-state: {exc}", file=sys.stderr)
+            return 1
+        out: list[str] = []
+        if command == "summary":
+            cmd_summary(rdb, conn, out)
+        elif command == "packages":
+            cmd_packages(rdb, conn, out)
+        elif command == "package":
+            command_args(command, rest, 1)
+            cmd_package(rdb, conn, out, rest[0])
+        elif command == "owner":
+            command_args(command, rest, 1)
+            cmd_owner(rdb, conn, out, rest[0])
+        elif command == "users":
+            cmd_users(rdb, conn, out)
+        elif command == "user":
+            command_args(command, rest, 1)
+            cmd_user(rdb, conn, out, rest[0])
+        elif command == "gid":
+            command_args(command, rest, 1)
+            cmd_gid(rdb, conn, out, rest[0])
+        elif command == "history":
+            command_args(command, rest, 1)
+            cmd_history(rdb, conn, out, rest[0])
+        elif command == "conflicts":
+            cmd_conflicts(rdb, conn, out)
+        elif command == "audit":
+            cmd_audit(rdb, conn, out, config, repo_dir)
+        conn.close()
+    except StateError as exc:
+        print(f"saphira-repo-state: {exc}", file=sys.stderr)
+        return 1
+    print("\n".join(out))
+    return 0
+
+
+def command_args(command: str, rest: list[str], want: int) -> None:
+    if len(rest) != want:
+        raise StateError(f"usage: saphira-repo-state {command} <{' '.join(['arg'] * want)}>")
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -4,6 +4,11 @@ After=network.target
 
 [Service]
 Type=simple
+# No User=/Group= here by design: the daemon starts as root only to
+# bind privileged ports, then irreversibly drops to proxyto:19 itself
+# (setgroups/setgid/setuid with regain verification, fatal on failure).
+# A unit-level User= would break privileged-port instances and merely
+# duplicate the self-drop; the running process is proxyto:19 either way.
 EnvironmentFile=-/etc/conf.d/proxyto
 ExecStart=/usr/bin/proxyto --syslog ${proxyto_name:-geomyidae}
 Restart=on-failure

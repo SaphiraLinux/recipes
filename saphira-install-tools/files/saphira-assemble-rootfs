@@ -1,0 +1,141 @@
+#!/bin/sh
+#
+# saphira-assemble-rootfs TARGET PROFILE
+#
+# Shared rootfs assembly: the single code path consumed by image
+# creation (saphira-image) and disk installation (saphira-install).
+# Both entry points call this; neither reimplements it.
+
+set -u
+
+usage()
+{
+	printf 'usage: saphira-assemble-rootfs TARGET PROFILE\n' >&2
+	exit 2
+}
+
+die()
+{
+	printf 'saphira-assemble-rootfs: %s\n' "$*" >&2
+	exit 1
+}
+
+test $# -eq 2 || usage
+target=$1
+profile=$2
+
+bindir=$(dirname -- "$0") || die 'cannot locate tool directory'
+bootstrap_command=${SAPHIRA_BOOTSTRAP:-$bindir/saphira-bootstrap}
+chroot_command=${SAPHIRA_CHROOT:-$bindir/saphira-chroot}
+profile_root=${SAPHIRA_PROFILE_ROOT:-/usr/share/saphira/profiles}
+repository=${SAPHIRA_REPOSITORY:-}
+hostname=${SAPHIRA_HOSTNAME:-$profile}
+root_password=${SAPHIRA_ROOT_PASSWORD:-}
+
+# 1. Package the root filesystem from the profile. The profile owns
+# top-level intentions only; the resolver owns closure.
+if test -n "$repository"; then
+	SAPHIRA_PROFILE_ROOT="$profile_root" "$bootstrap_command" \
+		-r "$repository" "$target" "$profile" ||
+		die 'saphira-bootstrap failed'
+else
+	SAPHIRA_PROFILE_ROOT="$profile_root" "$bootstrap_command" \
+		"$target" "$profile" ||
+		die 'saphira-bootstrap failed'
+fi
+
+# 2. Machine identity. Hostname defaults to the profile name; /etc/hosts
+# carries the loopback entries so the name resolves without DNS.
+case $hostname in
+	''|*[^A-Za-z0-9._+-]*)
+		die "invalid hostname: $hostname" ;;
+esac
+printf '%s\n' "$hostname" > "$target/etc/hostname" ||
+	die 'cannot write /etc/hostname'
+if ! grep -q . "$target/etc/hosts" 2>/dev/null; then
+	cat > "$target/etc/hosts" <<EOF ||
+127.0.0.1	localhost
+::1		localhost
+127.0.1.1	$hostname
+EOF
+	die 'cannot write /etc/hosts'
+fi
+
+# 3. System accounts from the base layout's accounts.tsv. The guard
+# inside apply-accounts.sh permits only the Stage4 root or an
+# explicitly opted-in installer target, so pass SAPHIRA_INSTALLER_ROOT.
+# This also arms firstboot when the root account is locked.
+SAPHIRA_INSTALLER_ROOT="$target" \
+	"$target/usr/libexec/saphira/apply-accounts.sh" \
+	"$target" "$target/usr/share/saphira/accounts.tsv" ||
+	die 'apply-accounts failed'
+
+# 3b. Package-declared identities. Bootstrap installs with --no-scripts
+# (no target shell exists yet), so replay every installed accounts.d
+# fragment here through the host-run reconciler with the target as its
+# root. Same helper, same fragments as live `apk add`; assembly and
+# live install converge instead of duplicating policy. Two passes: a
+# fragment whose primary group is declared by another fragment may fail
+# until that group exists, so retry failures once before failing closed.
+accounts_dir=$target/usr/share/saphira/accounts.d
+if test -d "$accounts_dir"; then
+	replay_identities()
+	{
+		for fragment in "$accounts_dir"/*; do
+			test -f "$fragment" || continue
+			SAPHIRA_ENSURE_ROOT="$target" \
+				"$target/usr/libexec/saphira/ensure-identity.sh" \
+				"$fragment" || return 1
+		done
+		return 0
+	}
+	# Replay is idempotent, so a second full pass (not a partial retry)
+	# covers fragments whose primary group is declared by another
+	# fragment that sorts later.
+	if ! replay_identities && ! replay_identities; then
+		die 'package identity replay failed'
+	fi
+fi
+
+# 4. CA bundle inside the target (mirrors the builder root-init).
+"$chroot_command" "$target" /usr/sbin/update-ca-certificates ||
+	die 'update-ca-certificates failed'
+test -f "$target/etc/ssl/certs/ca-certificates.crt" ||
+	die 'CA bundle missing after update-ca-certificates'
+
+# 4. Root credential. Empty password locks root (firstboot owns
+# account setup); a supplied one is for automated boot-test images
+# only and must be rotated on first real use.
+if test -n "$root_password"; then
+	printf 'root:%s\n' "$root_password" |
+		"$chroot_command" "$target" /usr/sbin/chpasswd ||
+		die 'cannot set root password'
+else
+	"$chroot_command" "$target" /usr/sbin/usermod -p '!' root ||
+		die 'cannot lock root password'
+fi
+
+# 5. Service enables from the profile sidecar
+# (profiles/<profile>.services, one unit per line, # comments).
+# Offline enable via the target's own systemctl; the unit files
+# come from the packages, the selection comes from the profile.
+services_file=$profile_root/$profile.services
+if test -f "$services_file"; then
+	units=$(mktemp /tmp/saphira-assemble.units.XXXXXX) ||
+		die 'cannot create units workspace'
+	trap 'rm -f -- "$units"' EXIT HUP INT TERM
+	while IFS= read -r entry || test -n "$entry"; do
+		case $entry in
+			''|'#'*) continue ;;
+			*[!A-Za-z0-9._@+-]*) die "invalid unit: $entry" ;;
+			*) printf '%s\n' "$entry" >> "$units" ;;
+		esac
+	done < "$services_file"
+	if test -s "$units"; then
+		"$chroot_command" "$target" /usr/bin/systemctl --root=/ \
+			enable $(cat "$units") ||
+			die 'systemctl enable failed'
+	fi
+	rm -f -- "$units"
+	trap - EXIT HUP INT TERM
+fi

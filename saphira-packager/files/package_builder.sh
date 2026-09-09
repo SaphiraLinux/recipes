@@ -42,9 +42,12 @@ SAPHIRA_METADATA_TIMEOUT=${SAPHIRA_METADATA_TIMEOUT:-10}
 # rebuild to byte-identical APKs so republication stays idempotent under the
 # immutable-filename rule.
 SAPHIRA_SOURCE_DATE_EPOCH=${SAPHIRA_SOURCE_DATE_EPOCH:-1753401600}
-SAPHIRA_BUILD_SEED=${SAPHIRA_BUILD_SEED:-saphira-baselayout saphira-base-abi apk-tools bash libcap coreutils curl diffutils findutils pcre2 mawk grep gzip patch sed tar acl attr xz bzip2 lz4 zstd ca-certificates python3 ccache which}
-SAPHIRA_BOOTSTRAP_ROOT=${SAPHIRA_BOOTSTRAP_ROOT:-/}
-SAPHIRA_BOOTSTRAP_MANIFEST=${SAPHIRA_BOOTSTRAP_MANIFEST:-/etc/saphira/bootstrap-v0.1.paths}
+# Package names are the boundary: the clean root is seeded exclusively
+# from signed repository APKs. musl/musl-dev provide the C library,
+# headers and static objects; saphira-kernel-headers the kernel UAPI;
+# libxcrypt and flex the runtimes the old host-file manifest used to
+# carry (libcrypt.so.2, libfl.so.2). Nothing is copied from the host.
+SAPHIRA_BUILD_SEED=${SAPHIRA_BUILD_SEED:-saphira-baselayout saphira-base-abi apk-tools bash libcap coreutils curl diffutils findutils pcre2 mawk grep gzip patch sed tar acl attr xz bzip2 lz4 zstd ca-certificates python3 ccache which musl musl-dev saphira-kernel-headers libxcrypt flex}
 SAPHIRA_HOST_RESOLV_CONF=${SAPHIRA_HOST_RESOLV_CONF:-/etc/resolv.conf}
 SAPHIRA_HOST_HOSTS_FILE=${SAPHIRA_HOST_HOSTS_FILE:-/etc/hosts}
 SAPHIRA_ROOT_RECIPE_MOUNT=${SAPHIRA_ROOT_RECIPE_MOUNT:-/recipes}
@@ -71,7 +74,7 @@ export SAPHIRA_SIGN_KEY SAPHIRA_TRUST_KEY SAPHIRA_ARCH SAPHIRA_BINDIR
 export SAPHIRA_RELEASE_STATE SAPHIRA_RELEASE_POLICY
 export SAPHIRA_APK SAPHIRA_BWRAP SAPHIRA_PYTHON SAPHIRA_METADATA_SHELL SAPHIRA_METADATA_TIMEOUT
 export SAPHIRA_SOURCE_DATE_EPOCH
-export SAPHIRA_BUILD_SEED SAPHIRA_BOOTSTRAP_ROOT SAPHIRA_BOOTSTRAP_MANIFEST
+export SAPHIRA_BUILD_SEED
 export SAPHIRA_HOST_RESOLV_CONF SAPHIRA_HOST_HOSTS_FILE
 export SAPHIRA_ROOT_RECIPE_MOUNT SAPHIRA_ROOT_REPO_MOUNT
 export SAPHIRA_ROOT_ARTIFACT_MOUNT SAPHIRA_ROOT_BUILD_ROOT SAPHIRA_ROOT_PACKAGE_TMP

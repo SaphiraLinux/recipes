@@ -2,7 +2,7 @@
 
 pkgname=postgresql-server
 pkgver=18.4
-pkgrel=1
+pkgrel=2
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="PostgreSQL database server"
 license="PostgreSQL"
@@ -75,6 +75,13 @@ recipe_install()
 	install -D -m 0644 "$RECIPE_DIR/files/AKADATA.md" \
 		"$PKGDEST/usr/share/doc/postgresql-server/AKADATA.md"
 	install -d -m 0700 "$PKGDEST/var/lib/postgresql"
+	# Runtime identity declaration: postgres:122 required by the
+	# shipped service units. makepkg generates the install scripts
+	# from this fragment; the package creates its identity at install
+	# time.
+	# r2: fragment added (payload change, revision bumps).
+	install -D -m 0644 "$RECIPE_DIR/files/accounts.d/postgresql-server" \
+		"$PKGDEST/usr/share/saphira/accounts.d/postgresql-server"
 	install -D -m 0644 "$SRC/COPYRIGHT" \
 		"$PKGDEST/usr/share/licenses/postgresql-server/COPYRIGHT"
 }

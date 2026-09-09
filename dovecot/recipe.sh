@@ -2,7 +2,7 @@
 
 pkgname=dovecot
 pkgver=2.4.4
-pkgrel=1
+pkgrel=2
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="IMAP and POP3 email server"
 license="LGPL-2.1-or-later MIT"
@@ -68,4 +68,11 @@ recipe_install()
 		"$PKGDEST/etc/init.d/dovecot"
 	install -m 0644 "$RECIPE_DIR/files/dovecot.conf" \
 		"$PKGDEST/etc/dovecot/dovecot.conf"
+	# Runtime identity declaration: dovecot:114 + dovenull:115 required
+	# by upstream compiled defaults. makepkg generates the install
+	# scripts from this fragment; the package creates its identities
+	# at install time.
+	# r2: fragment added (payload change, revision bumps).
+	install -D -m 0644 "$RECIPE_DIR/files/accounts.d/dovecot" \
+		"$PKGDEST/usr/share/saphira/accounts.d/dovecot"
 }

@@ -1,0 +1,13 @@
+# ftp runtime identity (canonical, fixed): user ftp UID 18,
+# primary group ftp GID 18. Required by the shipped server config
+# (proftpd.conf: User/Group ftp for the anonymous area). This
+# fragment ships in proftpd alone: vsftpd carries no ftp requirement
+# in its shipped files, so one package owns the identity. UID 18
+# sits in the preferred 0..199 packaged range - never reuse it for
+# another identity.
+# /srv/ftp ownership exception: the content root stays root-owned
+# 0755 by recipe decision (anonymous area), so the fragment pins it
+# back explicitly - the user stanza would otherwise hand it to ftp.
+user ftp 18 ftp /srv/ftp /sbin/nologin
+group ftp 18
+dir /srv/ftp 0755 root root

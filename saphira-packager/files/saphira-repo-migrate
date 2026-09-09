@@ -1,0 +1,482 @@
+#!/usr/bin/python3
+
+"""saphira-repo-migrate: explicit one-time JSON-to-SQLite migration (and
+reconcile) for one generation repository.
+
+Usage:
+    sudo saphira-repo-migrate <repo>                 fresh migration
+    sudo saphira-repo-migrate --reconcile <repo>     full rebuild + verify
+    sudo saphira-repo-migrate --reconcile --from-history <repo>
+
+Fresh migration requires ownership.json (migration evidence input) and
+runs the one-time full census (every APK dumped + hashed; carrier
+payload declarations extracted in isolation). accounts.json, when
+present, is cross-checked against the census and then frozen; when
+absent, the absence is recorded in the manifest (the r48-to-r49
+transition artifact is the documented exception, never consulted again).
+
+After a successful migration SQLite is the sole authority.
+ownership.json (and accounts.json if it exists) are frozen read-only as
+evidence and never consulted by normal operation again.
+
+--reconcile rebuilds current packages/files/accounts from the census and
+VERIFIES the reservation ledger: legitimate drops tombstone loudly,
+tombstones are never deleted, and unknown history fails closed.
+--from-history additionally re-derives tombstones, but only where the
+repository holds complete append-only history; on a current-view
+repository it refuses and points at the append-only archive.
+
+Requires root; use sudo explicitly, exactly like sign-apk-repo.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+import shutil
+import stat
+import sys
+import tempfile
+from pathlib import Path
+
+CONFIG_KEYS = (
+    "SAPHIRA_REPO_DIR",
+    "SAPHIRA_REPO_NAMES",
+    "SAPHIRA_ARCH",
+    "SAPHIRA_APK",
+    "SAPHIRA_SIGN_KEY",
+    "SAPHIRA_TRUST_KEY",
+    "SAPHIRA_PACKAGE_TMP",
+    "SAPHIRA_PYTHON",
+)
+REPO_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+DEFAULT_TSV = "/usr/share/saphira/accounts.tsv"
+
+
+class MigrateError(RuntimeError):
+    pass
+
+
+def lib() -> object:
+    here = Path(__file__).resolve().parent
+    for candidate in (here / "repo_db.py", Path("/usr/lib/saphira-packager/repo_db.py")):
+        if candidate.is_file():
+            import importlib.machinery
+            import importlib.util
+
+            loader = importlib.machinery.SourceFileLoader("repo_db", str(candidate))
+            spec = importlib.util.spec_from_file_location("repo_db", str(candidate), loader=loader)
+            assert spec is not None and spec.loader is not None
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return module
+    raise MigrateError("cannot locate repo_db.py")
+
+
+def load_config() -> dict[str, str]:
+    import subprocess
+
+    config_path = os.environ.get("SAPHIRA_CONFIG_FILE", "/etc/saphira/package_builder.sh")
+    script = r'''
+set -eu
+set -a
+. "$1"
+shift
+for name do
+    value=${!name-}
+    builtin printf '%s\0%s\0' "$name" "$value"
+done
+'''
+    result = subprocess.run(
+        ["/bin/bash", "--noprofile", "--norc", "-c", script,
+         "saphira-repo-migrate-config", config_path, *CONFIG_KEYS],
+        check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    parts = result.stdout.split(b"\0")
+    values = {parts[i].decode(): parts[i + 1].decode() for i in range(0, len(parts) - 1, 2)}
+    missing = [k for k in CONFIG_KEYS if not values.get(k)]
+    if missing:
+        raise MigrateError(f"missing configuration keys: {', '.join(missing)} ({config_path})")
+    return values
+
+
+def normalize_ownership(path: Path) -> None:
+    uid = os.environ.get("SUDO_UID")
+    if not uid:
+        return
+    import grp
+
+    group = os.environ.get("SAPHIRA_REPO_GROUP", "saphira-build")
+    os.chown(path, int(uid), grp.getgrnam(group).gr_gid)
+
+
+def freeze(path: Path) -> None:
+    mode = os.stat(path).st_mode
+    os.chmod(path, mode & ~(stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        for chunk in iter(lambda: stream.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def build_database(rdb: object, config: dict, repo: str, out_db: Path,
+                   ownership_path: Path | None, manifest: dict, notices: list[str],
+                   history_complete: bool) -> None:
+    arch = config["SAPHIRA_ARCH"]
+    apk = config["SAPHIRA_APK"]
+    repo_dir = Path(config["SAPHIRA_REPO_DIR"]) / repo / arch
+    trust_dir = str(Path(config["SAPHIRA_TRUST_KEY"]).parent)
+    tsv_path = os.environ.get("SAPHIRA_ACCOUNTS_TSV", DEFAULT_TSV)
+
+    index = repo_dir / "Packages.adb"
+    if not index.is_file():
+        raise MigrateError(f"repository index is missing: {index}")
+    import subprocess
+
+    subprocess.run([apk, "verify", "--keys-dir", trust_dir, str(index)], check=True,
+                   capture_output=True, text=True)
+
+    print(f"saphira-repo-migrate: full census of {repo_dir} ...", flush=True)
+    census_data = rdb.census(apk, repo_dir)
+    if not census_data:
+        raise MigrateError(f"repository holds no APK files: {repo_dir}")
+    carriers = rdb.fragment_carriers(census_data)
+    print(f"saphira-repo-migrate: {len(census_data)} APK identities,"
+          f" {len(carriers)} fragment carriers", flush=True)
+    manifest["apk_identity_count"] = len(census_data)
+    manifest["carriers"] = carriers
+
+    with tempfile.TemporaryDirectory(prefix="saphira-repo-migrate-") as tmp:
+        declarations = rdb.extract_declarations(apk, repo_dir, carriers, tmp)
+    for filename in carriers:
+        decl = declarations[filename]
+        if not decl.get("users") and not decl.get("groups"):
+            raise MigrateError(
+                f"{filename} ships an accounts.d fragment with no parseable "
+                "declaration (rebuild and re-publish the package)"
+            )
+    manifest["declarations"] = {
+        filename: rdb.canonical_declaration(
+            d.get("users", []), d.get("groups", []), d.get("dirs", []))[1]
+        for filename, d in sorted(declarations.items())
+    }
+
+    # Ownership.json cross-check (fresh migration): the DB-reconstructed
+    # newest-owners map must equal the JSON owners map exactly.
+    if ownership_path is not None:
+        with open(ownership_path, encoding="utf-8") as stream:
+            legacy = json.load(stream)
+        if legacy.get("schema") != "saphira-ownership/v1":
+            raise MigrateError(f"unknown ownership state schema: {ownership_path}")
+        manifest["ownership_json_sha256"] = sha256_file(ownership_path)
+        legacy_idents = {(i[0], i[1]) for i in legacy["identities"]}
+        census_idents = {(info["name"], info["version"]) for info in census_data.values()}
+        if legacy_idents != census_idents:
+            raise MigrateError(
+                f"ownership.json holds {len(legacy_idents)} APK identities,"
+                f" repository {len(census_idents)}; re-run sign-apk-repo first"
+            )
+
+    # accounts.json cross-check when present; absence recorded when not.
+    accounts_path = repo_dir / "accounts.json"
+    if accounts_path.is_file():
+        manifest["accounts_json_sha256"] = sha256_file(accounts_path)
+        with open(accounts_path, encoding="utf-8") as stream:
+            registry = json.load(stream)
+        if registry.get("schema") != "saphira-accounts/v1":
+            raise MigrateError(f"unknown account registry schema: {accounts_path}")
+        known = {(item["package"], item["version"]): item["declaration"]
+                 for item in registry.get("entries", [])}
+        for filename in carriers:
+            info = census_data[filename]
+            key = (info["name"], info["version"])
+            if key not in known:
+                raise MigrateError(
+                    f"{filename} ships a fragment but has no accounts.json entry"
+                )
+            _, live_sha = rdb.canonical_declaration(
+                declarations[filename].get("users", []),
+                declarations[filename].get("groups", []),
+                declarations[filename].get("dirs", []))
+            _, reg_sha = rdb.canonical_declaration(
+                known[key].get("users", []), known[key].get("groups", []),
+                known[key].get("dirs", []))
+            if live_sha != reg_sha:
+                raise MigrateError(
+                    f"{filename} payload declaration disagrees with accounts.json"
+                )
+    else:
+        manifest["accounts_json_absent"] = True
+
+    # Full collision check over the migrated state (fail closed).
+    tsv = rdb.parse_tsv(tsv_path)
+    if tsv is None:
+        raise MigrateError(f"accounts authority is missing: {tsv_path}")
+    manifest["tsv_sha256"] = sha256_file(Path(tsv_path))
+    tsv_users, tsv_groups = tsv
+    live: list[tuple[str, dict]] = []
+    newest: dict[str, str] = {}
+    for filename, info in census_data.items():
+        name, version = info["name"], info["version"]
+        if name not in newest or rdb.apk_newer(apk, version, newest[name]):
+            newest[name] = version
+    for name, version in sorted(newest.items()):
+        decl = declarations.get(f"{name}-{version}.apk",
+                                {"users": [], "groups": [], "dirs": []})
+        if decl.get("users") or decl.get("groups"):
+            live.append((f"{name}-{version}", decl))
+    try:
+        rdb.check_union(tsv_users, tsv_groups, live)
+    except rdb.RepoDbError as exc:
+        raise MigrateError(f"migrated state fails collision check: {exc}")
+
+    conn = rdb.connect(out_db)
+    try:
+        rdb.init_db(conn, repo, history_complete)
+        published_at = rdb.utcnow()
+        rdb.sync_packages(conn, census_data, declarations, apk, published_at)
+        try:
+            ledger = rdb.derive_ledger(apk, census_data, declarations, notices)
+        except rdb.RepoDbError as exc:
+            raise MigrateError(str(exc))
+        for row in ledger:
+            conn.execute(
+                "INSERT INTO reservations(kind, name, numeric_id, owning_package,"
+                " first_nvr, last_nvr, status, declaration_sha256)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)", row)
+        active = conn.execute(
+            "SELECT COUNT(*) c FROM reservations WHERE status='ACTIVE'").fetchone()["c"]
+        tombs = conn.execute(
+            "SELECT COUNT(*) c FROM reservations WHERE status='TOMBSTONED'").fetchone()["c"]
+        manifest.update({
+            "active_reservations": active, "tombstoned_reservations": tombs,
+            "history_complete": history_complete,
+        })
+        # Owners-map equivalence proof against ownership.json.
+        if ownership_path is not None:
+            rebuilt = rdb.newest_owners(conn)
+            if rebuilt != legacy["owners"]:
+                raise MigrateError("rebuilt owners map disagrees with ownership.json")
+        rdb.set_meta(conn, "last_audit", published_at)
+        rdb.set_meta(conn, "tsv_sha256", manifest["tsv_sha256"])
+        conn.commit()
+    finally:
+        conn.close()
+    # Single-file proof: no sidecars may exist beside the database.
+    sidecars = list(out_db.parent.glob(out_db.name + "-*")) + \
+        list(out_db.parent.glob(out_db.name + ".shm"))
+    if sidecars:
+        raise MigrateError(f"database sidecars present (WAL forbidden): {sidecars}")
+
+
+def cmd_migrate(rdb: object, config: dict, repo: str) -> int:
+    arch = config["SAPHIRA_ARCH"]
+    repo_dir = Path(config["SAPHIRA_REPO_DIR"]) / repo / arch
+    if not repo_dir.is_dir():
+        print(f"saphira-repo-migrate: repository does not exist: {repo_dir}", file=sys.stderr)
+        return 1
+    if (repo_dir / "repository.db").exists():
+        print(f"saphira-repo-migrate: {repo_dir}/repository.db already exists"
+              " (use --reconcile to rebuild)", file=sys.stderr)
+        return 1
+    ownership_path = repo_dir / "ownership.json"
+    if not ownership_path.is_file():
+        print(f"saphira-repo-migrate: ownership.json is missing: {ownership_path}"
+              " (fresh migration requires it)", file=sys.stderr)
+        return 1
+    repos = config["SAPHIRA_REPO_NAMES"].split()
+    history_complete = bool(repos) and repos[0] == repo
+    lock = None
+    try:
+        lock = rdb.acquire_db_lock(repo_dir)
+    except rdb.RepoDbError as exc:
+        print(f"saphira-repo-migrate: {exc}", file=sys.stderr)
+        return 1
+    notices: list[str] = []
+    manifest: dict = {
+        "schema": "saphira-repo-migration/v1",
+        "tool": "migrate",
+        "repository": repo,
+        "history_complete_rationale": ("oldest archive is append-only"
+                                       if history_complete else "current view; deep history needs the append-only archive"),
+    }
+    try:
+        with tempfile.TemporaryDirectory(prefix="saphira-repo-migrate-") as tmp:
+            out_db = Path(tmp) / "repository.db"
+            build_database(rdb, config, repo, out_db, ownership_path, manifest, notices,
+                           history_complete)
+            for notice in notices:
+                print(f"saphira-repo-migrate: notice: {notice}")
+            manifest["notices"] = notices
+            manifest["completed"] = rdb.utcnow()
+            target = repo_dir / "repository.db"
+            staging = repo_dir / f"repository.db.migrating-{os.getpid()}"
+            shutil.copy2(out_db, staging)
+            os.chmod(staging, 0o664)
+            normalize_ownership(staging)
+            os.rename(staging, target)
+            normalize_ownership(target)
+            manifest_path = repo_dir / "migration.json"
+            manifest_tmp = repo_dir / f"migration.json.migrating-{os.getpid()}"
+            manifest_tmp.write_text(json.dumps(manifest, sort_keys=True, indent=1) + "\n",
+                                    encoding="utf-8")
+            os.chmod(manifest_tmp, 0o644)
+            normalize_ownership(manifest_tmp)
+            os.rename(manifest_tmp, manifest_path)
+            normalize_ownership(manifest_path)
+            freeze(ownership_path)
+            accounts_path = repo_dir / "accounts.json"
+            if accounts_path.is_file():
+                freeze(accounts_path)
+    except (MigrateError, rdb.RepoDbError) as exc:
+        print(f"saphira-repo-migrate: {exc}", file=sys.stderr)
+        return 1
+    finally:
+        rdb.release_db_lock(repo_dir)
+        _ = lock
+    print(f"saphira-repo-migrate: {repo} migrated:"
+          f" {manifest['apk_identity_count']} APK identities,"
+          f" {manifest['active_reservations']} active +"
+          f" {manifest['tombstoned_reservations']} tombstoned reservations;"
+          " ownership.json frozen as evidence")
+    return 0
+
+
+def cmd_reconcile(rdb: object, config: dict, repo: str, from_history: bool) -> int:
+    arch = config["SAPHIRA_ARCH"]
+    repo_dir = Path(config["SAPHIRA_REPO_DIR"]) / repo / arch
+    db_path = repo_dir / "repository.db"
+    if not db_path.is_file():
+        print(f"saphira-repo-migrate: no repository.db in {repo_dir}"
+              " (run saphira-repo-migrate to create it)", file=sys.stderr)
+        return 1
+    try:
+        lock = rdb.acquire_db_lock(repo_dir)
+    except rdb.RepoDbError as exc:
+        print(f"saphira-repo-migrate: {exc}", file=sys.stderr)
+        return 1
+    _ = lock
+    try:
+        conn = rdb.connect(db_path)
+    except Exception as exc:
+        print(f"saphira-repo-migrate: cannot open repository.db: {exc}", file=sys.stderr)
+        rdb.release_db_lock(repo_dir)
+        return 1
+    try:
+        try:
+            rdb.check_schema(conn)
+        except rdb.RepoDbError as exc:
+            print(f"saphira-repo-migrate: {exc}", file=sys.stderr)
+            return 1
+        history_complete = rdb.get_meta(conn, "history_complete") == "1"
+        if from_history and not history_complete:
+            print("saphira-repo-migrate: --from-history refused: this repository"
+                  " does not hold complete append-only history (recover deep history"
+                  " from the append-only archive or migration evidence, never inference)",
+                  file=sys.stderr)
+            return 1
+        apk = config["SAPHIRA_APK"]
+        print(f"saphira-repo-migrate: full census of {repo_dir} ...", flush=True)
+        census_data = rdb.census(apk, repo_dir)
+        carriers = rdb.fragment_carriers(census_data)
+        with tempfile.TemporaryDirectory(prefix="saphira-repo-reconcile-") as tmp:
+            declarations = rdb.extract_declarations(apk, repo_dir, carriers, tmp)
+        notices: list[str] = []
+        published_at = rdb.utcnow()
+        rdb.sync_packages(conn, census_data, declarations, apk, published_at)
+        if from_history:
+            conn.execute("DELETE FROM reservations")
+            try:
+                ledger = rdb.derive_ledger(apk, census_data, declarations, notices)
+            except rdb.RepoDbError as exc:
+                raise MigrateError(str(exc))
+            for row in ledger:
+                conn.execute(
+                    "INSERT INTO reservations(kind, name, numeric_id, owning_package,"
+                    " first_nvr, last_nvr, status, declaration_sha256)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?)", row)
+        else:
+            # Current-view reconcile: verify the eternal ledger, advance
+            # legitimate drops to tombstones, never invent history.
+            live: list[tuple[str, dict]] = []
+            newest: dict[str, str] = {}
+            for filename, info in census_data.items():
+                name, version = info["name"], info["version"]
+                if name not in newest or rdb.apk_newer(apk, version, newest[name]):
+                    newest[name] = version
+            for name, version in sorted(newest.items()):
+                decl = declarations.get(f"{name}-{version}.apk",
+                                        {"users": [], "groups": [], "dirs": []})
+                if decl.get("users") or decl.get("groups"):
+                    live.append((f"{name}-{version}", decl))
+            try:
+                rdb.advance_reservations(conn, live, False, notices)
+            except rdb.RepoDbError as exc:
+                conn.rollback()
+                print(f"saphira-repo-migrate: reservation verification failed: {exc}",
+                      file=sys.stderr)
+                return 1
+        for notice in notices:
+            print(f"saphira-repo-migrate: notice: {notice}")
+        rdb.set_meta(conn, "last_audit", published_at)
+        conn.commit()
+    except (MigrateError, rdb.RepoDbError) as exc:
+        print(f"saphira-repo-migrate: {exc}", file=sys.stderr)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return 1
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        rdb.release_db_lock(repo_dir)
+    print(f"saphira-repo-migrate: {repo} reconciled:"
+          f" {len(census_data)} APK identities verified against the ledger")
+    return 0
+
+
+def main() -> int:
+    if os.geteuid() != 0:
+        print("saphira-repo-migrate: must be run as root; use sudo explicitly",
+              file=sys.stderr)
+        return 1
+    args = sys.argv[1:]
+    from_history = False
+    if args and args[0] == "--reconcile":
+        args = args[1:]
+        if args and args[0] == "--from-history":
+            from_history = True
+            args = args[1:]
+        if len(args) != 1 or not REPO_NAME_RE.fullmatch(args[0]):
+            print("usage: saphira-repo-migrate --reconcile [--from-history] <repo>",
+                  file=sys.stderr)
+            return 1
+        mode = "reconcile"
+    elif len(args) == 1 and REPO_NAME_RE.fullmatch(args[0]):
+        mode = "migrate"
+    else:
+        print("usage: saphira-repo-migrate [--reconcile [--from-history]] <repo>",
+              file=sys.stderr)
+        return 1
+    try:
+        rdb = lib()
+        config = load_config()
+    except (MigrateError, Exception) as exc:
+        print(f"saphira-repo-migrate: {exc}", file=sys.stderr)
+        return 1
+    if mode == "migrate":
+        return cmd_migrate(rdb, config, args[0])
+    return cmd_reconcile(rdb, config, args[0], from_history)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

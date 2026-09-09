@@ -1,0 +1,7 @@
+# FRR service identity (canonical, fixed): user and group frr,
+# UID/GID 125. Matches --enable-user/--enable-group and the PID/state
+# directory. UID 125 sits in the preferred 0..199 packaged range -
+# never reuse it for another identity.
+user frr 125 frr /var/run/frr /sbin/nologin
+group frr 125
+dir /var/run/frr 0755 frr frr

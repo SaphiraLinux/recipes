@@ -1,0 +1,24 @@
+#!/sbin/openrc-run
+
+description="DRBD event-driven resource manager (promoter)"
+
+depend()
+{
+	need drbd localmount
+	use net
+	after bootmisc
+}
+
+start()
+{
+	ebegin "Starting drbd-reactor promoter"
+	/usr/sbin/drbd-reactor || { eend 1 "drbd-reactor failed"; return 1; }
+	eend 0
+}
+
+stop()
+{
+	ebegin "Stopping drbd-reactor promoter"
+	/usr/sbin/drbd-reactorctl shutdown || killall -q drbd-reactor
+	eend 0
+}

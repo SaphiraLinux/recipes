@@ -1,0 +1,14 @@
+# messagebus runtime identity (canonical, fixed): user messagebus
+# UID 81, primary group messagebus GID 81. Required by the system bus
+# (dbus-daemon --system drops to messagebus; upstream ships its own
+# sysusers.d declaring messagebus with a DYNAMIC id, which Saphira
+# deliberately replaces with this fixed identity - nothing on a
+# Saphira target invokes systemd-sysusers, so this fragment is the
+# sole live mechanism). UID/GID 81 freeness audit: absent from the
+# base seed (no 81 user or group row), absent from every other
+# fragment, and upstream claims no fixed ID. UID 81 sits in the
+# preferred 0..199 packaged range - never reuse it for another
+# identity. No dir stanza: /run/dbus is ephemeral (tmpfiles.d,
+# already shipped, owns runtime creation).
+user messagebus 81 messagebus /run/dbus /sbin/nologin
+group messagebus 81

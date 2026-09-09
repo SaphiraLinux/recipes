@@ -1,6 +1,10 @@
 pkgname=libxslt
 pkgver=1.1.43
-pkgrel=2
+# r3: -dev carries libxml2-dev (libxslt headers include libxml2
+# headers; without it every consumer configure fails its libxslt
+# probe despite libxslt-dev being installed - proven by the retained
+# /build/nginx.buildpkg log, nginx 1.30.4-r4 configure).
+pkgrel=3
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='XSLT processing library + xsltproc (libvirt build dependency)'
 license='MIT'
@@ -11,6 +15,9 @@ url=https://gitlab.gnome.org/GNOME/libxslt
 libxslt_sha256=e491bb8f11bd43c5da323c66f696b6e7b59d767c446053a7cbd8e805256bd9cb
 
 depends="libxml2"
+# Alpine-style -dev dependency: consumers compiling against our
+# headers need libxml2 headers too (see r3 note above).
+depends_dev="libxml2-dev"
 makedepends="
 	binutils
 	autoconf

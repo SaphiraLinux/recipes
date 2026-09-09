@@ -1,0 +1,10 @@
+# gopher runtime identity (canonical, fixed): user gopher UID 123,
+# primary group gopher GID 123. Required by the service account the
+# daemon drops to (see geomyidae-seed-defaults, which keeps only its
+# content-seeding role once this fragment owns the identity).
+# UID 123 sits in the preferred 0..199 packaged range - never reuse
+# it for another identity. No dir stanza: the home directory is
+# ensured by the user stanza, and content seeding stays with the
+# existing seed helper (untouched).
+user gopher 123 gopher /srv/gopher /sbin/nologin
+group gopher 123

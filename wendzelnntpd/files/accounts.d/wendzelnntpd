@@ -1,0 +1,11 @@
+# news runtime identity (canonical, fixed): user news UID 12,
+# primary group news GID 12. Required by the service setup, which
+# installs state with news:news ownership
+# (wendzelnntpd-setup: install -o news -g news), and by the spool
+# layout (/var/spool/news/wendzelnntpd, news:news per the service
+# files). UID 12 sits in the preferred 0..199 packaged range - never
+# reuse it for another identity. Spool-directory mode 0700 mirrors
+# the initd checkpath.
+user news 12 news /var/spool/news /sbin/nologin
+group news 12
+dir /var/spool/news/wendzelnntpd 0700 news news

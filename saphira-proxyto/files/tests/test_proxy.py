@@ -476,10 +476,57 @@ def test_privdrop_ids():
     assert resp==b"r:drop\n", f"post-drop exchange failed (bind-before-drop broken?): {resp!r}"
     assert f"now running as proxyto:proxyto (uid={want_uid} gid={want_gid})" in err, f"drop verification missing: {err!r}"
 
+# --- child reap: no lingering zombies while idle ---
+def _zombie_children(pid):
+    try:
+        with open(f"/proc/{pid}/task/{pid}/children") as f:
+            kids = f.read().split()
+    except OSError:
+        return []
+    out = []
+    for k in kids:
+        try:
+            with open(f"/proc/{k}/stat") as f:
+                state = f.read().rsplit(')', 1)[1].split()[0]
+                if state == 'Z':
+                    out.append(k)
+        except OSError:
+            pass
+    return out
+
+def test_reap_no_zombie():
+    lp=free_port(); bp=free_port()
+    with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.conf') as f:
+        f.write(f"listen=127.0.0.1:{lp}\nproxy=127.0.0.1:{bp}\n"); conf=f.name
+    def be():
+        s=socket.socket(); s.setsockopt(socket.SOL_SOCKET,socket.SO_REUSEADDR,1)
+        s.bind(('127.0.0.1',bp)); s.listen(5); s.settimeout(8)
+        for _ in range(3):
+            try:
+                c,a=s.accept(); c.settimeout(8); d=c.recv(4096); c.sendall(d); c.close()
+            except: break
+        s.close()
+    t=threading.Thread(target=be); t.start()
+    p=subprocess.Popen([BIN,"-c",conf], stderr=subprocess.PIPE)
+    time.sleep(0.4)
+    for i in range(3):
+        s=socket.socket(); s.connect(('127.0.0.1',lp)); s.sendall(b"PROXY TCP4 1.2.3.4 5.6.7.8 12345 70\r\n"+f"z{i}\n".encode()); s.settimeout(2); s.recv(4096); s.close()
+    # children have exited; the daemon is now idle with no further
+    # connections arriving - reaping must already have happened
+    dead = _zombie_children(p.pid)
+    for _ in range(20):
+        if not dead:
+            break
+        time.sleep(0.1)
+        dead = _zombie_children(p.pid)
+    p.terminate(); p.wait(timeout=2); t.join(timeout=2); os.unlink(conf)
+    assert not dead, f"zombie children linger while idle: {dead}"
+
 check("config knobs accepted", test_config_knobs)
 check("config knobs rejected", test_config_knobs_reject)
 check("v2 small segments accepted", test_v2_small_segments)
 check("privdrop refuse without account", test_privdrop_refuse_no_account)
 check("privdrop ids after drop", test_privdrop_ids)
+check("no zombie children while idle", test_reap_no_zombie)
 
 print("\nAll tests passed")

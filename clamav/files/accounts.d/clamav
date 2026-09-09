@@ -1,0 +1,11 @@
+# clamav runtime identity (canonical, fixed): user clamav UID 120,
+# primary group clamav GID 120. Required by the shipped service units
+# (clamd.service and freshclam.service both run User=clamav). This
+# fragment ships in the base clamav output because both clamav-daemon
+# and clamav-freshclam depend on base clamav - one package owns the
+# identity. UID 120 sits in the preferred 0..199 packaged range -
+# never reuse it for another identity. Database-directory mode 0755
+# mirrors recipe staging.
+user clamav 120 clamav /var/lib/clamav /sbin/nologin
+group clamav 120
+dir /var/lib/clamav 0755 clamav clamav

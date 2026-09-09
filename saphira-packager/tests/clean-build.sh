@@ -27,10 +27,8 @@ run_buildpkg()
 	SAPHIRA_INCOMING_DIR=$incoming \
 	SAPHIRA_BINDIR=$source_root/saphira-packager/files \
 	SAPHIRA_PACKAGE_TMP=$test_root/package-tmp \
-	SAPHIRA_BOOTSTRAP_ROOT=/ \
-	SAPHIRA_BOOTSTRAP_MANIFEST=$source_root/saphira-packager/files/bootstrap-v0.1.paths \
 	SAPHIRA_HOST_RESOLV_CONF=/etc/resolv.conf SAPHIRA_HOST_HOSTS_FILE=/etc/hosts \
-	SAPHIRA_BUILD_SEED='saphira-base-abi apk-tools bash libcap coreutils findutils pcre2 grep python3 ca-certificates curl tar' \
+	SAPHIRA_BUILD_SEED='saphira-base-abi apk-tools bash libcap coreutils findutils pcre2 grep python3 ca-certificates curl tar musl musl-dev saphira-kernel-headers libxcrypt flex' \
 	SAPHIRA_SOURCE_CACHE=${SAPHIRA_TEST_SOURCE_CACHE:-$test_root/source-cache} \
 		"$buildpkg" "$@"
 }
@@ -56,6 +54,26 @@ recipe_header()
 		'depends=""' \
 		"makedepends='$depends'" \
 		"subpackages='$subpackages'" > "$recipes/$package/recipe.sh"
+}
+
+assert_holder_released()
+{
+	# A finished attempt (PASS or FAIL) must leave no overlay holder
+	# behind: no recorded-holder process and no overlay mount still
+	# referencing the workspace upper layer. The workspace itself stays.
+	workspace=$1
+	n=0
+	while [ "$n" -lt 100 ] && [ -n "$(grep -rls "upperdir=$workspace/upper" /proc/[0-9]*/mountinfo 2>/dev/null)" ]; do
+		n=$((n + 1))
+		sleep 0.1
+	done
+	test -z "$(grep -rls "upperdir=$workspace/upper" /proc/[0-9]*/mountinfo 2>/dev/null)"
+	if [ -f "$workspace/overlay-holder.json" ]; then
+		pid=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["pid"])' "$workspace/overlay-holder.json")
+		if [ -d "/proc/$pid" ]; then
+			! tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | grep -q 'saphira-overlay-holder'
+		fi
+	fi
 }
 
 recipe_header make '' 'make-doc make-libs' 9
@@ -119,7 +137,7 @@ test ! -e "$build_root/fakeroot.buildpkg"
 # with a visible state manifest and no leftover staging/retired directories.
 test -d "$build_root/rootfs_overlay/base"
 test -f "$build_root/rootfs_overlay/state/base.json"
-test -f "$build_root/rootfs_overlay/state/bootstrap-seed.json"
+test -f "$build_root/rootfs_overlay/state/package-seed.json"
 test "$(readlink "$build_root/rootfs_overlay/base/bin/sh")" = bash
 test -e "$build_root/rootfs_overlay/base/usr/bin/apk"
 test -s "$build_root/rootfs_overlay/base/etc/ssl/certs/ca-certificates.crt"
@@ -136,7 +154,7 @@ apk verify --allow-untrusted "$ready/make-9-r1.apk"
 apk verify --allow-untrusted "$ready/make-doc-9-r1.apk"
 apk verify --allow-untrusted "$ready/make-libs-9-r1.apk"
 apk verify --allow-untrusted "$ready/fakeroot-9-r1.apk"
-python3 - "$ready/artifact-manifest.json" "$ready/bootstrap-seed.json" <<'PY'
+python3 - "$ready/artifact-manifest.json" "$ready/package-seed.json" <<'PY'
 import json
 import sys
 with open(sys.argv[1], encoding="utf-8") as stream:
@@ -145,13 +163,13 @@ assert manifest["schema"] == "saphira-build-artifacts/v1"
 assert manifest["target"] == "fakeroot"
 assert [item["producer"] for item in manifest["constructors"]] == ["make", "fakeroot"]
 assert all(item["constructor"] == "makepkg" for item in manifest["constructors"])
-seed = manifest["bootstrap_seed"]
-assert seed["schema"] == "saphira-bootstrap-seed/v1"
-paths = {item["path"] for item in seed["entries"]}
-assert "/lib/ld-musl-x86_64.so.1" in paths
-assert "/usr/include/stdio.h" in paths
-assert "/usr/include/FlexLexer.h" not in paths
-assert not any(path.startswith(("/lib64", "/usr/lib64")) for path in paths)
+seed = manifest["package_seed"]
+assert seed["schema"] == "saphira-package-seed/v1"
+resolved = {item["name"]: item for item in seed["resolved"]}
+for name in seed["seed"]:
+    assert name in resolved, name
+    assert resolved[name]["version"], name
+assert set(seed["seed"]) == {"saphira-base-abi", "apk-tools", "bash", "libcap", "coreutils", "findutils", "pcre2", "grep", "python3", "ca-certificates", "curl", "tar", "musl", "musl-dev", "saphira-kernel-headers", "libxcrypt", "flex"}
 with open(sys.argv[2], encoding="utf-8") as stream:
     assert json.load(stream) == seed
 PY
@@ -170,8 +188,10 @@ grep 'saphira-buildpkg-failed/v1' "$failed/FAILED" >/dev/null
 test -f "$failed/plan.json"
 
 # Failed workspaces retain the overlay upper, workdir, empty merged-root
-# mountpoint, holder record and recovery instructions; the merged root is
-# still mounted in the holder's namespace for diagnosis.
+# mountpoint, holder record and recovery instructions - but must NOT retain
+# a live overlay holder: the holder process and its private overlay mount
+# are released when the attempt finishes (a retained FAILED marker used to
+# pin a sleeping holder and mount indefinitely - the overlay-holder leak).
 test -d "$failed/upper"
 test -d "$failed/work"
 test -d "$failed/root"
@@ -179,7 +199,8 @@ test -z "$(ls -A "$failed/root")"
 test -f "$failed/overlay-holder.json"
 test -f "$failed/OVERLAY-RECOVER.txt"
 holder_pid=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["pid"])' "$failed/overlay-holder.json")
-grep -q ' - overlay ' "/proc/$holder_pid/mountinfo"
+grep 'OVERLAY unmounted' "$failed/logs/buildpkg.log" >/dev/null
+assert_holder_released "$failed"
 
 printf '%s\n' old > "$failed/retry-sentinel"
 if run_buildpkg integration-failure > "$test_root/failure-2.out" 2> "$test_root/failure-2.err"; then
@@ -189,12 +210,32 @@ fi
 test -f "$failed/FAILED"
 test ! -e "$failed/retry-sentinel"
 
-# A retry replaces the old holder (exactly one live holder per workspace)
-# and still reuses the same immutable base root (no second physical root).
+# A retry spawns a fresh holder (exactly one holder per workspace attempt,
+# recorded pid differs) and still reuses the same immutable base root (no
+# second physical root); the fresh holder is likewise released on failure.
 holder_pid_2=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["pid"])' "$failed/overlay-holder.json")
 [ "$holder_pid_2" != "$holder_pid" ]
-grep -q ' - overlay ' "/proc/$holder_pid_2/mountinfo"
+assert_holder_released "$failed"
 [ "$(stat -c %i "$build_root/rootfs_overlay/base")" = "$base_inode" ]
+
+# A resolve-time failure (unknown producer: resolvepkg refuses before any
+# worker runs) retains the workspace evidence yet releases the holder too -
+# the release lives in fail(), not in any build-stage cleanup.
+if run_buildpkg definitely-not-a-recipe > "$test_root/early-fail.out" 2> "$test_root/early-fail.err"; then
+	printf '%s\n' 'resolve-time failure unexpectedly succeeded' >&2
+	exit 1
+fi
+early=$build_root/definitely-not-a-recipe.buildpkg
+test -f "$early/FAILED"
+grep 'saphira-buildpkg-failed/v1' "$early/FAILED" >/dev/null
+test -f "$early/logs/buildpkg.log"
+test -f "$early/overlay-holder.json"
+test -f "$early/OVERLAY-RECOVER.txt"
+assert_holder_released "$early"
+SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
+SAPHIRA_BUILD_ROOT=$build_root \
+	"$source_root/saphira-packager/files/cleanpkg" definitely-not-a-recipe >/dev/null
+test ! -e "$early"
 
 # Unmarked workspaces are never removed as a retry convenience.
 mkdir "$build_root/collision.buildpkg"

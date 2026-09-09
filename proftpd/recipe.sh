@@ -1,6 +1,6 @@
 pkgname=proftpd
 pkgver=1.3.9
-pkgrel=3
+pkgrel=4
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='High-performance, scalable FTP server (with TLS via mod_tls)'
 license='GPL-2.0-or-later'
@@ -51,4 +51,10 @@ recipe_install() {
 		"$PKGDEST/etc/init.d/proftpd"
 	install -Dm0644 "$RECIPE_DIR/files/proftpd.service" \
 		"$PKGDEST/usr/lib/systemd/system/proftpd.service"
+	# Runtime identity declaration: ftp:18 required by the shipped
+	# server config. makepkg generates the install scripts from this
+	# fragment; the package creates its identity at install time.
+	# r4: fragment added (payload change, revision bumps).
+	install -D -m 0644 "$RECIPE_DIR/files/accounts.d/proftpd" \
+		"$PKGDEST/usr/share/saphira/accounts.d/proftpd"
 }

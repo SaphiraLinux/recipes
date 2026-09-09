@@ -1,8 +1,8 @@
 pkgname=libvirt
 pkgver=12.6.0
-pkgrel=5
+pkgrel=6
 pkgarch=${SAPHIRA_ARCH:-x86_64}
-pkgdesc='Libvirt control plane: libvirtd, virsh, QEMU/network/storage drivers (headless, no GUI)'
+pkgdesc='Libvirt control plane: modular daemons (virtqemud/storaged/networkd/nodedevd/secretd/logd/lockd, virtproxyd TLS entry), virsh, QEMU/network/storage drivers (headless, no GUI)'
 license='LGPL-2.1-or-later'
 origin=libvirt
 repo=saphira
@@ -41,8 +41,18 @@ makedepends="
 	zlib-dev
 "
 
-# KISS server build: monolithic libvirtd, QEMU/network/storage drivers,
-# no polkit/dbus/audit/selinux, no GUI, nwfilter+libpcap deferred.
+# Modular daemons from day one: no monolithic libvirtd dependency over
+# the architecture. virtqemud/virtstoraged/virtnetworkd/virtnodedevd/
+# virtsecretd do the work, virtlogd/virtlockd assist, virtproxyd is the
+# remote TLS entry point (certs are deployment config, not packaging).
+# Upstream ships the OpenRC init scripts (-Dinit_script=openrc installs
+# one per enabled daemon, with VIRT*_OPTS conf.d hooks and reload), so
+# no hand init files. storage_dir/storage_fs stay at defaults (enabled)
+# so Gluster FUSE mounts slot in as plain dir/fs pools; storage_gluster
+# (libgfapi) stays disabled - that QEMU backend is dead upstream and
+# nothing here may depend on it. remote_default_mode=direct is the
+# modular-correct client routing (qemu:///system -> virtqemud socket).
+# No polkit/dbus/audit/selinux, no GUI, nwfilter+libpcap deferred.
 recipe_build()
 {
 	LVBALL="$RECIPE_DIR/files/libvirt-12.6.0.tar.xz"
@@ -52,7 +62,7 @@ recipe_build()
 	meson setup build "$SRC" --prefix=/usr \
 		-Dpackager=Saphira \
 		-Ddocs=disabled -Dtests=disabled \
-		-Dlibvirtd=enabled -Dremote_default_mode=legacy \
+		-Dlibvirtd=disabled -Dremote_default_mode=direct \
 		-Ddriver_qemu=enabled -Ddriver_network=enabled \
 		-Ddriver_secrets=enabled \
 		-Ddriver_lxc=disabled -Ddriver_libxl=disabled \
@@ -69,7 +79,7 @@ recipe_build()
 		-Dstorage_iscsi_direct=disabled -Dstorage_rbd=disabled \
 		-Dstorage_vstorage=disabled \
 		-Dnls=disabled -Dnss=disabled \
-		-Dinit_script=systemd \
+		-Dinit_script=openrc \
 		-Dudev=enabled -Dcurl=enabled -Dreadline=enabled -Dlibnl=enabled \
 		-Dattr=enabled -Dblkid=disabled
 	ninja -C build
@@ -78,8 +88,6 @@ recipe_build()
 recipe_install()
 {
 	DESTDIR="$PKGDEST" ninja -C build install
-	install -d "$PKGDEST/etc/init.d"
-	install -m 755 "$RECIPE_DIR/files/libvirtd.initd" "$PKGDEST/etc/init.d/libvirtd"
 	# Runtime firewall backend: nftables (Saphira carries nftables; no
 	# iptables). libvirt falls back to iptables backend when unset.
 	install -d "$PKGDEST/etc/libvirt"
@@ -89,10 +97,4 @@ recipe_install()
 	[ -f "$PKGDEST/etc/libvirt/network.conf" ] || \
 		printf '# Saphira: nftables firewall backend (no iptables)\nfirewall_backend = "nftables"\n' \
 			> "$PKGDEST/etc/libvirt/network.conf"
-	# Saphira is non-usrmerged: tc lives in /sbin. systemd's default
-	# service PATH omits /sbin, so give the daemon the full Saphira PATH
-	# (tracked for a proper systemd split-bin fix separately).
-	install -d "$PKGDEST/usr/lib/systemd/system/libvirtd.service.d"
-	printf '[Service]\nEnvironment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n' \
-		> "$PKGDEST/usr/lib/systemd/system/libvirtd.service.d/10-saphira-path.conf"
 }

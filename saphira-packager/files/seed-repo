@@ -153,6 +153,25 @@ def load_version_lines(config: dict[str, str]) -> dict[str, list[str]]:
     return lines
 
 
+def load_repo_db() -> object | None:
+    """Shared repository metadata library. None when seeding with an older
+    packager that predates it: the seed then completes without a database
+    (loud warning) and explicit migration stays required."""
+    here = Path(__file__).resolve().parent
+    for candidate in (here / "repo_db.py", Path("/usr/lib/saphira-packager/repo_db.py")):
+        if candidate.is_file():
+            import importlib.machinery
+            import importlib.util
+
+            loader = importlib.machinery.SourceFileLoader("repo_db", str(candidate))
+            spec = importlib.util.spec_from_file_location("repo_db", str(candidate), loader=loader)
+            assert spec is not None and spec.loader is not None
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return module
+    return None
+
+
 def version_compare(apk: str, left: str, right: str) -> int:
     out = run([apk, "version", "-t", left, right]).stdout.decode().strip()
     if out == ">":
@@ -286,6 +305,47 @@ def main() -> int:
                 normalize_ownership(target_dir / "Packages.adb")
                 normalize_ownership(target_dir / "APKINDEX.tar.gz")
 
+            # New generations are born with a database: the same census
+            # every sanctioned writer uses. The seed carries latest-only
+            # state, so history is explicitly incomplete — deep
+            # reservation history lives in the append-only source
+            # archive, never inferred here.
+            has_database = False
+            rdb = load_repo_db()
+            if rdb is None:
+                print("seed-repo: warning: repo_db.py not found; seeding without"
+                      " repository.db (run saphira-repo-migrate before publishing)",
+                      file=sys.stderr)
+            else:
+                db_path = target_dir / "repository.db"
+                census_data = rdb.census(apk, target_dir)
+                carriers = rdb.fragment_carriers(census_data)
+                with tempfile.TemporaryDirectory(prefix="seed-repo-extract-") as extract_tmp:
+                    declarations = rdb.extract_declarations(
+                        apk, str(target_dir), carriers, extract_tmp)
+                conn = rdb.connect(str(db_path))
+                try:
+                    rdb.init_db(conn, new_name, False)
+                    published_at = rdb.utcnow()
+                    rdb.sync_packages(conn, census_data, declarations, apk, published_at)
+                    notices: list[str] = []
+                    for row in rdb.derive_ledger(apk, census_data, declarations, notices):
+                        conn.execute(
+                            "INSERT INTO reservations(kind, name, numeric_id, owning_package,"
+                            " first_nvr, last_nvr, status, declaration_sha256)"
+                            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)", row)
+                    rdb.set_meta(conn, "seeded_from", source_name)
+                    rdb.set_meta(conn, "last_audit", published_at)
+                    conn.commit()
+                finally:
+                    conn.close()
+                os.chmod(db_path, 0o664)
+                normalize_ownership(db_path)
+                for notice in notices:
+                    print(f"seed-repo: notice: {notice}")
+                has_database = True
+                print(f"seed-repo: repository.db created ({len(census_data)} APK identities)")
+
             receipt = {
                 "schema": "saphira-repo-genesis/v1",
                 "source": source_name,
@@ -294,6 +354,8 @@ def main() -> int:
                 "package_count": len(selected_pairs),
                 "excluded": excluded,
                 "version_lines": applied_lines,
+                "repository_db": has_database,
+                "history_complete": False,
                 "created": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             }
             (target_dir / "genesis.json").write_text(

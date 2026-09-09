@@ -1,0 +1,9 @@
+# php-fpm runtime identity (canonical, fixed): user php-fpm UID 103,
+# primary group php-fpm GID 103. Required by the shipped pool config
+# (www.conf: user/group php-fpm; sockets owned php-fpm:nginx).
+# UID 103 sits in the preferred 0..199 packaged range - never reuse it
+# for another identity. This fragment ships in the php85 main output
+# (the php-fpm daemon lives there); the filename must match the output.
+user php-fpm 103 php-fpm /var/lib/php-fpm /sbin/nologin
+group php-fpm 103
+dir /var/lib/php-fpm 0755 php-fpm php-fpm

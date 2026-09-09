@@ -1,0 +1,9 @@
+# mysql runtime identity (canonical, fixed): user mysql UID 106,
+# primary group mysql GID 106. Required by the shipped service units
+# (mariadb.service User=mysql, mariadb.initd command_user mysql:mysql,
+# mariadb-install-db --user=mysql) and the data directory. UID 106
+# sits in the preferred 0..199 packaged range - never reuse it for
+# another identity. Data-directory mode 0750 mirrors recipe staging.
+user mysql 106 mysql /var/lib/mysql /sbin/nologin
+group mysql 106
+dir /var/lib/mysql 0750 mysql mysql

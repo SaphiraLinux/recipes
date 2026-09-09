@@ -1,0 +1,49 @@
+.TH APKSYNC 8 "September 2026" "Saphira Linux" "System Administration"
+.SH NAME
+apksync \- repository synchronisation to publication mirrors
+.SH SYNOPSIS
+.B apksync
+.SH DESCRIPTION
+.B apksync
+synchronises the local generation repositories outward to the
+publication target with rsync (archive, compress, delayed updates).
+In-flight
+.I *.publishing-*
+temporaries and the local
+.I ownership.json
+migration evidence are excluded and never leave the host.
+.PP
+Configuration comes from
+.IR /etc/saphira/apksync.conf :
+.I SAPHIRA_REPO_DIR
+(the local source) and
+.I SAPHIRA_SYNC_TARGET
+(the mirror destination) are both required. Takes no arguments and
+publishes nothing by itself; run it after
+.BR sign-apk-repo (8),
+then
+.I apk update
+on consumers.
+.SH OPTIONS
+This command takes no options.
+.SH FILES
+.TP
+.I /etc/saphira/apksync.conf
+Source and target configuration (both required).
+.SH EXIT STATUS
+.TP
+.B 0
+Synchronised.
+.TP
+.B 1
+Missing configuration or rsync failure.
+.SH EXAMPLES
+.PP
+.RS
+sudo sign-apk-repo && sudo apksync && apk update
+.RE
+.SH SEE ALSO
+.BR saphira (7),
+.BR sign-apk-repo (8),
+.BR installpkg (8),
+.BR saphira-build (8)

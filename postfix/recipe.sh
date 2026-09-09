@@ -2,7 +2,7 @@
 
 pkgname=postfix
 pkgver=3.11.6
-pkgrel=3
+pkgrel=4
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="Mail transfer agent (SMTP) with sqlite/mysql/lmdb map support"
 license="IPL-1.0 EPL-2.0 OR MPL-2.0"
@@ -70,4 +70,11 @@ recipe_install()
 		"$PKGDEST/etc/init.d/postfix"
 	install -m 0644 "$RECIPE_DIR/files/postfix.service" \
 		"$PKGDEST/usr/lib/systemd/system/postfix.service"
+	# Runtime identity declaration: postfix:112 + postdrop:113 required
+	# by the MTA master. makepkg generates the install scripts from
+	# this fragment; the package creates its identities at install
+	# time.
+	# r4: fragment added (payload change, revision bumps).
+	install -D -m 0644 "$RECIPE_DIR/files/accounts.d/postfix" \
+		"$PKGDEST/usr/share/saphira/accounts.d/postfix"
 }

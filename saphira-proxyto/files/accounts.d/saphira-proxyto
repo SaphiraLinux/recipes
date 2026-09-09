@@ -1,0 +1,9 @@
+# proxyto runtime identity (canonical, fixed): user proxyto
+# UID 19, primary group proxyto GID 19. Required by the compiled
+# service defaults (PROXYTO_USER/PROXYTO_GROUP), which fail closed on
+# a missing account. UID 19 sits in the preferred 0..199 packaged
+# range - never reuse it for another identity. Home /var/empty is
+# shared infrastructure (left untouched by design); no dir stanza
+# needed.
+user proxyto 19 proxyto /var/empty /sbin/nologin
+group proxyto 19

@@ -1,0 +1,17 @@
+--- a/src/manconv.c
++++ b/src/manconv.c
+@@ -308,6 +308,14 @@
+ 	debug ("trying encoding %s -> %s\n", try_from_code, try_to_code);
+ 
+ 	cd_utf8 = iconv_open (utf8_target, try_from_code);
++	if (cd_utf8 == (iconv_t) -1 && last && errno == EINVAL) {
++		/* musl libc rejects //IGNORE suffixes with EINVAL: it has
++		 * no ignore-errors conversion concept, so plain UTF-8 is
++		 * the equivalent request. Genuine conversion errors still
++		 * surface below through the normal error path.
++		 */
++		cd_utf8 = iconv_open ("UTF-8", try_from_code);
++	}
+ 	if (cd_utf8 == (iconv_t) -1) {
+ 		error (0, errno, "iconv_open (\"%s\", \"%s\")", utf8_target,
+ 		       try_from_code);

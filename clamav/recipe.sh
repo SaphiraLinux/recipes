@@ -2,7 +2,7 @@
 
 pkgname=clamav
 pkgver=1.5.3
-pkgrel=2
+pkgrel=3
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="ClamAV antivirus engine: libraries and scanner utilities"
 license="GPL-2.0-or-later"
@@ -86,4 +86,12 @@ recipe_install()
 		"$PKGDEST/etc/clamav/freshclam.conf.sample"
 	rm -rf "$PKGDEST/usr/lib/systemd"
 	install -d -m 0755 "$PKGDEST/var/lib/clamav"
+	# Runtime identity declaration: clamav:120 required by the
+	# clamav-daemon and clamav-freshclam service units (both depend on
+	# this base output, so it owns the identity). makepkg generates
+	# the install scripts from this fragment; the package creates its
+	# identity at install time.
+	# r3: fragment added (payload change, revision bumps).
+	install -D -m 0644 "$RECIPE_DIR/files/accounts.d/clamav" \
+		"$PKGDEST/usr/share/saphira/accounts.d/clamav"
 }

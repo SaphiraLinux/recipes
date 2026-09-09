@@ -1,0 +1,54 @@
+.TH RESOLVEPKG 1 "September 2026" "Saphira Linux" "User Commands"
+.SH NAME
+resolvepkg \- dependency and package resolution planner
+.SH SYNOPSIS
+.B resolvepkg
+.I PACKAGE
+.SH DESCRIPTION
+.B resolvepkg
+prints the
+.I saphira-build-plan/v1
+JSON document for building
+.IR PACKAGE :
+which native producers must build (with their full dependency
+closure) and which artifacts satisfy from the trusted repositories.
+Resolution is repository-first: a satisfying trusted APK is reused
+and never rebuilt merely because a newer recipe exists; an explicit
+top-level request always plans the current native recipe.
+.PP
+Repository immutability is enforced at plan time: an exact NVR
+already published in any generation repository is never scheduled
+for rebuild (the repair is
+.BR promote-repo ,
+never a rebuild), a recipe that would resolve from a disabled recipe
+fails closed, and a known-working reference recipe without a native
+producer is a porting error, not a silent skip.
+.SH OPTIONS
+This command takes no options beyond the package name.
+.SH FILES
+.TP
+.I /recipes
+Native recipe tree (producers of last resort).
+.TP
+.I /reference-package-recipes/
+Read-only known-working catalogue named in porting errors.
+.SH EXIT STATUS
+.TP
+.B 0
+Plan printed.
+.TP
+.B 1
+Unresolvable output, disabled producer, immutability violation, or
+invalid package name.
+.SH EXAMPLES
+.PP
+.RS
+resolvepkg nginx | python3 -m json.tool | head -30
+.RE
+.SH SEE ALSO
+.BR recipe (5),
+.BR saphira (7),
+.BR buildpkg (1),
+.BR checkpkg (1),
+.BR bumppkg (1),
+.BR sign-apk-repo (8)
