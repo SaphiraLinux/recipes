@@ -1,3 +1,23 @@
+Saphira Linux — Repository Licensing Notice
+
+This repository contains software under multiple licences.
+
+Unless a file or directory contains its own licence notice or LICENSE file,
+the contents of this repository are licensed under the MIT License below.
+
+Where a package, directory, or file contains its own licence notice or
+LICENSE file, that licence applies to the corresponding material and takes
+precedence over this repository-level default for that material.
+
+In particular, some Saphira-specific components are licensed under the
+Business Source License 1.1 and are not licensed under the MIT License.
+
+Always consult the licence information within the relevant package or
+directory before redistributing, incorporating, or commercially using its
+contents.
+
+-------------------------------------------------------------------------------
+
 MIT License
 
 Copyright (c) 2026 SaphiraLinux
