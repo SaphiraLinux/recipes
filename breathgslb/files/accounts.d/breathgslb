@@ -1,0 +1,13 @@
+# breathgslb runtime identity (canonical, fixed): user breathgslb
+# UID 126, primary group breathgslb GID 126. Required by the shipped
+# service unit (breathgslb.service User=breathgslb) and the initd
+# command_user. The daemon binds privileged port 53 via
+# CAP_NET_BIND_SERVICE (file caps for OpenRC, ambient caps for
+# systemd), never as root. UID 126 sits in the preferred 0..199
+# packaged range - never reuse it for another identity.
+# State dirs below are daemon-written; DNSSEC keys under
+# /etc/breathgslb stay root-owned (operator-provisioned readable).
+user breathgslb 126 breathgslb /var/lib/breathgslb /sbin/nologin
+group breathgslb 126
+dir /var/lib/breathgslb 0750 breathgslb breathgslb
+dir /var/log/breathgslb 0750 breathgslb breathgslb

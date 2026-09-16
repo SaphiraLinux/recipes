@@ -1,0 +1,34 @@
+# recipe-coverage map: every non-same-name reference outcome.
+#
+# /reference-package-recipes is the authoritative migration input,
+# /recipes the authoritative native output. Same-name native recipes
+# need no entry. Every other reference recipe needs exactly one entry:
+#
+#   <ref> rename <target>      # reason (one ref name, new native name)
+#   <ref> consolidate <target> # reason (packaging split folded into one)
+#   <ref> exempt               # reason (reviewed deliberate absence)
+#
+# Enforced by saphira-packager/tests/recipe-coverage.sh: unknown kinds
+# fail, duplicate ref entries fail, entries for same-name pairs fail,
+# missing targets fail, disabled targets fail, unlisted refs fail.
+#
+# Verified consolidations (evidence in the native recipe):
+grub-bios consolidate grub # packaging split; monolith installs BIOS+EFI (replaces=grub-common grub-bios grub-efi)
+grub-common consolidate grub # packaging split; see grub-bios
+grub-efi consolidate grub # packaging split; see grub-bios
+grub-doc consolidate grub # shipped as the grub-doc subpackage (subpackages="$pkgname-doc")
+qemu-img consolidate qemu # one upstream tree (qemu-9.1.2 tools-only split); monolith full make install ships img+system+tools, no splits
+qemu-system-x86_64 consolidate qemu # same upstream tree, x86_64-softmmu in the monolith build
+qemu-tools consolidate qemu # same upstream tree, tools ship from the monolith build
+python-certifi rename certifi # de-prefixed (replaces="python-certifi")
+python-idna rename idna # de-prefixed (replaces="python-idna")
+python-packaging rename packaging # de-prefixed (replaces="python-packaging")
+python-pyparsing rename pyparsing # de-prefixed (replaces="python-pyparsing")
+node22lts rename nodejs22 # side-by-side versioned runtime (binaries suffixed node22, headers in /usr/include/node22)
+#
+# Reviewed exemptions:
+gcc-no-gcc-branch-cost exempt # deliberate obsolete per RECIPE_RULES.md toolchain guardrails; branch-cost lives in /recipes/gcc, never rebuild
+#
+# Notes (not entries; the test only reads entries):
+# - freeradius-utils/ has no recipe.sh in reference (empty dir): nothing to migrate.
+# - bind, age, saphira-mail have no native successor yet: gaps, not exemptions. They fail until ported.

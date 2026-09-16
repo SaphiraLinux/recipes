@@ -18,7 +18,11 @@ migrate_tool=$2
 repo_state=$3
 makepkg=$4
 source_root=$(CDPATH= cd -- "$(dirname -- "$sign_repo")/../.." && pwd)
-test_root=$(mktemp -d /tmp/saphira-repo-state-test.XXXXXX)
+test_tmp_base=${SAPHIRA_TMPDIR:-/build/test-tmp}
+mkdir -p "$test_tmp_base"
+test_root=$(mktemp -d "$test_tmp_base/saphira-repo-state-test.XXXXXX")
+export SAPHIRA_TMPDIR=$test_root/tool-tmp
+mkdir -p "$SAPHIRA_TMPDIR"
 trap 'find "$test_root" -depth -delete' EXIT HUP INT TERM
 repo=$test_root/repository/hatchling/x86_64
 incoming=$test_root/incoming/x86_64
@@ -224,8 +228,11 @@ grep 'staged gate:' "$test_root/svcC.out" >/dev/null
 grep 'repository.db transaction committed' "$test_root/svcC.out" >/dev/null
 test -d "$incoming/svcC-published"
 
-# A UID collision with the ACTIVE reservation refuses loudly (the
-# union sees the live declaration first).
+# A UID collision with the ACTIVE reservation refuses loudly. The union
+# no longer sees r0 declarations as active claims (r0 inadmissibility:
+# a published r0 is history, never a live declaration), so the refusal
+# now comes from the eternal ledger, which binds everything including
+# r0-owned ACTIVE rows - same closed door, ledger diagnostic.
 mkdir -p "$stage/evilD/pkg/usr/bin" "$stage/evilD/pkg/usr/share/saphira/accounts.d"
 printf '%s\n' evilD > "$stage/evilD/pkg/usr/bin/evilD"
 printf '%s\n' 'user eviluser 660 evilgroup /var/lib/evilD /sbin/nologin' 'group evilgroup 661' > "$stage/evilD/pkg/usr/share/saphira/accounts.d/evilD"
@@ -236,8 +243,9 @@ if run_signer evilD > "$test_root/evilD.out" 2> "$test_root/evilD.err"; then
 	printf '%s\n' 'colliding Unix identity unexpectedly published' >&2
 	exit 1
 fi
-grep 'account identity collision' "$test_root/evilD.err" >/dev/null
-grep 'UID 660' "$test_root/evilD.err" >/dev/null
+grep 'reservation refusal' "$test_root/evilD.err" >/dev/null
+grep 'wants ID 660' "$test_root/evilD.err" >/dev/null
+grep 'held by ACTIVE reservation svcA' "$test_root/evilD.err" >/dev/null
 test ! -f "$repo/evilD-1-r0.apk"
 rm -rf "$incoming/evilD-ready"
 

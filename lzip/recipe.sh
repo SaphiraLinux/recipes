@@ -9,10 +9,12 @@ license="GPL-2.0-or-later"
 origin=lzip
 repo=main
 url=https://www.nongnu.org/lzip/
-# download.savannah.gnu.org challenges this network; kernel.org mirror
-# verified byte-equivalent.
+# download.savannah.gnu.org challenges this network; the savannah canonical
+# and download-mirror endpoints were verified byte-identical 2026-09-10.
+# Upstream re-gzipped lzip-1.25 (same tree, new bytes): pin follows what
+# both endpoints serve.
 source=https://download.savannah.gnu.org/releases/lzip/lzip-1.25.tar.gz
-sha256=5db7a6ea9a3d4878b7f6ec0d2dca330b9a09a26b1336cec59586205253e7504c
+sha256=09418a6d8fb83f5113f5bd856e09703df5d37bae0308c668d0f346e3d3f0a56f
 
 depends=""
 

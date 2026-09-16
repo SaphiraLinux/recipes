@@ -11,7 +11,7 @@ source=https://github.com/proftpd/proftpd/archive/refs/tags/v${pkgver}.tar.gz
 sha256=4a5f13b666226813b4da0ade34535d325e204ab16cf8008c7353b1b5a972f74b
 
 depends="openssl libcap"
-makedepends="gcc make libcap-dev openssl-dev pkgconf saphira-kernel-headers=7.1.5"
+makedepends="gcc make libcap-dev openssl-dev pkgconf saphira-kernel-headers"
 subpackages="$pkgname-doc"
 
 recipe_build() {

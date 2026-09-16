@@ -11,7 +11,7 @@ source=https://ftp.gnu.org/gnu/parted/parted-${pkgver}.tar.xz
 sha256=008de57561a4f3c25a0648e66ed11e7b30be493889b64334a6d70f2c1951ef7b
 
 depends="util-linux"
-makedepends="gcc make pkgconf util-linux-dev saphira-kernel-headers=7.1.5"
+makedepends="gcc make pkgconf util-linux-dev saphira-kernel-headers"
 subpackages="$pkgname-dev $pkgname-doc"
 
 recipe_build() {

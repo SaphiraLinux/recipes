@@ -25,7 +25,11 @@ assert_contains() { # desc, haystack_file_or_- , needle
     fi
 }
 
-TMP=$(mktemp -d /tmp/saphira-build-test.XXXXXX)
+test_tmp_base=${SAPHIRA_TMPDIR:-/build/test-tmp}
+mkdir -p "$test_tmp_base"
+TMP=$(mktemp -d "$test_tmp_base/saphira-build-test.XXXXXX")
+export SAPHIRA_TMPDIR=$TMP/tool-tmp
+mkdir -p "$SAPHIRA_TMPDIR"
 trap 'rm -rf "$TMP"' EXIT
 WORLD_BEFORE=$(sha256sum /etc/apk/world 2>/dev/null | cut -d' ' -f1 || echo none)
 

@@ -1,0 +1,161 @@
+#!/bin/sh
+# fetch-vendor-sources: vendor every fetchable upstream archive into files/.
+#
+# For every recipe under $SAPHIRA_RECIPE_ROOT (default /recipes), extract
+# each top-level (source=|vendor=, sha256=) pair (single-source, multi-
+# version case branches, multi-source), download the URL, verify sha256,
+# and store it as <pkg>/files/<basename> plus a <basename>.sha256 sidecar
+# ("<sha>  <basename>", sha256sum -c compatible).
+#
+# A present archive that verifies is never re-downloaded (a missing sidecar
+# is recreated). Nothing is ever staged in /tmp: downloads land as
+# files/.<basename>.download and are renamed into place (atomic, same
+# filesystem). Read-only audit mode: fetch-vendor-sources --check lists
+# what is missing without fetching.
+#
+# Exit 1 when any archive is missing (check mode) or failed to fetch.
+
+set -eu
+
+ROOT=${SAPHIRA_RECIPE_ROOT:-/recipes}
+JOBS=${SAPHIRA_FETCH_JOBS:-6}
+MODE=""
+PKGS=""
+for arg in "$@"; do
+	case $arg in
+		--check) MODE="--check" ;;
+		*) PKGS="$PKGS $arg" ;;
+	esac
+done
+[ -d "$ROOT" ] || { printf 'fetch-vendor-sources: recipe root missing: %s\n' "$ROOT" >&2; exit 2; }
+command -v curl >/dev/null 2>&1 || { printf 'fetch-vendor-sources: curl is required\n' >&2; exit 2; }
+command -v sha256sum >/dev/null 2>&1 || { printf 'fetch-vendor-sources: sha256sum is required\n' >&2; exit 2; }
+
+n_ok=0 n_fetched=0 n_failed=0
+failed_list=""
+
+# Emit "url<TAB>sha" pairs for one recipe: every sequential top-level
+# (source=|vendor=, sha256=) pair outside recipe_build/recipe_install
+# bodies, with shell variables expanded from the recipe's own simple
+# top-level assignments.
+recipe_pairs()
+{
+	recipe_sh=$1
+	pkg=$2
+	meta=$(sed '/^recipe_\(build\|install\)()/,/^}/d' "$recipe_sh")
+	mkdir -p "$ROOT/$pkg/files"
+	# Per-package env file (parallel jobs never share a package).
+	env_file=$ROOT/$pkg/files/.fetch-env
+	# Simple VAR=value assignments only: no command substitution, no
+	# backticks, unquoted or single/double-quoted values.
+	printf '%s\n' "$meta" | grep -E '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=([^`]*)$' \
+		| grep -vE '\$\(' | sed 's/^[[:space:]]*//' > "$env_file" 2>/dev/null || true
+	printf '%s\n' "$meta" | grep -E '^[[:space:]]*(source|vendor|sha256)=' | sed 's/^[[:space:]]*//' | (
+		pair_url=""
+		while IFS= read -r line; do
+			case $line in
+				source=*|vendor=*)
+					u=${line#*=}; u=${u#\"}; u=${u%\"}; u=${u#\'}; u=${u%\'}
+					case $u in *'://'*) pair_url=$u ;; *) pair_url="" ;; esac
+					;;
+				sha256=*)
+					s=${line#*=}; s=${s#\"}; s=${s%\"}; s=${s#\'}; s=${s%\'}
+					if [ -n "$pair_url" ]; then
+						# Expand $vars against the recipe's own assignments
+						# in a subshell whose variable names cannot collide
+						# with recipe fields (notably url= homepage).
+						expanded=$(
+							set +u
+							__u=$pair_url
+							# shellcheck disable=SC1090
+							. "$env_file" 2>/dev/null || true
+							case $__u in *'`'*|*'$('*) printf '%s' "$__u" ;; *) eval "printf '%s' \"$__u\"" ;; esac 2>/dev/null || printf '%s' "$__u"
+						)
+						printf '%s\t%s\n' "$expanded" "$s"
+					fi
+					pair_url=""
+					;;
+			esac
+		done
+	)
+	rm -f "$env_file"
+}
+
+fetch_one()
+{
+	pkg=$1 url=$2 sha=$3
+	base=${url##*/}; base=${base%%\?*}
+	files_dir=$ROOT/$pkg/files
+	target=$files_dir/$base
+	sidecar=$target.sha256
+	if [ -f "$target" ]; then
+		if printf '%s  %s\n' "$sha" "$target" | sha256sum -c - >/dev/null 2>&1; then
+			[ -f "$sidecar" ] || printf '%s  %s\n' "$sha" "$base" > "$sidecar"
+			printf 'present %s %s\n' "$pkg" "$base"
+			return 0
+		fi
+		printf 'CORRUPT %s %s (sha mismatch, refetching)\n' "$pkg" "$base" >&2
+		rm -f -- "$target"
+	fi
+	mkdir -p "$files_dir"
+	dl_tmp=$files_dir/.$base.download
+	if ! curl -fL --retry 3 --retry-all-errors -o "$dl_tmp" "$url" 2>/dev/null; then
+		rm -f -- "$dl_tmp"
+		printf 'FAIL %s %s (download: %s)\n' "$pkg" "$base" "$url" >&2
+		return 1
+	fi
+	if ! printf '%s  %s\n' "$sha" "$dl_tmp" | sha256sum -c - >/dev/null 2>&1; then
+		rm -f -- "$dl_tmp"
+		printf 'FAIL %s %s (sha mismatch: %s)\n' "$pkg" "$base" "$url" >&2
+		return 1
+	fi
+	mv -- "$dl_tmp" "$target"
+	printf '%s  %s\n' "$sha" "$base" > "$sidecar"
+	printf 'fetched %s %s\n' "$pkg" "$base"
+	return 0
+}
+
+run_pkg()
+{
+	pkg=$1
+	recipe_sh=$ROOT/$pkg/recipe.sh
+	[ -f "$recipe_sh" ] || return 0
+	recipe_pairs "$recipe_sh" "$pkg" | while IFS='	' read -r url sha; do
+		[ -n "$url" ] && [ -n "$sha" ] || continue
+		if [ "$MODE" = "--check" ]; then
+			base=${url##*/}; base=${base%%\?*}
+			if [ -f "$ROOT/$pkg/files/$base" ]; then
+				printf 'present %s %s\n' "$pkg" "$base"
+			else
+				printf 'MISSING %s %s %s\n' "$pkg" "$base" "$url"
+			fi
+		else
+			fetch_one "$pkg" "$url" "$sha" || printf 'FAILED %s\n' "$pkg" >> "$ROOT/.fetch-failed.$$"
+		fi
+	done
+}
+
+rm -f "$ROOT/.fetch-failed.$$"
+if [ -z "$PKGS" ]; then
+	for recipe_sh in "$ROOT"/*/recipe.sh; do
+		pkg=${recipe_sh%/*}; pkg=${pkg##*/}
+		run_pkg "$pkg" &
+		# Bound parallelism without xargs (keep it busybox-sh clean).
+		while [ "$(jobs -p | wc -l)" -ge "$JOBS" ]; do wait -n 2>/dev/null || break; done
+	done
+else
+	for pkg in $PKGS; do
+		run_pkg "$pkg" &
+		while [ "$(jobs -p | wc -l)" -ge "$JOBS" ]; do wait -n 2>/dev/null || break; done
+	done
+fi
+wait || true
+if [ -f "$ROOT/.fetch-failed.$$" ]; then
+	sort -u "$ROOT/.fetch-failed.$$" | while IFS= read -r line; do printf 'failed: %s\n' "$line" >&2; done
+	n_failed=$(sort -u "$ROOT/.fetch-failed.$$" | wc -l)
+	rm -f "$ROOT/.fetch-failed.$$"
+	printf 'fetch-vendor-sources: FAILED pkgs=%s\n' "$n_failed" >&2
+	exit 1
+fi
+rm -f "$ROOT/.fetch-failed.$$"
+printf 'fetch-vendor-sources: all vendored archives present and verified\n' >&2

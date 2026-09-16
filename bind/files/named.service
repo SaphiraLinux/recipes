@@ -1,0 +1,23 @@
+# systemd runs named as the service user with just the bind
+# capability; OpenRC instead starts root and lets named drop via -u
+# (no ambient-capability mechanism there). Same unprivileged runtime
+# either way, each init in its native idiom.
+[Unit]
+Description=ISC BIND nameserver
+Wants=network-online.target
+After=network.target network-online.target
+Before=nss-lookup.target
+Wants=nss-lookup.target
+
+[Service]
+Type=simple
+User=named
+Group=named
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+ExecStart=/usr/sbin/named -f -c /etc/bind/named.conf
+RuntimeDirectory=named
+RuntimeDirectoryMode=0755
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

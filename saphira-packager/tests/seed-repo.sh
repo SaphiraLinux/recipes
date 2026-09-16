@@ -11,7 +11,11 @@ seed_repo=$1
 sign_repo=$2
 makepkg=$3
 source_root=$(CDPATH= cd -- "$(dirname -- "$seed_repo")/../.." && pwd)
-test_root=$(mktemp -d /tmp/saphira-seed-repo-test.XXXXXX)
+test_tmp_base=${SAPHIRA_TMPDIR:-/build/test-tmp}
+mkdir -p "$test_tmp_base"
+test_root=$(mktemp -d "$test_tmp_base/saphira-seed-repo-test.XXXXXX")
+export SAPHIRA_TMPDIR=$test_root/tool-tmp
+mkdir -p "$SAPHIRA_TMPDIR"
 trap 'find "$test_root" -depth -delete' EXIT HUP INT TERM
 incoming=$test_root/incoming/x86_64
 stage=$test_root/stage

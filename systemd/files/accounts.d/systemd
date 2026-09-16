@@ -1,0 +1,11 @@
+# systemd account management is sysusers-native (no user/group/dir/file
+# stanzas here by design): the package ships authoritative sysusers.d
+# declarations with Saphira-pinned fixed IDs (meson -D for the
+# templated confs, files/sysusers-static-ids.patch for the two static
+# ones), and the generated post-install/post-upgrade runs
+# systemd-sysusers after the reconciler. A second handwritten census
+# would drift (it once missed imds and coredump entirely); instead the
+# regression rule asserts every shipped identity-declaring conf is
+# covered. ensure-identity remains for ordinary packages without a
+# native account mechanism.
+sysusers

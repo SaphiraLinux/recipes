@@ -1,0 +1,5 @@
+# named runtime identity (canonical, fixed): user named UID 53,
+# primary group named GID 53 (TSV-reserved base-seed identity for the
+# BIND nameserver; named drops to it via -u after binding port 53).
+user named 53 named /var/lib/bind /sbin/nologin
+group named 53

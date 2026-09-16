@@ -6,6 +6,17 @@ After=network.target
 Type=simple
 # Instance unit: %i selects the interface AND its configuration file
 # /etc/hostapd/%i.conf (systemd instance escape: systemd-escape first).
+# Least privilege: service user + ambient caps (file caps on the binary
+# cover the OpenRC path). Config must stay readable by hostapd (PSKs -
+# never auto-chmodded). Cap set is best-effort pending first AP-hardware
+# boot proof; extend on fail-closed evidence, never trim silently.
+User=hostapd
+Group=hostapd
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+NoNewPrivileges=true
+RuntimeDirectory=hostapd
+RuntimeDirectoryMode=0750
 ExecStart=/usr/bin/hostapd /etc/hostapd/%i.conf
 Restart=on-failure
 RestartSec=2

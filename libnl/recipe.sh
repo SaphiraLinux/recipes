@@ -16,7 +16,7 @@ makedepends="
 	flex
 	gawk
 	gcc
-	saphira-kernel-headers=7.1.5
+	saphira-kernel-headers
 	m4
 	make
 	pkgconf

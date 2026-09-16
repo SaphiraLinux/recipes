@@ -12,9 +12,10 @@ url=https://linbit.com/drbd/
 # Optional failover companion to drbd-utils. Deliberately NOT in any
 # default closure: nothing depends on this recipe, and it must never be
 # dragged in by drbd-utils (VIP failover stays ldirectord's job).
-# BLOCKED_BY_cargo: no cargo recipe exists yet (rustc is unpackaged
-# R&D); resolvepkg fails closed here until the cargo track lands, at
-# which point this recipe builds unmodified.
+# Cargo ships inside the rustc base package (branded r2); there is
+# no standalone cargo producer, so the toolchain dependency is
+# spelled rustc. (No controller change, no -cargo split: recipe
+# track only.)
 vendor=https://pkg.linbit.com/downloads/drbd/utils/drbd-reactor-1.12.0.tar.gz
 sha256=ce88fe47c9ee1ae9a5232de6a4fa3d9e2c3e564701a0aeef8f64a86b98db63da
 
@@ -25,7 +26,7 @@ depends="
 "
 
 makedepends="
-    cargo
+    rustc
     gcc
     make
 "

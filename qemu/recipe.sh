@@ -27,7 +27,7 @@ makedepends="
 	libusb-dev
 	openssl-dev
 	libaio-dev
-	saphira-kernel-headers=7.1.5
+	saphira-kernel-headers
 	bzip2
 	make
 	meson

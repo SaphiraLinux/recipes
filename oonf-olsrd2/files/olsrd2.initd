@@ -1,0 +1,13 @@
+#!/sbin/openrc-run
+
+description="OLSRv2 routing agent"
+
+command="/usr/sbin/olsrd2"
+command_args="--load=/etc/olsrd2/olsrd2.conf"
+supervisor="supervise-daemon"
+
+depend()
+{
+	use net logger
+	after firewall
+}

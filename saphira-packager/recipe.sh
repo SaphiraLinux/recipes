@@ -3,7 +3,33 @@ pkgver=1.0
 # r50: provider selection matches exact package names (a -dev/-doc NVR
 # must never satisfy a base-name dependency during declaration
 # extraction); viewer conflicts output names its legacy-pair semantics.
-pkgrel=50
+# r51: republish without the stale usr/share/man/man8/saphira-build.8
+# (canonical home is saphira-docs since the man-hierarchy move; the
+# published r50 artifact predates it). Recipe install set unchanged
+# since r50 - this revision exists to unblock the file-ownership gate.
+# r57: file-ownership stanza (file <path> <mode> <owner> <group>) in
+# account fragments: makepkg validates shape plus payload binding,
+# the publish gate enforces same-fragment-or-root references, and the
+# generated install scripts apply ownership through ensure-identity
+# (baselayout r12 carries the reconciler side).
+# r58: legacy-history sidecars (<fragment>.legacy): makepkg validates
+# shape plus same-fragment consistency, the publish gate refuses
+# legacy IDs colliding with any present, census skips sidecars.
+# r59: buildpkg is authoritative over stale environments: the base
+# rebuilds automatically on live seed NVR drift (presence-based
+# per-NVR rule, multi-line coexistence is not drift), clean roots
+# provision a locked root shadow row (base schema v2), and retained
+# FAILED workspaces from a stale base generation move aside with
+# logs intact while a fresh workspace executes.
+# r60: sign-apk-repo --full-audit heals with an empty stage (census
+# rebuild of indexes + repository.db from disk truth, no publish,
+# no retention); empty stage without the flag stays a refusal.
+# r61: sysusers-native fragments (makepkg sysusers stanza, generated
+# reconciler-then-systemd-sysusers callers, bootstrap tolerates
+# identity-less fragments) plus the legacy-gate namespace fix: a
+# legacy user's primary GID is a reference, not a group-namespace
+# history claim, so paired user+group sidecars publish.
+pkgrel=61
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='Native Saphira package builder tools'
 license=BUSL-1.1

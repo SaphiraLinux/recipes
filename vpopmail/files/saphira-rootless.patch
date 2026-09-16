@@ -1,0 +1,172 @@
+--- a/configure.ac
++++ b/configure.ac
+@@ -316,8 +316,12 @@
+     ]
+ )
+
+-if test ! -f "$qmailnewu"
++# Saphira rootless staging: qmail builds after vpopmail here
++# (chkuser needs vpopmail headers), so its binaries cannot exist
++# yet; the explicit --enable path is authoritative when
++# SAPHIRA_NO_HOST_DIRS=1 (exported by the recipe).
++if test ! -f "$qmailnewu" && test "$SAPHIRA_NO_HOST_DIRS" != "1"
+ then
+     AC_MSG_RESULT(no)
+     AC_MSG_ERROR([Unable to find your qmail-newu file, specify --enable-qmail-newu=/full/path/to/qmail-newu])
+ fi
+@@ -350,8 +350,12 @@
+     ]
+ )
+
+-if test ! -f "$qmailinject"
++# Saphira rootless staging: qmail builds after vpopmail here
++# (chkuser needs vpopmail headers), so its binaries cannot exist
++# yet; the explicit --enable path is authoritative when
++# SAPHIRA_NO_HOST_DIRS=1 (exported by the recipe).
++if test ! -f "$qmailinject" && test "$SAPHIRA_NO_HOST_DIRS" != "1"
+ then
+     AC_MSG_RESULT(no)
+     AC_MSG_ERROR([Unable to find your qmail-inject file, specify --enable-qmail-inject=/full/path/to/qmail-inject])
+ fi
+@@ -384,8 +384,12 @@
+     ]
+ )
+
+-if test ! -f "$qmailnewmrh"
++# Saphira rootless staging: qmail builds after vpopmail here
++# (chkuser needs vpopmail headers), so its binaries cannot exist
++# yet; the explicit --enable path is authoritative when
++# SAPHIRA_NO_HOST_DIRS=1 (exported by the recipe).
++if test ! -f "$qmailnewmrh" && test "$SAPHIRA_NO_HOST_DIRS" != "1"
+ then
+     AC_MSG_RESULT(no)
+     AC_MSG_ERROR([Unable to find your qmail-newmrh file, specify --enable-qmail-qmail-newmrh=/full/path/to/qmail-newmrh])
+ fi
+@@ -473,6 +473,20 @@
+                 f=fopen("vpopmail.gid", "a+");
+                 fprintf(f,"%d\n", pw->pw_gid);
+                 fclose(f);
++        } else if (getenv("SAPHIRA_VPOPMAIL_DIR") && getenv("SAPHIRA_VPOPMAIL_UID") && getenv("SAPHIRA_VPOPMAIL_GID")) {
++                /* Saphira rootless build: fixed identities (see
++                   accounts.d/vpopmail) pre-seeded by the recipe. */
++                f=fopen("vpopmail.dir","a+");
++                fprintf(f,"%s\n", getenv("SAPHIRA_VPOPMAIL_DIR"));
++                fclose(f);
++
++                f=fopen("vpopmail.uid", "a+");
++                fprintf(f,"%s\n", getenv("SAPHIRA_VPOPMAIL_UID"));
++                fclose(f);
++
++                f=fopen("vpopmail.gid", "a+");
++                fprintf(f,"%s\n", getenv("SAPHIRA_VPOPMAIL_GID"));
++                fclose(f);
+         } else {
+                 printf("No vpopmail user found.\n");
+                 printf("Please add the vchkpw group and\n");
+@@ -516,7 +530,10 @@
+ 
+ #----------------------------------------------------------------------
+ 
+-if test ! -d $vpopmaildir/etc
++# Saphira: the build host is never mutated (no /home/vpopmail
++# there); installed-system directories come from the
++# accounts.d dir stanzas at install time instead.
++if test -z "$SAPHIRA_NO_HOST_DIRS" && test ! -d $vpopmaildir/etc
+ then
+   if test ! -d $vpopmaildir
+   then
+--- a/Makefile.am
++++ b/Makefile.am
+@@ -22,7 +22,7 @@
+ CONFIG_CLEAN_FILES+=cdb/conf-cc cdb/conf-ld cdb/compile cdb/load
+ endif
+ 
+-INSTALL_PROGRAM= ${INSTALL} -o @vpopuser@ -m 711 -g @vpopgroup@ $(AM_INSTALL_PROGRAM_FLAGS)
++INSTALL_PROGRAM= ${INSTALL} -m 711 $(AM_INSTALL_PROGRAM_FLAGS)
+ INSTALL_STRIP_PROGRAM=${INSTALL_PROGRAM} -s
+ 
+ MYSQLCONF=$(DESTDIR)@vpopmaildir@/etc/vpopmail.mysql
+@@ -167,13 +167,16 @@
+ install-exec-am:
+ 	for d in bin doc etc include lib ; do \
+ 	  if test ! -d $(DESTDIR)@vpopmaildir@/$$d; then \
+-	    $(INSTALL) -d -g @vpopgroup@ -m 0755 -o @vpopuser@ \
++	    $(INSTALL) -d -m 0755 \
+ 	      $(DESTDIR)@vpopmaildir@/$$d ; \
+ 	  fi ; \
+ 	done
+ 
++# Saphira: install-time ownership comes from the accounts.d file
++# stanza (rootless staging cannot chown); chown/chgrp dropped
++# below, modes kept.
+ install-data-local:
+-	$(INSTALL) -d -g @vpopgroup@ -m 0700 -o @vpopuser@ \
++	$(INSTALL) -d -m 0700 \
+ 	  $(DESTDIR)@vpopmaildir@/@domains_dir@
+ 
+ 	echo "-I@vpopmaildir@/include" > \
+@@ -183,18 +183,18 @@
+ 
+ 	if test @MANY_DOMAINS@ = 0; then \
+ 		if test ! -r $(DOVECOT_SQL); then \
+-			$(INSTALL) -o root -m 0644 \
++			$(INSTALL) -m 0644 \
+ 			dovecot/disable-many-domains_procedures.sql $(DOVECOT_SQL); \
+ 		fi \
+ 	fi
+ 
+ 	if test ! -r $(VUSAGECCONF); then \
+-		$(INSTALL) -o @vpopuser@ -m 0644 -g @vpopgroup@ \
++		$(INSTALL) -m 0644 \
+ 		vusagec.conf $(VUSAGECCONF); \
+ 	fi
+ 
+ 	if test ! -r $(VLIMITS); then \
+-	  $(INSTALL) -o @vpopuser@ -m 0644 -g @vpopgroup@ \
++	  $(INSTALL) -m 0644 \
+ 	    vlimits.default $(VLIMITS); \
+ 	fi
+ 
+@@ -210,7 +210,7 @@
+ 
+ 	if test "@USE_MYSQL@" = "1"; then \
+ 	  if test "@ENABLE_SQL_LOGGING@" = "1"; then \
+-	    $(INSTALL) -o @vpopuser@ -g @vpopgroup@ -m 711 purge_vlog.sh $(PURGE_VLOG); \
++	    $(INSTALL) -m 711 purge_vlog.sh $(PURGE_VLOG); \
+ 	  fi \
+ 	fi
+ 
+@@ -234,28 +234,26 @@
+ 	    echo "#   If host is 'localhost', then sockets (Unix) or named pipes (Windows)" >> $(MYSQLCONF); \
+ 	    echo "#   will be used instead of TCP/IP to connect to the server."   >> $(MYSQLCONF); \
+ 	  fi ; \
+-	  chown @vpopuser@  $(MYSQLCONF) ; \
+-	  chgrp @vpopgroup@ $(MYSQLCONF) ; \
+ 	  chmod 0640        $(MYSQLCONF) ; \
+ 	fi
+ 
+-	$(INSTALL) -o root -m 0644 \
++	$(INSTALL) -m 0644 \
+ 	  libvpopmail.a $(DESTDIR)@vpopmaildir@/lib/libvpopmail.a
+ 
+-	$(INSTALL) -o root -m 0444 \
++	$(INSTALL) -m 0444 \
+ 	  config.h $(DESTDIR)@vpopmaildir@/include/vpopmail_config.h
+ 
+ 	for include in vpopmail.h config.h vauth.h vlimits.h storage.h client.h conf.h ippp.h vlogger.h pwstr.h vutil.h; do \
+-	    $(INSTALL) -o root -m 0444 $$include \
++	    $(INSTALL) -m 0444 $$include \
+ 		$(DESTDIR)@vpopmaildir@/include/ ; \
+ 	done
+ 
+ 	$(INSTALL) -d $(DESTDIR)@vpopmaildir@/doc/man_html
+ 	$(INSTALL) -d $(DESTDIR)@vpopmaildir@/doc/doc_html
+-	$(INSTALL) -o @vpopuser@ -m 0444 -g @vpopgroup@ \
++	$(INSTALL) -m 0444 \
+ 	  doc/man_html/*.* $(DESTDIR)@vpopmaildir@/doc/man_html/
+ 
+-	$(INSTALL) -o @vpopuser@ -m 0444 -g @vpopgroup@ \
++	$(INSTALL) -m 0444 \
+ 	  doc/doc_html/*.* $(DESTDIR)@vpopmaildir@/doc/doc_html/
+ 
+ fix-priv:

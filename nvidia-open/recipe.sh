@@ -4,6 +4,8 @@ pkgname=nvidia-open
 pkgver=610.57.04
 pkgrel=1
 pkgarch=${SAPHIRA_ARCH:-x86_64}
+disabled=yes
+disabled_reason='superseded by the per-kernel nvidia-open-7.1.5 / nvidia-open-7.2.2 + nvidia-open-firmware split (co-installable outputs; replaces=nvidia-open handover)'
 pkgdesc='NVIDIA open kernel modules 610.57.04 for kernel 7.2.2 (kmods + GSP firmware only, NO CUDA userspace)'
 license='MIT OR GPL-2.0'
 origin=nvidia-open
@@ -26,10 +28,10 @@ makedepends="
 "
 
 # Build inputs supplied via the /input staging directory (same contract
-# as saphira-zfs; signing key never lives in /recipes):
+# as saphira-zfs). The signing key is builder-exposed (never staged,
+# never in /recipes):
 #   buildpkg nvidia-open /build/nv-input
 #   <input>/linux-7.2.2/        pruned built kernel tree (kmod-ready)
-#   <input>/saphira-module.pem  module signing key
 #
 # CUDA policy: the Saphira host stays pure musl. CUDA runs inside a
 # version-matched glibc systemd-nspawn container; only these kmods and
@@ -39,9 +41,16 @@ KVER=7.2.2
 recipe_build()
 {
 	KDIR="$SRC/linux-$KVER"
-	KEY="$SRC/saphira-module.pem"
+	KEY=/keys/module-signing.pem
 	[ -f "$KDIR/Makefile" ] || { echo "ERROR: kernel build tree missing at $KDIR (staged /input?)" >&2; return 1; }
-	[ -f "$KEY" ] || { echo "ERROR: module signing key missing at $KEY (staged /input?)" >&2; return 1; }
+	if [ ! -e "$KEY" ]; then
+		echo "ERROR: module signing key not exposed at $KEY (builder key configuration?)" >&2
+		return 1
+	fi
+	if [ ! -r "$KEY" ]; then
+		echo "ERROR: module signing key exposed but unreadable at $KEY (UID ACL missing on the host key? builds must never go unsigned)" >&2
+		return 1
+	fi
 	[ -x "$KDIR/scripts/sign-file" ] || { echo "ERROR: $KDIR/scripts/sign-file not built" >&2; return 1; }
 
 	NVBALL="$RECIPE_DIR/files/open-gpu-kernel-modules-610.57.04.tar.gz"

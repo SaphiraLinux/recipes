@@ -1,0 +1,76 @@
+--- /dev/null
++++ b/compiler/rustc_target/src/spec/targets/x86_64_akadata_linux_musl.rs
+@@ -0,0 +1,51 @@
++// Saphira first-class AKADATA Rust target. Cloned from
++// x86_64_unknown_linux_musl; only what Saphira deliberately owns
++// differs (vendor, CPU floor, default linker, description, tier).
++// The LLVM triple stays x86_64-unknown-linux-musl: same machine ABI,
++// branded Rust target. vendor = "akadata" (in the TargetOptions
++// literal below) is load-bearing: without it Cargo would still see
++// target_vendor="unknown".
++use crate::spec::{
++    Arch, Cc, LinkerFlavor, Lld, SanitizerSet, StackProbeType, Target, TargetMetadata, TargetOptions,
++    base,
++};
++
++pub(crate) fn target() -> Target {
++    let mut base = base::linux_musl::opts();
++    // NOTE: vendor is set in the TargetOptions literal below, not via
++    // base.vendor assignment: the field carries
++    // #[rustc_lint_opt_deny_field_access] and direct mutation fails the
++    // build (warnings are denied). Struct-literal construction is the
++    // accepted in-tree idiom.
++    base.cpu = "x86-64-v3".into();
++    base.linker = Some("x86_64-akadata-linux-musl-gcc".into());
++    base.plt_by_default = false;
++    base.max_atomic_width = Some(64);
++    base.add_pre_link_args(LinkerFlavor::Gnu(Cc::Yes, Lld::No), &["-m64"]);
++    base.stack_probes = StackProbeType::Inline;
++    base.static_position_independent_executables = true;
++    base.supported_sanitizers = SanitizerSet::ADDRESS
++        | SanitizerSet::CFI
++        | SanitizerSet::LEAK
++        | SanitizerSet::MEMORY
++        | SanitizerSet::THREAD;
++    base.supports_xray = true;
++    // Same upstream default as the cloned musl target; the recipe's
++    // bootstrap.toml sets crt-static = false for our builds.
++    base.crt_static_default = true;
++
++    Target {
++        llvm_target: "x86_64-unknown-linux-musl".into(),
++        metadata: TargetMetadata {
++            description: Some("64-bit Saphira Linux with musl (AKADATA toolchain)".into()),
++            tier: None,
++            host_tools: Some(true),
++            std: Some(true),
++        },
++        pointer_width: 64,
++        data_layout:
++            "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128".into(),
++        arch: Arch::X86_64,
++        options: TargetOptions { vendor: "akadata".into(), ..base },
++    }
++}
+--- a/compiler/rustc_target/src/spec/mod.rs
++++ b/compiler/rustc_target/src/spec/mod.rs
+@@ -1506,6 +1506,7 @@ supported_targets! {
+     ("aarch64-unknown-linux-musl", aarch64_unknown_linux_musl),
+     ("aarch64_be-unknown-linux-musl", aarch64_be_unknown_linux_musl),
+     ("x86_64-unknown-linux-musl", x86_64_unknown_linux_musl),
++    ("x86_64-akadata-linux-musl", x86_64_akadata_linux_musl),
+     ("i686-unknown-linux-musl", i686_unknown_linux_musl),
+     ("i586-unknown-linux-musl", i586_unknown_linux_musl),
+     ("mips-unknown-linux-musl", mips_unknown_linux_musl),
+--- a/src/bootstrap/src/core/sanity.rs
++++ b/src/bootstrap/src/core/sanity.rs
+@@ -38,6 +38,9 @@ pub struct Finder {
+ /// when the newly-bumped stage 0 compiler now knows about the formerly-missing targets.
+ const STAGE0_MISSING_TARGETS: &[&str] = &[
+     // just a dummy comment so the list doesn't get onelined
++    // Saphira: our first-class target is newer than any stage0 compiler;
++    // remove if a future stage0 ever ships it (i.e. never, unless upstreamed).
++    "x86_64-akadata-linux-musl",
+ ];
+ 
+ /// Minimum version threshold for libstdc++ required when using prebuilt LLVM

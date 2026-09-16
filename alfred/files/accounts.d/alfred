@@ -1,0 +1,10 @@
+# alfred runtime identity (canonical, fixed): user alfred UID 104,
+# primary group alfred GID 104. Required by the shipped service units
+# (alfred.service User=alfred, alfred.initd command_user alfred:alfred).
+# The daemon retains only CAP_NET_ADMIN/CAP_NET_RAW across its setuid
+# drop (file caps on the binary for OpenRC, ambient caps for systemd).
+# UID 104 sits in the preferred 0..199 packaged range - never reuse it
+# for another identity. No state directory: the unix socket lives under
+# /run/alfred, provided per-boot by the service runtimes.
+user alfred 104 alfred /var/empty /sbin/nologin
+group alfred 104

@@ -5,6 +5,11 @@ SAPHIRA_RECIPE_ROOT=${SAPHIRA_RECIPE_ROOT:-/recipes}
 SAPHIRA_REFERENCE_RECIPE_ROOT=${SAPHIRA_REFERENCE_RECIPE_ROOT:-/reference-package-recipes}
 SAPHIRA_CPORTS_ROOT=${SAPHIRA_CPORTS_ROOT:-/cports}
 SAPHIRA_BUILD_ROOT=${SAPHIRA_BUILD_ROOT:-/build}
+# Scratch for every controller tool, test harness, and namespace backing
+# store. Host /tmp is never used for Saphira work: it is wiped on reboot,
+# shared, and invisible. /build/tmp is writable by the builder user,
+# visible, and disposed with the work that used it.
+SAPHIRA_TMPDIR=${SAPHIRA_TMPDIR:-/build/tmp}
 SAPHIRA_PACKAGE_TMP=${SAPHIRA_PACKAGE_TMP:-/var/tmp/saphira-package}
 # Persistent content-addressed source cache (verified upstream archives,
 # keyed by sha256). Survives workdir disposal so rebuilds never re-fetch;
@@ -27,8 +32,26 @@ SAPHIRA_GENESIS_EXCLUDE=${SAPHIRA_GENESIS_EXCLUDE:-}
 # Generic parallel-version-line policy (empty/unset: tool defaults apply).
 SAPHIRA_VERSION_LINES_FILE=${SAPHIRA_VERSION_LINES_FILE:-}
 SAPHIRA_INCOMING_DIR=${SAPHIRA_INCOMING_DIR:-/out/stage4/incoming}
+# Hatched retention: the live generation keeps the newest
+# SAPHIRA_RETAIN_GENERATIONS NVRs per package name (default 2). Older
+# NVRs retire inside the signer's publication transaction unless a live
+# dependent needs exactly them or they sit on SAPHIRA_RETAIN_NVR
+# (space-separated NVRs or nvr.apk filenames, e.g. "acl-2.3.2-r1").
+# Archive generations are never pruned.
+SAPHIRA_RETAIN_GENERATIONS=${SAPHIRA_RETAIN_GENERATIONS:-2}
+SAPHIRA_RETAIN_NVR=${SAPHIRA_RETAIN_NVR:-}
 SAPHIRA_SIGN_KEY=${SAPHIRA_SIGN_KEY:-/root/apk-signing/akadata-repository.rsa}
 SAPHIRA_TRUST_KEY=${SAPHIRA_TRUST_KEY:-/etc/apk/keys/akadata-repository.rsa.pub}
+# Canonical host-side module signing key. The builder exposes it read-only
+# inside the isolated build namespace at the fixed path
+# /keys/module-signing.pem (recipes must use that path; they never learn
+# the host path). The file must be readable by the builder user - plain
+# 0600 root:root is NOT enough; grant UID access, e.g.:
+#   setfacl -m u:smalley:r /etc/saphira/keys/module-signing.pem
+# (group membership does not survive the user namespace, UID ACLs do).
+# saphira-module.pem is byte-identical but retired: zero consumers, kept
+# only until every reference is proven migrated, then removed.
+SAPHIRA_MODULE_KEY=${SAPHIRA_MODULE_KEY:-/etc/saphira/keys/module-signing.pem}
 SAPHIRA_RELEASE_STATE=${SAPHIRA_RELEASE_STATE:-/var/lib/saphira-build/releases}
 SAPHIRA_RELEASE_POLICY=${SAPHIRA_RELEASE_POLICY:-monotonic}
 SAPHIRA_ARCH=${SAPHIRA_ARCH:-x86_64}
@@ -68,9 +91,10 @@ SAPHIRA_HOST_APK_KEY_DIR=${SAPHIRA_HOST_APK_KEY_DIR:-/etc/apk/keys}
 SAPHIRA_ROOT_SHELL_LINK=${SAPHIRA_ROOT_SHELL_LINK:-/bin/sh}
 
 export SAPHIRA_CONFIG_FILE SAPHIRA_RECIPE_ROOT SAPHIRA_REFERENCE_RECIPE_ROOT SAPHIRA_CPORTS_ROOT
-export SAPHIRA_BUILD_ROOT SAPHIRA_PACKAGE_TMP SAPHIRA_SOURCE_CACHE SAPHIRA_REPO_DIR SAPHIRA_INCOMING_DIR
+export SAPHIRA_BUILD_ROOT SAPHIRA_TMPDIR SAPHIRA_PACKAGE_TMP SAPHIRA_SOURCE_CACHE SAPHIRA_REPO_DIR SAPHIRA_INCOMING_DIR
+export SAPHIRA_RETAIN_GENERATIONS SAPHIRA_RETAIN_NVR
 export SAPHIRA_REPO_NAMES SAPHIRA_GENESIS_EXCLUDE SAPHIRA_VERSION_LINES_FILE
-export SAPHIRA_SIGN_KEY SAPHIRA_TRUST_KEY SAPHIRA_ARCH SAPHIRA_BINDIR
+export SAPHIRA_SIGN_KEY SAPHIRA_TRUST_KEY SAPHIRA_MODULE_KEY SAPHIRA_ARCH SAPHIRA_BINDIR
 export SAPHIRA_RELEASE_STATE SAPHIRA_RELEASE_POLICY
 export SAPHIRA_APK SAPHIRA_BWRAP SAPHIRA_PYTHON SAPHIRA_METADATA_SHELL SAPHIRA_METADATA_TIMEOUT
 export SAPHIRA_SOURCE_DATE_EPOCH

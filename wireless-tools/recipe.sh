@@ -13,7 +13,7 @@ sha256=6fb80935fe208538131ce2c4178221bab1078a1656306bce8909c19887e2e5a1
 makedepends="
 	binutils
 	gcc
-	saphira-kernel-headers=7.1.5
+	saphira-kernel-headers
 	make
 "
 

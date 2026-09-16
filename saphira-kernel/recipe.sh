@@ -1,6 +1,6 @@
 pkgname=saphira-kernel
 pkgver=${SAPHIRA_KERNEL_VERSION:-7.2.2}
-pkgrel=5
+pkgrel=6
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="Saphira kernel ${pkgver} (x86-64-v3, signed modules, Saphira regdb trust)"
 license=GPL-2.0-only
@@ -34,6 +34,10 @@ case "$pkgver" in
 	*) echo "ERROR: no pinned vendor/sha256 for kernel $pkgver" >&2; return 1 ;;
 esac
 
+# Build secret contract: module signing is mandatory, never optional.
+# The worker refuses before spending anything when the builder did
+# not expose a readable /keys/module-signing.pem.
+saphira_sign_key_required=yes
 makedepends="
 	bc
 	binutils
@@ -49,22 +53,27 @@ makedepends="
 	perl
 "
 
-# Build inputs supplied via the /input staging directory:
-#   buildpkg saphira-kernel /build/kernel-input
-#   /build/kernel-input/saphira-module.pem   module signing key (never in /recipes)
+# Build inputs: none beyond the recipe tree. The module signing key is
+# exposed by the builder (fixed in-namespace path); no /input staging.
 # Regdb trust: public DER cert ships in files/ and is compiled into cfg80211
 # via CONFIG_CFG80211_EXTRA_REGDB_KEYDIR. Saphira policy patches live in
 # files/: x86-64-v3.patch, config-${pkgver}-akadata.
 
 recipe_build()
 {
-	# Module signing key: supplied via the /input staging directory
-	# (buildpkg saphira-kernel /build/kernel-input); $SRC copy kept
-	# as fallback for hand-staged manual builds. buildpkg binds
-	# /input but nothing copies it into $SRC, so read it directly.
-	KEY="$SRC/saphira-module.pem"
-	[ -f "$KEY" ] || KEY=/input/saphira-module.pem
-	[ -f "$KEY" ] || { echo "ERROR: module signing key missing at $KEY (staged /input?)" >&2; return 1; }
+	# Module signing key: exposed by the builder read-only at the fixed
+	# in-namespace path /keys/module-signing.pem (canonical host key
+	# /etc/saphira/keys/module-signing.pem, never in /recipes, never
+	# staged through /build). Absent key fails closed below.
+	KEY=/keys/module-signing.pem
+	if [ ! -e "$KEY" ]; then
+		echo "ERROR: module signing key not exposed at $KEY (builder key configuration?)" >&2
+		return 1
+	fi
+	if [ ! -r "$KEY" ]; then
+		echo "ERROR: module signing key exposed but unreadable at $KEY (UID ACL missing on the host key? builds must never go unsigned)" >&2
+		return 1
+	fi
 	export TAR_OPTIONS=--no-same-owner
 
 	# Local archive wins when present (verified, never re-downloaded);
@@ -86,8 +95,8 @@ recipe_build()
 	cp "$RECIPE_DIR/files/config-${pkgver}-akadata" "$SRC/linux-${pkgver}/.config"
 	mkdir -p "$SRC/linux-${pkgver}/certs/regdb"
 	cp "$RECIPE_DIR/files/saphira-regdb.x509" "$SRC/linux-${pkgver}/certs/regdb/saphira-regdb.x509"
-	cp "$KEY" "$SRC/linux-${pkgver}/certs/saphira-module.pem"
-	chmod 600 "$SRC/linux-${pkgver}/certs/saphira-module.pem"
+	cp "$KEY" "$SRC/linux-${pkgver}/certs/module-signing.pem"
+	chmod 600 "$SRC/linux-${pkgver}/certs/module-signing.pem"
 
 	make olddefconfig
 	make -j${JOBS:-$(nproc)}
@@ -101,5 +110,22 @@ recipe_install()
 	install -m 644 "$SRC/linux-${pkgver}/arch/x86/boot/bzImage" "$PKGDEST/boot/vmlinuz-${pkgver}-akadata"
 	install -m 644 "$SRC/linux-${pkgver}/System.map" "$PKGDEST/boot/System.map-${pkgver}-akadata"
 	install -m 644 "$SRC/linux-${pkgver}/.config" "$PKGDEST/boot/config-${pkgver}-akadata"
-	depmod -b "$PKGDEST" $pkgver
+	# Installed module-tree layout (Saphira policy): upstream
+	# modules_install bakes the absolute build-tree path into
+	# lib/modules/<release>/{build,source} - constructor state under
+	# /build that must never leak into the installed filesystem.
+	# Replace with the versioned prepared-tree layout (see
+	# files/install-kernel-layout.sh): /usr/src/linux-<pkgver>-saphira
+	# owned by this package, build pointing at it directly (never via
+	# the floating /usr/src/linux convenience pointer, which stays
+	# admin-managed so co-installed kernels never fight over it).
+	# saphira-kernel-headers stays UAPI-only and is unrelated to this
+	# tree. KREL is the true kernel release (differs from pkgver on
+	# -rc lines); depmod and the module dir both use it.
+	. "$RECIPE_DIR/files/install-kernel-layout.sh"
+	KREL=$(kernel_layout_release "$SRC/linux-${pkgver}")
+	install_prepared_tree "$SRC/linux-${pkgver}" "$PKGDEST/usr/src/linux-${pkgver}-saphira"
+	install_module_build_link "$PKGDEST" "$KREL" "linux-${pkgver}-saphira"
+	check_module_layout "$PKGDEST" "$KREL" "linux-${pkgver}-saphira" "$KREL"
+	depmod -b "$PKGDEST" $KREL
 }

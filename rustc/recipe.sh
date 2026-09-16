@@ -2,7 +2,7 @@
 
 pkgname=rustc
 pkgver=1.97.1
-pkgrel=1
+pkgrel=2
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="Rust language compiler, cargo, clippy and rustfmt"
 license="MIT OR Apache-2.0"
@@ -18,6 +18,12 @@ depends="
     llvm>=22.1.8-r2
 "
 
+# openssl-dev is required by openssl-sys's probe when building the
+# host tools (cargo links curl/openssl); pkgconf drives that probe.
+# The branded build needs it explicitly: with HOST != TARGET the
+# openssl-sys build script only succeeds via its pkg-config path,
+# and there is no pkg-config binary in the root without this.
+# (r1 built without it only by transitive luck, never by design.)
 makedepends="
     binutils
     curl
@@ -25,8 +31,21 @@ makedepends="
     llvm>=22.1.8-r2
     make
     openssl-dev
+    pkgconf
     python3
 "
+# Splits restored (match the published -dev/-doc r0 boundaries):
+# self-contained .a libraries belong in -dev, usr/share/doc in -doc
+# (the recipe installs TRUST.md there). Man pages are not built
+# (docs disabled), so those stale -doc r0 claims touch nothing staged
+# and the gate skips them. Without these splits, base r1 reclaims paths
+# the r0 splits still own and the file gate refuses.
+# r2 keeps cargo in base (no cargo split: the builder only knows
+# -dev/-doc/-libs and the controller is not to be extended for
+# this; a standalone cargo producer, if wanted, is a recipe-track
+# decision for later). drbd-reactor's makedepends on cargo stays
+# red until then.
+subpackages="rustc-dev rustc-doc"
 
 fatal()
 {
@@ -59,6 +78,29 @@ install_bootstrap_component()
 
 recipe_build()
 {
+	cd "$SRC"
+	patch -p1 < "$RECIPE_DIR/files/akadata-target.patch"
+	# Cargo-channeled env for the x.py tool builds (stage2-tools cargo
+	# for the akadata host): the build log proves OPENSSL_DIR is unset
+	# in openssl-sys's build-script env despite the recipe-process
+	# prefix below, so channel it through cargo config (filesystem,
+	# always read) instead of process inheritance. /usr (not /usr/lib
+	# or lib64): openssl-sys probes lib64-then-lib under the dir and
+	# Saphira ships lib-only (/lib, /usr/lib), which the exists-guards
+	# handle. PKG_CONFIG_ALLOW_CROSS unblocks the crate's pkg-config
+	# path for HOST != TARGET against the same /usr.
+	mkdir -p "$SRC/.cargo"
+	cat > "$SRC/.cargo/config.toml" <<EOF
+[source.crates-io]
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+directory = "vendor"
+
+[env]
+OPENSSL_DIR = "/usr"
+PKG_CONFIG_ALLOW_CROSS = "1"
+EOF
 	bootstrap=$BUILDDIR/bootstrap
 	install_bootstrap_component \
 		rustc-1.96.0-x86_64-unknown-linux-musl.tar.xz "$bootstrap"
@@ -69,10 +111,15 @@ recipe_build()
 	cat > "$SRC/bootstrap.toml" <<EOF
 change-id = "ignore"
 
+# Branded bootstrap: the stage0/build machine stays
+# x86_64-unknown-linux-musl (the old working compiler), while host and
+# target become x86_64-akadata-linux-musl. BOTH target sections are
+# deliberate: x.py still needs build-tuple tool settings while
+# constructing stage1, and must not fall back to plain cc there.
 [build]
 build = "x86_64-unknown-linux-musl"
-host = ["x86_64-unknown-linux-musl"]
-target = ["x86_64-unknown-linux-musl"]
+host = ["x86_64-akadata-linux-musl"]
+target = ["x86_64-akadata-linux-musl"]
 rustc = "$bootstrap/bin/rustc"
 cargo = "$bootstrap/bin/cargo"
 python = "/usr/bin/python3"
@@ -102,12 +149,27 @@ download-ci-llvm = false
 link-shared = true
 
 [target.x86_64-unknown-linux-musl]
-cc = "gcc"
-cxx = "g++"
+cc = "x86_64-akadata-linux-musl-gcc"
+cxx = "x86_64-akadata-linux-musl-g++"
 ar = "ar"
 ranlib = "ranlib"
-linker = "gcc"
+linker = "x86_64-akadata-linux-musl-gcc"
 crt-static = false
+# Explicit (not the /usr fallback): bootstrap only applies the fallback
+# to its primary host_target (= build = unknown here), so the branded
+# host needs its own. Clean roots carry musl + musl-dev in the seed.
+musl-root = "/usr"
+llvm-config = "/usr/bin/llvm-config"
+llvm-has-rust-patches = false
+
+[target.x86_64-akadata-linux-musl]
+cc = "x86_64-akadata-linux-musl-gcc"
+cxx = "x86_64-akadata-linux-musl-g++"
+ar = "ar"
+ranlib = "ranlib"
+linker = "x86_64-akadata-linux-musl-gcc"
+crt-static = false
+musl-root = "/usr"
 llvm-config = "/usr/bin/llvm-config"
 llvm-has-rust-patches = false
 EOF
@@ -137,4 +199,19 @@ recipe_install()
 		"$PKGDEST/usr/bin/cargo" --version
 	LD_LIBRARY_PATH="$PKGDEST/usr/lib" \
 		"$PKGDEST/usr/bin/rustfmt" --version
+	# Branded-host acceptance: the stage2 compiler must report the
+	# AKADATA triple, not the bootstrap seed's unknown tuple.
+	# Captured comparison (not `... | grep -q ...`): a direct
+	# grep -q pipeline false-negatived here under set -o pipefail
+	# while every staged binary reports the branded host. The
+	# actual value is echoed on mismatch so the next failure is
+	# self-diagnosing instead of a bare fatal.
+	stage2_host="$(LD_LIBRARY_PATH="$PKGDEST/usr/lib" \
+		"$PKGDEST/usr/bin/rustc" -vV | grep '^host: ' || true)"
+	test "$stage2_host" = "host: x86_64-akadata-linux-musl" ||
+		fatal "stage2 rustc host is not x86_64-akadata-linux-musl (got: $stage2_host)"
+	stage2_targets="$(LD_LIBRARY_PATH="$PKGDEST/usr/lib" \
+		"$PKGDEST/usr/bin/rustc" --print target-list || true)"
+	printf '%s\n' "$stage2_targets" | grep -qx 'x86_64-akadata-linux-musl' ||
+		fatal "stage2 rustc does not enumerate x86_64-akadata-linux-musl"
 }

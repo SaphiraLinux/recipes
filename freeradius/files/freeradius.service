@@ -1,14 +1,27 @@
+# Hatched-refined unit (operator template): config check, runtime dir,
+# restart pacing. Plus the raddb ownership line, which MUST stay ahead
+# of the config check - fresh installs ship raddb root:root (makepkg
+# flattens payload ownership) and radiusd -C running as radius would
+# fail on permissions before ever parsing. Order: dirs, ownership,
+# then check.
 [Unit]
-Description=FreeRADIUS authentication server
+Description=FreeRADIUS high performance RADIUS server
+Documentation=man:radiusd(8) man:radiusd.conf(5)
 After=network.target
+Wants=network.target
 
 [Service]
 Type=simple
 User=radius
 Group=radius
-ExecStartPre=/usr/bin/install -d -m 0750 -o radius -g radius /var/log/radius /var/lib/radius
+ExecStartPre=+/usr/bin/install -d -o radius -g radius -m 0750 /var/log/radius /var/lib/radius
+ExecStartPre=+/bin/sh -c 'chown -R root:radius /etc/raddb && find /etc/raddb -type d -exec chmod 0750 {} + && find /etc/raddb -type f ! -path "*/certs/bootstrap" -exec chmod 0640 {} + && chmod 0750 /etc/raddb/certs/bootstrap'
+ExecStartPre=/usr/sbin/radiusd -C
+RuntimeDirectory=radiusd
+RuntimeDirectoryMode=0750
 ExecStart=/usr/sbin/radiusd -f
 Restart=on-failure
+RestartSec=2s
 
 [Install]
 WantedBy=multi-user.target

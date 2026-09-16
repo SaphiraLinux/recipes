@@ -23,7 +23,10 @@ from typing import NoReturn
 PLAN_SCHEMA = "saphira-build-plan/v1"
 FAILED_MARKER = "saphira-buildpkg-failed/v1\n"
 BASE_SCHEMA = "saphira-base-root/v1"
-BASE_STATE_SCHEMA = "saphira-base-root-state/v1"
+# v2: the minimal account database includes a locked root shadow
+# row (package install scripts require passwd+group+shadow); v1
+# bases are rebuilt automatically on next use.
+BASE_STATE_SCHEMA = "saphira-base-root-state/v2"
 HOLDER_SCHEMA = "saphira-overlay-holder/v1"
 OVERLAY_OPTIONS = "userxattr,index=off"
 CONFIG_KEYS = (
@@ -84,6 +87,75 @@ def live_repo_dir(config: dict[str, str]) -> Path:
     if not names or any(not REPO_NAME_RE.fullmatch(name) for name in names):
         die(f"invalid SAPHIRA_REPO_NAMES: {config['SAPHIRA_REPO_NAMES']!r}")
     return Path(config["SAPHIRA_REPO_DIR"]) / names[-1] / config["SAPHIRA_ARCH"]
+
+
+def _seed_drift_names(seed_names: list[str], receipt_nvrs: dict[str, str],
+                      live_filenames: list[str]) -> list[str]:
+    """Seed names whose base receipt no longer resolves against the live
+    repository: the receipt NVR is absent (purged, replaced, or never
+    published), or a higher pkgrel exists on its line. Pure function
+    (unit-tested). Coexisting upstream lines (kernel headers per
+    kernel, kmods per kver) are normal and never drift on their own;
+    version ordering across lines is deliberately never attempted
+    (same discipline as _newer_live_nvr). An empty live listing means
+    the repo cannot be judged, never drift."""
+    if not live_filenames:
+        return []
+    live_set = set(live_filenames)
+    by_name: dict[str, list[str]] = {}
+    for filename in live_set:
+        parts = _split_nvr(filename)
+        if parts is None:
+            continue
+        by_name.setdefault(parts[0], []).append(filename)
+    drift = []
+    for name in seed_names:
+        receipt = receipt_nvrs.get(name)
+        if receipt is None:
+            drift.append(name)
+            continue
+        candidate = f"{name}-{receipt}.apk"
+        if _split_nvr(candidate) is None:
+            drift.append(name)
+            continue
+        if candidate not in live_set:
+            drift.append(name)
+            continue
+        if _newer_live_nvr(by_name[name], candidate) is not None:
+            drift.append(name)
+    return sorted(drift)
+
+
+def _base_generation(fingerprint: str, receipt_bytes: bytes) -> str:
+    """Content identity of the canonical base: seed names (fingerprint)
+    plus resolved seed NVRs (receipt). Workspaces stamp it at creation;
+    a mismatch means the workspace predates the current base."""
+    digest = hashlib.sha256()
+    digest.update(fingerprint.encode("utf-8"))
+    digest.update(b"\0")
+    digest.update(receipt_bytes)
+    return digest.hexdigest()
+
+
+def _current_base_generation(config: dict[str, str]) -> str | None:
+    """Generation of the on-disk canonical base, or None when its state
+    is unreadable (caller treats None as stale)."""
+    state_dir = Path(config["SAPHIRA_BUILD_ROOT"]) / "rootfs_overlay" / "state"
+    try:
+        state = json.loads((state_dir / "base.json").read_text(encoding="utf-8"))
+        receipt_bytes = (state_dir / "package-seed.json").read_bytes()
+        return _base_generation(str(state["fingerprint"]), receipt_bytes)
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def _workspace_disposition(stamped: str | None, current: str | None) -> str:
+    """'reuse' only on exact base-generation match; anything else
+    (missing stamp, unreadable base, drift) moves the retained
+    workspace aside for diagnosis and builds fresh."""
+    if stamped and current and stamped == current:
+        return "reuse"
+    return "move_aside"
 
 
 class BuildError(RuntimeError):
@@ -239,8 +311,15 @@ class Transaction:
                 die(f"cannot read FAILED marker in {self.workspace}: {exc}")
             if marker_value != FAILED_MARKER:
                 die(f"workspace FAILED marker is not trusted: {marker}")
-            self._kill_recorded_holder()
-            shutil.rmtree(self.workspace)
+            # A retained failed workspace whose base generation is stale
+            # (the canonical base was rebuilt since it ran) must not be
+            # reused for execution: move it aside with logs intact and
+            # build fresh from the current base. Same-generation retries
+            # keep the existing marker lifecycle below.
+            self._move_aside_if_stale_base()
+            if self.workspace.exists() or self.workspace.is_symlink():
+                self._kill_recorded_holder()
+                shutil.rmtree(self.workspace)
         self.workspace.mkdir()
         for directory in (
             self.root, self.upper, self.work,
@@ -248,11 +327,40 @@ class Transaction:
             self.logs, self.package_tmp,
         ):
             directory.mkdir(parents=True)
+        generation = _current_base_generation(self.config)
+        if generation is None:
+            die("cannot determine canonical base generation for workspace stamp (rebuild the base)")
+        (self.workspace / "base-generation.json").write_text(
+            json.dumps({"generation": generation,
+                        "schema": "saphira-workspace-base/v1"},
+                       sort_keys=True) + "\n",
+            encoding="utf-8")
         base_receipt = self.overlay_root / "state" / "package-seed.json"
         if not base_receipt.is_file():
             die(f"canonical base root receipt is missing (run with SAPHIRA_BASE_REBUILD=1 to rebuild): {base_receipt}")
         shutil.copy2(base_receipt, self.package_receipt)
         self.log_stream = self.log_path.open("x", encoding="utf-8")
+
+    def _move_aside_if_stale_base(self) -> None:
+        current = _current_base_generation(self.config)
+        stamped = None
+        try:
+            stamped = json.loads(
+                (self.workspace / "base-generation.json").read_text(encoding="utf-8")
+            ).get("generation")
+        except (OSError, ValueError, AttributeError):
+            stamped = None
+        if _workspace_disposition(stamped, current) == "reuse":
+            return
+        stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+        aside = self.workspace.with_name(f"{self.workspace.name}.stale-{stamp}")
+        if aside.exists() or aside.is_symlink():
+            aside = self.workspace.with_name(
+                f"{self.workspace.name}.stale-{stamp}-{os.getpid()}")
+        print(f"buildpkg: retained workspace predates the current base generation; "
+              f"moving aside to {aside} and building fresh", file=sys.stderr)
+        self._kill_recorded_holder()
+        shutil.move(str(self.workspace), str(aside))
 
     def log(self, message: str) -> None:
         if self.log_stream is None or self.log_stream.closed:
@@ -479,6 +587,47 @@ class Transaction:
             stream.write("\n")
         return plan
 
+    def _module_key_options(self) -> list[str]:
+        # Canonical module signing key, exposed read-only at a fixed
+        # in-namespace path. Missing/unreadable is NEVER silent: it logs
+        # a loud warning here, and recipes declaring
+        # saphira_sign_key_required=yes die in the worker before spending
+        # anything (nothing is ever built unsigned). Ordinary packages
+        # declare nothing and proceed - the warning is the signal.
+        # The host file must grant the builder UID read access (group
+        # membership does not survive the user namespace; use a UID ACL,
+        # never world-readable).
+        key = (os.environ.get("SAPHIRA_MODULE_KEY") or
+               self.config.get("SAPHIRA_MODULE_KEY", "") or
+               "/etc/saphira/keys/module-signing.pem")
+        if not os.path.isfile(key):
+            self.log(f"WARNING: module signing key missing: {key} - "
+                     "builds declaring it required will fail closed")
+            print(f"WARNING: module signing key missing: {key} - "
+                  "builds declaring it required will fail closed",
+                  file=sys.stderr)
+            return []
+        if not os.access(key, os.R_OK):
+            self.log(f"WARNING: module signing key unreadable: {key} - "
+                     "grant the builder UID read access "
+                     "(setfacl -m u:<builder>:r) - builds declaring it "
+                     "required will fail closed")
+            print(f"WARNING: module signing key unreadable: {key} - "
+                  "grant the builder UID read access "
+                  "(setfacl -m u:<builder>:r) - builds declaring it "
+                  "required will fail closed", file=sys.stderr)
+            return []
+        return ["--dir", "/keys", "--ro-bind", key, "/keys/module-signing.pem"]
+
+    def _ns_tmp_options(self) -> list[str]:
+        # The isolated namespace keeps the POSIX /tmp name (countless build
+        # tools reference it), but it is never host /tmp and never a tmpfs:
+        # it is bound to per-workspace stage storage, visible under /build
+        # and disposed with the workspace (retained on failure as evidence).
+        ns_tmp = self.stage / "tmp"
+        ns_tmp.mkdir(parents=True, exist_ok=True)
+        return ["--dir", "/tmp", "--bind", str(ns_tmp), "/tmp"]
+
     def _bootstrap_bwrap(self, apk_arguments: list[str]) -> None:
         runtime = dynamic_runtime_files(self.config["SAPHIRA_APK"])
         directories = {"/bin", "/lib", "/usr", "/usr/bin", "/usr/lib", "/target", "/repository", "/keys"}
@@ -493,7 +642,7 @@ class Transaction:
         ]
         for directory in sorted(directories, key=lambda item: (item.count("/"), item)):
             command.extend(("--dir", directory))
-        command.extend(("--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp"))
+        command.extend(("--dev", "/dev", "--proc", "/proc", *self._ns_tmp_options()))
         for path in runtime:
             command.extend(("--ro-bind", path, path))
         repo_dir = live_repo_dir(self.config)
@@ -583,7 +732,7 @@ class Transaction:
             self.config["SAPHIRA_BWRAP"], "--die-with-parent", "--new-session",
             "--unshare-all", "--uid", "0", "--gid", "0", "--clearenv",
             "--bind", str(self.root), "/", "--dev", "/dev", "--proc", "/proc",
-            "--tmpfs", "/tmp", "--setenv", "PATH", "/usr/bin:/bin:/usr/sbin:/sbin",
+            *self._ns_tmp_options(), "--setenv", "PATH", "/usr/bin:/bin:/usr/sbin:/sbin",
             "/usr/sbin/update-ca-certificates",
         ])
         if not (self.root / "etc/ssl/certs/ca-certificates.crt").is_file():
@@ -605,6 +754,25 @@ class Transaction:
                 "{ grep -q '^root:' /etc/group 2>/dev/null || "
                 "printf 'root:x:0:\\n' >> /etc/group; }",
             ])
+        # The account database must be complete, not just resolvable:
+        # package install scripts reconcile declared identities through
+        # ensure-identity.sh, which requires passwd, group AND shadow.
+        # A locked root row is the safe seed (live provisioning owns
+        # real credentials; clean roots are disposable and never reach
+        # payloads or images).
+        shadow = self.root / "etc/shadow"
+        try:
+            shadow_content = shadow.read_text(encoding="utf-8")
+        except OSError:
+            shadow_content = ""
+        if not any(line.startswith("root:") for line in shadow_content.splitlines()):
+            self.run([
+                self.config["SAPHIRA_BWRAP"], "--die-with-parent", "--new-session",
+                "--unshare-all", "--uid", "0", "--gid", "0", "--clearenv",
+                "--bind", str(self.root), "/", "/bin/sh", "-c",
+                "printf 'root:!:0:0:99999:7:::\\n' >> /etc/shadow && "
+                "chmod 0600 /etc/shadow",
+            ])
 
     def root_apk(self, arguments: list[str], *, allow_untrusted: bool = False) -> None:
         repo_dir = live_repo_dir(self.config)
@@ -620,11 +788,22 @@ class Transaction:
             "--ro-bind", str(repo_dir), "/repository",
             "--ro-bind", str(self.artifacts), "/artifacts",
             "--ro-bind", str(trust_key), f"/keys/{trust_key.name}",
-            "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp",
+            "--dev", "/dev", "--proc", "/proc", *self._ns_tmp_options(),
             "--setenv", "PATH", "/usr/bin:/bin",
             "/usr/bin/apk", "--root", "/", "--no-cache", "--no-network",
             "--repositories-file", "/dev/null", "--keys-dir", "/keys",
             "--repository", "/repository/Packages.adb",
+            # Non-live root: install files only, never converge.
+            # Package scripts solely invoke the identity reconciler
+            # (makepkg generates nothing else), whose chowns cannot
+            # succeed under the rootless single-UID namespace (EINVAL
+            # on any non-zero UID - proven) and whose results no build
+            # consumes (builds cope without live identities via
+            # SAPHIRA_* fallbacks; payload ownership comes from
+            # makepkg staging). Same --no-scripts rule as the
+            # repo_db.py/saphira-accounts-bootstrap scratch installs.
+            # Live installs (installpkg) always run scripts.
+            "--no-scripts",
             # Genesis transition: some stage4-era packages ship
             # overlapping artifacts (e.g. /usr/share/info/dir); the
             # root setup must not deadlock on their legacy payloads.
@@ -709,7 +888,8 @@ class Transaction:
             "--dir", "/artifacts", "--bind", str(self.artifacts), "/artifacts",
             "--dir", "/controller", "--ro-bind", str(worker), "/controller/buildpkg-single",
             "--ro-bind", str(config_file), "/controller/package_builder.sh",
-            "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp",
+            "--dev", "/dev", "--proc", "/proc", *self._ns_tmp_options(),
+            *self._module_key_options(),
             *ccache_options,
             *source_cache_options,
             "--setenv", "PATH", worker_path,
@@ -1023,12 +1203,40 @@ class BaseRoot:
                 and state.get("fingerprint") == fingerprint
                 and self.intact()
             )
+            if fresh:
+                # The fingerprint pins seed NAMES, not versions: a bumped
+                # seed package (e.g. saphira-baselayout, whose scripts
+                # every package install assumes) must invalidate the base
+                # automatically, or newly bumped packages build against an
+                # obsolete environment. No operator rebuild flag required.
+                drift = self._seed_drift()
+                if drift:
+                    print(f"buildpkg: seed drift in live repo ({', '.join(drift)}); rebuilding canonical base root", file=sys.stderr)
+                    fresh = False
             if os.environ.get("SAPHIRA_BASE_REBUILD", "") == "1":
                 print("buildpkg: SAPHIRA_BASE_REBUILD=1 forces a canonical base root rebuild", file=sys.stderr)
                 fresh = False
             if not fresh:
                 self._rebuild(fingerprint)
             self._retire_stale_bases()
+
+    def _seed_drift(self) -> list[str]:
+        """Seed names whose live NVRs differ from the base receipt (see
+        _seed_drift_names). Unreadable receipt counts as drift (rebuild
+        heals it); an unreadable live repo counts as none (the build
+        itself surfaces repository trouble)."""
+        try:
+            receipt = json.loads(self.receipt_path.read_text(encoding="utf-8"))
+            resolved = {item["name"]: item["version"] for item in receipt.get("resolved", [])}
+        except (OSError, ValueError, AttributeError, KeyError, TypeError):
+            return ["<unreadable base receipt>"]
+        seed_names = shlex.split(self.config["SAPHIRA_BUILD_SEED"])
+        try:
+            archdir = live_repo_dir(self.config)
+            live_files = [entry.name for entry in archdir.glob("*.apk")]
+        except OSError:
+            return []
+        return _seed_drift_names(seed_names, resolved, live_files)
 
     def _rebuild(self, fingerprint: str) -> None:
         if self.staging.exists() or self.staging.is_symlink():

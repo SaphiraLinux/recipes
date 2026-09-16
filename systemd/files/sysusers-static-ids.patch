@@ -1,0 +1,14 @@
+--- a/sysusers.d/systemd-coredump.conf
++++ b/sysusers.d/systemd-coredump.conf
+@@ -6,3 +6,3 @@
+ #  (at your option) any later version.
+ 
+-u! systemd-coredump - "systemd Core Dumper"
++u! systemd-coredump 144 "systemd Core Dumper"
+--- a/sysusers.d/systemd-oom.conf
++++ b/sysusers.d/systemd-oom.conf
+@@ -6,3 +6,3 @@
+ #  (at your option) any later version.
+ 
+-u! systemd-oom - "systemd Userspace OOM Killer"
++u! systemd-oom 130 "systemd Userspace OOM Killer"

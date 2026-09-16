@@ -15,7 +15,11 @@ assert_not_contains() { grep -qF -- "$2" "$1" && bad "$3 (unexpected: $2)" || ok
 assert_line() { grep -qF -- "$2" "$1" && ok || bad "$3"; }
 assert_eq() { [ "$2" = "$3" ] && ok || bad "$1 (got: $2, want: $3)"; }
 
-TMP=$(mktemp -d /tmp/saphira-bumppkg-test.XXXXXX)
+test_tmp_base=${SAPHIRA_TMPDIR:-/build/test-tmp}
+mkdir -p "$test_tmp_base"
+TMP=$(mktemp -d "$test_tmp_base/saphira-bumppkg-test.XXXXXX")
+export SAPHIRA_TMPDIR=$TMP/tool-tmp
+mkdir -p "$SAPHIRA_TMPDIR"
 trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/recipes" "$TMP/repo" "$TMP/state"
 

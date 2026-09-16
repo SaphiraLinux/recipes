@@ -33,6 +33,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import NoReturn
 
+def saphira_tmpdir():
+    """Host scratch base for temp dirs. Host /tmp is never Saphira scratch."""
+    base = os.environ.get("SAPHIRA_TMPDIR", "/build/tmp")
+    os.makedirs(base, exist_ok=True)
+    return base
+
+
 CONFIG_KEYS = (
     "SAPHIRA_REPO_DIR",
     "SAPHIRA_REPO_NAMES",
@@ -289,7 +296,7 @@ def main() -> int:
             for package in sorted(target_dir.glob("*.apk")):
                 run([apk, "verify", "--keys-dir", trust_dir, str(package)])
 
-            with tempfile.TemporaryDirectory(prefix="seed-repo-") as workspace:
+            with tempfile.TemporaryDirectory(prefix="seed-repo-", dir=saphira_tmpdir()) as workspace:
                 packages_adb = Path(workspace) / "Packages.adb"
                 apkindex = Path(workspace) / "APKINDEX.tar.gz"
                 run([apk, "mkndx", "--allow-untrusted", "--hash", "sha256-160",
@@ -320,7 +327,7 @@ def main() -> int:
                 db_path = target_dir / "repository.db"
                 census_data = rdb.census(apk, target_dir)
                 carriers = rdb.fragment_carriers(census_data)
-                with tempfile.TemporaryDirectory(prefix="seed-repo-extract-") as extract_tmp:
+                with tempfile.TemporaryDirectory(prefix="seed-repo-extract-", dir=saphira_tmpdir()) as extract_tmp:
                     declarations = rdb.extract_declarations(
                         apk, str(target_dir), carriers, extract_tmp)
                 conn = rdb.connect(str(db_path))
@@ -328,15 +335,23 @@ def main() -> int:
                     rdb.init_db(conn, new_name, False)
                     published_at = rdb.utcnow()
                     rdb.sync_packages(conn, census_data, declarations, apk, published_at)
-                    notices: list[str] = []
-                    for row in rdb.derive_ledger(apk, census_data, declarations, notices):
-                        conn.execute(
-                            "INSERT INTO reservations(kind, name, numeric_id, owning_package,"
-                            " first_nvr, last_nvr, status, declaration_sha256)"
-                            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)", row)
-                    rdb.set_meta(conn, "seeded_from", source_name)
-                    rdb.set_meta(conn, "last_audit", published_at)
-                    conn.commit()
+                    # Genesis rows are one explicit transaction too
+                    # (autocommit strands partial writes on kill).
+                    conn.execute("BEGIN IMMEDIATE")
+                    try:
+                        notices: list[str] = []
+                        for row in rdb.derive_ledger(apk, census_data, declarations, notices):
+                            conn.execute(
+                                "INSERT INTO reservations(kind, name, numeric_id, owning_package,"
+                                " first_nvr, last_nvr, status, declaration_sha256)"
+                                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)", row)
+                        rdb.set_meta(conn, "seeded_from", source_name)
+                        rdb.set_meta(conn, "last_audit", published_at)
+                    except BaseException:
+                        conn.execute("ROLLBACK")
+                        raise
+                    else:
+                        conn.execute("COMMIT")
                 finally:
                     conn.close()
                 os.chmod(db_path, 0o664)

@@ -2,12 +2,20 @@
 
 pkgname=python-cryptography
 pkgver=46.0.2
-pkgrel=1
+# r2: rebuild against the branded rustc (x86_64-akadata-linux-musl).
+pkgrel=2
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="Cryptographic recipes and primitives for Python (Rust-backed)"
 license="Apache-2.0 OR BSD-3-Clause"
 origin=python-cryptography
 repo=saphira
+# Path handover from the dead renamed akadata-unified-memory-mcp (which
+# vendored this whole tree): the file gate exempts retired names listed
+# here, same precedent as expat absorbing libexpat. The live
+# saphira-unified-memory-mcp r21+ no longer vendors these paths (it
+# depends on this package instead), so this only ever fires against the
+# dead rename row.
+replaces="akadata-unified-memory-mcp"
 url=https://github.com/pyca/cryptography
 source=https://files.pythonhosted.org/packages/source/c/cryptography/cryptography-46.0.2.tar.gz
 sha256=21b6fc8c71a3f9a604f028a329e5560009cc4a3a828bfea5fcba8eb7647d88fe
@@ -47,6 +55,10 @@ recipe_build()
 {
 	vendor=$BUILDDIR/vendor
 	mkdir -p "$vendor" "$SRC/.cargo"
+	# Loop variables must stay function-local: url/license collide with
+	# builder metadata globals, and the final failing read would otherwise
+	# clear them (empty license/url in the normalized manifest).
+	local source version url checksum archive license
 	while IFS='|' read -r source version url checksum archive license; do
 		crate_archive=$BUILDDIR/$archive
 		curl -fsSL --retry 3 --output "$crate_archive" "$url" ||

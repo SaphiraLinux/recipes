@@ -2,7 +2,9 @@
 
 pkgname=rust-src
 pkgver=1.97.1
-pkgrel=1
+# r2: generation sync with the branded rustc r2 (same sources, same
+# shared install path; the tuple needs no target-specific dir).
+pkgrel=2
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="Rust standard library source (rust-analyzer type info, -Zbuild-std)"
 license="MIT OR Apache-2.0"

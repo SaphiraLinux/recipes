@@ -2,7 +2,7 @@
 
 pkgname=saphira-baselayout
 pkgver=0.1
-pkgrel=11
+pkgrel=15
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="Saphira filesystem skeleton and platform tools (init-system neutral)"
 license="BUSL-1.1"
@@ -15,6 +15,11 @@ depends=""
 
 makedepends=""
 
+# r15: ensure-identity.sh auto-repairs exact legacy mappings in
+# place (locked, backed up, post-verified), so apk fix/upgrade
+# self-heal recognised drift with no manual reconcile step;
+# saphira-identity reconcile's user-side target-GID check aligned
+# to the declared primary group (same rule both tools).
 # r5: accounts.tsv gained the proxyto:proxyto 19 reservation after r4
 # was cut (hatchling's r4 predates it, so promote-repo would publish
 # stale bytes under a live NVR - payload changed, revision bumps).
@@ -65,6 +70,8 @@ recipe_install()
 		"$PKGDEST/sbin/saphira-firstboot"
 	install -m 0755 "$RECIPE_DIR/files/saphira-network-config" \
 		"$PKGDEST/sbin/saphira-network-config"
+	install -m 0755 "$RECIPE_DIR/files/sbin/saphira-identity" \
+		"$PKGDEST/sbin/saphira-identity"
 	install -m 0755 "$RECIPE_DIR/files/installkernel" \
 		"$PKGDEST/sbin/installkernel"
 	install -m 0755 "$RECIPE_DIR/files/nologin" "$PKGDEST/sbin/nologin"

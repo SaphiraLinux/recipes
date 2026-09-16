@@ -1,0 +1,766 @@
+--- a/addcr.c
++++ b/addcr.c
+@@ -1,7 +1,7 @@
+ #include "buffer.h"
+ #include "exit.h"
+ 
+-main()
++int main()
+ {
+   register int n;
+   register char *x;
+--- a/alloc.c
++++ b/alloc.c
+@@ -1,3 +1,4 @@
++#include <errno.h>
+ #include "alloc.h"
+ #include "error.h"
+ extern char *malloc();
+--- a/argv0.c
++++ b/argv0.c
+@@ -1,7 +1,7 @@
+ #include "pathexec.h"
+ #include "strerr.h"
+ 
+-main(int argc,char **argv,char **envp)
++int main(int argc,char **argv,char **envp)
+ {
+   if (argc < 3)
+     strerr_die1x(100,"argv0: usage: argv0 realname program [ arg ... ]");
+--- a/auto-str.c
++++ b/auto-str.c
+@@ -10,7 +10,7 @@
+   if (buffer_puts(&b,s) == -1) _exit(111);
+ }
+ 
+-main(int argc,char **argv)
++int main(int argc,char **argv)
+ {
+   char *name;
+   char *value;
+--- a/buffer_get.c
++++ b/buffer_get.c
+@@ -1,3 +1,4 @@
++#include <errno.h>
+ #include "buffer.h"
+ #include "byte.h"
+ #include "error.h"
+--- a/buffer_put.c
++++ b/buffer_put.c
+@@ -1,3 +1,4 @@
++#include <errno.h>
+ #include "buffer.h"
+ #include "str.h"
+ #include "byte.h"
+--- a/cdb.c
++++ b/cdb.c
+@@ -1,7 +1,8 @@
+-/* Public domain. */
+-
++#include <errno.h>
+ #include <sys/types.h>
+ #include <sys/stat.h>
++/* Public domain. */
++
+ #include <sys/mman.h>
+ #include "readwrite.h"
+ #include "error.h"
+--- a/cdb_make.c
++++ b/cdb_make.c
+@@ -1,3 +1,4 @@
++#include <errno.h>
+ /* Public domain. */
+ 
+ #include "readwrite.h"
+--- a/chkshsgr.c
++++ b/chkshsgr.c
+@@ -1,6 +1,9 @@
++#include <sys/types.h>
++#include <grp.h>
+ #include "exit.h"
++#include <unistd.h>
+ 
+-main()
++int main()
+ {
+   short x[4];
+ 
+--- a/delcr.c
++++ b/delcr.c
+@@ -1,7 +1,7 @@
+ #include "buffer.h"
+ #include "exit.h"
+ 
+-main()
++int main()
+ {
+   register int n;
+   register char *x;
+--- a/dns_dfd.c
++++ b/dns_dfd.c
+@@ -1,3 +1,4 @@
++#include <errno.h>
+ #include "error.h"
+ #include "alloc.h"
+ #include "byte.h"
+--- a/dns_packet.c
++++ b/dns_packet.c
+@@ -1,3 +1,4 @@
++#include <errno.h>
+ /*
+ DNS should have used LZ77 instead of its own sophomoric compression algorithm.
+ */
+--- a/dns_random.c
++++ b/dns_random.c
+@@ -1,6 +1,7 @@
+ #include "dns.h"
+ #include "taia.h"
+ #include "uint32.h"
++#include <unistd.h>
+ 
+ static uint32 seed[32];
+ static uint32 in[12];
+--- a/dns_rcrw.c
++++ b/dns_rcrw.c
+@@ -4,6 +4,7 @@
+ #include "str.h"
+ #include "openreadclose.h"
+ #include "dns.h"
++#include <unistd.h>
+ 
+ static stralloc data = {0};
+ 
+--- a/dns_transmit.c
++++ b/dns_transmit.c
+@@ -1,3 +1,6 @@
++#include <errno.h>
++#include <sys/types.h>
++#include <sys/socket.h>
+ #include "socket.h"
+ #include "alloc.h"
+ #include "error.h"
+@@ -5,6 +8,7 @@
+ #include "readwrite.h"
+ #include "uint16.h"
+ #include "dns.h"
++#include <unistd.h>
+ 
+ static int serverwantstcp(char *buf,unsigned int len)
+ {
+--- a/error.h
++++ b/error.h
+@@ -1,7 +1,6 @@
+ #ifndef ERROR_H
+ #define ERROR_H
+ 
+-extern int errno;
+ 
+ extern int error_intr;
+ extern int error_nomem;
+--- a/fd_copy.c
++++ b/fd_copy.c
+@@ -1,5 +1,6 @@
+ #include <fcntl.h>
+ #include "fd.h"
++#include <unistd.h>
+ 
+ int fd_copy(int to,int from)
+ {
+--- a/fd_move.c
++++ b/fd_move.c
+@@ -1,4 +1,5 @@
+ #include "fd.h"
++#include <unistd.h>
+ 
+ int fd_move(int to,int from)
+ {
+--- a/fixcrio.c
++++ b/fixcrio.c
+@@ -6,6 +6,8 @@
+ #include "exit.h"
+ #include "iopause.h"
+ #include "pathexec.h"
++#include <unistd.h>
++#include "fd.h"
+ 
+ #define FATAL "fixcrio: fatal: "
+ 
+@@ -126,7 +128,7 @@
+   _exit(0);
+ }
+ 
+-main(int argc,char **argv,char **envp)
++int main(int argc,char **argv,char **envp)
+ {
+   int piin[2];
+   int piout[2];
+--- a/hier.c
++++ b/hier.c
+@@ -1,5 +1,12 @@
+ #include "auto_home.h"
+ 
++/* Saphira: install.c defines these without a shared header. */
++extern void h(char *,int,int,int);
++extern void d(char *,char *,int,int,int);
++extern void z(char *,char *,int,int,int,int);
++extern void p(char *,char *,int,int,int);
++extern void c(char *,char *,char *,int,int,int);
++
+ void hier()
+ {
+   h(auto_home,-1,-1,02755);
+--- a/install.c
++++ b/install.c
+@@ -1,9 +1,27 @@
++#include <errno.h>
++#include <sys/types.h>
++#include <sys/stat.h>
+ #include "buffer.h"
+ #include "strerr.h"
+ #include "error.h"
+ #include "open.h"
+ #include "readwrite.h"
+ #include "exit.h"
++#include <unistd.h>
++#include <stdio.h>
++#include <stdlib.h>
++
++/* Saphira: DESTDIR prefixes every installed path for rootless
++   staging. Ownership needs no handling: hier() passes -1/-1
++   (chown no-op, succeeds unprivileged). */
++static const char *saphira_destdir = 0;
++static char *saphira_home(char *home)
++{
++  static char buf[512];
++  if (!saphira_destdir || !*saphira_destdir) return home;
++  snprintf(buf,sizeof buf,"%s%s",saphira_destdir,home);
++  return buf;
++}
+ 
+ extern void hier();
+ 
+@@ -17,6 +35,7 @@
+ int gid;
+ int mode;
+ {
++  home = saphira_home(home);
+   if (mkdir(home,0700) == -1)
+     if (errno != error_exist)
+       strerr_die4sys(111,FATAL,"unable to mkdir ",home,": ");
+@@ -33,6 +52,7 @@
+ int gid;
+ int mode;
+ {
++  home = saphira_home(home);
+   if (chdir(home) == -1)
+     strerr_die4sys(111,FATAL,"unable to switch to ",home,": ");
+   if (mkdir(subdir,0700) == -1)
+@@ -68,6 +88,7 @@
+     strerr_die4sys(111,FATAL,"unable to read ",file,": ");
+   buffer_init(&ssin,read,fdin,inbuf,sizeof inbuf);
+ 
++  home = saphira_home(home);
+   if (chdir(home) == -1)
+     strerr_die4sys(111,FATAL,"unable to switch to ",home,": ");
+   if (chdir(subdir) == -1)
+@@ -110,6 +131,7 @@
+ {
+   int fdout;
+ 
++  home = saphira_home(home);
+   if (chdir(home) == -1)
+     strerr_die4sys(111,FATAL,"unable to switch to ",home,": ");
+   if (chdir(subdir) == -1)
+@@ -137,8 +159,9 @@
+     strerr_die6sys(111,FATAL,"unable to chmod .../",subdir,"/",file,": ");
+ }
+ 
+-main()
++int main()
+ {
++  saphira_destdir = getenv("DESTDIR");
+   fdsourcedir = open_read(".");
+   if (fdsourcedir == -1)
+     strerr_die2sys(111,FATAL,"unable to open current directory: ");
+--- a/instcheck.c
++++ b/instcheck.c
+@@ -1,9 +1,11 @@
++#include <errno.h>
+ #include <sys/types.h>
+ #include <sys/stat.h>
+ #include "strerr.h"
+ #include "error.h"
+ #include "readwrite.h"
+ #include "exit.h"
++#include <unistd.h>
+ 
+ extern void hier();
+ 
+@@ -101,7 +103,7 @@
+   perm("",home,"/",file,S_IFREG,uid,gid,mode);
+ }
+ 
+-main()
++int main()
+ {
+   hier();
+   _exit(0);
+--- a/mconnect-io.c
++++ b/mconnect-io.c
+@@ -1,3 +1,4 @@
++#include <signal.h>
+ #include "sig.h"
+ #include "wait.h"
+ #include "fork.h"
+@@ -5,6 +6,7 @@
+ #include "strerr.h"
+ #include "readwrite.h"
+ #include "exit.h"
++#include <unistd.h>
+ 
+ char outbuf[512];
+ buffer bout;
+@@ -18,7 +20,7 @@
+   return read(fd,buf,len);
+ }
+ 
+-main()
++int main()
+ {
+   int pid;
+   int wstat;
+--- a/openreadclose.c
++++ b/openreadclose.c
+@@ -1,3 +1,4 @@
++#include <errno.h>
+ #include "error.h"
+ #include "open.h"
+ #include "readclose.h"
+--- a/pathexec_run.c
++++ b/pathexec_run.c
+@@ -1,8 +1,10 @@
++#include <errno.h>
+ #include "error.h"
+ #include "stralloc.h"
+ #include "str.h"
+ #include "env.h"
+ #include "pathexec.h"
++#include <unistd.h>
+ 
+ static stralloc tmp;
+ 
+--- a/prot.c
++++ b/prot.c
+@@ -1,3 +1,5 @@
++#include <unistd.h>
++#include <grp.h>
+ #include "hasshsgr.h"
+ #include "prot.h"
+ 
+--- a/rblsmtpd.c
++++ b/rblsmtpd.c
+@@ -1,3 +1,4 @@
++#include <unistd.h>
+ #include "byte.h"
+ #include "str.h"
+ #include "scan.h"
+@@ -153,7 +154,7 @@
+   _exit(0);
+ }
+ 
+-main(int argc,char **argv,char **envp)
++int main(int argc,char **argv,char **envp)
+ {
+   int flagwantdefaultrbl = 1;
+   char *x;
+--- a/readclose.c
++++ b/readclose.c
+@@ -1,6 +1,8 @@
++#include <errno.h>
+ #include "readwrite.h"
+ #include "error.h"
+ #include "readclose.h"
++#include <unistd.h>
+ 
+ int readclose_append(int fd,stralloc *sa,unsigned int bufsize)
+ {
+--- a/readwrite.h
++++ b/readwrite.h
+@@ -1,7 +1,8 @@
+ #ifndef READWRITE_H
+ #define READWRITE_H
+ 
+-extern int read();
+-extern int write();
++/* Saphira: read()/write() are system calls - their only correct
++   declarations come from unistd.h (ssize_t, 64-bit clean). */
++#include <unistd.h>
+ 
+ #endif
+--- a/recordio.c
++++ b/recordio.c
+@@ -8,6 +8,8 @@
+ #include "fmt.h"
+ #include "iopause.h"
+ #include "pathexec.h"
++#include <unistd.h>
++#include "fd.h"
+ 
+ #define FATAL "recordio: fatal: "
+ 
+@@ -141,7 +143,7 @@
+   _exit(0);
+ }
+ 
+-main(int argc,char **argv,char **envp)
++int main(int argc,char **argv,char **envp)
+ {
+   int piin[2];
+   int piout[2];
+--- a/remoteinfo.c
++++ b/remoteinfo.c
+@@ -1,3 +1,5 @@
++#include <errno.h>
++#include <sys/types.h>
+ #include "fmt.h"
+ #include "buffer.h"
+ #include "socket.h"
+@@ -5,6 +7,7 @@
+ #include "iopause.h"
+ #include "timeoutconn.h"
+ #include "remoteinfo.h"
++#include <unistd.h>
+ 
+ static struct taia now;
+ static struct taia deadline;
+--- a/seek_set.c
++++ b/seek_set.c
+@@ -1,5 +1,6 @@
+ #include <sys/types.h>
+ #include "seek.h"
++#include <unistd.h>
+ 
+ #define SET 0 /* sigh */
+ 
+--- a/socket.h
++++ b/socket.h
+@@ -18,5 +18,7 @@
+ extern int socket_remote4(int,char *,uint16 *);
+ 
+ extern void socket_tryreservein(int,int);
++extern int socket_tcpnodelay(int);
++extern int socket_ipoptionskill(int);
+ 
+ #endif
+--- a/socket_accept.c
++++ b/socket_accept.c
+@@ -1,6 +1,6 @@
+ #include <sys/types.h>
+-#include <sys/param.h>
+ #include <sys/socket.h>
++#include <sys/param.h>
+ #include <netinet/in.h>
+ #include "byte.h"
+ #include "socket.h"
+--- a/socket_bind.c
++++ b/socket_bind.c
+@@ -1,6 +1,6 @@
+ #include <sys/types.h>
+-#include <sys/param.h>
+ #include <sys/socket.h>
++#include <sys/param.h>
+ #include <netinet/in.h>
+ #include "byte.h"
+ #include "socket.h"
+--- a/socket_conn.c
++++ b/socket_conn.c
+@@ -1,6 +1,7 @@
++#include <errno.h>
+ #include <sys/types.h>
+-#include <sys/param.h>
+ #include <sys/socket.h>
++#include <sys/param.h>
+ #include <netinet/in.h>
+ #include "readwrite.h"
+ #include "byte.h"
+--- a/socket_delay.c
++++ b/socket_delay.c
+@@ -1,6 +1,6 @@
+ #include <sys/types.h>
+-#include <sys/param.h>
+ #include <sys/socket.h>
++#include <sys/param.h>
+ #include <netinet/in.h>
+ #include "socket.h"
+ 
+--- a/socket_listen.c
++++ b/socket_listen.c
+@@ -1,6 +1,6 @@
+ #include <sys/types.h>
+-#include <sys/param.h>
+ #include <sys/socket.h>
++#include <sys/param.h>
+ #include <netinet/in.h>
+ #include "socket.h"
+ 
+--- a/socket_local.c
++++ b/socket_local.c
+@@ -1,6 +1,6 @@
+ #include <sys/types.h>
+-#include <sys/param.h>
+ #include <sys/socket.h>
++#include <sys/param.h>
+ #include <netinet/in.h>
+ #include "byte.h"
+ #include "socket.h"
+--- a/socket_opts.c
++++ b/socket_opts.c
+@@ -1,6 +1,6 @@
+ #include <sys/types.h>
+-#include <sys/param.h>
+ #include <sys/socket.h>
++#include <sys/param.h>
+ #include <netinet/in.h>
+ #include "socket.h"
+ 
+--- a/socket_remote.c
++++ b/socket_remote.c
+@@ -1,6 +1,6 @@
+ #include <sys/types.h>
+-#include <sys/param.h>
+ #include <sys/socket.h>
++#include <sys/param.h>
+ #include <netinet/in.h>
+ #include "byte.h"
+ #include "socket.h"
+--- a/socket_tcp.c
++++ b/socket_tcp.c
+@@ -1,9 +1,10 @@
+ #include <sys/types.h>
+-#include <sys/param.h>
+ #include <sys/socket.h>
++#include <sys/param.h>
+ #include <netinet/in.h>
+ #include "ndelay.h"
+ #include "socket.h"
++#include <unistd.h>
+ 
+ int socket_tcp(void)
+ {
+--- a/socket_udp.c
++++ b/socket_udp.c
+@@ -1,9 +1,10 @@
+ #include <sys/types.h>
+-#include <sys/param.h>
+ #include <sys/socket.h>
++#include <sys/param.h>
+ #include <netinet/in.h>
+ #include "ndelay.h"
+ #include "socket.h"
++#include <unistd.h>
+ 
+ int socket_udp(void)
+ {
+--- a/strerr_sys.c
++++ b/strerr_sys.c
+@@ -1,3 +1,4 @@
++#include <errno.h>
+ #include "error.h"
+ #include "strerr.h"
+ 
+--- a/tcpclient.c
++++ b/tcpclient.c
+@@ -1,3 +1,5 @@
++#include <errno.h>
++#include <unistd.h>
+ #include <sys/types.h>
+ #include <sys/param.h>
+ #include <netdb.h>
+@@ -65,7 +67,7 @@
+ 
+ char seed[128];
+ 
+-main(int argc,char **argv)
++int main(int argc,char **argv)
+ {
+   unsigned long u;
+   int opt;
+--- a/tcprules.c
++++ b/tcprules.c
+@@ -1,3 +1,5 @@
++#include <stdio.h>
++#include <sys/types.h>
+ #include "strerr.h"
+ #include "stralloc.h"
+ #include "getln.h"
+@@ -6,6 +8,9 @@
+ #include "fmt.h"
+ #include "byte.h"
+ #include "cdb_make.h"
++#include <unistd.h>
++#include "scan.h"
++#include "open.h"
+ 
+ #define FATAL "tcprules: fatal: "
+ 
+@@ -87,7 +92,7 @@
+   if (cdb_make_add(&c,address.s,address.len,data.s,data.len) == -1) die_write();
+ }
+ 
+-main(int argc,char **argv)
++int main(int argc,char **argv)
+ {
+   int colon;
+   char *x;
+--- a/tcprulescheck.c
++++ b/tcprulescheck.c
+@@ -3,6 +3,8 @@
+ #include "strerr.h"
+ #include "env.h"
+ #include "rules.h"
++#include <unistd.h>
++#include "open.h"
+ 
+ void found(char *data,unsigned int datalen)
+ {
+@@ -31,7 +33,7 @@
+   _exit(0);
+ }
+ 
+-main(int argc,char **argv)
++int main(int argc,char **argv)
+ {
+   char *fnrules;
+   int fd;
+--- a/tcpserver.c
++++ b/tcpserver.c
+@@ -1,3 +1,5 @@
++#include <errno.h>
++#include <unistd.h>
+ #include <sys/types.h>
+ #include <sys/param.h>
+ #include <netdb.h>
+@@ -289,7 +291,7 @@
+   }
+ }
+ 
+-main(int argc,char **argv)
++int main(int argc,char **argv)
+ {
+   char *hostname;
+   char *portname;
+--- a/timeoutconn.c
++++ b/timeoutconn.c
+@@ -1,3 +1,4 @@
++#include <errno.h>
+ #include "ndelay.h"
+ #include "socket.h"
+ #include "iopause.h"
+--- a/trycpp.c
++++ b/trycpp.c
+@@ -1,4 +1,4 @@
+-main()
++int main()
+ {
+ #ifdef NeXT
+   printf("nextstep\n"); exit(0);
+--- a/trylsock.c
++++ b/trylsock.c
+@@ -1,4 +1,4 @@
+-main()
++int main()
+ {
+   ;
+ }
+--- a/trypoll.c
++++ b/trypoll.c
+@@ -2,7 +2,7 @@
+ #include <fcntl.h>
+ #include <poll.h>
+ 
+-main()
++int main()
+ {
+   struct pollfd x;
+ 
+--- a/trysgact.c
++++ b/trysgact.c
+@@ -1,6 +1,6 @@
+ #include <signal.h>
+ 
+-main()
++int main()
+ {
+   struct sigaction sa;
+   sa.sa_handler = 0;
+--- a/trysgprm.c
++++ b/trysgprm.c
+@@ -1,6 +1,6 @@
+ #include <signal.h>
+ 
+-main()
++int main()
+ {
+   sigset_t ss;
+  
+--- a/tryshsgr.c
++++ b/tryshsgr.c
+@@ -1,4 +1,4 @@
+-main()
++int main()
+ {
+   short x[4];
+  
+--- a/tryulong32.c
++++ b/tryulong32.c
+@@ -1,4 +1,4 @@
+-main()
++int main()
+ {
+   unsigned long u;
+   u = 1;
+--- a/tryulong64.c
++++ b/tryulong64.c
+@@ -1,4 +1,4 @@
+-main()
++int main()
+ {
+   unsigned long u;
+   u = 1;
+--- a/tryvfork.c
++++ b/tryvfork.c
+@@ -1,4 +1,4 @@
+-main()
++int main()
+ {
+   vfork();
+ }
+--- a/trywaitp.c
++++ b/trywaitp.c
+@@ -1,7 +1,7 @@
+ #include <sys/types.h>
+ #include <sys/wait.h>
+ 
+-main()
++int main()
+ {
+   waitpid(0,0,0);
+ }
+--- a/wait_pid.c
++++ b/wait_pid.c
+@@ -1,3 +1,4 @@
++#include <errno.h>
+ #include <sys/types.h>
+ #include <sys/wait.h>
+ #include "error.h"
+--- a/x86cpuid.c
++++ b/x86cpuid.c
+@@ -5,7 +5,7 @@
+   exit(1);
+ }
+ 
+-main()
++int main()
+ {
+   unsigned long x[4];
+   unsigned long y[4];

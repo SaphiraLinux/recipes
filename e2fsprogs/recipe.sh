@@ -10,7 +10,7 @@ repo=saphira
 url=https://e2fsprogs.sourceforge.net/
 e2fsprogs_sha256=08242e64ca0e8194d9c1caad49762b19209a06318199b63ce74ae4ef2d74e63c
 depends="util-linux"
-makedepends="util-linux-dev gawk gcc make pkgconf saphira-kernel-headers=7.1.5"
+makedepends="util-linux-dev gawk gcc make pkgconf saphira-kernel-headers"
 subpackages="$pkgname-dev $pkgname-doc"
 recipe_build() {
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$RECIPE_DIR/files/e2fsprogs-1.47.2.tar.xz"

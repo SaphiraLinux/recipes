@@ -1,0 +1,8 @@
+# coraza-spoa runtime identity (canonical, fixed): user coraza-spoa
+# UID 143, primary group coraza-spoa GID 143. Required by the shipped
+# service units (coraza-spoa.service User=/Group=, initd --user).
+# The daemon is stateless (YAML config + logs to stdout), so home is
+# /var/empty and no state dir stanza ships. UID 143 sits in the
+# preferred 0..199 packaged range - never reuse it for another identity.
+user coraza-spoa 143 coraza-spoa /var/empty /sbin/nologin
+group coraza-spoa 143

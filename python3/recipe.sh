@@ -15,7 +15,7 @@ makedepends="
 	gcc
 	gawk
 	libffi-dev
-	saphira-kernel-headers=7.1.5
+	saphira-kernel-headers
 	make
 	ncurses-dev
 	openssl-dev

@@ -17,7 +17,7 @@ depends=""
 makedepends="
     binutils
     gcc
-    saphira-kernel-headers=7.1.5
+    saphira-kernel-headers
     make
     perl
     pkgconf

@@ -4,7 +4,10 @@
 # knot configure fails closed without it).
 
 pkgname=libedit
-pkgver=20260512-3.1
+# Upstream versions this release 20260512-3.1, but '-' is illegal in
+# APK versions (it separates name/version/rel), so the NVR carries
+# 20260512.3.1 while source=/files keep the upstream dashed names.
+pkgver=20260512.3.1
 pkgrel=1
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="Command-line editing library"

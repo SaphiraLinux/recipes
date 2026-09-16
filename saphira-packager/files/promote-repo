@@ -89,7 +89,8 @@ already=0
 promoted_nvrs=()
 db_lock_held=""
 chmod g+rws -- "$to_dir" 2>/dev/null || true
-workspace=$(mktemp -d "${TMPDIR:-/tmp}/promote-repo.XXXXXX")
+mkdir -p -- "${SAPHIRA_TMPDIR:-/build/tmp}"
+workspace=$(mktemp -d "${SAPHIRA_TMPDIR:-/build/tmp}/promote-repo.XXXXXX")
 trap 'if [ -n "$db_lock_held" ]; then rmdir -- "$db_lock_held/repository.db.lock" 2>/dev/null || true; fi; rm -rf -- "$workspace"' EXIT HUP INT TERM
 
 for nvr in "$@"; do
@@ -148,6 +149,9 @@ import os
 import sys
 import tempfile
 
+_promote_tmp_base = os.environ.get("SAPHIRA_TMPDIR", "/build/tmp")
+os.makedirs(_promote_tmp_base, exist_ok=True)
+
 (lib_path, apk, to_dir, *nvrs) = sys.argv[1:]
 sys.path.insert(0, os.path.dirname(lib_path))
 import repo_db as rdb
@@ -169,7 +173,7 @@ for nvr in nvrs:
                         "replaces": sorted(dumped["replaces"]), "accounts": None}
     if any(f.startswith(rdb.FRAGMENT_PREFIX) for f in dumped["files"]):
         carriers.append(filename)
-with tempfile.TemporaryDirectory(prefix="promote-repo-extract-") as tmp:
+with tempfile.TemporaryDirectory(prefix="promote-repo-extract-", dir=_promote_tmp_base) as tmp:
     decls = rdb.extract_declarations(apk, to_dir, carriers, tmp)
 for filename, item in staged.items():
     item["accounts"] = decls.get(filename, {"users": [], "groups": [], "dirs": []})

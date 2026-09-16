@@ -10,7 +10,7 @@ repo=saphira
 url=https://gitlab.com/procps-ng/procps
 procps_ng_sha256=5ccf2299eea4751f0b76655d793aed3d63d5612fdd316e909e594b2f8e216af8
 depends="ncurses"
-makedepends="autoconf automake libtool gettext ncurses-dev saphira-kernel-headers=7.1.5 gcc make pkgconf"
+makedepends="autoconf automake libtool gettext ncurses-dev saphira-kernel-headers gcc make pkgconf"
 subpackages="$pkgname-dev $pkgname-doc"
 recipe_build() {
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$RECIPE_DIR/files/procps-ng-4.0.5.tar.gz"

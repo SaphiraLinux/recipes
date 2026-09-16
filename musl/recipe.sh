@@ -2,7 +2,13 @@
 
 pkgname=musl
 pkgver=1.2.6
-pkgrel=2
+# r3: static-PIE foundation repair. The static libc archive is now
+# assembled from musl's existing PIC object family (AOBJS = LOBJS via
+# config.mak override, per the Makefile's own "use config.mak to
+# override" contract) so libc.a links into static-PIE binaries.
+# Shared libc, loader, CRT, headers and ABI are intentionally
+# unchanged: libc.so keeps consuming the same LOBJS as before.
+pkgrel=3
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='musl libc 1.2.6 with the Saphira 1MiB pthread stack patch - the installable base libc'
 license='MIT'
@@ -46,7 +52,33 @@ recipe_build()
 	# clean root from the package seed: same-ABI rebuild, no cross
 	# toolchain and no host files involved.
 	./configure --prefix=/usr --syslibdir=/lib
+	# Saphira policy: the static libc archive must support static PIE.
+	# Reuse musl's existing PIC libc object set (LOBJS, built with
+	# -fPIC for libc.so) instead of the default non-PIC AOBJS.
+	# Verified against vendored 1.2.6: Makefile line 7 invites
+	# config.mak overrides, line 78 includes it after the defaults,
+	# line 132 compiles LOBJS with -fPIC, line 165 archives AOBJS.
+	printf '%s\n' \
+		'# Saphira policy: libc.a must be static-PIE capable.' \
+		'AOBJS = $(LOBJS)' >> config.mak
 	make -j${JOBS:-$(nproc)}
+
+	# Policy assert: every object in the static archive must be
+	# static-PIE capable (no absolute 32-bit relocations). Scans the
+	# actual archive that ships, not just the build tree.
+	rm -rf "$SRC/obj/piecheck" && mkdir -p "$SRC/obj/piecheck"
+	(cd "$SRC/obj/piecheck" && ar x "$SRC/lib/libc.a") || {
+		echo "ERROR: cannot extract lib/libc.a for PIE check" >&2
+		return 1
+	}
+	if readelf -r "$SRC/obj/piecheck"/* 2>/dev/null |
+		grep -E 'R_X86_64_32([^0-9]|$)'; then
+		echo "ERROR: libc.a contains non-PIC objects (absolute 32-bit relocations)" >&2
+		rm -rf "$SRC/obj/piecheck"
+		return 1
+	fi
+	rm -rf "$SRC/obj/piecheck"
+	echo "piecheck: libc.a is static-PIE capable"
 
 	# Self-hosting parity check: compare the freshly built dynamic
 	# loader and libc against the repository copies this clean root

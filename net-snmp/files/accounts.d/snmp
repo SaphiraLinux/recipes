@@ -1,0 +1,11 @@
+# snmp runtime identity (canonical, fixed): user snmp UID 105,
+# primary group snmp GID 105. Required by the shipped service units
+# (snmpd.service/snmptrapd.service User=snmp, both init scripts
+# command_user snmp:snmp with -u/-g drop). The daemons bind ports
+# 161/162 via a file capability (cap_net_bind_service), so the
+# account itself stays unprivileged.
+# UID 105 sits in the preferred 0..199 packaged range - never reuse it
+# for another identity. Persistent-state mode 0750 mirrors staging.
+user snmp 105 snmp /var/lib/snmp /sbin/nologin
+group snmp 105
+dir /var/lib/snmp 0750 snmp snmp

@@ -2,7 +2,7 @@
 
 pkgname=php85
 pkgver=8.5.9
-pkgrel=8
+pkgrel=9
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="PHP 8.5 language runtime: CLI, FPM, opcache and shared extensions"
 license="PHP-3.01"
@@ -47,8 +47,11 @@ subpackages="
 recipe_build()
 {
 	# Dual-format service package; ships a real /etc/php85/php-fpm.conf
-	# (upstream only leaves php-fpm.conf.default) and enables the bundled
-	# opcache as a shared extension.
+	# (upstream only leaves php-fpm.conf.default). OPcache is
+	# always-on and built into the binaries since PHP 8.4: there is no
+	# --enable-opcache switch anymore (configure warns it unrecognized)
+	# and no shared opcache.so target exists, so the ini below carries
+	# settings only, never a zend_extension line.
 	#
 	# r3: curl, zip and mbstring extensions enabled - their build-time
 # libraries (curl, libzip, oniguruma) are published now.
@@ -59,7 +62,7 @@ recipe_build()
 		--program-suffix=85 \
 		--with-config-file-path=/etc/php85 \
 		--with-config-file-scan-dir=/etc/php85/conf.d \
-		--enable-cli --enable-fpm --enable-opcache=shared \
+		--enable-cli --enable-fpm \
 		--with-mysqli=shared,mysqlnd \
 		--with-pdo-mysql=shared,mysqlnd --with-pdo-sqlite=shared \
 		--with-curl=shared --with-zip=shared --enable-mbstring=shared \
@@ -95,8 +98,14 @@ recipe_install()
 		"$PKGDEST/etc/init.d/php-fpm85"
 	install -m 0644 "$RECIPE_DIR/files/php-fpm85.service" \
 		"$PKGDEST/usr/lib/systemd/system/php-fpm85.service"
-	printf 'zend_extension=opcache.so\nopcache.enable=1\nopcache.enable_cli=0\n' \
+	printf 'opcache.enable=1\nopcache.enable_cli=0\n' \
 		> "$PKGDEST/etc/php85/conf.d/00_opcache.ini"
+	# Built-in accelerator proof: with no shared target, the setting
+	# lines above are only meaningful if OPcache compiled in. Ask the
+	# just-built CLI directly (perl-recipe precedent: validate the
+	# product, not the file list).
+	"$SRC/sapi/cli/php" -m | grep -qi 'Zend OPcache' ||
+		{ printf 'php85: OPcache not compiled in\n' >&2; exit 1; }
 	install_extension_ini mysqli mysqli
 	install_extension_ini pdo_mysql pdo_mysql
 	install_extension_ini pdo_sqlite pdo_sqlite

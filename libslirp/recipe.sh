@@ -13,7 +13,7 @@ libslirp_sha256=f3bd780f88472fea86e53c62b14120c93f4923bd4836ef33ffa878525ecb8f5b
 makedepends="
 	binutils
 	gcc
-	saphira-kernel-headers=7.1.5
+	saphira-kernel-headers
 	meson
 	ninja
 	pkgconf

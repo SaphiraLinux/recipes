@@ -41,6 +41,13 @@ import sys
 import tempfile
 from pathlib import Path
 
+def saphira_tmpdir():
+    """Host scratch base for temp dirs. Host /tmp is never Saphira scratch."""
+    base = os.environ.get("SAPHIRA_TMPDIR", "/build/tmp")
+    os.makedirs(base, exist_ok=True)
+    return base
+
+
 CONFIG_KEYS = (
     "SAPHIRA_REPO_DIR",
     "SAPHIRA_REPO_NAMES",
@@ -152,7 +159,7 @@ def build_database(rdb: object, config: dict, repo: str, out_db: Path,
     manifest["apk_identity_count"] = len(census_data)
     manifest["carriers"] = carriers
 
-    with tempfile.TemporaryDirectory(prefix="saphira-repo-migrate-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="saphira-repo-migrate-", dir=saphira_tmpdir()) as tmp:
         declarations = rdb.extract_declarations(apk, repo_dir, carriers, tmp)
     for filename in carriers:
         decl = declarations[filename]
@@ -307,7 +314,7 @@ def cmd_migrate(rdb: object, config: dict, repo: str) -> int:
                                        if history_complete else "current view; deep history needs the append-only archive"),
     }
     try:
-        with tempfile.TemporaryDirectory(prefix="saphira-repo-migrate-") as tmp:
+        with tempfile.TemporaryDirectory(prefix="saphira-repo-migrate-", dir=saphira_tmpdir()) as tmp:
             out_db = Path(tmp) / "repository.db"
             build_database(rdb, config, repo, out_db, ownership_path, manifest, notices,
                            history_complete)
@@ -385,43 +392,53 @@ def cmd_reconcile(rdb: object, config: dict, repo: str, from_history: bool) -> i
         print(f"saphira-repo-migrate: full census of {repo_dir} ...", flush=True)
         census_data = rdb.census(apk, repo_dir)
         carriers = rdb.fragment_carriers(census_data)
-        with tempfile.TemporaryDirectory(prefix="saphira-repo-reconcile-") as tmp:
+        with tempfile.TemporaryDirectory(prefix="saphira-repo-reconcile-", dir=saphira_tmpdir()) as tmp:
             declarations = rdb.extract_declarations(apk, repo_dir, carriers, tmp)
         notices: list[str] = []
         published_at = rdb.utcnow()
         rdb.sync_packages(conn, census_data, declarations, apk, published_at)
-        if from_history:
-            conn.execute("DELETE FROM reservations")
-            try:
-                ledger = rdb.derive_ledger(apk, census_data, declarations, notices)
-            except rdb.RepoDbError as exc:
-                raise MigrateError(str(exc))
-            for row in ledger:
-                conn.execute(
-                    "INSERT INTO reservations(kind, name, numeric_id, owning_package,"
-                    " first_nvr, last_nvr, status, declaration_sha256)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?)", row)
-        else:
-            # Current-view reconcile: verify the eternal ledger, advance
-            # legitimate drops to tombstones, never invent history.
-            live: list[tuple[str, dict]] = []
-            newest: dict[str, str] = {}
-            for filename, info in census_data.items():
-                name, version = info["name"], info["version"]
-                if name not in newest or rdb.apk_newer(apk, version, newest[name]):
-                    newest[name] = version
-            for name, version in sorted(newest.items()):
-                decl = declarations.get(f"{name}-{version}.apk",
-                                        {"users": [], "groups": [], "dirs": []})
-                if decl.get("users") or decl.get("groups"):
-                    live.append((f"{name}-{version}", decl))
-            try:
-                rdb.advance_reservations(conn, live, False, notices)
-            except rdb.RepoDbError as exc:
-                conn.rollback()
-                print(f"saphira-repo-migrate: reservation verification failed: {exc}",
-                      file=sys.stderr)
+        # Reservations rebuild is its own explicit transaction (autocommit
+        # connections strand partial writes on kill - same atomicity reason
+        # as sync_packages itself).
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            if from_history:
+                conn.execute("DELETE FROM reservations")
+                try:
+                    ledger = rdb.derive_ledger(apk, census_data, declarations, notices)
+                except rdb.RepoDbError as exc:
+                    raise MigrateError(str(exc))
+                for row in ledger:
+                    conn.execute(
+                        "INSERT INTO reservations(kind, name, numeric_id, owning_package,"
+                        " first_nvr, last_nvr, status, declaration_sha256)"
+                        " VALUES (?, ?, ?, ?, ?, ?, ?, ?)", row)
+            else:
+                # Current-view reconcile: verify the eternal ledger, advance
+                # legitimate drops to tombstones, never invent history.
+                live: list[tuple[str, dict]] = []
+                newest: dict[str, str] = {}
+                for filename, info in census_data.items():
+                    name, version = info["name"], info["version"]
+                    if name not in newest or rdb.apk_newer(apk, version, newest[name]):
+                        newest[name] = version
+                for name, version in sorted(newest.items()):
+                    decl = declarations.get(f"{name}-{version}.apk",
+                                            {"users": [], "groups": [], "dirs": []})
+                    if decl.get("users") or decl.get("groups"):
+                        live.append((f"{name}-{version}", decl))
+                try:
+                    rdb.advance_reservations(conn, live, False, notices)
+                except rdb.RepoDbError as exc:
+                    conn.rollback()
+                    print(f"saphira-repo-migrate: reservation verification failed: {exc}",
+                          file=sys.stderr)
                 return 1
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
+        else:
+            conn.execute("COMMIT")
         for notice in notices:
             print(f"saphira-repo-migrate: notice: {notice}")
         rdb.set_meta(conn, "last_audit", published_at)

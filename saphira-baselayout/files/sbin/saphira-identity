@@ -1,0 +1,498 @@
+#!/bin/sh
+# saphira-identity reconcile <package> [--apply] - migrate recognised
+# legacy account-database records to their declared identities.
+#
+# Account-database records ONLY (passwd/group, plus gshadow rows when
+# that file exists; shadow rows are name-keyed and untouched - enable
+# and disable stay exactly where they are). Filesystem ownership is
+# entirely outside this mechanism: install lays down the IDs present
+# in the APK, and this tool only corrects the /etc/passwd, /etc/group
+# (and /etc/shadow-adjacent) files. Nothing else.
+#
+# The legacy history comes from the package's
+# usr/share/saphira/accounts.d/<package>.legacy sidecar; only entries
+# declared there ever qualify (arbitrary mismatches have no migrate
+# path, ever). Two phases like the disable path: validate everything
+# first, then apply. Dry-run is the default (prints the plan, changes
+# nothing); --apply mutates under the account lock with a timestamped
+# backup. Already-migrated and already-absent entries are clean
+# no-ops, so repeats are harmless. Reserved identities can never be
+# legacy (refused at sidecar parse, like the reconciler).
+#
+# Purged-package recovery (the fragment ships in the package): install
+# the files without running scripts, migrate, then re-run them:
+#   apk add --no-scripts <package>
+#   saphira-identity reconcile <package> --apply
+#   apk fix <package>
+#
+# Target root: SAPHIRA_ENSURE_ROOT overrides / for tests (the process
+# table is then read from $ROOT/proc, which is empty hermetically).
+#
+# Note: after migration, users may reference a primary GID whose group
+# row does not exist yet (the group entry migrates separately, or the
+# install creates it). That dangling state is intentional and
+# transient: run the package install (or apk fix) immediately after,
+# whose ensure pass converges every declared identity.
+
+set -eu
+
+ROOT=${SAPHIRA_ENSURE_ROOT:-/}
+PASSWD=$ROOT/etc/passwd
+GROUPF=$ROOT/etc/group
+SHADOW=$ROOT/etc/shadow
+GSHADOW=$ROOT/etc/gshadow
+FRAGDIR=$ROOT/usr/share/saphira/accounts.d
+BACKUP_BASE=$ROOT/var/lib/saphira/identity-backups
+LOCKF=$ROOT/etc/.saphira-accounts.lock
+
+log()
+{
+	printf 'saphira-identity: %s\n' "$*"
+}
+
+die()
+{
+	printf 'saphira-identity: ERROR: %s\n' "$*" >&2
+	exit 1
+}
+
+usage()
+{
+	cat >&2 <<'EOF'
+usage: saphira-identity reconcile <package> [--apply]
+  Migrate recognised legacy passwd/group records to the identities
+  declared in usr/share/saphira/accounts.d/<package> (+ .legacy).
+  Default is dry-run (plan only). --apply mutates with backup.
+EOF
+	exit 2
+}
+
+[ "$#" -ge 1 ] || usage
+COMMAND=${1:?}
+[ "$COMMAND" = reconcile ] || usage
+shift
+APPLY=
+PKG=
+for arg in "$@"; do
+	case $arg in
+		--apply) APPLY=1 ;;
+		-*) usage ;;
+		*)
+			[ -z "$PKG" ] || usage
+			PKG=$arg
+			;;
+	esac
+done
+[ -n "$PKG" ] || usage
+case $PKG in
+	''|*[!a-zA-Z0-9_.-]*|.*|*/*) die "invalid package name: $PKG" ;;
+esac
+if [ "$ROOT" = / ] && [ "$(id -u)" != 0 ]; then
+	die "reconcile must run as root on the live system"
+fi
+
+FRAGMENT=$FRAGDIR/$PKG
+LEGACY=$FRAGMENT.legacy
+[ -f "$FRAGMENT" ] || die "package $PKG has no installed declaration ($FRAGMENT missing - install the package files first: apk add --no-scripts $PKG)"
+for f in "$PASSWD" "$GROUPF" "$SHADOW"; do
+	[ -f "$f" ] || die "account database is missing: $f"
+done
+
+# --- lookups (same shape as ensure-identity: shell builtins only) ---
+field()
+{
+	_n=$1
+	set -f
+	# shellcheck disable=SC2086
+	IFS=:; set -- $2
+	# shellcheck disable=SC1083,SC2086
+	eval "printf '%s' \"\${$_n-}\""
+}
+
+find_line()
+{
+	while IFS= read -r line || [ -n "$line" ]; do
+		case $line in
+			"$2":*) printf '%s\n' "$line"; return 0 ;;
+		esac
+	done < "$1"
+	return 1
+}
+
+find_uid()
+{
+	while IFS= read -r line || [ -n "$line" ]; do
+		[ "$(field 3 "$line")" = "$1" ] || continue
+		field 1 "$line"
+		return 0
+	done < "$PASSWD"
+	return 1
+}
+
+find_gid()
+{
+	while IFS= read -r line || [ -n "$line" ]; do
+		[ "$(field 3 "$line")" = "$1" ] || continue
+		field 1 "$line"
+		return 0
+	done < "$GROUPF"
+	return 1
+}
+
+valid_name()
+{
+	case $1 in
+		''|-*|*[!a-zA-Z0-9_.-]*) return 1 ;;
+	esac
+	return 0
+}
+
+group_gid()
+{
+	field 3 "$(find_line "$GROUPF" "$1" || true)"
+}
+
+# --- declaration + legacy load ---
+# Declared users: "name:uid:primary" / groups: "name:gid".
+# Legacy users: "name:olduid:oldgid" / groups: "name:oldgid".
+decl_users=
+decl_groups=
+leg_users=
+leg_groups=
+
+load_fragment()
+{
+	lineno=0
+	while IFS= read -r line || [ -n "$line" ]; do
+		lineno=$((lineno + 1))
+		case $line in
+			''|'#'*) continue ;;
+		esac
+		# shellcheck disable=SC2086
+		set -- $line
+		case $1 in
+			user)
+				[ $# -eq 6 ] || die "$FRAGMENT line $lineno: user needs 5 fields"
+				valid_name "$2" || die "$FRAGMENT line $lineno: invalid user name"
+				decl_users="$decl_users$2:$3:$4 "
+				;;
+			group)
+				[ $# -eq 3 ] || die "$FRAGMENT line $lineno: group needs 2 fields"
+				valid_name "$2" || die "$FRAGMENT line $lineno: invalid group name"
+				decl_groups="$decl_groups$2:$3 "
+				;;
+			dir|file) continue ;;
+			*) die "$FRAGMENT line $lineno: unknown stanza: $1" ;;
+		esac
+	done < "$FRAGMENT"
+}
+
+load_legacy()
+{
+	[ -f "$LEGACY" ] || return 0
+	lineno=0
+	while IFS= read -r line || [ -n "$line" ]; do
+		lineno=$((lineno + 1))
+		case $line in
+			''|'#'*) continue ;;
+		esac
+		# shellcheck disable=SC2086
+		set -- $line
+		[ "$1" = legacy ] || die "$LEGACY line $lineno: unknown stanza: $1"
+		case $2 in
+			user)
+				[ $# -eq 5 ] || die "$LEGACY line $lineno: legacy user needs 3 fields"
+				valid_name "$3" || die "$LEGACY line $lineno: invalid user name"
+				case $4 in ''|*[!0-9]*) die "$LEGACY line $lineno: invalid UID" ;; esac
+				case $5 in ''|*[!0-9]*) die "$LEGACY line $lineno: invalid GID" ;; esac
+				case $3 in root) die "$LEGACY line $lineno: root is never a legacy identity" ;; esac
+				case $4 in 0) die "$LEGACY line $lineno: UID 0 is never a legacy identity" ;; esac
+				leg_users="$leg_users$3:$(($4 + 0)):$(($5 + 0)) "
+				;;
+			group)
+				[ $# -eq 4 ] || die "$LEGACY line $lineno: legacy group needs 2 fields"
+				valid_name "$3" || die "$LEGACY line $lineno: invalid group name"
+				case $4 in ''|*[!0-9]*) die "$LEGACY line $lineno: invalid GID" ;; esac
+				case $3 in root|wheel|spokes) die "$LEGACY line $lineno: $3 is never a legacy identity" ;; esac
+				case $4 in 0|1|2) die "$LEGACY line $lineno: GID $4 is never a legacy identity" ;; esac
+				leg_groups="$leg_groups$3:$(($4 + 0)) "
+				;;
+			*) die "$LEGACY line $lineno: unknown legacy kind: $2" ;;
+		esac
+	done < "$LEGACY"
+}
+
+decl_user()
+{
+	# decl_user NAME -> "uid:primary" or empty.
+	for entry in $decl_users; do
+		case $entry in
+			"$1:"*) printf '%s' "${entry#*:}"; return 0 ;;
+		esac
+	done
+	return 1
+}
+
+decl_group()
+{
+	for entry in $decl_groups; do
+		case $entry in
+			"$1:"*) printf '%s' "${entry#*:}"; return 0 ;;
+		esac
+	done
+	return 1
+}
+
+load_fragment
+load_legacy
+if [ -z "$leg_users" ] && [ -z "$leg_groups" ]; then
+	log "no legacy entries for $PKG; nothing to do"
+	exit 0
+fi
+
+# --- validate phase (pure reads; any refusal precedes every write) ---
+# Plan entries: "user|group name olduid[:oldgid] newuid[:newgid]".
+plan=
+
+procs_using()
+{
+	# procs_using KIND ID - PIDs (under $ROOT/proc) holding the ID.
+	kind=$1
+	id=$2
+	[ -d "$ROOT/proc" ] || return 0
+	for status in "$ROOT"/proc/[0-9]*/status; do
+		[ -f "$status" ] || continue
+		while IFS= read -r line || [ -n "$line" ]; do
+			case $line in
+				Uid:*|Gid:*)
+					set -f
+					# shellcheck disable=SC2086
+					set -- $line
+					if { [ "$kind" = uid ] && [ "$1" = Uid: ]; } ||
+						{ [ "$kind" = gid ] && [ "$1" = Gid: ]; }; then
+						shift
+						for v in "$@"; do
+							[ "$v" = "$id" ] || continue
+							pid=${status%/status}
+							printf '%s\n' "${pid##*/}"
+							break
+						done
+						break
+					fi
+					;;
+			esac
+		done < "$status" 2>/dev/null || true
+	done
+}
+
+validate_user()
+{
+	name=$1
+	olduid=$2
+	oldgid=$3
+	decl=$(decl_user "$name") ||
+		die "legacy user $name is not declared in $FRAGMENT (sidecar inconsistent - refusing)"
+	nuid=${decl%%:*}
+	nprimary=${decl#*:}
+	[ "$nuid" -ge 0 ] && [ "$nuid" -le 887 ] ||
+		die "declared UID $nuid for $name is outside the packaged range 0..887"
+	# Target primary: declared wins (install creates it if absent),
+	# else the present system value.
+	ngid=$(decl_group "$nprimary") || ngid=
+	[ -n "$ngid" ] || ngid=$(group_gid "$nprimary")
+	existing=$(find_line "$PASSWD" "$name" || true)
+	if [ -z "$existing" ]; then
+		log "user $name absent; nothing to migrate"
+		return 0
+	fi
+	euid=$(field 3 "$existing")
+	egid=$(field 4 "$existing")
+	if [ "$euid" = "$nuid" ] && [ -n "$ngid" ] && [ "$egid" = "$ngid" ]; then
+		log "user $name already migrated ($nuid:$ngid)"
+		return 0
+	fi
+	if [ "$euid" != "$olduid" ] || [ "$egid" != "$oldgid" ]; then
+		die "user $name exists as $euid:$egid, which matches neither the declared $nuid:$nprimary nor the legacy $olduid:$oldgid - refusing (no migrate path for unrecognised state)"
+	fi
+	owner=$(find_uid "$nuid" || true)
+	[ -z "$owner" ] || die "target UID $nuid is already owned by user $owner - refusing"
+	[ -n "$ngid" ] || die "declared primary group $nprimary of $name is absent - install it first"
+	gowner=$(find_gid "$ngid" || true)
+	[ -z "$gowner" ] || [ "$gowner" = "$nprimary" ] ||
+		die "target GID $ngid is already owned by group $gowner - refusing"
+	for pid in $(procs_using uid "$olduid"; procs_using uid "$nuid"); do
+		die "process $pid holds UID $olduid/$nuid - stop it first"
+	done
+	plan="$plan
+user $name $olduid:$oldgid $nuid:$ngid"
+}
+
+validate_group()
+{
+	name=$1
+	oldgid=$2
+	ngid=$(decl_group "$name") ||
+		die "legacy group $name is not declared in $FRAGMENT (sidecar inconsistent - refusing)"
+	[ "$ngid" -ge 0 ] && [ "$ngid" -le 887 ] ||
+		die "declared GID $ngid for $name is outside the packaged range 0..887"
+	existing=$(find_line "$GROUPF" "$name" || true)
+	if [ -z "$existing" ]; then
+		log "group $name absent; nothing to migrate"
+		return 0
+	fi
+	egid=$(field 3 "$existing")
+	if [ "$egid" = "$ngid" ]; then
+		log "group $name already migrated ($ngid)"
+		return 0
+	fi
+	[ "$egid" = "$oldgid" ] ||
+		die "group $name exists as GID $egid, which matches neither the declared $ngid nor the legacy $oldgid - refusing (no migrate path for unrecognised state)"
+	gowner=$(find_gid "$ngid" || true)
+	[ -z "$gowner" ] || [ "$gowner" = "$name" ] ||
+		die "target GID $ngid is already owned by group $gowner - refusing"
+	for pid in $(procs_using gid "$oldgid"; procs_using gid "$ngid"); do
+		die "process $pid holds GID $oldgid/$ngid - stop it first"
+	done
+	plan="$plan
+group $name $oldgid $ngid"
+}
+
+for entry in $leg_users; do
+	name=${entry%%:*}
+	rest=${entry#*:}
+	validate_user "$name" "${rest%%:*}" "${rest#*:}"
+done
+for entry in $leg_groups; do
+	validate_group "${entry%%:*}" "${entry#*:}"
+done
+
+if [ -z "$plan" ]; then
+	log "everything already migrated or absent; nothing to do"
+	exit 0
+fi
+
+if [ -z "$APPLY" ]; then
+	log "dry-run migration plan for $PKG (no changes made):"
+	printf '%s\n' "$plan" | while IFS= read -r line; do
+		[ -n "$line" ] || continue
+		log "  $line"
+	done
+	log "re-run with --apply to execute (with backup)"
+	exit 0
+fi
+
+# --- apply phase (locked, backed up, atomic renames) ---
+if command -v flock >/dev/null 2>&1; then
+	: > "$LOCKF" 2>/dev/null || die "cannot write lock file: $LOCKF"
+	exec 9> "$LOCKF" || die "cannot open lock file: $LOCKF"
+	flock 9 || die "cannot acquire account lock"
+	lockdir=
+else
+	lockdir=$LOCKF.mkdir
+	while ! mkdir "$lockdir" 2>/dev/null; do
+		sleep 1 2>/dev/null || true
+	done
+fi
+unlock()
+{
+	if [ -n "${lockdir-}" ]; then
+		rmdir "$lockdir" 2>/dev/null || true
+	fi
+}
+trap unlock EXIT HUP INT TERM
+
+chmod 0644 "$PASSWD" "$GROUPF" || die "cannot set database modes"
+chmod 0600 "$SHADOW" || die "cannot set shadow mode"
+
+stamp=$(date -u +%Y%m%dT%H%M%SZ 2>/dev/null || date +%Y%m%dT%H%M%S)
+backup=$BACKUP_BASE/$stamp
+mkdir -p "$backup" || die "cannot create backup dir: $backup"
+chmod 0700 "$backup" || die "cannot secure backup dir"
+for f in "$PASSWD" "$GROUPF" "$SHADOW"; do
+	cp -p "$f" "$backup/" || die "cannot back up $f"
+done
+if [ -f "$GSHADOW" ]; then
+	cp -p "$GSHADOW" "$backup/" || die "cannot back up $GSHADOW"
+fi
+log "databases backed up to $backup"
+
+rewrite_field()
+{
+	# rewrite_field FILE NAME FIELD NEWVAL - atomic rename, all other
+	# bytes preserved.
+	file=$1
+	name=$2
+	nfield=$3
+	newval=$4
+	tmp=$(mktemp "$ROOT/etc/.saphira-migrate.XXXXXX") ||
+		die "cannot create migrate workspace"
+	while IFS= read -r line || [ -n "$line" ]; do
+		case $line in
+			"$name":*)
+				rest=$line
+				prefix=
+				i=1
+				while [ "$i" -lt "$nfield" ]; do
+					prefix=$prefix${rest%%:*}:
+					rest=${rest#*:}
+					i=$((i + 1))
+				done
+				tail=${rest#*:}
+				case $rest in
+					*:*) ;;
+					*) die "refusing to rewrite malformed row for $name in $file" ;;
+				esac
+				printf '%s%s:%s\n' "$prefix" "$newval" "$tail" >> "$tmp"
+				;;
+			*) printf '%s\n' "$line" >> "$tmp" ;;
+		esac
+	done < "$file"
+	mv -f "$tmp" "$file" || die "cannot install rewritten $file"
+}
+
+apply_user()
+{
+	name=$1
+	nuid=$2
+	ngid=$3
+	rewrite_field "$PASSWD" "$name" 3 "$nuid"
+	rewrite_field "$PASSWD" "$name" 4 "$ngid"
+	[ "$(field 3 "$(find_line "$PASSWD" "$name")")" = "$nuid" ] &&
+		[ "$(field 4 "$(find_line "$PASSWD" "$name")")" = "$ngid" ] ||
+		die "post-verify failed for user $name - restore from $backup"
+	log "user $name migrated to $nuid:$ngid"
+}
+
+apply_group()
+{
+	name=$1
+	ngid=$2
+	rewrite_field "$GROUPF" "$name" 3 "$ngid"
+	if [ -f "$GSHADOW" ] && [ -n "$(find_line "$GSHADOW" "$name" || true)" ]; then
+		rewrite_field "$GSHADOW" "$name" 3 "$ngid"
+	fi
+	[ "$(field 3 "$(find_line "$GROUPF" "$name")")" = "$ngid" ] ||
+		die "post-verify failed for group $name - restore from $backup"
+	log "group $name migrated to $ngid"
+}
+
+printf '%s\n' "$plan" | while IFS= read -r line; do
+	[ -n "$line" ] || continue
+	# shellcheck disable=SC2086
+	set -- $line
+	case $1 in
+		user)
+			newids=$4
+			apply_user "$2" "${newids%%:*}" "${newids#*:}"
+			;;
+		group) apply_group "$2" "$4" ;;
+	esac
+done
+
+# Post-verify: every migrated row re-reads at its target; row counts
+# unchanged (rename preserved all other bytes by construction, and the
+# backup above is the rollback).
+log "migration complete for $PKG (backup retained at $backup)"
+trap - EXIT HUP INT TERM
+unlock
+exit 0

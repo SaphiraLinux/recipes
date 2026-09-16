@@ -15,4 +15,21 @@ depend()
 start_pre()
 {
 	checkpath -d -m 0750 -o radius:radius /var/log/radius /var/lib/radius
+	# Upstream installs raddb 750/640 owned by the build user (root:root
+	# in the APK - makepkg flattens payload ownership). radiusd runs as
+	# radius:radius and must read it (the pre-r3 "Permission denied" on
+	# mods-config/files/authorize). Converge here so fresh installs and
+	# pre-r3 upgrades both heal at service start; the sentinel avoids
+	# churning every restart once converged.
+	if [ "$(stat -c %G /etc/raddb/mods-config/files/authorize)" != radius ]; then
+		chown -R root:radius /etc/raddb
+		find /etc/raddb -type d -exec chmod 0750 {} +
+		find /etc/raddb -type f ! -path '*/certs/bootstrap' -exec chmod 0640 {} +
+		chmod 0750 /etc/raddb/certs/bootstrap
+	fi
+	# Config check (mirrors ExecStartPre in the systemd unit): a broken
+	# config fails start instead of taking the server down on restart.
+	# Runs after the ownership pass so permission noise never masks a
+	# real syntax error.
+	/usr/sbin/radiusd -C || return 1
 }

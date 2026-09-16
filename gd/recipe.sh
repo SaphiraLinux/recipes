@@ -10,7 +10,7 @@
 
 pkgname=gd
 pkgver=2.3.3
-pkgrel=1
+pkgrel=2
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="libgd image library (PNG/JPEG core for nginx image_filter)"
 license="libgd"
@@ -46,6 +46,7 @@ recipe_build()
 	mkdir -p "$BUILDDIR" && cd "$BUILDDIR"
 	cmake "$SRC" \
 		-DCMAKE_INSTALL_PREFIX=/usr \
+		-DCMAKE_INSTALL_LIBDIR=lib \
 		-DCMAKE_BUILD_TYPE=Release \
 		-DBUILD_TEST=0 \
 		-DENABLE_PNG=1 -DENABLE_JPEG=1 \

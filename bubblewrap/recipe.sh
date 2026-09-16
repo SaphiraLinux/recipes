@@ -10,7 +10,7 @@ repo=saphira
 url=https://github.com/containers/bubblewrap
 bubblewrap_sha256=69abc30005d2186baf7737feacd8da35633b93cf5af38838ecff17c5f8e924f6
 depends="libcap"
-makedepends="gawk gcc libcap-dev saphira-kernel-headers=7.1.5 make meson ninja pkgconf"
+makedepends="gawk gcc libcap-dev saphira-kernel-headers make meson ninja pkgconf"
 recipe_build() {
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$RECIPE_DIR/files/bubblewrap-0.11.2.tar.xz"
 	cd "$SRC"
