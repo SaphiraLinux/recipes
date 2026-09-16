@@ -1,0 +1,49 @@
+name: Package request
+description: Request a new package or recipe.
+title: "[request] <project/package>"
+labels: ["request"]
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        SECURITY ISSUES MUST NOT BE FILED HERE. For undisclosed
+        vulnerabilities use the repository Security tab
+        (“Report a vulnerability” facility) as described in SECURITY.md.
+  - type: input
+    id: project
+    attributes:
+      label: Project / package
+    validations:
+      required: true
+  - type: input
+    id: upstream
+    attributes:
+      label: Upstream URL
+    validations:
+      required: true
+  - type: textarea
+    id: source-license
+    attributes:
+      label: Source / license information
+      description: Where the source lives and under which license.
+    validations:
+      required: true
+  - type: textarea
+    id: reason
+    attributes:
+      label: Reason / use case
+    validations:
+      required: true
+  - type: textarea
+    id: deps
+    attributes:
+      label: Known build dependencies
+    validations:
+      required: false
+  - type: textarea
+    id: replacement
+    attributes:
+      label: Existing Saphira recipe or replacement
+      description: Is there already something covering this need?
+    validations:
+      required: false
