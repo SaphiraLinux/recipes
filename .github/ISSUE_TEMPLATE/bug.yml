@@ -1,0 +1,73 @@
+name: Bug report
+description: Report a reproducible recipe or build bug.
+title: "[bug] <package>: <symptom>"
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        SECURITY ISSUES MUST NOT BE FILED HERE. For undisclosed
+        vulnerabilities use the repository Security tab
+        (“Report a vulnerability” facility) as described in SECURITY.md.
+  - type: input
+    id: context
+    attributes:
+      label: Saphira version / context
+      description: Builder generation, repository state, or system context.
+    validations:
+      required: true
+  - type: input
+    id: nvr
+    attributes:
+      label: Package name and NVR
+      description: e.g. musl-1.2.6-r3.
+    validations:
+      required: true
+  - type: input
+    id: commit
+    attributes:
+      label: Recipe commit
+      description: Commit hash of the recipe tree you built from.
+    validations:
+      required: false
+  - type: input
+    id: command
+    attributes:
+      label: Command run
+      description: The exact build or install command.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant build log excerpt
+      description: Paste the failing section, not the whole log.
+      render: shell
+    validations:
+      required: false
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproducibility
+      description: Does it happen every time? On a clean root?
+    validations:
+      required: true
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification already attempted
+      description: Tests run, theories ruled out.
+    validations:
+      required: false
