@@ -32,6 +32,10 @@ makedepends="
     nodejs>=24.18.1-r1
     python3
 "
+# Split restored (matches the published -dev r0 boundary): sysroot .a
+# libraries belong in -dev, not base. Without this, base r1 reclaims
+# paths the r0 split still owns and the file gate refuses.
+subpackages="emscripten-dev"
 
 fatal()
 {
@@ -65,6 +69,10 @@ recipe_build()
 		< "$RECIPE_DIR/offline-ports.patch"
 	patch -d "$SRC" -p1 \
 		< "$RECIPE_DIR/deterministic-macro-paths.patch"
+	# Loop variables must stay function-local: url/license collide with
+	# builder metadata globals, and the final failing read would otherwise
+	# clear them (empty license/url in the normalized manifest).
+	local destination version url checksum archive license path
 	while IFS='|' read -r destination version url checksum archive license; do
 		path=$BUILDDIR/$archive
 		curl -fsSL --retry 3 --output "$path" "$url" ||

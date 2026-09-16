@@ -9,7 +9,11 @@ set -eu
 
 makepkg=$1
 source_root=$(CDPATH= cd -- "$(dirname -- "$makepkg")/../.." && pwd)
-test_root=$(mktemp -d /tmp/saphira-makepkg-test.XXXXXX)
+test_tmp_base=${SAPHIRA_TMPDIR:-/build/test-tmp}
+mkdir -p "$test_tmp_base"
+test_root=$(mktemp -d "$test_tmp_base/saphira-makepkg-test.XXXXXX")
+export SAPHIRA_TMPDIR=$test_root/tool-tmp
+mkdir -p "$SAPHIRA_TMPDIR"
 trap 'find "$test_root" -depth -delete' EXIT HUP INT TERM
 stage=$test_root/stage
 artifacts=$test_root/artifacts
@@ -100,6 +104,21 @@ if run_makepkg lib64-test > "$test_root/lib64.log" 2>&1; then
 fi
 grep '/lib-only layout' "$test_root/lib64.log" >/dev/null
 
+# Installed symlinks may never point into the constructor workspace:
+# /build is build-time state and must not leak into APKs (precedent:
+# kernel modules_install baking /build/<pkg>/... into
+# /lib/modules/*/build, bzip2 install rules baking /build/<pkg>/...
+# into /usr/bin helpers). Relative links are unaffected.
+mkdir -p "$stage/workspace-leak/pkg/lib/modules/7.2.2"
+ln -s /build/saphira-kernel/source/linux-7.2.2 "$stage/workspace-leak/pkg/lib/modules/7.2.2/build"
+write_manifest workspace-leak '{"arch":"x86_64","build_time":6,"license":"MIT","name":"workspace-leak","origin":"workspace-leak","outputs":[{"dependencies":[],"description":"workspace leak","name":"workspace-leak","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r0"}'
+if run_makepkg workspace-leak > "$test_root/workspace-leak.log" 2>&1; then
+	printf '%s\n' 'constructor-workspace symlink unexpectedly packaged' >&2
+	exit 1
+fi
+grep 'points into constructor workspace /build in workspace-leak' "$test_root/workspace-leak.log" >/dev/null
+grep 'lib/modules/7.2.2/build -> /build/saphira-kernel/source/linux-7.2.2' "$test_root/workspace-leak.log" >/dev/null
+
 host_after=$(sha256sum /lib/apk/db/installed /etc/apk/world)
 [ "$host_before" = "$host_after" ]
 [ "$repo_before" = "$(find /out/stage4/packages/x86_64 -maxdepth 1 -type f -printf '%f\n' 2>/dev/null | sort | sha256sum)" ]
@@ -166,6 +185,32 @@ assert accounts["groups"] == [{"name": "idgroup", "gid": "660"}], accounts
 assert accounts["dirs"] == [{"path": "/var/lib/idsvc", "mode": "0755", "owner": "iduser", "group": "idgroup"}], accounts
 PY
 printf '%s\n' 'account fragment round-trip: ok (scripts, helper depends, receipt)'
+
+# sysusers stanza: a fragment with no census declares native account
+# management; install/upgrade callers run the reconciler then
+# systemd-sysusers, deinstall stays reconciler-only.
+mkdir -p "$stage/sysvc/pkg/usr/bin" "$stage/sysvc/pkg/usr/share/saphira/accounts.d"
+printf '%s\n' sysvc > "$stage/sysvc/pkg/usr/bin/sysvc"
+printf '%s\n' '# native accounts live in sysusers.d' 'sysusers' > "$stage/sysvc/pkg/usr/share/saphira/accounts.d/sysvc"
+write_manifest sysvc '{"arch":"x86_64","build_time":8,"license":"MIT","name":"sysvc","origin":"sysvc","outputs":[{"dependencies":[],"description":"sysvc","name":"sysvc","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r0"}'
+run_makepkg sysvc
+apk adbdump "$artifacts/x86_64/sysvc-1-r0.apk" | grep -A10 'post-install:' | grep '/usr/bin/systemd-sysusers' >/dev/null
+apk adbdump "$artifacts/x86_64/sysvc-1-r0.apk" | grep -A10 'post-upgrade:' | grep '/usr/bin/systemd-sysusers' >/dev/null
+apk adbdump "$artifacts/x86_64/sysvc-1-r0.apk" | grep -A10 'post-install:' | grep 'ensure-identity.sh' >/dev/null
+if apk adbdump "$artifacts/x86_64/sysvc-1-r0.apk" | grep -A20 'post-deinstall:' | grep -q 'systemd-sysusers'; then
+	printf '%s\n' 'sysusers leaked into post-deinstall caller' >&2
+	exit 1
+fi
+mkdir -p "$stage/dupsy/pkg/usr/bin" "$stage/dupsy/pkg/usr/share/saphira/accounts.d"
+printf '%s\n' dupsy > "$stage/dupsy/pkg/usr/bin/dupsy"
+printf '%s\n' 'sysusers' 'sysusers' > "$stage/dupsy/pkg/usr/share/saphira/accounts.d/dupsy"
+write_manifest dupsy '{"arch":"x86_64","build_time":8,"license":"MIT","name":"dupsy","origin":"dupsy","outputs":[{"dependencies":[],"description":"dupsy","name":"dupsy","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r0"}'
+if run_makepkg dupsy > "$test_root/dupsy.log" 2>&1; then
+	printf '%s\n' 'duplicate sysusers stanza unexpectedly packaged' >&2
+	exit 1
+fi
+grep 'duplicate sysusers stanza' "$test_root/dupsy.log" >/dev/null
+printf '%s\n' 'account sysusers stanza: ok (install callers, deinstall clean, duplicate refused)'
 
 # Malformed fragments and foreign fragments fail the build.
 mkdir -p "$stage/badfrag/pkg/usr/bin" "$stage/badfrag/pkg/usr/share/saphira/accounts.d"
@@ -257,3 +302,151 @@ if ! run_makepkg midrange > "$test_root/midrange.log" 2>&1; then
 fi
 grep 'expansion range' "$test_root/midrange.log" >/dev/null
 printf '%s\n' 'account expansion notice: ok (200..887 builds with notice)'
+
+# File stanzas bind install-time ownership to payload files: declared
+# owner plus the root built-in, validated, payload-bound, recorded in
+# the receipt, scripts generated with the helper dependency.
+mkdir -p "$stage/filesvc/pkg/usr/bin" "$stage/filesvc/pkg/usr/share/saphira/accounts.d"
+printf '%s\n' filesvc > "$stage/filesvc/pkg/usr/bin/filesvc"
+printf '%s\n' queuebinary > "$stage/filesvc/pkg/usr/bin/filesvc-queue"
+printf '%s\n' 'user fuser 664 fgroup /var/lib/filesvc /sbin/nologin' 'group fgroup 664' 'file /usr/bin/filesvc-queue 04711 fuser fgroup' 'file /usr/bin/filesvc 0755 root root' > "$stage/filesvc/pkg/usr/share/saphira/accounts.d/filesvc"
+write_manifest filesvc '{"arch":"x86_64","build_time":17,"license":"MIT","name":"filesvc","origin":"filesvc","outputs":[{"dependencies":[],"description":"filesvc","name":"filesvc","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r0"}'
+run_makepkg filesvc
+apk adbdump "$artifacts/x86_64/filesvc-1-r0.apk" | grep 'post-install' >/dev/null
+apk adbdump "$artifacts/x86_64/filesvc-1-r0.apk" | grep 'post-upgrade' >/dev/null
+apk adbdump "$artifacts/x86_64/filesvc-1-r0.apk" | grep 'post-deinstall' >/dev/null
+apk adbdump "$artifacts/x86_64/filesvc-1-r0.apk" | grep 'saphira-baselayout' >/dev/null
+python3 - "$stage/filesvc/artifact-manifest.json" <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as stream:
+    receipt = json.load(stream)
+accounts = receipt["artifacts"][0]["accounts"]
+assert accounts["files"] == [{"path": "/usr/bin/filesvc-queue", "mode": "04711", "owner": "fuser", "group": "fgroup"}, {"path": "/usr/bin/filesvc", "mode": "0755", "owner": "root", "group": "root"}], accounts
+PY
+printf '%s\n' 'account file stanza round-trip: ok (payload-bound, receipt, scripts)'
+
+# Malformed file stanzas fail the build: relative path, bad mode,
+# missing payload target, symlink target, directory target, numeric
+# owner reference.
+filebad()
+{
+	name=$1
+	fragment=$2
+	message=$3
+	mkdir -p "$stage/$name/pkg/usr/bin" "$stage/$name/pkg/usr/share/saphira/accounts.d"
+	printf '%s\n' "$name" > "$stage/$name/pkg/usr/bin/$name"
+	printf '%s\n' payloadfile > "$stage/$name/pkg/usr/bin/payloadfile"
+	printf '%s\n' 'user fbaduser 665 fbadgroup /var/lib/fbad /sbin/nologin' 'group fbadgroup 665' "$fragment" > "$stage/$name/pkg/usr/share/saphira/accounts.d/$name"
+	write_manifest "$name" '{"arch":"x86_64","build_time":18,"license":"MIT","name":"'"$name"'","origin":"'"$name"'","outputs":[{"dependencies":[],"description":"'"$name"'","name":"'"$name"'","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r0"}'
+	if run_makepkg "$name" > "$test_root/$name.log" 2>&1; then
+		printf '%s\n' "file stanza $name unexpectedly packaged" >&2
+		exit 1
+	fi
+	grep "$message" "$test_root/$name.log" >/dev/null
+}
+filebad filerel 'file var/rel 0644 fbaduser fbadgroup' 'must be absolute and normalized'
+filebad filemode 'file /usr/bin/payloadfile 0999 fbaduser fbadgroup' 'invalid mode'
+filebad filemissing 'file /usr/bin/absent 0644 fbaduser fbadgroup' 'missing from the payload'
+filebad filenumeric 'file /usr/bin/payloadfile 0644 665 fbadgroup' 'not a number'
+mkdir -p "$stage/filesymlink/pkg/usr/bin" "$stage/filesymlink/pkg/usr/share/saphira/accounts.d"
+printf '%s\n' filesymlink > "$stage/filesymlink/pkg/usr/bin/filesymlink"
+printf '%s\n' payloadfile > "$stage/filesymlink/pkg/usr/bin/payloadfile"
+ln -s payloadfile "$stage/filesymlink/pkg/usr/bin/linkfile"
+printf '%s\n' 'user fbaduser 665 fbadgroup /var/lib/fbad /sbin/nologin' 'group fbadgroup 665' 'file /usr/bin/linkfile 0644 fbaduser fbadgroup' > "$stage/filesymlink/pkg/usr/share/saphira/accounts.d/filesymlink"
+write_manifest filesymlink '{"arch":"x86_64","build_time":18,"license":"MIT","name":"filesymlink","origin":"filesymlink","outputs":[{"dependencies":[],"description":"filesymlink","name":"filesymlink","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r0"}'
+if run_makepkg filesymlink > "$test_root/filesymlink.log" 2>&1; then
+	printf '%s\n' 'symlink file target unexpectedly packaged' >&2
+	exit 1
+fi
+grep 'is a symlink' "$test_root/filesymlink.log" >/dev/null
+mkdir -p "$stage/filedir/pkg/usr/bin" "$stage/filedir/pkg/usr/share/saphira/accounts.d"
+printf '%s\n' filedir > "$stage/filedir/pkg/usr/bin/filedir"
+printf '%s\n' 'user fbaduser 665 fbadgroup /var/lib/fbad /sbin/nologin' 'group fbadgroup 665' 'file /usr/bin 0755 fbaduser fbadgroup' > "$stage/filedir/pkg/usr/share/saphira/accounts.d/filedir"
+write_manifest filedir '{"arch":"x86_64","build_time":18,"license":"MIT","name":"filedir","origin":"filedir","outputs":[{"dependencies":[],"description":"filedir","name":"filedir","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r0"}'
+if run_makepkg filedir > "$test_root/filedir.log" 2>&1; then
+	printf '%s\n' 'directory file target unexpectedly packaged' >&2
+	exit 1
+fi
+grep 'is a directory' "$test_root/filedir.log" >/dev/null
+# Fifos and other specials cannot ship in APK payloads (the
+# constructor archives regular files only): refused with guidance.
+mkdir -p "$stage/filefifo/pkg/usr/bin" "$stage/filefifo/pkg/usr/share/saphira/accounts.d"
+printf '%s\n' filefifo > "$stage/filefifo/pkg/usr/bin/filefifo"
+mkfifo "$stage/filefifo/pkg/usr/bin/filefifo-trigger"
+printf '%s\n' 'user fbaduser 665 fbadgroup /var/lib/fbad /sbin/nologin' 'group fbadgroup 665' 'file /usr/bin/filefifo-trigger 0622 fbaduser fbadgroup' > "$stage/filefifo/pkg/usr/share/saphira/accounts.d/filefifo"
+write_manifest filefifo '{"arch":"x86_64","build_time":18,"license":"MIT","name":"filefifo","origin":"filefifo","outputs":[{"dependencies":[],"description":"filefifo","name":"filefifo","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r0"}'
+if run_makepkg filefifo > "$test_root/filefifo.log" 2>&1; then
+	printf '%s\n' 'fifo file target unexpectedly packaged' >&2
+	exit 1
+fi
+grep 'cannot ship in APKs' "$test_root/filefifo.log" >/dev/null
+printf '%s\n' 'account file stanza refusal: ok (shape, payload binding, numeric refs, fifo refusal)'
+
+# Legacy sidecars: recognised history ships beside its fragment,
+# validated (names declared, past disjoint from present), recorded
+# in the receipt. A foreign sidecar is stray; a lone sidecar (no
+# fragment) is incoherent; malformed/reserved/undeclared entries
+# fail the build.
+mkdir -p "$stage/legacysvc/pkg/usr/bin" "$stage/legacysvc/pkg/usr/share/saphira/accounts.d"
+printf '%s\n' legacysvc > "$stage/legacysvc/pkg/usr/bin/legacysvc"
+printf '%s\n' 'user leguser 664 leggroup /var/lib/legacy /sbin/nologin' 'group leggroup 664' > "$stage/legacysvc/pkg/usr/share/saphira/accounts.d/legacysvc"
+printf '%s\n' '# upstream 900 block' 'legacy user leguser 900 900' 'legacy group leggroup 900' > "$stage/legacysvc/pkg/usr/share/saphira/accounts.d/legacysvc.legacy"
+write_manifest legacysvc '{"arch":"x86_64","build_time":19,"license":"MIT","name":"legacysvc","origin":"legacysvc","outputs":[{"dependencies":[],"description":"legacysvc","name":"legacysvc","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r0"}'
+run_makepkg legacysvc
+python3 - "$stage/legacysvc/artifact-manifest.json" <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as stream:
+    receipt = json.load(stream)
+legacy = receipt["artifacts"][0]["accounts"]["legacy"]
+assert legacy == {"users": [{"name": "leguser", "uid": "900", "gid": "900"}], "groups": [{"name": "leggroup", "gid": "900"}]}, legacy
+PY
+printf '%s\n' 'account legacy sidecar round-trip: ok (validated, receipt)'
+# Physical presence: the sidecar must be a real file in the APK
+# payload, not merely receipt metadata (systemd r6 shipped the
+# fragment but not the sidecar - receipts knew, payload did not).
+apk adbdump "$artifacts/x86_64/legacysvc-1-r0.apk" | grep -q 'name: legacysvc$' || {
+	printf '%s\n' 'fragment missing from APK payload' >&2
+	exit 1
+}
+apk adbdump "$artifacts/x86_64/legacysvc-1-r0.apk" | grep -q 'name: legacysvc.legacy$' || {
+	printf '%s\n' 'sidecar missing from APK payload' >&2
+	exit 1
+}
+printf '%s\n' 'account sidecar payload presence: ok (fragment + legacy in APK)'
+legacybad()
+{
+	name=$1
+	sidecar=$2
+	message=$3
+	extra=${4:-}
+	mkdir -p "$stage/$name/pkg/usr/bin" "$stage/$name/pkg/usr/share/saphira/accounts.d"
+	printf '%s\n' "$name" > "$stage/$name/pkg/usr/bin/$name"
+	if [ -n "$extra" ]; then
+		printf '%s\n' 'user legbaduser 665 legbadgroup /var/lib/legbad /sbin/nologin' 'group legbadgroup 665' > "$stage/$name/pkg/usr/share/saphira/accounts.d/$name"
+	fi
+	printf '%s\n' "$sidecar" > "$stage/$name/pkg/usr/share/saphira/accounts.d/$name.legacy"
+	write_manifest "$name" '{"arch":"x86_64","build_time":20,"license":"MIT","name":"'"$name"'","origin":"'"$name"'","outputs":[{"dependencies":[],"description":"'"$name"'","name":"'"$name"'","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r0"}'
+	if run_makepkg "$name" > "$test_root/$name.log" 2>&1; then
+		printf '%s\n' "legacy sidecar $name unexpectedly packaged" >&2
+		exit 1
+	fi
+	grep "$message" "$test_root/$name.log" >/dev/null
+}
+legacybad legacybadfrag 'frobnicate leguser' 'malformed stanza' yes
+legacybad legacyundeclared 'legacy user ghostuser 900 900' 'not declared in the same fragment' yes
+legacybad legacysame 'legacy user legbaduser 665 665' 'identical to the declared present' yes
+legacybad legacyreserved 'legacy user root 0 0' 'can never be legacy' yes
+legacybad legacylone 'legacy user ghostuser 900 900' 'not declared in the same fragment'
+mkdir -p "$stage/legacystray/pkg/usr/bin" "$stage/legacystray/pkg/usr/share/saphira/accounts.d"
+printf '%s\n' legacystray > "$stage/legacystray/pkg/usr/bin/legacystray"
+printf '%s\n' 'user legbaduser 665 legbadgroup /var/lib/legbad /sbin/nologin' 'group legbadgroup 665' > "$stage/legacystray/pkg/usr/share/saphira/accounts.d/legacystray"
+printf '%s\n' 'legacy user legbaduser 900 900' > "$stage/legacystray/pkg/usr/share/saphira/accounts.d/someoneelse.legacy"
+write_manifest legacystray '{"arch":"x86_64","build_time":20,"license":"MIT","name":"legacystray","origin":"legacystray","outputs":[{"dependencies":[],"description":"legacystray","name":"legacystray","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r0"}'
+if run_makepkg legacystray > "$test_root/legacystray.log" 2>&1; then
+	printf '%s\n' 'foreign sidecar unexpectedly packaged' >&2
+	exit 1
+fi
+grep 'foreign account fragments' "$test_root/legacystray.log" >/dev/null
+printf '%s\n' 'account legacy sidecar refusal: ok (malformed, undeclared, identical, reserved, lone, stray)'

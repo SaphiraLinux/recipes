@@ -13,7 +13,7 @@ cronie_sha256=241ecc1dcd8d4b2a6744fe93509932254d20b7bb9d979d27429809493806357f
 # coexist). replaces takes the legacy names over on upgrade.
 replaces="dcron dcron-doc"
 depends=""
-makedepends="autoconf automake gcc make saphira-kernel-headers=7.1.5"
+makedepends="autoconf automake gcc make saphira-kernel-headers"
 recipe_build() {
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$RECIPE_DIR/files/cronie-1.7.2.tar.gz"
 	cd "$SRC"

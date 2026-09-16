@@ -15,7 +15,11 @@ set -eu
 
 installpkg=$1
 source_root=$(CDPATH= cd -- "$(dirname -- "$installpkg")/../.." && pwd)
-test_root=$(mktemp -d /tmp/saphira-installpkg-test.XXXXXX)
+test_tmp_base=${SAPHIRA_TMPDIR:-/build/test-tmp}
+mkdir -p "$test_tmp_base"
+test_root=$(mktemp -d "$test_tmp_base/saphira-installpkg-test.XXXXXX")
+export SAPHIRA_TMPDIR=$test_root/tool-tmp
+mkdir -p "$SAPHIRA_TMPDIR"
 trap 'find "$test_root" -depth -delete' EXIT HUP INT TERM
 mkdir -p "$test_root/bin" "$test_root/repo/gen/x86_64" "$test_root/state"
 

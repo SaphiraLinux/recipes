@@ -73,7 +73,7 @@ for module_tarball in memc-0.21.tar.gz cache-purge-2.3.tar.gz; do
 		exit 1
 	}
 done
-[ -f "$source_root/gd/files/gd-2.3.3.tar.xz" ] || {
+[ -f "$source_root/gd/files/libgd-2.3.3.tar.xz" ] || {
 	printf '%s\n' 'gd source is not vendored (nginx image_filter has no headers)' >&2
 	exit 1
 }
@@ -177,5 +177,178 @@ case " $(recipe_var saphira-docs depends) " in
 		exit 1
 		;;
 esac
+
+# Incident: verified upstream archives were staged in /tmp/batchN (wiped by
+# the 2026-09-10 reboot before vendoring). The local recipe collection is
+# self-contained: every fetchable (source=|vendor=, sha256=) pair must have
+# its archive verified in <pkg>/files/ with a .sha256 sidecar, and the
+# builder prefers it over any download. Public builders fetch via URLs.
+check_base=${SAPHIRA_TMPDIR:-/build/tmp}
+mkdir -p "$check_base"
+check_out=$check_base/recipe-rules-fetch-check.out
+"$source_root/saphira-packager/files/fetch-vendor-sources" --check > "$check_out" 2>&1 || {
+	printf '%s\n' "vendored-sources gate failed (see $check_out)" >&2
+	exit 1
+}
+grep -q '^MISSING' "$check_out" && {
+	printf '%s\n' "vendored-sources gate: archives MISSING from files/ (see $check_out)" >&2
+	exit 1
+}
+rm -f "$check_out"
+
+# Incident: same /tmp/batchN episode. Host /tmp is never Saphira scratch:
+# no recipe may reference it (RPATH-leak detection patterns naming
+# /var/tmp, and the sandbox HOME=/tmp comment, are the documented
+# exceptions). Controller tools/tests moved to SAPHIRA_TMPDIR.
+tmp_refs=$(grep -RnE '/tmp(/|"|$)' "$source_root"/*/recipe.sh 2>/dev/null \
+	| grep -v 'RPATH\|RUNPATH\|HOME=/tmp\|/var/tmp' || true)
+[ -z "$tmp_refs" ] || {
+	printf '%s\n' "recipe /tmp references forbidden: $tmp_refs" >&2
+	exit 1
+}
+tmp_tools=$(grep -Rn -- '--tmpfs\|mktemp[^"'"'"']*/tmp/' "$source_root/saphira-packager/files" "$source_root/saphira-packager/tests" 2>/dev/null \
+	| grep -v 'build-ran\|recipe-rules.sh' || true)
+[ -z "$tmp_tools" ] || {
+	printf '%s\n' "controller /tmp usage forbidden: $tmp_tools" >&2
+	exit 1
+}
+
+# Incident: min-r1 is a three-layer rule (resolvepkg refuses to plan r0,
+# buildpkg-single refuses to stage r0, sign-apk-repo refuses staged r0 in
+# multi-generation runs). The source layer: no recipe may declare pkgrel 0.
+r0_recipes=$(grep -rln '^pkgrel=0$' "$source_root"/*/recipe.sh 2>/dev/null || true)
+[ -z "$r0_recipes" ] || {
+	printf '%s\n' "pkgrel 0 recipes forbidden: $r0_recipes" >&2
+	exit 1
+}
+
+# Incident: dbus declared depends+makedepends on the full PID-1 systemd
+# package, which silently dragged a different init onto an OpenRC host
+# after an explicit removal (Egg: systemd deleted, dbus pulled it back,
+# next upgrade collided on /sbin/init owned by openrc). Library
+# consumers link systemd-libs/systemd-dev only; a packaged .service
+# unit never justifies an init-system dependency. Both directions hold:
+# no OpenRC-closure package may resolve full systemd transitively, and
+# no systemd-closure package may resolve full openrc.
+init_coupled=$(for recipe in "$source_root"/*/recipe.sh; do
+	if awk '/^(depends|makedepends)="/ {
+		print $0
+		if ($0 ~ /"$/) next
+		inblock = 1
+		next
+	}
+	inblock {
+		print $0
+		if ($0 ~ /^"$/) inblock = 0
+	}' "$recipe" | sed -e 's/systemd-libs/SYSTEMDLIBS/g; s/systemd-dev/SYSTEMDDEV/g' | grep -qw -e systemd -e openrc; then
+		printf '%s\n' "$recipe"
+	fi
+done || true)
+[ -z "$init_coupled" ] || {
+	printf '%s\n' "init-system coupling forbidden (use systemd-libs/systemd-dev): $init_coupled" >&2
+	exit 1
+}
+# The legal edge, locked: dbus links libsystemd.so.0, so it depends on
+# the libs split - never the init package.
+grep -Eq '^depends="[^"]*systemd-libs' "$source_root/dbus/recipe.sh" || {
+	printf '%s\n' 'dbus must depend on systemd-libs (never full systemd)' >&2
+	exit 1
+}
+
+# Incident: legacy sidecars steer install-blocked migrations, so a
+# malformed or dangling sidecar is a broken repair path. Every
+# accounts.d/*.legacy must sit beside its fragment, contain only
+# well-formed legacy stanzas, and name only identities the sibling
+# fragment declares (only declared identities qualify, enforced again
+# at build and publish time).
+for legacy in "$source_root"/*/files/accounts.d/*.legacy; do
+	[ -f "$legacy" ] || continue
+	frag=${legacy%.legacy}
+	[ -f "$frag" ] || {
+		printf '%s\n' "legacy sidecar without fragment: $legacy" >&2
+		exit 1
+	}
+	bad_shape=$(grep -Ev '^#|^$' "$legacy" | grep -Ev '^legacy (user [A-Za-z0-9_.][A-Za-z0-9_.-]* [0-9]+ [0-9]+|group [A-Za-z0-9_.][A-Za-z0-9_.-]* [0-9]+)$' || true)
+	[ -z "$bad_shape" ] || {
+		printf '%s\n' "malformed legacy stanza in $legacy: $bad_shape" >&2
+		exit 1
+	}
+	for legname in $(grep -Eo '^legacy (user|group) [A-Za-z0-9_.][A-Za-z0-9_.-]*' "$legacy" | awk '{print $3}'); do
+		grep -Eq "^(user|group) $legname " "$frag" || {
+			printf '%s\n' "legacy identity $legname in $legacy is not declared in $frag" >&2
+			exit 1
+		}
+	done
+done
+
+# Incident: the accounts.d/systemd census drifted from the shipped
+# sysusers.d declarations (imds and coredump missed) while production
+# relied on them. systemd is sysusers-native now: the fragment carries
+# only the sysusers stanza, fixed IDs live in the shipped confs, and
+# post-install/post-upgrade run systemd-sysusers. This locks the full
+# mapping so a new upstream identity cannot slip through unpinned.
+sys_frag=$source_root/systemd/files/accounts.d/systemd
+[ "$(grep -c '^sysusers$' "$sys_frag")" -eq 1 ] || {
+	printf '%s\n' 'systemd fragment must carry exactly one sysusers stanza' >&2
+	exit 1
+}
+grep -Eq '^(user|group|dir|file) ' "$sys_frag" && {
+	printf '%s\n' 'systemd fragment must not duplicate sysusers declarations' >&2
+	exit 1
+}
+for flag in \
+	'-Dsystemd-journal-gid=131' \
+	'-Dsystemd-network-uid=127' \
+	'-Dsystemd-resolve-uid=128' \
+	'-Dsystemd-timesync-uid=129' \
+	'-Dsystemd-imds-uid=145'; do
+	grep -Fq -- "$flag" "$source_root/systemd/recipe.sh" || {
+		printf '%s\n' "systemd recipe is missing fixed-ID flag: $flag" >&2
+		exit 1
+	}
+done
+sys_patch=$source_root/systemd/files/sysusers-static-ids.patch
+for pin in \
+	'u! systemd-oom 130 ' \
+	'u! systemd-coredump 144 '; do
+	grep -Fq -- "$pin" "$sys_patch" || {
+		printf '%s\n' "systemd static-ids patch is missing pin: $pin" >&2
+		exit 1
+	}
+done
+# Upstream coverage: every identity-declaring sysusers conf in the
+# vendored source that installs under the recipe feature set must be
+# pinned above. basic.conf is the pre-existing group menagerie (out
+# of scope); systemd-remote.conf needs microhttpd (not a dependency,
+# so it never installs - asserted below, revisit if that changes).
+# Anything else unpinned fails closed here.
+grep -qi microhttpd "$source_root/systemd/recipe.sh" && {
+	printf '%s\n' 'systemd gained microhttpd: revisit systemd-remote.conf coverage' >&2
+	exit 1
+}
+sys_src=$(ls "$source_root"/systemd/files/*.tar.gz | head -n 1)
+sys_tmp=$check_base/recipe-rules-sysusers
+rm -rf "$sys_tmp"
+mkdir -p "$sys_tmp"
+tar -xzf "$sys_src" -C "$sys_tmp" --wildcards '*/sysusers.d/*.conf' '*/sysusers.d/*.conf.in'
+unpinned=""
+for conf in "$sys_tmp"/*/sysusers.d/*.conf "$sys_tmp"/*/sysusers.d/*.conf.in; do
+	[ -f "$conf" ] || continue
+	base=$(basename "$conf" .in)
+	base=${base%.conf}
+	case $base in
+		basic|systemd-remote) continue ;;
+	esac
+	grep -Eq '^(u|g|m)[! ]' "$conf" || continue
+	case $base in
+		systemd-journal|systemd-network|systemd-resolve|systemd-timesync|systemd-imds|systemd-oom|systemd-coredump) ;;
+		*) unpinned="$unpinned $base" ;;
+	esac
+done
+[ -z "$unpinned" ] || {
+	printf '%s\n' "systemd sysusers confs without fixed IDs:$unpinned" >&2
+	exit 1
+}
+rm -rf "$sys_tmp"
 
 printf '%s\n' 'recipe metadata rules tests: OK'

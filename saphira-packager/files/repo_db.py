@@ -65,7 +65,7 @@ from typing import NoReturn
 
 SCHEMA_VERSION = "saphira-repository.db/v1"
 FRAGMENT_PREFIX = "usr/share/saphira/accounts.d/"
-EMPTY_DECL = {"users": [], "groups": [], "dirs": []}
+EMPTY_DECL = {"users": [], "groups": [], "dirs": [], "files": []}
 
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
 VERSION_BASE_RE = re.compile(r"^(?P<base>.+)-r(?P<rel>\d+)$")
@@ -382,14 +382,26 @@ def sha256_file(path: str | Path) -> str:
 
 def census(apk_bin: str, repo_dir: str | Path) -> dict[str, dict]:
     """Dump every repository APK. Returns {filename: info} with info holding
-    name, version, files, replaces, depends and apk_sha256."""
-    result: dict[str, dict] = {}
-    for path in sorted(Path(repo_dir).glob("*.apk")):
-        if path.is_symlink() or not path.is_file():
-            continue
+    name, version, files, replaces, depends and apk_sha256. Dumps run in a
+    thread pool (subprocess + hashing release the GIL; results collected
+    in sorted order, so output is deterministic and the first failure
+    still fails the whole census closed)."""
+    import concurrent.futures
+    paths = sorted(
+        path for path in Path(repo_dir).glob("*.apk")
+        if not path.is_symlink() and path.is_file()
+    )
+
+    def dump_one(path):
         info = dump_package(apk_bin, path)
         info["apk_sha256"] = sha256_file(path)
-        result[path.name] = info
+        return path.name, info
+
+    result: dict[str, dict] = {}
+    workers = min(8, (os.cpu_count() or 1) + 4)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        for name, info in pool.map(dump_one, paths):
+            result[name] = info
     return result
 
 
@@ -477,10 +489,13 @@ def extract_declarations(apk_bin: str, repo_dir: str | Path, filenames: list[str
     for filename in filenames:
         info = cached_dump(filename)
         # Attribute the declaration to the NVR whose file list carries
-        # the fragment path (today: the main package).
+        # the fragment path (today: the main package). Legacy sidecars
+        # (*.legacy) are history, not declarations: the census skips
+        # them (their union is checked at publish from staged
+        # receipts, and migration preconditions fail closed live).
         frag_files = sorted({f[len(FRAGMENT_PREFIX):] for f in info["files"]
-                             if f.startswith(FRAGMENT_PREFIX)})
-        merged = {"users": [], "groups": [], "dirs": []}
+                             if f.startswith(FRAGMENT_PREFIX) and not f.endswith(".legacy")})
+        merged = {"users": [], "groups": [], "dirs": [], "files": []}
         for frag in frag_files:
             path = frag_dir / frag
             if not path.is_file():
@@ -489,7 +504,7 @@ def extract_declarations(apk_bin: str, repo_dir: str | Path, filenames: list[str
                     "(rebuild and re-publish the package)"
                 )
             decl, _notices = mk.parse_accounts_fragment(path)
-            for key in ("users", "groups", "dirs"):
+            for key in ("users", "groups", "dirs", "files"):
                 merged[key].extend(decl[key])
         decls[filename] = merged
     return decls
@@ -503,7 +518,26 @@ def sync_packages(conn: sqlite3.Connection, census_data: dict[str, dict],
                   declarations: dict[str, dict], apk_bin: str,
                   published_at: str) -> None:
     """Rebuild packages/files/users/groups/state_dirs from a census.
-    Reservations are NOT touched here (see advance_reservations)."""
+    Reservations are NOT touched here (see advance_reservations).
+    Atomic: one explicit transaction (this connection runs in autocommit
+    mode, so without this a kill mid-sync would commit the DELETEs and
+    strand a partial INSERT set - exactly the corruption a full audit
+    once left behind)."""
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        _sync_packages_inner(conn, census_data, declarations, apk_bin,
+                             published_at)
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    else:
+        conn.execute("COMMIT")
+
+
+def _sync_packages_inner(conn: sqlite3.Connection, census_data: dict[str, dict],
+                         declarations: dict[str, dict], apk_bin: str,
+                         published_at: str) -> None:
+    """Sync body: caller holds the transaction (see sync_packages)."""
     conn.execute("DELETE FROM state_dirs")
     conn.execute("DELETE FROM users")
     conn.execute("DELETE FROM groups")
@@ -747,6 +781,16 @@ def parse_tsv(path: str | Path) -> tuple[dict[str, int], dict[str, int]] | None:
 # owner/gate evaluation shared by the signer (single implementation)
 # ---------------------------------------------------------------------------
 
+# Init-system selector co-ownership (Saphira duality invariant: either
+# init installs without recompiling, swapped del-then-add). PID 1's
+# canonical path cannot move to /usr/sbin the way systemd's
+# halt/poweroff/reboot/shutdown siblings did, so exactly this one path
+# is deliberately co-owned by exactly these two packages. See
+# gate_staged for the enforcement and its limits.
+SHARED_INIT_SELECTOR = "sbin/init"
+SHARED_INIT_OWNERS = frozenset({"systemd", "openrc"})
+
+
 def evaluate_file_collisions(owners: dict[str, dict[str, str]],
                              staged_identities: set[tuple[str, str]],
                              staged_paths: dict[tuple[str, str], set[str]],
@@ -769,6 +813,319 @@ def evaluate_file_collisions(owners: dict[str, dict[str, str]],
             detail = ", ".join(name_versions[n] for n in sorted(others))
             collisions[path] = (name_versions[staged_name], detail)
     return collisions
+
+
+# ---------------------------------------------------------------------------
+# Hatched retention: keep latest N per name, hold live deps + explicit holds
+# ---------------------------------------------------------------------------
+# The live generation keeps the newest KEEP NVRs per package name. Older
+# NVRs retire unless a live dependent needs exactly them (a constraint no
+# kept NVR satisfies) or they sit on the explicit hold list. Retirement
+# always happens inside the signer's publication transaction (files go
+# before index regen, rows go with the staged apply) - never bare rm.
+# Archive generations are never pruned.
+
+DEPEND_ATOM_RE = re.compile(
+    r"^([A-Za-z0-9][A-Za-z0-9._+-]*?)((>=|<=|=|>|<|~)(.+))?$")
+
+_compare_cache: dict[tuple[str, str, str], str] = {}
+
+
+def apk_cmp(apk_bin: str, a: str, b: str) -> str:
+    """apk version comparison with memoization: '<', '=' or '>'."""
+    key = (apk_bin, a, b)
+    result = _compare_cache.get(key)
+    if result is None:
+        out = subprocess.run([apk_bin, "version", "-t", a, b], check=True,
+                             text=True, capture_output=True).stdout.strip()
+        result = out if out in ("<", "=", ">") else "="
+        _compare_cache[key] = result
+    return result
+
+
+def apk_versions_desc(apk_bin: str, versions) -> list:
+    """Newest-first ordering via apk semantics (duplicates collapsed)."""
+    import functools
+
+    def compare(a, b):
+        result = apk_cmp(apk_bin, a, b)
+        return 1 if result == "<" else (-1 if result == ">" else 0)
+
+    return sorted(set(versions), key=functools.cmp_to_key(compare))
+
+
+def _base_of(version: str) -> str:
+    match = VERSION_BASE_RE.fullmatch(version)
+    return match.group("base") if match else version
+
+
+def depend_satisfied(apk_bin: str, atom: str, kept_versions) -> bool:
+    """Whether any kept version satisfies one dependency atom. Opaque
+    atoms (so:, /path, virtuals) never satisfy by themselves: holds form
+    only on positively provable edges."""
+    match = DEPEND_ATOM_RE.fullmatch(atom)
+    if not match or "/" in atom or ":" in atom:
+        return False
+    op, want = match.group(3), match.group(4)
+    if op is None or op == "~":
+        return bool(kept_versions)
+    if op == "=" and VERSION_BASE_RE.fullmatch(want) is None:
+        return any(apk_cmp(apk_bin, _base_of(v), _base_of(want)) == "="
+                   for v in kept_versions)
+    if op == "=":
+        return want in kept_versions
+    if op == ">=":
+        return any(apk_cmp(apk_bin, v, want) in ("=", ">") for v in kept_versions)
+    if op == ">":
+        return any(apk_cmp(apk_bin, v, want) == ">" for v in kept_versions)
+    if op == "<=":
+        return any(apk_cmp(apk_bin, v, want) in ("=", "<") for v in kept_versions)
+    if op == "<":
+        return any(apk_cmp(apk_bin, v, want) == "<" for v in kept_versions)
+    return False
+
+
+def index_depends(apk_bin: str, index_path) -> dict:
+    """{(name, version): [depends]} from one ADB index dump."""
+    try:
+        dump = subprocess.run([apk_bin, "adbdump", str(index_path)], check=True,
+                              text=True, capture_output=True).stdout
+    except subprocess.CalledProcessError as exc:
+        raise RepoDbError(f"cannot dump index {index_path}: exit {exc.returncode}:"
+                          f" {(exc.stderr or '').strip()[:300]}")
+    result: dict[tuple[str, str], list[str]] = {}
+    name = version = None
+    depends: list[str] | None = None
+    in_depends = False
+    for line in dump.splitlines():
+        match = re.match(r"^  - name: (\S+)$", line)
+        if match:
+            if name is not None and version is not None:
+                result[(name, version)] = depends or []
+            name, version, depends, in_depends = match.group(1), None, None, False
+            continue
+        match = re.match(r"^    version: (\S+)$", line)
+        if match and name is not None:
+            version = match.group(1)
+            continue
+        if re.match(r"^    depends:", line):
+            depends, in_depends = [], True
+            continue
+        if line.startswith("      - ") and in_depends and depends is not None:
+            depends.append(line[len("      - "):].strip())
+            continue
+        if re.match(r"^    \S", line):
+            in_depends = False
+    if name is not None and version is not None:
+        result[(name, version)] = depends or []
+    return result
+
+
+def _live_needs_version(apk_bin: str, name: str, version: str, live: set,
+                        staged: dict, index_depends_map: dict,
+                        kept_versions: dict) -> tuple[str, str] | None:
+    """(dependent NVR, edge) if a live dependent needs exactly this
+    published version (no kept version satisfies the edge), else None."""
+    for dep_name, dep_version in sorted(live):
+        if dep_name == name:
+            continue
+        edges = staged.get((dep_name, dep_version))
+        if edges is None:
+            edges = index_depends_map.get((dep_name, dep_version), [])
+        for edge in edges:
+            match = DEPEND_ATOM_RE.fullmatch(edge)
+            if not match or "/" in edge or ":" in edge:
+                continue
+            if match.group(1) != name:
+                continue
+            if (not depend_satisfied(apk_bin, edge, kept_versions.get(name, []))
+                    and depend_satisfied(apk_bin, edge, [version])):
+                return (f"{dep_name}-{dep_version}", edge)
+    return None
+
+
+def compute_retire_set(conn, apk_bin: str, staged: dict,
+                       index_depends_map: dict, keep: int,
+                       holds) -> set:
+    """Filenames ('nvr.apk') to retire from the live generation. staged maps
+    (name, version) to depends lists; index_depends_map covers published
+    newest packages the same way. keep<1 is refused. Never returns staged
+    or explicitly held NVRs. Prune order: (1) every published r0 retires
+    unconditionally - r0 is inadmissible in the live view, never a
+    retention/rollback candidate, never held, never a satisfier; (2)
+    normal retention over r1+ (latest keep generations, exact live
+    dependency holds, explicit holds); (3) split siblings retire together
+    in the caller's single pass. An explicit hold naming an r0, or a live
+    dependent needing an r0, fails closed."""
+    if keep < 1:
+        raise RepoDbError(f"retention keep must be >= 1: {keep}")
+    holds_norm = set()
+    for hold in holds or []:
+        hold = hold.strip()
+        if hold.endswith(".apk"):
+            hold = hold[:-4]
+        if hold:
+            holds_norm.add(hold)
+    published: dict[str, list] = {}
+    for row in conn.execute("SELECT name, version FROM packages"):
+        published.setdefault(row["name"], []).append(row["version"])
+    staged_idents = set(staged)
+    # Step 1 - r0 purge. pkgrel is lineage-local: this is a flat
+    # pkgrel == 0 filter, never a cross-lineage version comparison.
+    r0_idents = {(name, version)
+                 for name, versions in published.items()
+                 for version in versions
+                 if pkgrel_of(version) == 0} - staged_idents
+    for (name, version) in sorted(r0_idents):
+        if f"{name}-{version}" in holds_norm:
+            raise RepoDbError(
+                f"explicit retention hold on r0 is rejected: {name}-{version}"
+                " (r0 is inadmissible in the live view; holds only ever pin r1+)")
+    post_newest: dict[str, str] = {}
+    kept_versions: dict[str, list] = {}
+    for name in sorted(set(published) | {n for n, _v in staged}):
+        versions = list(published.get(name, []))
+        for n, v in staged:
+            if n == name and v not in versions:
+                versions.append(v)
+        ranked = apk_versions_desc(apk_bin, versions)
+        if ranked:
+            post_newest[name] = ranked[0]
+        # r0 is never a retention candidate and never satisfies a live
+        # edge: a dependent "satisfied" only by an r0 is broken, and the
+        # r0 pass above (gate first, then prune) says so loudly.
+        kept_versions[name] = [v for v in ranked[:keep] if pkgrel_of(v) != 0]
+    live = ((set(staged) | {(n, post_newest[n]) for n in post_newest})
+            - r0_idents)
+    retired = set()
+    for (name, version) in sorted(r0_idents):
+        need = _live_needs_version(apk_bin, name, version, live, staged,
+                                   index_depends_map, kept_versions)
+        if need is not None:
+            dependent, edge = need
+            raise RepoDbError(
+                f"live package {dependent} depends on '{edge}', satisfiable"
+                f" only by r0 {name}-{version} (broken live dependency: r0 is"
+                " inadmissible in the live view and is never retained to"
+                " satisfy it - fix the consumer recipe at r1+)")
+        retired.add(f"{name}-{version}.apk")
+    for name in sorted(set(published) | {n for n, _v in staged}):
+        versions = list(published.get(name, []))
+        for n, v in staged:
+            if n == name and v not in versions:
+                versions.append(v)
+        ranked = apk_versions_desc(apk_bin, versions)
+        for version in ranked[keep:]:
+            ident = (name, version)
+            if ident in staged:
+                continue
+            if pkgrel_of(version) == 0:
+                continue  # step 1 above owns every published r0
+            nvr = f"{name}-{version}"
+            if nvr in holds_norm:
+                continue
+            if _live_needs_version(apk_bin, name, version, live, staged,
+                                   index_depends_map, kept_versions) is None:
+                retired.add(f"{nvr}.apk")
+    return retired
+
+
+def apply_retire(conn, apk_bin: str, filenames, touched=frozenset(),
+               notices=None) -> None:
+    """Delete retired NVRs (rows only; the caller removed the APK files
+    before index regen). Refuses newest rows - except r0, which is
+    inadmissible in the live view and retires even when newest (an
+    r0-only package goes absent rather than retained). When an r0-newest
+    retires over surviving older rows, the best admissible survivor is
+    crowned newest so its claims stay live, and its declarations become
+    the ACTIVE reservations. Names applied in the same transaction were
+    already reconciled by apply_staged and are left alone; other retired
+    names tombstone the ACTIVE reservations orphaned here (IDs never
+    recycle). The caller holds the transaction."""
+    if notices is None:
+        notices = []
+    retired_names: set[str] = set()
+    for filename in sorted(filenames):
+        nvr = filename[:-4] if filename.endswith(".apk") else filename
+        row = conn.execute(
+            "SELECT package_id, name, version, is_newest FROM packages WHERE nvr=?",
+            (nvr,)).fetchone()
+        if row is None:
+            raise RepoDbError(f"retire set references missing package: {filename}")
+        if row["is_newest"] and pkgrel_of(row["version"]) != 0:
+            raise RepoDbError(f"refusing to retire newest package: {filename}")
+        package_id = row["package_id"]
+        conn.execute("DELETE FROM state_dirs WHERE package_id=?", (package_id,))
+        conn.execute("DELETE FROM users WHERE package_id=?", (package_id,))
+        conn.execute("DELETE FROM groups WHERE package_id=?", (package_id,))
+        conn.execute("DELETE FROM files WHERE package_id=?", (package_id,))
+        conn.execute("DELETE FROM packages WHERE package_id=?", (package_id,))
+        retired_names.add(row["name"])
+    for name in sorted(retired_names):
+        if name in touched:
+            continue  # apply_staged already reconciled this lineage
+        survivors = [r["version"] for r in conn.execute(
+            "SELECT version FROM packages WHERE name=?", (name,)).fetchall()]
+        if not survivors:
+            # Lineage going absent: its ACTIVE reservations die with it
+            # (tombstoned, never deleted - IDs never recycle).
+            for res in conn.execute(
+                    "SELECT kind, name, last_nvr FROM reservations"
+                    " WHERE owning_package=? AND status='ACTIVE'",
+                    (name,)).fetchall():
+                conn.execute(
+                    "UPDATE reservations SET status='TOMBSTONED' WHERE kind=? AND name=?",
+                    (res["kind"], res["name"]))
+                notices.append(
+                    f"reservation tombstoned: {res['kind']} {res['name']}"
+                    f" ({res['last_nvr']} retired from live; IDs never recycle)")
+            continue
+        if conn.execute("SELECT COUNT(*) c FROM packages WHERE name=? AND is_newest=1",
+                        (name,)).fetchone()["c"]:
+            continue
+        # An r0-newest retired over older survivors: crown the best
+        # admissible (non-r0) survivor so its claims stay live.
+        admissible = [v for v in survivors if pkgrel_of(v) != 0]
+        best = apk_versions_desc(apk_bin, admissible or survivors)[0]
+        conn.execute("UPDATE packages SET is_newest=1 WHERE name=? AND version=?",
+                     (name, best))
+        notices.append(
+            f"{name}: newest recomputed as {name}-{best} (r0 retired from live)")
+        crowned_id = conn.execute(
+            "SELECT package_id FROM packages WHERE name=? AND version=?",
+            (name, best)).fetchone()["package_id"]
+        users = [dict(r) for r in conn.execute(
+            'SELECT name, uid, primary_group AS "primary", home, shell FROM users'
+            " WHERE package_id=? ORDER BY name", (crowned_id,)).fetchall()]
+        groups = [dict(r) for r in conn.execute(
+            "SELECT name, gid FROM groups WHERE package_id=? ORDER BY name",
+            (crowned_id,)).fetchall()]
+        for u in users:
+            u["uid"] = str(u["uid"])
+        for g in groups:
+            g["gid"] = str(g["gid"])
+        decl = {"users": users, "groups": groups, "dirs": []}
+        for entry in groups:
+            upsert_reservation(conn, "group", entry["name"], int(entry["gid"]),
+                               name, f"{name}-{best}", decl, notices)
+        for entry in users:
+            upsert_reservation(conn, "user", entry["name"], int(entry["uid"]),
+                               name, f"{name}-{best}", decl, notices)
+        live_users = {entry["name"] for entry in users}
+        live_groups = {entry["name"] for entry in groups}
+        for kind, sub in (("user", live_users), ("group", live_groups)):
+            for res in conn.execute(
+                    "SELECT name, last_nvr FROM reservations"
+                    " WHERE kind=? AND owning_package=? AND status='ACTIVE'",
+                    (kind, name)).fetchall():
+                if res["name"] not in sub:
+                    conn.execute(
+                        "UPDATE reservations SET status='TOMBSTONED', last_nvr=?"
+                        " WHERE kind=? AND name=?",
+                        (f"{name}-{best}", kind, res["name"]))
+                    notices.append(
+                        f"reservation tombstoned: {kind} {res['name']}"
+                        f" (dropped by {name}-{best}; IDs never recycle)")
 
 
 def check_union(tsv_users: dict[str, int], tsv_groups: dict[str, int],
@@ -838,6 +1195,87 @@ def check_union(tsv_users: dict[str, int], tsv_groups: dict[str, int],
     if errors:
         raise RepoDbError(
             "account identity collision - one package owns each declared Unix identity:\n  "
+            + "\n  ".join(sorted(errors))
+        )
+
+def check_legacy_union(staged_info: dict, combined_decls: list[tuple[str, dict]]) -> None:
+    """Legacy history must never collide with any present identity.
+
+    A legacy UID/GID claimed as history while declared (active or
+    staged, by any package) makes migration targets ambiguous; legacy
+    history claimed twice is incoherent (one past, one owner). Refuse
+    naming the collision. Published sidecars are not parsed here
+    (census reads declarations only); migration-time preconditions
+    fail closed on any residual overlap, so gate plus command cover
+    both layers.
+
+    Namespace split: a legacy user's UID claims user-namespace
+    history; a legacy group's GID claims group-namespace history. A
+    legacy user's primary GID is a reference, not a claim - the
+    universal paired shape (user foo N + group foo N), shared
+    primaries, and unchanged primaries must not self-collide - so it
+    is checked against neither declared groups nor other history.
+    Group-namespace coverage comes from the legacy group entries,
+    which makepkg requires to name groups the same fragment declares.
+    """
+    uids: dict[int, str] = {}
+    gids: dict[int, str] = {}
+    for owner, decl in combined_decls:
+        for entry in decl.get("users", []):
+            uids.setdefault(int(entry["uid"]), owner)
+        for entry in decl.get("groups", []):
+            gids.setdefault(int(entry["gid"]), owner)
+    seen_uids: dict[int, str] = {}
+    seen_gids: dict[int, str] = {}
+    errors: list[str] = []
+    for name in sorted(staged_info):
+        label = f"staged:{name}"
+        legacy = staged_info[name].get("accounts", {}).get("legacy", {"users": [], "groups": []})
+        for entry in legacy.get("users", []):
+            uid = int(entry["uid"])
+            if uid in uids:
+                errors.append(f"legacy user {entry['name']}: {label} old UID {uid} collides with {uids[uid]}")
+            elif uid in seen_uids:
+                errors.append(f"legacy user {entry['name']}: {label} old UID {uid} already claimed as history by {seen_uids[uid]}")
+            else:
+                seen_uids[uid] = label
+        for entry in legacy.get("groups", []):
+            gid = int(entry["gid"])
+            if gid in gids:
+                errors.append(f"legacy group {entry['name']}: {label} old GID {gid} collides with {gids[gid]}")
+            elif gid in seen_gids:
+                errors.append(f"legacy group {entry['name']}: {label} old GID {gid} already claimed as history by {seen_gids[gid]}")
+            else:
+                seen_gids[gid] = label
+    if errors:
+        raise RepoDbError(
+            "legacy history collides with declared identities:\n  "
+            + "\n  ".join(sorted(errors))
+        )
+
+
+def check_file_references(label: str, accounts: dict) -> None:
+    """File-stanza references resolve to what the package owns plus root.
+
+    A file stanza never declares an identity: its owner/group must be a
+    user/group declared in the same fragment, or the root/0 built-in
+    (which needs no declaration). Anything else is a typo or a
+    cross-package ownership grab, and publication fails closed naming
+    it. The live reconciler re-checks resolution independently.
+    """
+    own_users = {entry["name"] for entry in accounts.get("users", [])}
+    own_groups = {entry["name"] for entry in accounts.get("groups", [])}
+    errors: list[str] = []
+    for entry in accounts.get("files", []):
+        if entry["owner"] not in own_users and entry["owner"] not in ("root", "0"):
+            errors.append(
+                f"file {entry['path']}: {label} owner '{entry['owner']}' is neither declared by this package nor the root built-in")
+        if entry["group"] not in own_groups and entry["group"] not in ("root", "0"):
+            errors.append(
+                f"file {entry['path']}: {label} group '{entry['group']}' is neither declared by this package nor the root built-in")
+    if errors:
+        raise RepoDbError(
+            "file ownership references undeclared identities:\n  "
             + "\n  ".join(sorted(errors))
         )
 
@@ -931,7 +1369,7 @@ def derive_ledger(apk_bin: str, census_data: dict, declarations: dict,
         bindings: dict[tuple[str, str], list] = {}
         for version in _ordered_versions(apk_bin, by_name[name]):
             filename = f"{name}-{version}.apk"
-            decl = declarations.get(filename, {"users": [], "groups": [], "dirs": []})
+            decl = declarations.get(filename, {"users": [], "groups": [], "dirs": [], "files": []})
             owner = f"{name}-{version}"
             for entry in decl.get("groups", []):
                 key = ("group", entry["name"])
@@ -995,6 +1433,7 @@ def gate_staged(conn: sqlite3.Connection, apk_bin: str, staged_accounts_path: st
     staged_identities: set[tuple[str, str]] = set()
     staged_paths: dict[tuple[str, str], set[str]] = {}
     staged_replaces: dict[tuple[str, str], set[str]] = {}
+    staged_depends: dict[tuple[str, str], list[str]] = {}
     staged_decl_list: list[tuple[str, str, dict]] = []
     from collections import defaultdict
 
@@ -1011,11 +1450,12 @@ def gate_staged(conn: sqlite3.Connection, apk_bin: str, staged_accounts_path: st
         if package.name in staged_filenames:
             staged_identities.add(identity)
             staged_replaces[identity] = set(dumped["replaces"])
+            staged_depends[identity] = list(dumped["depends"])
             staged_paths_dd[identity].update(dumped["files"])
             item = staged_receipts.get(package.name,
-                                       {"accounts": {"users": [], "groups": [], "dirs": []}})
+                                       {"accounts": {"users": [], "groups": [], "dirs": [], "files": []}})
             accounts = item["accounts"]
-            declared = bool(accounts.get("users") or accounts.get("groups"))
+            declared = bool(accounts.get("users") or accounts.get("groups") or accounts.get("files"))
             fragment_here = any(f.startswith(FRAGMENT_PREFIX) for f in dumped["files"])
             if fragment_here and not declared:
                 raise RepoDbError(
@@ -1038,26 +1478,116 @@ def gate_staged(conn: sqlite3.Connection, apk_bin: str, staged_accounts_path: st
     owners = newest_owners(conn)
     newest = {r["name"]: r["version"] for r in conn.execute(
         "SELECT name, version FROM packages WHERE is_newest=1").fetchall()}
+    # r0 is inadmissible in the live view: published r0 claims are
+    # history, never active claims. A historical r0 still physically
+    # present (archive generation, or live awaiting its retirement
+    # transaction) must not block a legitimate successor or sibling
+    # split the way an active r1+ claim does. pkgrel is lineage-local
+    # (no generic "any r1 beats every r0" comparison across unrelated
+    # pkgvers): the rule is a flat admissibility filter on pkgrel == 0,
+    # applied to published claims only. Staged packages always
+    # participate fully, so single-generation archive runs still gate
+    # staged r0 fixtures against each other.
+    staged_names = {name for (name, _version) in staged_identities}
+    r0_names = {name for name, version in newest.items()
+                if pkgrel_of(version) == 0} - staged_names
+    if r0_names:
+        for path, name_versions in list(owners.items()):
+            for name in [candidate for candidate in name_versions
+                         if candidate in r0_names]:
+                del name_versions[name]
+            if not name_versions:
+                del owners[path]
     for ident in sorted(staged_identities):
         name, version = ident
         current = newest.get(name)
         if current is None or apk_newer(apk_bin, version, current):
             for path in staged_paths[ident]:
                 owners.setdefault(path, {})[name] = f"{name}-{version}"
+            # Newer-or-novel abandonment: a staged successor retires its own
+            # published claims on paths it no longer ships (subpackage file
+            # moves, dropped payloads). Without this, a file moving from a
+            # package to a sibling subpackage (or any takeover of an
+            # abandoned path) could never publish: the stale published claim
+            # would collide forever. True conflicts are unaffected: a path
+            # the staged successor still ships keeps its claim below.
+            for path, name_versions in list(owners.items()):
+                if (name in name_versions
+                        and name_versions[name] == f"{name}-{current}"
+                        and path not in staged_paths[ident]):
+                    del name_versions[name]
+                    if not name_versions:
+                        del owners[path]
     collisions = evaluate_file_collisions(owners, staged_identities,
                                           staged_paths, staged_replaces)
+    # Shared init selector: admit sbin/init co-owned by exactly the two
+    # init systems, and nothing else. Swapping inits is del-then-add -
+    # apk never overwrites a live-owned file, so no --force-overwrite
+    # exists anywhere in that flow; only the repository may hold both
+    # selectors at once. A third claimant on this path, or any other
+    # shared path, still fails closed below. Install-time behavior is
+    # untouched: adding an init while the other is installed refuses.
+    shared_init: dict[str, list[str]] = {
+        path: sorted(owners.get(path, {}))
+        for path in collisions
+        if path == SHARED_INIT_SELECTOR
+        and set(owners.get(path, {}))
+        and set(owners.get(path, {})) <= SHARED_INIT_OWNERS
+        and {ident[0] for ident in staged_identities
+             if path in staged_paths.get(ident, ())} <= SHARED_INIT_OWNERS
+    }
+    for path in shared_init:
+        del collisions[path]
     if collisions:
         lines = [f"{path}: claimed by {sv} and {dv}" for path, (sv, dv) in sorted(collisions.items())]
         raise RepoDbError(
             "file ownership collision - exactly one package must own a path; "
             "fix the recipe split (never --force-overwrite):\n  " + "\n  ".join(lines)
         )
+    # A staged package that exactly pins an r0 NVR is a broken live
+    # dependency: r0 is inadmissible in the live view and is never
+    # retained to satisfy anything, so publication fails closed here
+    # naming the broken dependent. Only exact (=) pins on an r0 revision
+    # qualify: bare, fuzzy and range atoms stay the resolver's domain
+    # (an archive legitimately satisfies bare deps from historical r0s
+    # it keeps forever, and fully dangling atoms are left alone).
+    published_versions: dict[str, list] = {}
+    for row in conn.execute("SELECT name, version FROM packages"):
+        published_versions.setdefault(row["name"], []).append(row["version"])
+    for ident in sorted(staged_identities):
+        for edge in staged_depends.get(ident, []):
+            match = DEPEND_ATOM_RE.fullmatch(edge)
+            if not match or "/" in edge or ":" in edge:
+                continue
+            if match.group(3) != "=":
+                continue
+            want = match.group(4)
+            if VERSION_BASE_RE.fullmatch(want) is None or pkgrel_of(want) != 0:
+                continue
+            target = match.group(1)
+            universe = list(published_versions.get(target, []))
+            universe.extend(version for (stage_name, version) in staged_identities
+                            if stage_name == target)
+            if (depend_satisfied(apk_bin, edge, universe)
+                    and not depend_satisfied(
+                        apk_bin, edge,
+                        [v for v in universe if pkgrel_of(v) != 0])):
+                raise RepoDbError(
+                    f"staged {ident[0]}-{ident[1]} depends on '{edge}',"
+                    " satisfiable only by r0 (broken live dependency: r0 is"
+                    " inadmissible in the live view and is never retained to"
+                    " satisfy it - fix the consumer recipe at r1+)")
     tsv_parsed = parse_tsv(tsv_path)
     notices: list[str] = []
+    for path, claimants in shared_init.items():
+        notices.append(
+            f"shared init selector: {path} co-owned by "
+            f"{', '.join(claimants)} (del-then-add init swaps; "
+            "never --force-overwrite)")
     if tsv_parsed is None:
         active_count = conn.execute(
             "SELECT COUNT(*) c FROM reservations WHERE status='ACTIVE'").fetchone()["c"]
-        if any(accounts.get("users") or accounts.get("groups")
+        if any(accounts.get("users") or accounts.get("groups") or accounts.get("files")
                for accounts in (item["accounts"] for item in info.values())) or active_count:
             raise RepoDbError(
                 f"accounts authority is missing: {tsv_path} "
@@ -1065,14 +1595,26 @@ def gate_staged(conn: sqlite3.Connection, apk_bin: str, staged_accounts_path: st
         notices.append(f"no TSV reservations and no declarations; account gate skipped ({tsv_path} absent)")
     else:
         tsv_users, tsv_groups = tsv_parsed
-        decls = [(label, decl) for label, _package, decl in active_declarations(conn)]
+        # A staged successor supersedes its repo-newest declaration in the
+        # union check (mirrors the file gate's newer-or-novel merge):
+        # without this, the first upgrade of any identity-declaring
+        # package under the SQLite gate false-collides with itself.
+        # Published r0 declarations are history, never active identity
+        # claims (mirrors the file-gate r0 filter above). The eternal
+        # reservation ledger still binds everything including r0
+        # tombstones - see check_reservations, deliberately unfiltered.
+        staged_newer = {name for (name, version) in staged_identities
+                        if name in newest and apk_newer(apk_bin, version, newest[name])}
+        decls = [(label, decl) for label, package, decl in active_declarations(conn)
+                 if package not in staged_newer and package not in r0_names]
         decls += [(label, decl) for label, _package, decl in staged_decl_list]
         check_union(tsv_users, tsv_groups, decls)
         check_reservations(conn, staged_decl_list)
         mk = makepkg()
         for filename in sorted(info):
-            item = staged_receipts.get(filename, {"accounts": {"users": [], "groups": [], "dirs": []}})
+            item = staged_receipts.get(filename, {"accounts": {"users": [], "groups": [], "dirs": [], "files": []}})
             label = f"staged:{item.get('name', '?')}-{item.get('version', '?')}"
+            check_file_references(label, item["accounts"])
             for entry in item["accounts"].get("groups", []):
                 if int(entry["gid"]) > mk.PREFERRED_MAX_ID:
                     notices.append(
@@ -1083,6 +1625,7 @@ def gate_staged(conn: sqlite3.Connection, apk_bin: str, staged_accounts_path: st
                     notices.append(
                         f"{label} user {entry['name']} UID {entry['uid']} is in the "
                         f"200..887 expansion range (preferred 0..{mk.PREFERRED_MAX_ID})")
+        check_legacy_union(info, decls)
     return info, notices
 
 
@@ -1106,7 +1649,7 @@ def apply_staged(conn: sqlite3.Connection, apk_bin: str, repo_dir: str | Path,
         if not installed.is_file():
             raise RepoDbError(f"staged package not installed: {filename}")
         digest = sha256_file(installed)
-        decl = item.get("accounts", {"users": [], "groups": [], "dirs": []})
+        decl = item.get("accounts", {"users": [], "groups": [], "dirs": [], "files": []})
         _, decl_sha = canonical_declaration(decl.get("users", []),
                                             decl.get("groups", []), decl.get("dirs", []))
         row = conn.execute(

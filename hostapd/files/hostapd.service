@@ -1,0 +1,28 @@
+[Unit]
+Description=hostapd IEEE 802.11 AP (default instance)
+Documentation=man:hostapd(8)
+After=network.target
+
+[Service]
+Type=simple
+# Plain counterpart of hostapd@.service, bound to the default
+# configuration /etc/hostapd/hostapd.conf (per-interface instances
+# remain explicit via hostapd@<iface>). Least privilege as in the
+# template: service user + ambient caps; config readability stays the
+# operator's (PSKs - never auto-chmodded). Absent default config skips
+# cleanly instead of failing into a restart loop; do not enable this
+# and an instance for the same interface twice.
+User=hostapd
+Group=hostapd
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+NoNewPrivileges=true
+RuntimeDirectory=hostapd
+RuntimeDirectoryMode=0750
+ConditionPathExists=/etc/hostapd/hostapd.conf
+ExecStart=/usr/sbin/hostapd /etc/hostapd/hostapd.conf
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

@@ -10,7 +10,7 @@ repo=saphira
 url=https://wiki.linuxfoundation.org/networking/iproute2
 iproute2_sha256=fd9fa1b95809417157ca83dd72957e3261bdbce896353cb936f80af0b33a4b5c
 depends="libmnl"
-makedepends="saphira-kernel-headers=7.1.5 bison flex gawk gcc make pkgconf libmnl-dev"
+makedepends="saphira-kernel-headers bison flex gawk gcc make pkgconf libmnl-dev"
 subpackages="$pkgname-doc"
 recipe_build() {
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$RECIPE_DIR/files/iproute2-7.1.0.tar.xz"

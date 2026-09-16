@@ -43,15 +43,32 @@ for recipe_sh in "$ROOT"/*/recipe.sh; do
 			*) [ "${#sha}" -eq 64 ] || status="BROKEN bad-digest" ;;
 		esac
 	fi
-	if [ -z "$status" ] && [ -n "$vendor" ]; then
-		base=${vendor##*/}; base=${base%%\?*}
-		case " $consumed " in
-			*" $base "*) ;;
-			*)
-				present=$(ls "$ROOT/$pkg/files/$base" 2>/dev/null || true)
-				[ -n "$present" ] || status="BROKEN url-basename-unmatched($base)"
-				;;
-		esac
+	if [ -z "$status" ]; then
+		# URL basename must equal an archive the recipe consumes or one
+		# already present in files/ (applies to vendor= and source=
+		# alike; source=+sha pairs predate vendor= but ride the same path).
+		# $vars in URLs expand against the recipe's own simple top-level
+		# assignments (same expansion fetch-vendor-sources uses).
+		audit_tmp=${SAPHIRA_TMPDIR:-/build/tmp}/audit-vendor-sources
+		mkdir -p "$audit_tmp"
+		audit_env=$audit_tmp/env.$pkg
+		printf '%s\n' "$meta" | grep -E '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=([^`]*)$' \
+			| grep -vE '\$\(' | sed 's/^[[:space:]]*//' > "$audit_env" 2>/dev/null || true
+		for u in $vendor $source_url; do
+			case $u in *'://'*) ;;
+				*) continue ;;
+			esac
+			u_exp=$(set +u; __u=$u; . "$audit_env" 2>/dev/null || true; case $__u in *'`'*|*'$('*) printf '%s' "$__u" ;; *) eval "printf '%s' \"$__u\"" ;; esac 2>/dev/null || printf '%s' "$__u")
+			base=${u_exp##*/}; base=${base%%\?*}
+			case " $consumed " in
+				*" $base "*) ;;
+				*)
+					present=$(ls "$ROOT/$pkg/files/$base" 2>/dev/null || true)
+					[ -n "$present" ] || status="BROKEN url-basename-unmatched($base)"
+					;;
+			esac
+		done
+		rm -f "$audit_env"
 	fi
 	if [ -n "$status" ]; then
 		printf '%-32s %s\n' "$pkg" "$status"

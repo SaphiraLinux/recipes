@@ -9,7 +9,11 @@ set -eu
 
 resolver=$1
 source_root=$(CDPATH= cd -- "$(dirname -- "$resolver")/../.." && pwd)
-test_root=$(mktemp -d /tmp/saphira-resolver-test.XXXXXX)
+test_tmp_base=${SAPHIRA_TMPDIR:-/build/test-tmp}
+mkdir -p "$test_tmp_base"
+test_root=$(mktemp -d "$test_tmp_base/saphira-resolver-test.XXXXXX")
+export SAPHIRA_TMPDIR=$test_root/tool-tmp
+mkdir -p "$SAPHIRA_TMPDIR"
 trap 'find "$test_root" -depth -delete' EXIT HUP INT TERM
 recipes=$test_root/recipes
 build_root=$test_root/build
@@ -80,7 +84,7 @@ run_resolver unversioned-target > "$test_root/unversioned.json"
 assert_plan "$test_root/unversioned.json" '
 assert [node["producer"] for node in plan["builds"]] == ["unversioned-target"]
 acl = next(node for node in plan["repository"] if node["name"] == "acl-dev")
-assert acl["version"].startswith("2.3.2-r")
+assert "-r" in acl["version"]
 '
 
 # Regression: an exact version pin without a revision (=7.1.5) is
@@ -104,15 +108,17 @@ assert next(
 '
 
 # A constraint the trusted repository cannot satisfy builds the local
-# subpackage producer (repo currently serves acl-dev 2.3.2-rN with small N;
-# the r99 fixture stays above it).
-recipe constrained-target 1 'acl-dev>=2.3.2-r99'
+# subpackage producer (fictional provider at a version the repository will
+# never carry; earlier revisions of this test floored a real repository
+# package and broke whenever the repository moved).
+recipe tall-provider 9.9.9 '' 'tall-provider-dev'
+recipe constrained-target 1 'tall-provider-dev>=9.9.9'
 run_resolver constrained-target > "$test_root/constrained.json"
 assert_plan "$test_root/constrained.json" '
-assert [node["producer"] for node in plan["builds"]] == ["acl", "constrained-target"]
+assert [node["producer"] for node in plan["builds"]] == ["tall-provider", "constrained-target"]
 acl = plan["builds"][0]
-assert acl["required_outputs"] == ["acl-dev"]
-assert not any(node["name"] == "acl-dev" for node in plan["repository"])
+assert acl["required_outputs"] == ["tall-provider-dev"]
+assert not any(node["name"] == "tall-provider-dev" for node in plan["repository"])
 '
 
 # An explicit top-level request always builds the current native recipe.
@@ -186,17 +192,22 @@ if run_resolver revision-pinned-target > "$test_root/revision-pin.json" 2> "$tes
 fi
 grep 'exact revision pin' "$test_root/revision-pin.log" >/dev/null
 
-# Metadata shell code is contained: build functions are not called, Egg paths
-# are not mounted writable, and unrelated recipes never enter the plan.
-host_marker=/tmp/saphira-resolver-host-marker.$$
-test ! -e "$host_marker"
+# Metadata shell code is contained: build functions are not called, host
+# /tmp is never touched, and unrelated recipes never enter the plan. The
+# sandbox's /tmp is backed by SAPHIRA_TMPDIR store (writable inside, visible
+# on the host only under the test's own tool-tmp): the probe must appear
+# there and nowhere else.
+escape_probe=saphira-resolver-escape-$$
+test ! -e "/tmp/$escape_probe"
 recipe sandbox-target 1 ''
 printf '%s\n' \
-	"builtin printf sandbox > '$host_marker'" \
+	"builtin printf sandbox > '/tmp/$escape_probe'" \
 	'recipe_build() { builtin printf build-ran > /tmp/build-ran; }' \
 	'recipe_install() { :; }' >> "$recipes/sandbox-target/recipe.sh"
 run_resolver sandbox-target > "$test_root/sandbox.json"
-test ! -e "$host_marker"
+test ! -e "/tmp/$escape_probe"
+found_probe=$(find "$SAPHIRA_TMPDIR" -name "$escape_probe" -print -quit)
+test -n "$found_probe"
 recipe unrelated-catalogue-entry 1 ''
 run_resolver sandbox-target > "$test_root/closure.json"
 assert_plan "$test_root/closure.json" '

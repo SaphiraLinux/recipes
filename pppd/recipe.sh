@@ -21,7 +21,7 @@ makedepends="
 	binutils
 	gcc
 	libxcrypt-dev
-	saphira-kernel-headers=7.1.5
+	saphira-kernel-headers
 	make
 "
 

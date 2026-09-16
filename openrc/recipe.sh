@@ -19,7 +19,7 @@ depends="
 makedepends="
     gcc
     libcap-dev
-    saphira-kernel-headers=7.1.5
+    saphira-kernel-headers
     meson
     ninja
     pkgconf

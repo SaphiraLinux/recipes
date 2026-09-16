@@ -5,26 +5,56 @@
 # Called ONLY from makepkg-generated package scripts, with the
 # package's own accounts.d fragment. Ensure mode (post-install,
 # post-upgrade) makes sure every declared group, user, locked shadow
-# entry, and state directory exists; never modifies, reorders, or
-# rehashes anything already present.
+# entry, and state directory exists. A present identity that exactly
+# matches a declared legacy entry is migrated in place to its
+# canonical IDs first (database rows only, with backup - the same
+# semantics as saphira-identity reconcile --apply, so apk fix and apk
+# upgrade self-heal recognised drift with no manual step); anything
+# else already present is never modified, reordered, or rehashed.
 #
 # Disable mode (--disable, post-deinstall) sanitizes WITHOUT deleting:
 # a removed package must never leave its historical service account
-# usable for login. For every declared user found on the system it
-# forces the shadow entry locked ('!') and the shell to
+# usable for login. For every declared user that still matches its
+# declaration it forces the shadow entry locked ('!') and the shell to
 # /sbin/nologin, preserving UID, GID, home, and every other field;
 # groups stay present and reserved; state directories are untouched
 # (never walked, never chowned, never removed); fixed IDs are never
 # recycled. Anything already absent is a silent no-op, so repeats are
-# harmless. A present user with a DIFFERENT UID, or a present group
-# with a DIFFERENT GID, is fatal: disable never touches an unrelated
-# account merely because a name collides.
+# harmless. A declared name that exists with DIFFERENT UID/GID (or an
+# unverifiable primary group) is FOREIGN: reality no longer matches
+# the declaration, so removal has lost authority over that identity.
+# Disable warns, leaves it byte-untouched, and succeeds - APK removal
+# must never be blocked by declaration drift, and deinstall never
+# renumbers anything. Reserved identities stay fatal in both modes:
+# root/UID 0 and the foundation groups are refused always, before
+# any write.
 #
 # Fragment syntax (strict; anything else fails closed):
 #   group <name> <gid>
 #   user <name> <uid> <primary-group> <home> <shell>
 #   dir <path> <mode> <owner> <group>
+#   file <path> <mode> <owner> <group>
 # Blank lines and '#' comments are ignored.
+#
+# A legacy sidecar (<fragment>.legacy, same directory) records
+# recognised history for the declared identities:
+#   legacy user <name> <old-uid> <old-gid>
+#   legacy group <name> <old-gid>
+# When ensure meets a present identity whose UID/GID exactly matches
+# a legacy entry, it migrates the database rows to the canonical IDs
+# automatically (passwd fields 3/4, group field 3, gshadow field 3
+# when that row exists; shadow rows are name-keyed and untouched),
+# under the account lock with a timestamped backup, then verifies
+# the canonical state through the normal path. The sidecar is the
+# standing authorization: only declared pasts ever migrate.
+# Anything not matching a legacy entry is an ordinary conflict and
+# stays fatal, as do reserved identities and occupied targets.
+# Disable mode never consults the sidecar. Repairs are per-entry, so
+# a refusal after a partial repair leaves a backup and a clear
+# error; re-running converges the repaired entries and retries the
+# rest. Reconciliation of undeclared states still lives in
+# saphira-identity(8): account-database records only, never
+# filesystem ownership.
 #
 # Rules:
 # - one package owns each declared identity; a user/group name or numeric
@@ -54,6 +84,19 @@
 #   entry that is locked ('!', '*', '!...') is left alone. An existing
 #   entry with a usable password hash is FATAL: this tool must never
 #   represent, alter, or overwrite login credentials.
+# - file reconciliation fixes ownership and mode on files the package
+#   itself ships, never creates content: a missing path is a packaging
+#   bug and fails closed, symlinks are refused (chown would follow the
+#   link onto another package's target), and directories belong to the
+#   dir stanza. Regular files and live-created fifos are accepted;
+#   anything else special is refused. (Packaging itself cannot ship
+#   fifos - APK payloads carry regular files only - so runtime fifos
+#   such as qmail's queue trigger are created with ownership by the
+#   service start_pre instead.) Owner/group references resolve to declared-or-present
+#   identities; root and UID/GID 0 are built-ins needing no declaration.
+#   Bare numbers besides 0 are refused so every other reference stays a
+#   converge-checkable name. Like dirs, files are untouched by disable
+#   mode (never walked, never chowned, never removed).
 # - directory reconciliation is non-recursive: missing leading components
 #   are created with default modes, and only the final leaf gets the
 #   declared mode/ownership (changed only when different, to stay
@@ -73,6 +116,7 @@ GROUPF=$ROOT/etc/group
 SHADOW=$ROOT/etc/shadow
 TSV=$ROOT/usr/share/saphira/accounts.tsv
 LOCKF=$ROOT/etc/.saphira-accounts.lock
+BACKUP_BASE=$ROOT/var/lib/saphira/identity-backups
 
 log()
 {
@@ -96,6 +140,16 @@ test -f "$FRAGMENT" || die "fragment is missing: $FRAGMENT"
 for f in "$PASSWD" "$GROUPF" "$SHADOW"; do
 	test -f "$f" || die "account database is missing: $f"
 done
+
+# Mode hygiene: the databases must be world-readable except shadow,
+# regardless of the umask that created them (Hatched 2026-09 arrived
+# with /etc/group mode 600 from an image build under a strict umask,
+# breaking every non-root group lookup). Normalize on every run - this
+# heals existing systems the next time any fragment installs, and makes
+# fresh creation umask-independent. Content promises below are
+# unaffected: modes are not entries.
+chmod 0644 "$PASSWD" "$GROUPF" || die "cannot set database modes"
+chmod 0600 "$SHADOW" || die "cannot set shadow mode"
 
 # --- exclusive lock (flock when available, atomic mkdir fallback) ---
 lockdir=
@@ -238,8 +292,14 @@ ensure_group()
 	reserved_identity group "$name" "$gid"
 	existing=$(group_entry "$name")
 	if [ -n "$existing" ]; then
-		[ "$(field 3 "$existing")" = "$gid" ] ||
-			die "group conflict: $name exists with different GID"
+		if [ "$(field 3 "$existing")" != "$gid" ]; then
+			if legacy_group_match "$name" "$(field 3 "$existing")"; then
+				repair_group_legacy "$name" "$gid"
+				existing=$(group_entry "$name")
+			fi
+			[ "$(field 3 "$existing")" = "$gid" ] ||
+				die "group conflict: $name exists with different GID"
+		fi
 		log "group $name ($gid) already present"
 		return 0
 	fi
@@ -287,10 +347,17 @@ ensure_user()
 	if [ -n "$existing" ]; then
 		[ -n "$primary_gid" ] ||
 			die "user conflict: $name exists but primary group $primary is absent"
-		[ "$(field 3 "$existing")" = "$uid" ] ||
-			die "user conflict: $name exists with different UID"
-		[ "$(field 4 "$existing")" = "$primary_gid" ] ||
-			die "user conflict: $name exists with different primary group"
+		if [ "$(field 3 "$existing")" != "$uid" ] ||
+			[ "$(field 4 "$existing")" != "$primary_gid" ]; then
+			if legacy_user_match "$name" "$(field 3 "$existing")" "$(field 4 "$existing")"; then
+				repair_user_legacy "$name" "$uid" "$primary_gid" "$primary"
+				existing=$(passwd_entry "$name")
+			fi
+			[ "$(field 3 "$existing")" = "$uid" ] ||
+				die "user conflict: $name exists with different UID"
+			[ "$(field 4 "$existing")" = "$primary_gid" ] ||
+				die "user conflict: $name exists with different primary group"
+		fi
 		log "user $name ($uid) already present"
 		ensure_shadow "$name"
 		ensure_home "$home" "$uid" "$primary"
@@ -397,6 +464,307 @@ id_numeric_group()
 	esac
 }
 
+# --- legacy sidecar (<fragment>.legacy): recognised history ---
+#
+# Loaded once on the ensure path (disable never consults it).
+# LEGACY_USERS holds "name:uid:gid" entries, LEGACY_GROUPS "name:gid".
+# Legacy IDs are history, never creation targets: no range restriction
+# applies, but reserved identities are refused outright (fail closed).
+legacy_path=
+legacy_users=
+legacy_groups=
+
+# --- legacy auto-repair (ensure path only) ---
+#
+# An exact sidecar match authorizes an in-place migration with the
+# same safety rules as saphira-identity reconcile --apply: the live
+# row must equal the declared past exactly, the canonical target
+# must be free (or already self), reserved identities never qualify
+# (refused at sidecar parse), and every mutation lands under the
+# account lock this script already holds, behind a timestamped
+# backup, with a post-write re-read. Live processes holding either
+# ID are warned about, never fatal: the kernel keeps them on their
+# numeric ID while the name row moves, and the operator restarts the
+# affected service afterwards. gshadow rows migrate when present;
+# shadow rows are name-keyed and untouched.
+backup_done=
+backup_dir=
+
+ensure_backup()
+{
+	if [ -n "$backup_done" ]; then return 0; fi
+	stamp=$(date -u +%Y%m%dT%H%M%SZ 2>/dev/null || date +%Y%m%dT%H%M%S)
+	backup_dir=$BACKUP_BASE/$stamp
+	mkdir -p "$backup_dir" || die "cannot create backup dir: $backup_dir"
+	chmod 0700 "$backup_dir" || die "cannot secure backup dir"
+	for bf in "$PASSWD" "$GROUPF" "$SHADOW"; do
+		cp -p "$bf" "$backup_dir/" || die "cannot back up $bf"
+	done
+	if [ -f "$ROOT/etc/gshadow" ]; then
+		cp -p "$ROOT/etc/gshadow" "$backup_dir/" || die "cannot back up gshadow"
+	fi
+	backup_done=1
+	log "account databases backed up to $backup_dir"
+}
+
+rewrite_field()
+{
+	# rewrite_field FILE NAME FIELD NEWVAL - atomic rename, all
+	# other bytes preserved; refuses malformed rows.
+	file=$1
+	name=$2
+	nfield=$3
+	newval=$4
+	tmp=$(mktemp "$ROOT/etc/.saphira-ensure-repair.XXXXXX") ||
+		die "cannot create repair workspace"
+	while IFS= read -r line || [ -n "$line" ]; do
+		case $line in
+			"$name":*)
+				rest=$line
+				prefix=
+				i=1
+				while [ "$i" -lt "$nfield" ]; do
+					prefix=$prefix${rest%%:*}:
+					rest=${rest#*:}
+					i=$((i + 1))
+				done
+				tail=${rest#*:}
+				case $rest in
+					*:*) ;;
+					*) die "refusing to rewrite malformed row for $name in $file" ;;
+				esac
+				printf '%s%s:%s\n' "$prefix" "$newval" "$tail" >> "$tmp"
+				;;
+			*) printf '%s\n' "$line" >> "$tmp" ;;
+		esac
+	done < "$file"
+	mv -f "$tmp" "$file" || die "cannot install rewritten $file"
+}
+
+line_holds()
+{
+	# line_holds KIND LINE OLD NEW - status check in a subshell so
+	# the field split cannot clobber the caller's positionals.
+	(
+		kind=$1
+		line=$2
+		old=$3
+		new=$4
+		set -f
+		# shellcheck disable=SC2086
+		set -- $line
+		case $kind in
+			uid) [ "$1" = Uid: ] || exit 1 ;;
+			gid) [ "$1" = Gid: ] || exit 1 ;;
+		esac
+		shift
+		for v in "$@"; do
+			if [ "$v" = "$old" ] || [ "$v" = "$new" ]; then exit 0; fi
+		done
+		exit 1
+	)
+}
+
+warn_procs()
+{
+	kind=$1
+	old=$2
+	new=$3
+	[ -d "$ROOT/proc" ] || return 0
+	for status in "$ROOT"/proc/[0-9]*/status; do
+		[ -f "$status" ] || continue
+		while IFS= read -r line || [ -n "$line" ]; do
+			case $line in
+				Uid:*|Gid:*)
+					if line_holds "$kind" "$line" "$old" "$new"; then
+						pid=${status%/status}
+						log "WARNING: live process ${pid##*/} holds $kind $old/$new; restart affected services after repair"
+					fi
+					break
+					;;
+			esac
+		done < "$status" 2>/dev/null || true
+	done
+}
+
+repair_group_legacy()
+{
+	name=$1
+	ngid=$2
+	owner=$(gid_taken "$ngid")
+	if [ -n "$owner" ] && [ "$owner" != "$name" ]; then
+		die "legacy repair refused: target GID $ngid already owned by group $owner"
+	fi
+	warn_procs gid "$(field 3 "$(group_entry "$name")")" "$ngid"
+	ensure_backup
+	rewrite_field "$GROUPF" "$name" 3 "$ngid"
+	if [ -f "$ROOT/etc/gshadow" ] && [ -n "$(find_line "$ROOT/etc/gshadow" "$name" || true)" ]; then
+		rewrite_field "$ROOT/etc/gshadow" "$name" 3 "$ngid"
+	fi
+	[ "$(field 3 "$(group_entry "$name")")" = "$ngid" ] ||
+		die "legacy repair post-verify failed for group $name - restore from $backup_dir"
+	log "group $name migrated from legacy to GID $ngid (backup at $backup_dir)"
+}
+
+repair_user_legacy()
+{
+	name=$1
+	nuid=$2
+	ngid=$3
+	primary=$4
+	owner=$(uid_taken "$nuid")
+	if [ -n "$owner" ] && [ "$owner" != "$name" ]; then
+		die "legacy repair refused: target UID $nuid already owned by user $owner"
+	fi
+	# The canonical primary row exists by now (groups reconcile in
+	# the pre-pass): the target GID must be owned by the declared
+	# primary group itself. Anything else - missing row, stranger
+	# owner - stays fatal.
+	gowner=$(gid_taken "$ngid")
+	if [ "$gowner" != "$primary" ]; then
+		die "legacy repair refused: target primary GID $ngid is not owned by group $primary (held by ${gowner:-nobody})"
+	fi
+	warn_procs uid "$(field 3 "$(passwd_entry "$name")")" "$nuid"
+	ensure_backup
+	rewrite_field "$PASSWD" "$name" 3 "$nuid"
+	rewrite_field "$PASSWD" "$name" 4 "$ngid"
+	[ "$(field 3 "$(passwd_entry "$name")")" = "$nuid" ] &&
+		[ "$(field 4 "$(passwd_entry "$name")")" = "$ngid" ] ||
+		die "legacy repair post-verify failed for user $name - restore from $backup_dir"
+	log "user $name migrated from legacy to $nuid:$ngid (backup at $backup_dir)"
+}
+
+legacy_user_match()
+{
+	# legacy_user_match NAME UID GID - true on exact triple match.
+	case " $legacy_users " in
+		*" $1:$2:$3 "*) return 0 ;;
+	esac
+	return 1
+}
+
+legacy_group_match()
+{
+	case " $legacy_groups " in
+		*" $1:$2 "*) return 0 ;;
+	esac
+	return 1
+}
+
+load_legacy()
+{
+	legacy_path=$FRAGMENT.legacy
+	legacy_users=
+	legacy_groups=
+	[ -f "$legacy_path" ] || return 0
+	lineno=0
+	while IFS= read -r line || [ -n "$line" ]; do
+		lineno=$((lineno + 1))
+		case $line in
+			''|'#'*) continue ;;
+		esac
+		# shellcheck disable=SC2086
+		set -- $line
+		[ "$1" = legacy ] || die "legacy line $lineno: unknown stanza: $1"
+		case $2 in
+			user)
+				[ $# -eq 5 ] || die "legacy line $lineno: legacy user needs 3 fields"
+				valid_name "$3" || die "legacy line $lineno: invalid user name: $3"
+				case $4 in
+					''|*[!0-9]*) die "legacy line $lineno: invalid UID" ;;
+				esac
+				case $5 in
+					''|*[!0-9]*) die "legacy line $lineno: invalid GID" ;;
+				esac
+				case $3 in
+					root) die "legacy line $lineno: root is never a legacy identity" ;;
+				esac
+				case $4 in
+					0) die "legacy line $lineno: UID 0 is never a legacy identity" ;;
+				esac
+				legacy_users="$legacy_users$3:$(($4 + 0)):$(($5 + 0)) "
+				;;
+			group)
+				[ $# -eq 4 ] || die "legacy line $lineno: legacy group needs 2 fields"
+				valid_name "$3" || die "legacy line $lineno: invalid group name: $3"
+				case $4 in
+					''|*[!0-9]*) die "legacy line $lineno: invalid GID" ;;
+				esac
+				case $3 in
+					root|wheel|spokes) die "legacy line $lineno: $3 is never a legacy identity" ;;
+				esac
+				case $4 in
+					0|1|2) die "legacy line $lineno: GID $4 is never a legacy identity" ;;
+				esac
+				legacy_groups="$legacy_groups$3:$(($4 + 0)) "
+				;;
+			*)
+				die "legacy line $lineno: unknown legacy kind: $2" ;;
+		esac
+	done < "$legacy_path"
+}
+
+file_owner_numeric()
+{
+	# root/UID 0 are built-ins (no declaration needed); every other
+	# reference must resolve to a passwd entry, which exists by the
+	# time the file pass runs for declared identities. Bare numbers
+	# besides 0 are refused so references stay converge-checkable
+	# names (an empty print means unknown; the caller dies).
+	case $1 in
+		0) printf '0' ;;
+		''|*[!0-9]*) field 3 "$(passwd_entry "$1")" ;;
+		*) die "numeric file owner refs forbidden except 0: $1 (use the identity name)" ;;
+	esac
+}
+
+file_group_numeric()
+{
+	case $1 in
+		0) printf '0' ;;
+		''|*[!0-9]*) group_gid "$1" ;;
+		*) die "numeric file group refs forbidden except 0: $1 (use the identity name)" ;;
+	esac
+}
+
+ensure_file()
+{
+	path=$1
+	mode=$2
+	owner=$3
+	group=$4
+	[ -L "$ROOT$path" ] &&
+		die "not a regular file: $path (refusing to follow symlinks)"
+	[ -d "$ROOT$path" ] &&
+		die "not a file: $path (directories use the dir stanza)"
+	# Regular files and fifos (qmail's queue trigger) take ownership;
+	# anything else special is refused.
+	[ -f "$ROOT$path" ] || [ -p "$ROOT$path" ] ||
+		die "file stanza target is missing: $path (files must ship in the package payload)"
+	want_owner=$(file_owner_numeric "$owner")
+	want_group=$(file_group_numeric "$group")
+	[ -n "$want_owner" ] || die "unknown owner: $owner"
+	[ -n "$want_group" ] || die "unknown group: $group"
+	current_owner=$(stat -c '%u:%g' "$ROOT$path") || die "cannot stat $path"
+	if [ "$current_owner" != "$want_owner:$want_group" ]; then
+		chown "$want_owner:$want_group" "$ROOT$path" ||
+			die "cannot set ownership on $path"
+		log "file $path ownership set to $want_owner:$want_group"
+	fi
+	# normalize declared mode (accept 755 or 0755, keep setuid bits)
+	# for comparison
+	want_mode=$mode
+	while [ "$want_mode" != "${want_mode#0}" ]; do
+		want_mode=${want_mode#0}
+	done
+	[ -n "$want_mode" ] || want_mode=0
+	current_mode=$(stat -c '%a' "$ROOT$path") || die "cannot stat $path"
+	if [ "$current_mode" != "$want_mode" ]; then
+		chmod "$mode" "$ROOT$path" || die "cannot set mode on $path"
+		log "file $path mode set to $mode"
+	fi
+}
+
 ensure_home()
 {
 	home=$1
@@ -413,9 +781,25 @@ ensure_home()
 # Phase 1 (disable_validate) is pure reads: every stanza is shape-
 # checked and every present identity is conflict-checked before
 # anything is written, so a refusal leaves the databases untouched.
-# Phase 2 (disable_apply) forces locked shadow + nologin shell on
-# verified identities, retains groups, and ignores state entirely.
+# Mismatches do not refuse: the identity is recorded foreign (warned,
+# retained, skipped). Phase 2 (disable_apply) forces locked shadow +
+# nologin shell on verified identities only, retains groups, and
+# ignores state entirely.
 frag_groups=
+foreign_users=
+foreign_groups=
+
+is_foreign()
+{
+	# is_foreign KIND NAME - true when validation recorded NAME as
+	# a foreign identity of that kind. Names cannot contain spaces
+	# (valid_name), so space-separated lists are exact.
+	case $1 in
+		user) case " $foreign_users " in *" $2 "*) return 0 ;; esac ;;
+		group) case " $foreign_groups " in *" $2 "*) return 0 ;; esac ;;
+	esac
+	return 1
+}
 
 frag_gid()
 {
@@ -440,16 +824,25 @@ disable_check_user()
 	esac
 	existing=$(passwd_entry "$name")
 	[ -n "$existing" ] || return 0
-	[ "$(field 3 "$existing")" = "$uid" ] ||
-		die "disable refused: user $name exists with different UID (not the declared $uid)"
+	if [ "$(field 3 "$existing")" != "$uid" ]; then
+		log "WARNING: user $name UID differs from declared $uid; foreign identity retained unchanged"
+		foreign_users="$foreign_users $name"
+		return 0
+	fi
 	want_gid=$(frag_gid "$primary")
 	if [ -z "$want_gid" ]; then
 		want_gid=$(group_gid "$primary")
-		[ -n "$want_gid" ] ||
-			die "disable refused: primary group $primary of $name is neither declared nor present"
+		if [ -z "$want_gid" ]; then
+			log "WARNING: primary group $primary of $name is neither declared nor present; foreign identity retained unchanged"
+			foreign_users="$foreign_users $name"
+			return 0
+		fi
 	fi
-	[ "$(field 4 "$existing")" = "$want_gid" ] ||
-		die "disable refused: user $name exists with different primary group"
+	if [ "$(field 4 "$existing")" != "$want_gid" ]; then
+		log "WARNING: user $name primary group differs from declared $primary; foreign identity retained unchanged"
+		foreign_users="$foreign_users $name"
+		return 0
+	fi
 }
 
 disable_check_group()
@@ -459,8 +852,10 @@ disable_check_group()
 	reserved_identity group "$name" "$gid"
 	existing=$(group_entry "$name")
 	[ -n "$existing" ] || return 0
-	[ "$(field 3 "$existing")" = "$gid" ] ||
-		die "disable refused: group $name exists with different GID (not the declared $gid)"
+	if [ "$(field 3 "$existing")" != "$gid" ]; then
+		log "WARNING: group $name GID differs from declared $gid; foreign identity retained unchanged"
+		foreign_groups="$foreign_groups $name"
+	fi
 }
 
 disable_validate()
@@ -491,6 +886,12 @@ disable_validate()
 					''|*[!0-9]*) die "fragment line $lineno: invalid UID" ;;
 				esac
 				;;
+			# Files are state, and state is untouched by disable mode:
+			# shape-checked here so malformed stanzas still fail
+			# closed, then skipped by both passes below.
+			file)
+				[ $# -eq 5 ] || die "fragment line $lineno: file needs 4 fields"
+				;;
 			dir) continue ;;
 			*) die "fragment line $lineno: unknown stanza: $1" ;;
 		esac
@@ -516,6 +917,10 @@ sanitize_user()
 	existing=$(passwd_entry "$name")
 	if [ -z "$existing" ]; then
 		log "user $name absent; nothing to disable"
+		return 0
+	fi
+	if is_foreign user "$name"; then
+		log "user $name is foreign; left untouched"
 		return 0
 	fi
 	# Apply-time backstop: even past validation, UID 0 and the
@@ -644,6 +1049,7 @@ reject_reserved()
 	done < "$FRAGMENT"
 }
 reject_reserved
+load_legacy
 
 lineno=0
 # Pre-pass: groups first, so user stanzas may reference a primary group
@@ -691,8 +1097,42 @@ while IFS= read -r line || [ -n "$line" ]; do
 			esac
 			ensure_leaf "$2" "$3" "$4" "$5"
 			;;
+		# File stanzas are deferred to the post-pass below: owners
+		# must resolve after every user/group stanza has applied,
+		# regardless of line order.
+		file)
+			continue
+			;;
 		*)
 			die "fragment line $lineno: unknown stanza: $1"
+			;;
+	esac
+done < "$FRAGMENT"
+# Post-pass: files last, so owner/group references resolve against the
+# fully reconciled user/group set (declared, present, or root/0).
+lineno=0
+while IFS= read -r line || [ -n "$line" ]; do
+	lineno=$((lineno + 1))
+	case $line in
+		''|'#'*) continue ;;
+	esac
+	# shellcheck disable=SC2086
+	set -- $line
+	case $1 in
+		file)
+			[ $# -eq 5 ] || die "fragment line $lineno: file needs 4 fields"
+			case $2 in
+				/*) ;;
+				*) die "fragment line $lineno: file path must be absolute" ;;
+			esac
+			case $2 in
+				*'..'*) die "fragment line $lineno: file path must be normalized (no ..)" ;;
+			esac
+			case $3 in
+				0*|[1-7][0-7][0-7]|[1-7][0-7][0-7][0-7]) ;;
+				*) die "fragment line $lineno: invalid mode: $3" ;;
+			esac
+			ensure_file "$2" "$3" "$4" "$5"
 			;;
 	esac
 done < "$FRAGMENT"

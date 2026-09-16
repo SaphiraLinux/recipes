@@ -9,7 +9,11 @@ set -eu
 
 buildpkg=$1
 source_root=$(CDPATH= cd -- "$(dirname -- "$buildpkg")/../.." && pwd)
-test_root=$(mktemp -d /tmp/saphira-clean-build-test.XXXXXX)
+test_tmp_base=${SAPHIRA_TMPDIR:-/build/test-tmp}
+mkdir -p "$test_tmp_base"
+test_root=$(mktemp -d "$test_tmp_base/saphira-clean-build-test.XXXXXX")
+export SAPHIRA_TMPDIR=$test_root/tool-tmp
+mkdir -p "$SAPHIRA_TMPDIR"
 trap 'find "$test_root" -depth -delete' EXIT HUP INT TERM
 recipes=$test_root/recipes
 build_root=$test_root/build
@@ -76,6 +80,41 @@ assert_holder_released()
 	fi
 }
 
+# Seed-drift and workspace-disposition rules are pure functions:
+# unit-test them here (fast, no namespaces) before the heavy builds.
+python3 - "$buildpkg" <<'PY'
+import importlib.util
+import sys
+from importlib.machinery import SourceFileLoader
+loader = SourceFileLoader("buildpkg_under_test", sys.argv[1])
+spec = importlib.util.spec_from_loader("buildpkg_under_test", loader)
+module = importlib.util.module_from_spec(spec)
+loader.exec_module(module)
+drift = module._seed_drift_names
+assert drift(["a", "b"], {"a": "1.0-r1", "b": "2.0-r3"},
+             ["a-1.0-r1.apk", "b-2.0-r3.apk"]) == []
+assert drift(["a"], {"a": "1.0-r1"}, ["a-1.0-r2.apk"]) == ["a"]
+assert drift(["a"], {"a": "1.0-r1"}, ["a-2.0-r1.apk"]) == ["a"]
+assert drift(["a"], {"a": "2.0-r1"}, ["a-1.0-r9.apk"]) == ["a"]
+assert drift(["a"], {"a": "1.0-r9"}, ["a-1.0-r5.apk", "a-1.0-r9.apk"]) == []
+assert drift(["kh"], {"kh": "7.2.2-r1"},
+             ["kh-7.1.5-r1.apk", "kh-7.1.5-r2.apk", "kh-7.2.2-r1.apk"]) == []
+assert drift(["kh"], {"kh": "7.2.2-r1"},
+             ["kh-7.1.5-r2.apk", "kh-7.2.2-r1.apk", "kh-7.2.2-r2.apk"]) == ["kh"]
+assert drift(["kh"], {"kh": "7.2.2-r1"},
+             ["kh-7.1.5-r2.apk", "kh-7.2.3-r1.apk"]) == ["kh"]
+assert drift(["a"], {"a": "1.0-r1"}, []) == []
+assert drift(["a"], {}, ["a-1.0-r1.apk"]) == ["a"]
+assert drift(["a"], {"b": "1.0-r1"}, ["a-1.0-r1.apk"]) == ["a"]
+assert drift(["a"], {"a": "bogus"}, ["a-1.0-r1.apk"]) == ["a"]
+disposition = module._workspace_disposition
+assert disposition("g", "g") == "reuse"
+assert disposition("g", "h") == "move_aside"
+assert disposition(None, "h") == "move_aside"
+assert disposition("g", None) == "move_aside"
+assert disposition("", "") == "move_aside"
+PY
+
 recipe_header make '' 'make-doc make-libs' 9
 printf '%s\n' \
 	'recipe_build() { :; }' \
@@ -141,6 +180,11 @@ test -f "$build_root/rootfs_overlay/state/package-seed.json"
 test "$(readlink "$build_root/rootfs_overlay/base/bin/sh")" = bash
 test -e "$build_root/rootfs_overlay/base/usr/bin/apk"
 test -s "$build_root/rootfs_overlay/base/etc/ssl/certs/ca-certificates.crt"
+# The minimal account database is complete, not just resolvable:
+# package install scripts require passwd+group+shadow (dbus-class
+# closures install fragment-carrying packages into clean roots).
+grep -q '^root:!' "$build_root/rootfs_overlay/base/etc/shadow"
+[ "$(stat -c '%a' "$build_root/rootfs_overlay/base/etc/shadow")" = 600 ]
 [ -z "$(find "$build_root/rootfs_overlay" -maxdepth 1 \( -name 'base.new' -o -name 'base.old-*' \) -print -quit)" ]
 base_inode=$(stat -c %i "$build_root/rootfs_overlay/base")
 set -- "$incoming/x86_64"/fakeroot-*-ready
@@ -448,4 +492,98 @@ test -n "$(find "$incoming" -mindepth 3 -maxdepth 3 -name 'vendor-fallback-1-r1.
 grep 'disposable per-build cache' "$test_root/vendor-fallback.err" >/dev/null
 test ! -e /sys/saphira-source-cache-test
 
-printf '%s\n' 'single-root isolation, graph-output, lifecycle, overlay base reuse, incoming transaction, verified-source cache, and source-cache fallback tests: OK'
+# --- vendored files/ preference --------------------------------------------
+# The local recipe collection carries its archives: <pkg>/files/<basename>
+# verified against sha256= wins over cache and download alike. The URL is
+# unresolvable (example.invalid), so a build that succeeds proves no fetch
+# was attempted; a corrupt vendored copy must fail closed, never fall
+# through to the network.
+mkdir -p "$test_root/files-content"
+printf '%s\n' files-payload > "$test_root/files-content/probe.txt"
+mkdir -p "$recipes/files-probe/files"
+tar -C "$test_root" -cf "$recipes/files-probe/files/files-probe-1.tar" files-content
+files_sha=$(sha256sum "$recipes/files-probe/files/files-probe-1.tar" | cut -d' ' -f1)
+recipe_header files-probe '' '' 1
+printf '%s\n' \
+	'vendor=https://example.invalid/files-probe-1.tar' \
+	"sha256=$files_sha" \
+	'recipe_build() { test -f probe.txt; }' \
+	'recipe_install() {' \
+	'	install -d "$DESTDIR/usr/bin"' \
+	'	printf "%s\n" "#!/bin/sh" "exit 0" > "$DESTDIR/usr/bin/files-probe"' \
+	'	chmod 755 "$DESTDIR/usr/bin/files-probe"' \
+	'}' >> "$recipes/files-probe/recipe.sh"
+run_buildpkg files-probe >/dev/null 2> "$test_root/files-probe.err"
+test -n "$(find "$incoming" -mindepth 3 -maxdepth 3 -name 'files-probe-1-r1.apk')"
+recipe_header files-poison '' '' 1
+mkdir -p "$recipes/files-poison/files"
+printf '%s\n' poisoned-payload > "$test_root/files-content/probe.txt"
+tar -C "$test_root" -cf "$recipes/files-poison/files/files-poison-1.tar" files-content
+printf '%s\n' \
+	'vendor=https://example.invalid/files-poison-1.tar' \
+	"sha256=$files_sha" \
+	'recipe_build() { :; }' \
+	'recipe_install() { :; }' >> "$recipes/files-poison/recipe.sh"
+if run_buildpkg files-poison > "$test_root/files-poison.out" 2> "$test_root/files-poison.err"; then
+	printf '%s\n' 'corrupt vendored archive unexpectedly built' >&2
+	exit 1
+fi
+grep 'failed verification' "$build_root/files-poison.buildpkg/logs/buildpkg.log" >/dev/null
+SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
+SAPHIRA_BUILD_ROOT=$build_root \
+	"$source_root/saphira-packager/files/cleanpkg" files-poison >/dev/null
+test ! -e "$build_root/files-poison.buildpkg"
+
+# Stale-generation workspaces are evidence, not execution slots: a
+# retained FAILED workspace whose base generation no longer matches
+# moves aside with logs intact while a fresh workspace builds from
+# the current base. Same-generation retries keep the marker
+# lifecycle (no move-aside).
+recipe_header always-fails '' '' 1
+printf '%s\n' 'recipe_build() { return 1; }' 'recipe_install() { :; }' >> "$recipes/always-fails/recipe.sh"
+if run_buildpkg always-fails > "$test_root/always-fails.out" 2> "$test_root/always-fails.err"; then
+	printf '%s\n' 'failing fixture unexpectedly built' >&2
+	exit 1
+fi
+test -f "$build_root/always-fails.buildpkg/FAILED"
+test -f "$build_root/always-fails.buildpkg/base-generation.json"
+# Same-generation retry reuses the lifecycle (no move-aside).
+if run_buildpkg always-fails > "$test_root/always-fails.out" 2> "$test_root/always-fails.err"; then
+	printf '%s\n' 'failing fixture unexpectedly built' >&2
+	exit 1
+fi
+test -f "$build_root/always-fails.buildpkg/FAILED"
+[ -z "$(find "$build_root" -maxdepth 1 -name 'always-fails.buildpkg.stale-*' -print -quit)" ]
+# Forge a base generation change (the stamp, not the base) and retry:
+# the retained workspace moves aside with its logs while a fresh
+# workspace fails anew at the canonical path.
+python3 - "$build_root/always-fails.buildpkg/base-generation.json" <<'PY'
+import json
+import sys
+path = sys.argv[1]
+with open(path, encoding="utf-8") as stream:
+    stamp = json.load(stream)
+stamp["generation"] = "forged-stale-generation"
+with open(path, "w", encoding="utf-8") as stream:
+    json.dump(stamp, stream, sort_keys=True)
+    stream.write("\n")
+PY
+if run_buildpkg always-fails > "$test_root/always-fails.out" 2> "$test_root/always-fails.err"; then
+	printf '%s\n' 'failing fixture unexpectedly built' >&2
+	exit 1
+fi
+test -f "$build_root/always-fails.buildpkg/FAILED"
+stale=$(find "$build_root" -maxdepth 1 -name 'always-fails.buildpkg.stale-*')
+test -n "$stale" && [ "$(printf '%s\n' "$stale" | wc -l)" -eq 1 ]
+test -f "$stale/FAILED"
+test -f "$stale/logs/buildpkg.log"
+test -f "$stale/base-generation.json"
+test -f "$build_root/always-fails.buildpkg/base-generation.json"
+grep -q 'moving aside' "$test_root/always-fails.err"
+SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
+SAPHIRA_BUILD_ROOT=$build_root \
+	"$source_root/saphira-packager/files/cleanpkg" always-fails >/dev/null
+test ! -e "$build_root/always-fails.buildpkg"
+rm -rf "$build_root"/always-fails.buildpkg.stale-*
+
+printf '%s\n' 'single-root isolation, graph-output, lifecycle, overlay base reuse, incoming transaction, verified-source cache, vendored files/ preference, source-cache fallback, seed shadow provisioning, seed-drift rules, and stale-workspace move-aside tests: OK'

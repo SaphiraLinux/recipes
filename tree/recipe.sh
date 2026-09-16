@@ -2,7 +2,12 @@
 
 pkgname=tree
 pkgver=2.3.2
-pkgrel=2
+# r3: fix install paths. Upstream's Makefile abuses DESTDIR to mean
+# BINDIR (DESTDIR defaults to ${PREFIX}/bin) and does not prefix
+# MANDIR, so DESTDIR=$PKGDEST staged the binary at the package
+# root (/tree on target) and the man page leaked into the build
+# root. Stage both under PKGDEST explicitly (LFS form).
+pkgrel=3
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='Recursive directory listing tool'
 license='GPL-2.0-or-later'
@@ -24,5 +29,10 @@ recipe_build()
 
 recipe_install()
 {
-	make -C "$SRC" PREFIX=/usr MANDIR=/usr/share/man DESTDIR="$PKGDEST" install
+	make -C "$SRC" PREFIX=/usr DESTDIR="$PKGDEST/usr/bin" \
+		MANDIR="$PKGDEST/usr/share/man" install
+	test -x "$PKGDEST/usr/bin/tree" ||
+		{ echo "ERROR: tree binary not staged at usr/bin/tree" >&2; return 1; }
+	test -f "$PKGDEST/usr/share/man/man1/tree.1" ||
+		{ echo "ERROR: tree man page not staged" >&2; return 1; }
 }

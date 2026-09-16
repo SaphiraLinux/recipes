@@ -2,7 +2,7 @@
 
 pkgname=hostapd
 pkgver=2.11
-pkgrel=2
+pkgrel=3
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='IEEE 802.11 AP, IEEE 802.1X/WPA/WPA2/EAP/RADIUS Authenticator'
 license='BSD-3-Clause'
@@ -14,11 +14,12 @@ sha256=2b3facb632fd4f65e32f4bf82a76b4b72c501f995a4f62e330219fe7aed1747a
 
 depends="libnl openssl"
 makedepends="
-	gcc
-	libnl-dev
-	make
-	openssl-dev
-	pkgconf
+    gcc
+    libcap
+    libnl-dev
+    make
+    openssl-dev
+    pkgconf
 "
 
 recipe_build()
@@ -52,7 +53,21 @@ recipe_install()
 	install -d -m 0755 "$PKGDEST/etc/hostapd"
 	install -D -m 0644 "$RECIPE_DIR/files/hostapd@.service" \
 		"$PKGDEST/usr/lib/systemd/system/hostapd@.service"
+	install -D -m 0644 "$RECIPE_DIR/files/hostapd.service" \
+		"$PKGDEST/usr/lib/systemd/system/hostapd.service"
 	install -D -m 0755 "$RECIPE_DIR/files/hostapd.initd" \
 		"$PKGDEST/etc/init.d/hostapd"
+	# Least privilege without daemon support (hostapd has no -u flag):
+	# file caps for the OpenRC path (systemd uses ambient caps), so
+	# the service user keeps interface config + packet injection.
+	# CAP_NET_ADMIN + CAP_NET_RAW is best-effort from nl80211 needs -
+	# first boot on real AP hardware proves it (fail-closed logs name
+	# anything further). Unproven set, do not trim silently.
+	setcap cap_net_admin,cap_net_raw+ep "$PKGDEST/usr/bin/hostapd"
+	# Runtime identity declaration: hostapd:124. makepkg generates the
+	# install scripts from this fragment; the package creates its
+	# identity at install time. r3: identity + caps (payload changes).
+	install -D -m 0644 "$RECIPE_DIR/files/accounts.d/hostapd" \
+		"$PKGDEST/usr/share/saphira/accounts.d/hostapd"
 	test -x "$PKGDEST/usr/bin/hostapd"
 }

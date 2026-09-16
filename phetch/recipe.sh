@@ -45,6 +45,10 @@ recipe_build()
 {
 	vendor=$BUILDDIR/vendor
 	mkdir -p "$vendor" "$SRC/.cargo"
+	# Loop variables must stay function-local: url/license collide with
+	# builder metadata globals, and the final failing read would otherwise
+	# clear them (empty license/url in the normalized manifest).
+	local source version url checksum archive license
 	while IFS='|' read -r source version url checksum archive license; do
 		name=${source#phetch-crate-}
 		name=${name%-$version}

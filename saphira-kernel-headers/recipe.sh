@@ -1,18 +1,36 @@
 pkgname=saphira-kernel-headers
-pkgver=7.1.5
+pkgver=${SAPHIRA_KERNEL_VERSION:-7.1.5}
 pkgrel=2
 pkgarch=${SAPHIRA_ARCH:-x86_64}
-pkgdesc='Saphira kernel UAPI headers (Genesis SDK base - all toolchain packages build against 7.1.5 until the deliberate whole-world 7.2.2 generation)'
+pkgdesc='Saphira kernel UAPI headers (version selected by SAPHIRA_KERNEL_VERSION)'
 license=GPL-2.0-only
 origin=saphira-kernel-headers
 repo=main
 url=https://saphira.vm2.uk/
-# Upstream kernel tarball pinned per pkgver. 7.1.5 hash = Genesis kernel
-# tarball (/usr/src/linux-7.1.5.tar.xz); 7.2.2 hash matches saphira-kernel.
-# kernel.org signs the uncompressed .tar; verify procedure as saphira-kernel:
+# Upstream kernel tarball per version line (SAPHIRA_KERNEL_VERSION selects;
+# same pattern and pins as the saphira-kernel recipe). Default stays 7.1.5
+# (Genesis SDK base). kernel.org signs the uncompressed .tar; verify
+# procedure as saphira-kernel:
 # xz -dc file.xz > file.tar && gpg --verify linux-<ver>.tar.sign file.tar
-source=https://mirrors.edge.kernel.org/pub/linux/kernel/v7.x/linux-${pkgver}.tar.xz
-sha256=22a0196b3cbcdf34dc27b77561f4d040585fd3447edc9ab3531a1ac79e3041e7
+case "$pkgver" in
+	7.1.5)
+		vendor=https://mirrors.edge.kernel.org/pub/linux/kernel/v7.x/linux-7.1.5.tar.xz
+		sha256=22a0196b3cbcdf34dc27b77561f4d040585fd3447edc9ab3531a1ac79e3041e7
+		;;
+	7.2.2)
+		vendor=https://mirrors.edge.kernel.org/pub/linux/kernel/v7.x/linux-7.2.2.tar.xz
+		sha256=7d0e7ce14f98c43efe880cffbf354a59be45928fdf7170d7333c374ae91c0d83
+		;;
+	7.2.3)
+		vendor=https://mirrors.edge.kernel.org/pub/linux/kernel/v7.x/linux-7.2.3.tar.xz
+		sha256=8ba259e8e7b13ec6ef0941c8a39ad90b24bd4a4d6c0010ba6bafb794550ecd03
+		;;
+	7.3-rc1)
+		vendor=https://git.kernel.org/torvalds/t/linux-7.3-rc1.tar.gz
+		sha256=8d36fbfc7c8906ccfa1ebacc30f84998406504c3f13733a040bb3a3fbe8ac270
+		;;
+	*) echo "ERROR: no pinned vendor/sha256 for kernel headers $pkgver" >&2; return 1 ;;
+esac
 
 depends=""
 

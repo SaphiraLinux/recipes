@@ -10,7 +10,7 @@ repo=saphira
 url=https://www.wireguard.com/
 wireguard_tools_sha256=587db136e52a53999bd58df8626137b2600db90909a4020b0f7c8b356ac6799b
 depends="bash"
-makedepends="saphira-kernel-headers=7.1.5 gcc make"
+makedepends="saphira-kernel-headers gcc make"
 recipe_build() {
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$RECIPE_DIR/files/wireguard-tools-v1.0.20260223.tar.xz"
 	cd "$SRC"

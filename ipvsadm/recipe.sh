@@ -10,7 +10,7 @@ repo=saphira
 url=https://www.linuxvirtualserver.org/
 ipvsadm_sha256=1a0a5e25b5a1226435d2fb76341656f83a710183aebb0d204db39c0ec3bedfdb
 depends="popt libnl"
-makedepends="popt-dev libnl-dev saphira-kernel-headers=7.1.5 gcc make pkgconf"
+makedepends="popt-dev libnl-dev saphira-kernel-headers gcc make pkgconf"
 recipe_build() {
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$RECIPE_DIR/files/ipvsadm-1.31.tar.xz"
 	cd "$SRC"

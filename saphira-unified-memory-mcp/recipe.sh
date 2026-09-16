@@ -1,6 +1,6 @@
 pkgname=saphira-unified-memory-mcp
 pkgver=3.13.5
-pkgrel=20
+pkgrel=23
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='SQLite-backed MCP memory suite: unified stdio servers, optional remote bearer endpoint, debate runtime, MariaDB profile'
 license='MIT'
@@ -9,6 +9,22 @@ origin=saphira-unified-memory-mcp
 repo=saphira
 url=https://github.com/akadata/akadata-unified-memory-mcp
 
+# r23: extend the r21/r22 de-vendoring to attrs 26.1.0 (now a
+# proper repo package: python-attrs). Vendoring duplicated its
+# site-packages tree and the file gate refuses the overlap.
+# r22: extend the r21 de-vendoring to every wheel the repo now packages:
+# anyio 4.14.2, httpx 0.28.1, click 8.5.0, idna 3.19, typing_extensions
+# 4.16.0 (bundle versions equal the repo versions, so no skew). Vendoring
+# any of them duplicates a repo-owned site-packages tree and the file
+# gate refuses the overlap. Remaining wheels (mcp, fastmcp, uvicorn,
+# starlette, pydantic-core, rich, ...) stay vendored: no repo package
+# claims those paths.
+# r21: stop vendoring cryptography + cffi wheels (now proper repo
+# packages: python-cryptography, python-cffi). Vendoring duplicated
+# their site-packages trees and the file gate refuses the overlap.
+# Version skew to watch at runtime: bundle carried cryptography 46.0.5
+# and cffi 2.1.1; repo provides 46.0.2 and 2.0.0 (stable APIs, but
+# smoke-test crypto ops after install).
 # r18: package renamed saphira-unified-memory-mcp (Genesis rebrand); payload,
 # vendored source name, and /etc/akadata-memory config path stay unchanged:
 # the config path is resolved inside the vendored python modules, and moving
@@ -21,7 +37,7 @@ url=https://github.com/akadata/akadata-unified-memory-mcp
 akadata_unified_sha256=69cbd3a9ee3738c7a15bee4b0c89e3acbe5d9b6d76137ba7752415dda3131591
 wheels_sha256=8d3a76aff5e30571ba0eb62f580e716d9fb704059b2dd1a1160a8a59f8429754
 
-depends="python3 sqlite bash"
+depends="python3 sqlite bash python-cryptography python-cffi anyio httpx click idna typing-extensions python-attrs"
 # Pure-python suite: no compilation. Only python3 is needed at build time
 # (zipfile extraction); no compiler, make, or kernel UAPI consumption.
 makedepends="python3"
@@ -45,6 +61,11 @@ recipe_install() {
 	# The vendored tarball carries its own SHA256SUMS listing the wheels.
 	(cd "$SRC" && sha256sum -c SHA256SUMS)
 	for w in "$SRC"/*.whl; do
+		# Wheels the repo packages (see r21/r22 notes): never vendor
+		# their trees or the file gate refuses the overlap.
+		case ${w##*/} in
+			cryptography-*|cffi-*|anyio-*|httpx-*|click-*|idna-*|typing_extensions-*|attrs-*) continue ;;
+		esac
 		python3 -m zipfile -e "$w" "$SP/"
 	done
 	rm -f "$SP"/fastmcp_slim-* 2>/dev/null || true

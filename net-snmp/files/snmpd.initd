@@ -1,0 +1,19 @@
+#!/sbin/openrc-run
+
+description="Net-SNMP agent"
+
+command="/usr/sbin/snmpd"
+command_args="-f -C -c /etc/snmp/snmpd.conf -u snmp -g snmp"
+command_user="snmp:snmp"
+supervisor="supervise-daemon"
+
+depend()
+{
+	use net logger
+	after firewall
+}
+
+start_pre()
+{
+	checkpath -d -m 0750 -o snmp:snmp /var/lib/snmp
+}

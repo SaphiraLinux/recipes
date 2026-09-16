@@ -19,11 +19,11 @@ makedepends="
     binutils
     curl
     gcc
-    libunwind-dev>=22.1.8-r1
+    libunwind-dev
     make
     openssl-dev
     python3
-    rustc>=1.97.1-r1
+    rustc
 "
 
 fatal()
@@ -36,6 +36,10 @@ recipe_build()
 {
 	vendor=$BUILDDIR/vendor
 	mkdir -p "$vendor" "$SRC/.cargo"
+	# Loop variables must stay function-local: url/license collide with
+	# builder metadata globals, and the final failing read would otherwise
+	# clear them (empty license/url in the normalized manifest).
+	local source version url checksum archive license
 	while IFS='|' read -r source version url checksum archive license; do
 		name=${source#ripgrep-crate-}
 		name=${name%-$version}

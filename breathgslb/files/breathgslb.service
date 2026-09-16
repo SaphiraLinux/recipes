@@ -1,0 +1,25 @@
+# BreathGSLB unit adapted from upstream services/systemd/breathgslb.service:
+# Saphira binary path (/usr/sbin); identity, ambient caps and hardening
+# kept as upstream designed (User=breathgslb, CAP_NET_BIND_SERVICE only,
+# NoNewPrivileges). Pre-steps run root-privileged (+) so state dirs
+# converge even though the daemon itself never runs as root.
+[Unit]
+Description=Breath GSLB Authoritative DNS
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+EnvironmentFile=/etc/breathgslb/env
+Environment=BREATHGSLB_CONFIG=/etc/breathgslb/config.yaml
+ExecStartPre=+/usr/bin/install -d -m 0750 -o breathgslb -g breathgslb /var/log/breathgslb /var/lib/breathgslb
+ExecStart=/usr/sbin/breathgslb -config ${BREATHGSLB_CONFIG}
+ExecReload=/bin/kill -HUP $MAINPID
+User=breathgslb
+Group=breathgslb
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

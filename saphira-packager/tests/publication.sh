@@ -11,7 +11,11 @@ sign_repo=$1
 makepkg=$2
 checkpkg=$3
 source_root=$(CDPATH= cd -- "$(dirname -- "$sign_repo")/../.." && pwd)
-test_root=$(mktemp -d /tmp/saphira-publication-test.XXXXXX)
+test_tmp_base=${SAPHIRA_TMPDIR:-/build/test-tmp}
+mkdir -p "$test_tmp_base"
+test_root=$(mktemp -d "$test_tmp_base/saphira-publication-test.XXXXXX")
+export SAPHIRA_TMPDIR=$test_root/tool-tmp
+mkdir -p "$SAPHIRA_TMPDIR"
 trap 'find "$test_root" -depth -delete' EXIT HUP INT TERM
 repo=$test_root/repository/hatchling/x86_64
 incoming=$test_root/incoming/x86_64
@@ -159,26 +163,26 @@ mkdir -p "$test_root/repository/hatched/x86_64"
 init_repo_db "$test_root/repository/hatched/x86_64" hatched
 mkdir -p "$stage/gawk/pkg/usr/bin"
 printf '%s\n' gawk > "$stage/gawk/pkg/usr/bin/gawk"
-printf '%s\n' '{"arch":"x86_64","build_time":2,"license":"GPL-3.0-or-later","name":"gawk","origin":"gawk","outputs":[{"dependencies":[],"description":"GNU awk","name":"gawk","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://www.gnu.org/software/gawk/","version":"1-r0"}' > "$stage/gawk/manifest.json"
+printf '%s\n' '{"arch":"x86_64","build_time":2,"license":"GPL-3.0-or-later","name":"gawk","origin":"gawk","outputs":[{"dependencies":[],"description":"GNU awk","name":"gawk","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://www.gnu.org/software/gawk/","version":"1-r1"}' > "$stage/gawk/manifest.json"
 SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
 SAPHIRA_BUILD_ROOT=$stage SAPHIRA_INCOMING_DIR=$artifacts \
 SAPHIRA_PACKAGE_TMP=$test_root/makepkg-tmp SAPHIRA_FAKEROOT_BOOTSTRAP=1 \
 SAPHIRA_BOOTSTRAP_TARGET=fakeroot "$makepkg" gawk >/dev/null
 dual=$incoming/gawk-fixture-ready
 mkdir "$dual"
-cp "$artifacts/x86_64/gawk-1-r0.apk" "$dual/"
+cp "$artifacts/x86_64/gawk-1-r1.apk" "$dual/"
 printf '%s\n' gawk > "$dual/target"
 printf '%s\n' '{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}' > "$dual/package-seed.json"
 printf '%s\n' '{"schema":"saphira-build-artifacts/v1","target":"gawk","constructors":[{"constructor":"makepkg","producer":"gawk"}],"package_seed":{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}}' > "$dual/artifact-manifest.json"
-(CDPATH= cd -- "$dual" && sha256sum gawk-1-r0.apk > manifest.sha256)
+(CDPATH= cd -- "$dual" && sha256sum gawk-1-r1.apk > manifest.sha256)
 SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
 SAPHIRA_REPO_DIR=$test_root/repository SAPHIRA_INCOMING_DIR=$test_root/incoming \
 SAPHIRA_PACKAGE_TMP=$test_root/package-tmp SAPHIRA_SIGN_KEY=$test_root/test-repository.rsa \
 SAPHIRA_TRUST_KEY=$keys/test-repository.rsa.pub SAPHIRA_REPO_NAMES='hatchling hatched' \
 	unshare --map-root-user "$sign_repo" >/dev/null
 hatched_repo=$test_root/repository/hatched/x86_64
-test -f "$hatched_repo/gawk-1-r0.apk"
-test -f "$repo/gawk-1-r0.apk"
+test -f "$hatched_repo/gawk-1-r1.apk"
+test -f "$repo/gawk-1-r1.apk"
 for index in "$repo/Packages.adb" "$repo/APKINDEX.tar.gz" \
 	"$hatched_repo/Packages.adb" "$hatched_repo/APKINDEX.tar.gz"; do
 	apk verify --keys-dir "$keys" "$index"
@@ -192,30 +196,56 @@ test -d "$incoming/gawk-fixture-published"
 # entries, no concurrency-guard trip, both indexes stay valid.
 mkdir -p "$stage/mawk/pkg/usr/bin"
 printf '%s\n' mawk > "$stage/mawk/pkg/usr/bin/mawk"
-printf '%s\n' '{"arch":"x86_64","build_time":3,"license":"GPL-3.0-or-later","name":"mawk","origin":"mawk","outputs":[{"dependencies":[],"description":"minimal awk","name":"mawk","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r0"}' > "$stage/mawk/manifest.json"
+printf '%s\n' '{"arch":"x86_64","build_time":3,"license":"GPL-3.0-or-later","name":"mawk","origin":"mawk","outputs":[{"dependencies":[],"description":"minimal awk","name":"mawk","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r1"}' > "$stage/mawk/manifest.json"
 SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
 SAPHIRA_BUILD_ROOT=$stage SAPHIRA_INCOMING_DIR=$artifacts \
 SAPHIRA_PACKAGE_TMP=$test_root/makepkg-tmp SAPHIRA_FAKEROOT_BOOTSTRAP=1 \
 SAPHIRA_BOOTSTRAP_TARGET=fakeroot "$makepkg" mawk >/dev/null
-cp "$artifacts/x86_64/mawk-1-r0.apk" "$repo/"
-apk adbsign --allow-untrusted --sign-key "$test_root/test-repository.rsa" "$repo/mawk-1-r0.apk"
+cp "$artifacts/x86_64/mawk-1-r1.apk" "$repo/"
+apk adbsign --allow-untrusted --sign-key "$test_root/test-repository.rsa" "$repo/mawk-1-r1.apk"
 div=$incoming/mawk-fixture-ready
 mkdir "$div"
-cp "$artifacts/x86_64/mawk-1-r0.apk" "$div/"
+cp "$artifacts/x86_64/mawk-1-r1.apk" "$div/"
 printf '%s\n' mawk > "$div/target"
 cp "$incoming/gawk-fixture-published/package-seed.json" "$div/"
 printf '%s\n' '{"schema":"saphira-build-artifacts/v1","target":"mawk","constructors":[{"constructor":"makepkg","producer":"mawk"}],"package_seed":{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}}' > "$div/artifact-manifest.json"
-(CDPATH= cd -- "$div" && sha256sum mawk-1-r0.apk > manifest.sha256)
+(CDPATH= cd -- "$div" && sha256sum mawk-1-r1.apk > manifest.sha256)
 SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
 SAPHIRA_REPO_DIR=$test_root/repository SAPHIRA_INCOMING_DIR=$test_root/incoming \
 SAPHIRA_PACKAGE_TMP=$test_root/package-tmp SAPHIRA_SIGN_KEY=$test_root/test-repository.rsa \
 SAPHIRA_TRUST_KEY=$keys/test-repository.rsa.pub SAPHIRA_REPO_NAMES='hatchling hatched' \
 	unshare --map-root-user "$sign_repo" >/dev/null
-test -f "$hatched_repo/mawk-1-r0.apk"
-test -f "$repo/mawk-1-r0.apk"
+test -f "$hatched_repo/mawk-1-r1.apk"
+test -f "$repo/mawk-1-r1.apk"
 [ "$(apk adbdump "$repo/Packages.adb" | awk '/^  - name: / { count++ } END { print count + 0 }')" -eq 3 ]
 [ "$(apk adbdump "$hatched_repo/Packages.adb" | awk '/^  - name: / { count++ } END { print count + 0 }')" -eq 2 ]
 test -d "$incoming/mawk-fixture-published"
+
+# r0 refusal at the publishing boundary: a staged r0 in a multi-generation
+# run would land in the live view, so it dies before any mutation (resolvepkg
+# and buildpkg-single refuse r0 upstream; this makes hand-crafted
+# transactions fail closed too). Single-generation archive runs still take
+# historical r0 fixtures elsewhere in this suite. m4-1-r0 was built above
+# but never published, so it stages clean apart from its revision.
+r0ban=$incoming/r0ban-fixture-ready
+mkdir "$r0ban"
+cp "$artifacts/x86_64/m4-1-r0.apk" "$r0ban/"
+printf '%s\n' r0ban > "$r0ban/target"
+cp "$incoming/make-fixture-published/package-seed.json" "$r0ban/"
+printf '%s\n' '{"schema":"saphira-build-artifacts/v1","target":"r0ban","constructors":[{"constructor":"makepkg","producer":"m4"}],"package_seed":{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}}' > "$r0ban/artifact-manifest.json"
+(CDPATH= cd -- "$r0ban" && sha256sum m4-1-r0.apk > manifest.sha256)
+r0ban_before=$(find "$test_root/repository" -type f -printf '%P %s\n' | sort | sha256sum)
+if SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
+	SAPHIRA_REPO_DIR=$test_root/repository SAPHIRA_INCOMING_DIR=$test_root/incoming \
+	SAPHIRA_PACKAGE_TMP=$test_root/package-tmp SAPHIRA_SIGN_KEY=$test_root/test-repository.rsa \
+	SAPHIRA_TRUST_KEY=$keys/test-repository.rsa.pub SAPHIRA_REPO_NAMES='hatchling hatched' \
+	unshare --map-root-user "$sign_repo" r0ban > "$test_root/r0ban.out" 2> "$test_root/r0ban.err"; then
+	printf '%s\n' 'r0 publication to a live generation unexpectedly succeeded' >&2
+	exit 1
+fi
+grep 'r0 packages are forbidden' "$test_root/r0ban.err" >/dev/null
+[ "$r0ban_before" = "$(find "$test_root/repository" -type f -printf '%P %s\n' | sort | sha256sum)" ]
+rm -rf "$r0ban"
 
 # File-ownership collision gate: two packages claiming the same path in one
 # transaction refuse publication without mutating anything. The classic
@@ -293,6 +323,54 @@ printf '%s\n' '{"schema":"saphira-build-artifacts/v1","target":"tar2","construct
 (CDPATH= cd -- "$handover" && sha256sum tar2-2-r0.apk > manifest.sha256)
 run_signer > "$test_root/handover.out" 2> "$test_root/handover.err"
 test -f "$repo/tar2-2-r0.apk"
+
+# Newer-or-novel abandonment: a file moving from a package to a sibling
+# subpackage across revisions publishes clean. mvf r1 ships tool + .pc;
+# r2 abandons the .pc to mvf-dev r2. Without the abandonment rule the
+# stale published r1 claim would collide with mvf-dev forever.
+mkdir -p "$stage/mvf/pkg/usr/bin" "$stage/mvf/pkg/usr/lib/pkgconfig"
+printf '%s\n' tool > "$stage/mvf/pkg/usr/bin/tool"
+printf '%s\n' pc > "$stage/mvf/pkg/usr/lib/pkgconfig/tool.pc"
+printf '%s\n' '{"arch":"x86_64","build_time":6,"license":"MIT","name":"mvf","origin":"mvf","outputs":[{"dependencies":[],"description":"mvf","name":"mvf","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r1"}' > "$stage/mvf/manifest.json"
+SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
+SAPHIRA_BUILD_ROOT=$stage SAPHIRA_INCOMING_DIR=$artifacts \
+SAPHIRA_PACKAGE_TMP=$test_root/makepkg-tmp SAPHIRA_FAKEROOT_BOOTSTRAP=1 \
+SAPHIRA_BOOTSTRAP_TARGET=fakeroot "$makepkg" mvf >/dev/null
+movefix=$incoming/movefix-ready
+mkdir "$movefix"
+cp "$artifacts/x86_64/mvf-1-r1.apk" "$movefix/"
+printf '%s\n' mvf > "$movefix/target"
+printf '%s\n' '{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}' > "$movefix/package-seed.json"
+printf '%s\n' '{"schema":"saphira-build-artifacts/v1","target":"mvf","constructors":[{"constructor":"makepkg","producer":"mvf"}],"package_seed":{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}}' > "$movefix/artifact-manifest.json"
+(CDPATH= cd -- "$movefix" && sha256sum mvf-1-r1.apk > manifest.sha256)
+run_signer > "$test_root/movefix.out" 2> "$test_root/movefix.err"
+test -f "$repo/mvf-1-r1.apk"
+rm -rf "$stage/mvf"
+mkdir -p "$stage/mvf/pkg/usr/bin"
+printf '%s\n' tool > "$stage/mvf/pkg/usr/bin/tool"
+printf '%s\n' '{"arch":"x86_64","build_time":7,"license":"MIT","name":"mvf","origin":"mvf","outputs":[{"dependencies":[],"description":"mvf","name":"mvf","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r2"}' > "$stage/mvf/manifest.json"
+mkdir -p "$stage/mvfdev/pkg/usr/lib/pkgconfig"
+printf '%s\n' pc > "$stage/mvfdev/pkg/usr/lib/pkgconfig/tool.pc"
+printf '%s\n' '{"arch":"x86_64","build_time":8,"license":"MIT","name":"mvfdev","origin":"mvf","outputs":[{"dependencies":[],"description":"mvfdev","name":"mvfdev","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r2"}' > "$stage/mvfdev/manifest.json"
+SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
+SAPHIRA_BUILD_ROOT=$stage SAPHIRA_INCOMING_DIR=$artifacts \
+SAPHIRA_PACKAGE_TMP=$test_root/makepkg-tmp SAPHIRA_FAKEROOT_BOOTSTRAP=1 \
+SAPHIRA_BOOTSTRAP_TARGET=fakeroot "$makepkg" mvf >/dev/null
+SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
+SAPHIRA_BUILD_ROOT=$stage SAPHIRA_INCOMING_DIR=$artifacts \
+SAPHIRA_PACKAGE_TMP=$test_root/makepkg-tmp SAPHIRA_FAKEROOT_BOOTSTRAP=1 \
+SAPHIRA_BOOTSTRAP_TARGET=fakeroot "$makepkg" mvfdev >/dev/null
+movetxn=$incoming/move-ready
+mkdir "$movetxn"
+cp "$artifacts/x86_64/mvf-1-r2.apk" "$artifacts/x86_64/mvfdev-1-r2.apk" "$movetxn/"
+printf '%s\n' mvf > "$movetxn/target"
+printf '%s\n' '{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}' > "$movetxn/package-seed.json"
+printf '%s\n' '{"schema":"saphira-build-artifacts/v1","target":"mvf","constructors":[{"constructor":"makepkg","producer":"mvf"},{"constructor":"makepkg","producer":"mvfdev"}],"package_seed":{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}}' > "$movetxn/artifact-manifest.json"
+(CDPATH= cd -- "$movetxn" && sha256sum mvf-1-r2.apk mvfdev-1-r2.apk > manifest.sha256)
+run_signer > "$test_root/move.out" 2> "$test_root/move.err"
+test -f "$repo/mvf-1-r2.apk"
+test -f "$repo/mvfdev-1-r2.apk"
+grep 'no file collisions' "$test_root/move.out" >/dev/null
 
 # Selective fast path: the full runs above warmed repository.db, so a
 # fresh solo package must publish through indexed rows (assert the
@@ -485,10 +563,12 @@ grep 'no file collisions' "$test_root/dirt2.out" >/dev/null
 # not ownership competitors. senior r0 ships a shared path and publishes;
 # senior r1 drops it and is hand-placed, so the archive holds both NVRs
 # with current = r1 (no path). A staged junior r0 claiming that path must
-# publish: the only live claimant is junior itself. Control: elder r0 is
-# hand-placed KEEPING the path (sole, current NVR) while staged youngster
-# r0 claims it - that must still refuse, proving the gate is not weakened
-# for current owners.
+# publish: the only live claimant is junior itself. Control: elder r1 is
+# hand-placed KEEPING the path (sole, current, admissible NVR) while
+# staged youngster r0 claims it - that must still refuse, proving the
+# gate is not weakened for current owners. (An r0 newest is history,
+# never a current owner under the r0-inadmissibility policy, so the
+# control owner is r1: r0 claims never block anyone.)
 mkdir -p "$stage/senior/pkg/usr/sbin" "$stage/senior/pkg/usr/bin" "$stage/junior/pkg/usr/sbin" "$stage/junior/pkg/usr/bin"
 printf '%s\n' shared > "$stage/senior/pkg/usr/sbin/shared"
 printf '%s\n' senior > "$stage/senior/pkg/usr/bin/senior"
@@ -536,7 +616,7 @@ printf '%s\n' shared > "$stage/elder/pkg/usr/sbin/shared"
 printf '%s\n' elder > "$stage/elder/pkg/usr/bin/elder"
 printf '%s\n' shared > "$stage/youngster/pkg/usr/sbin/shared"
 printf '%s\n' youngster > "$stage/youngster/pkg/usr/bin/youngster"
-printf '%s\n' '{"arch":"x86_64","build_time":10,"license":"MIT","name":"elder","origin":"elder","outputs":[{"dependencies":[],"description":"elder","name":"elder","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r0"}' > "$stage/elder/manifest.json"
+printf '%s\n' '{"arch":"x86_64","build_time":10,"license":"MIT","name":"elder","origin":"elder","outputs":[{"dependencies":[],"description":"elder","name":"elder","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r1"}' > "$stage/elder/manifest.json"
 printf '%s\n' '{"arch":"x86_64","build_time":11,"license":"MIT","name":"youngster","origin":"youngster","outputs":[{"dependencies":[],"description":"youngster","name":"youngster","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r0"}' > "$stage/youngster/manifest.json"
 for fixture in elder youngster; do
 	SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
@@ -544,8 +624,8 @@ for fixture in elder youngster; do
 	SAPHIRA_PACKAGE_TMP=$test_root/makepkg-tmp SAPHIRA_FAKEROOT_BOOTSTRAP=1 \
 	SAPHIRA_BOOTSTRAP_TARGET=fakeroot "$makepkg" "$fixture" >/dev/null
 done
-apk adbsign --allow-untrusted --sign-key "$test_root/test-repository.rsa" "$artifacts/x86_64/elder-1-r0.apk"
-cp "$artifacts/x86_64/elder-1-r0.apk" "$repo/elder-1-r0.apk"
+apk adbsign --allow-untrusted --sign-key "$test_root/test-repository.rsa" "$artifacts/x86_64/elder-1-r1.apk"
+cp "$artifacts/x86_64/elder-1-r1.apk" "$repo/elder-1-r1.apk"
 # Account identity gate: the global authority is the TSV reservation map
 # plus every published accounts.d fragment. A staged package declaring
 # a fresh identity publishes and registers it; a staged UID collision
@@ -585,6 +665,37 @@ assert conn.execute("SELECT gid FROM groups WHERE package_id=? AND name='acctgro
 assert conn.execute("SELECT mode FROM state_dirs WHERE package_id=? AND path='/var/lib/acctsvc'", (pid,)).fetchone()[0] == "0755"
 PY
 grep 'staged gate:' "$test_root/acctpub.out" >/dev/null
+# Same-name succession: upgrading an identity-declaring package supersedes
+# its own repo declaration instead of colliding with it (regression: the
+# SQLite gate once false-refused an upgrade as "claimed by r4 and staged
+# r5"). The successor publishes, newest flips, the reservation stays owned.
+printf '%s\n' '{"arch":"x86_64","build_time":10,"license":"MIT","name":"acctsvc","origin":"acctsvc","outputs":[{"dependencies":[],"description":"acctsvc","name":"acctsvc","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r1"}' > "$stage/acctsvc/manifest.json"
+rm -f "$stage/acctsvc/artifact-manifest.json"
+SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
+SAPHIRA_BUILD_ROOT=$stage SAPHIRA_INCOMING_DIR=$artifacts \
+SAPHIRA_PACKAGE_TMP=$test_root/makepkg-tmp SAPHIRA_FAKEROOT_BOOTSTRAP=1 \
+SAPHIRA_BOOTSTRAP_TARGET=fakeroot "$makepkg" acctsvc >/dev/null
+succpub=$incoming/succpub-ready
+mkdir "$succpub"
+cp "$artifacts/x86_64/acctsvc-1-r1.apk" "$succpub/"
+printf '%s\n' acctsvc > "$succpub/target"
+printf '%s\n' '{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}' > "$succpub/package-seed.json"
+succsha=$(sha256sum "$succpub/acctsvc-1-r1.apk" | awk '{ print $1 }')
+printf '%s\n' '{"schema":"saphira-build-artifacts/v1","target":"acctsvc","constructors":[{"constructor":"makepkg","producer":"acctsvc","artifacts":[{"name":"acctsvc","artifact":"acctsvc-1-r1.apk","sha256":"'"$succsha"'","backend":"userns-maproot","accounts":{"users":[{"name":"acctuser","uid":"670","primary":"acctgroup","home":"/var/lib/acctsvc","shell":"/sbin/nologin"}],"groups":[{"name":"acctgroup","gid":"670"}],"dirs":[{"path":"/var/lib/acctsvc","mode":"0755","owner":"acctuser","group":"acctgroup"}]}}]}],"package_seed":{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}}' > "$succpub/artifact-manifest.json"
+(CDPATH= cd -- "$succpub" && sha256sum acctsvc-1-r1.apk > manifest.sha256)
+SAPHIRA_ACCOUNTS_TSV=$test_root/accounts.tsv run_signer > "$test_root/succpub.out" 2> "$test_root/succpub.err"
+test -f "$repo/acctsvc-1-r1.apk"
+python3 - "$repo/repository.db" <<'PY'
+import sqlite3
+import sys
+conn = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+newest = conn.execute("SELECT version FROM packages WHERE name='acctsvc' AND is_newest=1").fetchall()
+assert len(newest) == 1 and newest[0][0] == "1-r1", newest
+row = conn.execute("SELECT owning_package, status FROM reservations"
+                   " WHERE kind='user' AND name='acctuser'").fetchone()
+assert row is not None and row[0] == "acctsvc" and row[1] == "ACTIVE", row
+PY
+grep 'staged gate:' "$test_root/succpub.out" >/dev/null
 # A later unrelated publication gates fast and carries the registry forward.
 mkdir -p "$stage/acctplain/pkg/usr/bin"
 printf '%s\n' acctplain > "$stage/acctplain/pkg/usr/bin/acctplain"
@@ -782,7 +893,105 @@ fi
 grep 'reserved foundation' "$test_root/spokespub.err" >/dev/null
 test ! -f "$repo/acctspokes-1-r0.apk"
 mv "$spokespub" "$spokespub.superseded-conflict"
-printf '%s\n' 'account identity gate, ledger carry-forward, UID-collision, base-seed convergence/conflict, range refusal, reserved-identity refusal, and expansion-notice tests: OK'
+# File stanzas publish when every reference resolves to what the
+# package owns plus the root built-in; a receipt claiming an
+# undeclared owner refuses at the same backstop.
+mkdir -p "$stage/filepub/pkg/usr/bin" "$stage/filepub/pkg/usr/share/saphira/accounts.d"
+printf '%s\n' filepub > "$stage/filepub/pkg/usr/bin/filepub"
+printf '%s\n' queuebinary > "$stage/filepub/pkg/usr/bin/filepub-queue"
+printf '%s\n' 'user fileuser 673 filegroup /var/lib/filepub /sbin/nologin' 'group filegroup 673' 'file /usr/bin/filepub-queue 04711 fileuser filegroup' 'file /usr/bin/filepub 0755 root root' > "$stage/filepub/pkg/usr/share/saphira/accounts.d/filepub"
+printf '%s\n' '{"arch":"x86_64","build_time":19,"license":"MIT","name":"filepub","origin":"filepub","outputs":[{"dependencies":[],"description":"filepub","name":"filepub","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r0"}' > "$stage/filepub/manifest.json"
+SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
+SAPHIRA_BUILD_ROOT=$stage SAPHIRA_INCOMING_DIR=$artifacts \
+SAPHIRA_PACKAGE_TMP=$test_root/makepkg-tmp SAPHIRA_FAKEROOT_BOOTSTRAP=1 \
+SAPHIRA_BOOTSTRAP_TARGET=fakeroot "$makepkg" filepub >/dev/null
+filepubdir=$incoming/filepub-ready
+mkdir "$filepubdir"
+cp "$artifacts/x86_64/filepub-1-r0.apk" "$filepubdir/"
+printf '%s\n' filepub > "$filepubdir/target"
+printf '%s\n' '{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}' > "$filepubdir/package-seed.json"
+filesha=$(sha256sum "$filepubdir/filepub-1-r0.apk" | awk '{ print $1 }')
+printf '%s\n' '{"schema":"saphira-build-artifacts/v1","target":"filepub","constructors":[{"constructor":"makepkg","producer":"filepub","artifacts":[{"name":"filepub","artifact":"filepub-1-r0.apk","sha256":"'"$filesha"'","backend":"userns-maproot","accounts":{"users":[{"name":"fileuser","uid":"673","primary":"filegroup","home":"/var/lib/filepub","shell":"/sbin/nologin"}],"groups":[{"name":"filegroup","gid":"673"}],"dirs":[],"files":[{"path":"/usr/bin/filepub-queue","mode":"04711","owner":"fileuser","group":"filegroup"},{"path":"/usr/bin/filepub","mode":"0755","owner":"root","group":"root"}]}}]}],"package_seed":{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}}' > "$filepubdir/artifact-manifest.json"
+(CDPATH= cd -- "$filepubdir" && sha256sum filepub-1-r0.apk > manifest.sha256)
+SAPHIRA_ACCOUNTS_TSV=$test_root/accounts.tsv run_signer > "$test_root/filepub.out" 2> "$test_root/filepub.err"
+test -f "$repo/filepub-1-r0.apk"
+# A file stanza naming an owner the package does not declare builds
+# fine (shape-valid, payload-bound) but refuses at publication: the
+# gate is where references must resolve to owned-or-root identities.
+mkdir -p "$stage/fileevil/pkg/usr/bin" "$stage/fileevil/pkg/usr/share/saphira/accounts.d"
+printf '%s\n' fileevil > "$stage/fileevil/pkg/usr/bin/fileevil"
+printf '%s\n' queuebinary > "$stage/fileevil/pkg/usr/bin/fileevil-queue"
+printf '%s\n' 'user fileeviluser 674 fileevilgroup /var/lib/fileevil /sbin/nologin' 'group fileevilgroup 674' 'file /usr/bin/fileevil-queue 04711 ghostuser fileevilgroup' > "$stage/fileevil/pkg/usr/share/saphira/accounts.d/fileevil"
+printf '%s\n' '{"arch":"x86_64","build_time":20,"license":"MIT","name":"fileevil","origin":"fileevil","outputs":[{"dependencies":[],"description":"fileevil","name":"fileevil","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r0"}' > "$stage/fileevil/manifest.json"
+SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
+SAPHIRA_BUILD_ROOT=$stage SAPHIRA_INCOMING_DIR=$artifacts \
+SAPHIRA_PACKAGE_TMP=$test_root/makepkg-tmp SAPHIRA_FAKEROOT_BOOTSTRAP=1 \
+SAPHIRA_BOOTSTRAP_TARGET=fakeroot "$makepkg" fileevil >/dev/null
+fileevil=$incoming/fileevil-ready
+mkdir "$fileevil"
+cp "$artifacts/x86_64/fileevil-1-r0.apk" "$fileevil/"
+printf '%s\n' fileevil > "$fileevil/target"
+printf '%s\n' '{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}' > "$fileevil/package-seed.json"
+evilsha=$(sha256sum "$fileevil/fileevil-1-r0.apk" | awk '{ print $1 }')
+printf '%s\n' '{"schema":"saphira-build-artifacts/v1","target":"fileevil","constructors":[{"constructor":"makepkg","producer":"fileevil","artifacts":[{"name":"fileevil","artifact":"fileevil-1-r0.apk","sha256":"'"$evilsha"'","backend":"userns-maproot","accounts":{"users":[{"name":"fileeviluser","uid":"674","primary":"fileevilgroup","home":"/var/lib/fileevil","shell":"/sbin/nologin"}],"groups":[{"name":"fileevilgroup","gid":"674"}],"dirs":[],"files":[{"path":"/usr/bin/fileevil-queue","mode":"04711","owner":"ghostuser","group":"fileevilgroup"}]}}]}],"package_seed":{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}}' > "$fileevil/artifact-manifest.json"
+(CDPATH= cd -- "$fileevil" && sha256sum fileevil-1-r0.apk > manifest.sha256)
+if SAPHIRA_ACCOUNTS_TSV=$test_root/accounts.tsv run_signer > "$test_root/fileevil.out" 2> "$test_root/fileevil.err"; then
+	printf '%s\n' 'undeclared file owner unexpectedly published' >&2
+	exit 1
+fi
+grep 'file ownership references undeclared identities' "$test_root/fileevil.err" >/dev/null
+test ! -f "$repo/fileevil-1-r0.apk"
+mv "$fileevil" "$fileevil.superseded-conflict"
+# Legacy history colliding with a declared present refuses: staged
+# history naming the registered acctuser UID is ambiguous no matter
+# which package claims the past.
+mkdir -p "$stage/legacypub/pkg/usr/bin" "$stage/legacypub/pkg/usr/share/saphira/accounts.d"
+printf '%s\n' legacypub > "$stage/legacypub/pkg/usr/bin/legacypub"
+printf '%s\n' 'user legacyuser 674 legacygroup /var/lib/legacypub /sbin/nologin' 'group legacygroup 674' > "$stage/legacypub/pkg/usr/share/saphira/accounts.d/legacypub"
+printf '%s\n' 'legacy user legacyuser 670 670' > "$stage/legacypub/pkg/usr/share/saphira/accounts.d/legacypub.legacy"
+printf '%s\n' '{"arch":"x86_64","build_time":21,"license":"MIT","name":"legacypub","origin":"legacypub","outputs":[{"dependencies":[],"description":"legacypub","name":"legacypub","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r0"}' > "$stage/legacypub/manifest.json"
+SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
+SAPHIRA_BUILD_ROOT=$stage SAPHIRA_INCOMING_DIR=$artifacts \
+SAPHIRA_PACKAGE_TMP=$test_root/makepkg-tmp SAPHIRA_FAKEROOT_BOOTSTRAP=1 \
+SAPHIRA_BOOTSTRAP_TARGET=fakeroot "$makepkg" legacypub >/dev/null
+legacypubdir=$incoming/legacypub-ready
+mkdir "$legacypubdir"
+cp "$artifacts/x86_64/legacypub-1-r0.apk" "$legacypubdir/"
+printf '%s\n' legacypub > "$legacypubdir/target"
+printf '%s\n' '{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}' > "$legacypubdir/package-seed.json"
+legacysha=$(sha256sum "$legacypubdir/legacypub-1-r0.apk" | awk '{ print $1 }')
+printf '%s\n' '{"schema":"saphira-build-artifacts/v1","target":"legacypub","constructors":[{"constructor":"makepkg","producer":"legacypub","artifacts":[{"name":"legacypub","artifact":"legacypub-1-r0.apk","sha256":"'"$legacysha"'","backend":"userns-maproot","accounts":{"users":[{"name":"legacyuser","uid":"674","primary":"legacygroup","home":"/var/lib/legacypub","shell":"/sbin/nologin"}],"groups":[{"name":"legacygroup","gid":"674"}],"dirs":[],"files":[],"legacy":{"users":[{"name":"legacyuser","uid":"670","gid":"670"}],"groups":[]}}}]}],"package_seed":{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}}' > "$legacypubdir/artifact-manifest.json"
+(CDPATH= cd -- "$legacypubdir" && sha256sum legacypub-1-r0.apk > manifest.sha256)
+if SAPHIRA_ACCOUNTS_TSV=$test_root/accounts.tsv run_signer > "$test_root/legacypub.out" 2> "$test_root/legacypub.err"; then
+	printf '%s\n' 'colliding legacy history unexpectedly published' >&2
+	exit 1
+fi
+grep 'legacy history collides with declared identities' "$test_root/legacypub.err" >/dev/null
+test ! -f "$repo/legacypub-1-r0.apk"
+mv "$legacypubdir" "$legacypubdir.superseded-conflict"
+# Paired legacy history (user + primary group sharing one old ID, the
+# universal Unix shape) publishes: the user's GID is a reference, not
+# a second group-namespace claim, so the pair must not self-collide.
+mkdir -p "$stage/legacypair/pkg/usr/bin" "$stage/legacypair/pkg/usr/share/saphira/accounts.d"
+printf '%s\n' legacypair > "$stage/legacypair/pkg/usr/bin/legacypair"
+printf '%s\n' 'user pairuser 676 pairgroup /var/lib/legacypair /sbin/nologin' 'group pairgroup 676' > "$stage/legacypair/pkg/usr/share/saphira/accounts.d/legacypair"
+printf '%s\n' 'legacy user pairuser 675 675' 'legacy group pairgroup 675' > "$stage/legacypair/pkg/usr/share/saphira/accounts.d/legacypair.legacy"
+printf '%s\n' '{"arch":"x86_64","build_time":22,"license":"MIT","name":"legacypair","origin":"legacypair","outputs":[{"dependencies":[],"description":"legacypair","name":"legacypair","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r0"}' > "$stage/legacypair/manifest.json"
+SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
+SAPHIRA_BUILD_ROOT=$stage SAPHIRA_INCOMING_DIR=$artifacts \
+SAPHIRA_PACKAGE_TMP=$test_root/makepkg-tmp SAPHIRA_FAKEROOT_BOOTSTRAP=1 \
+SAPHIRA_BOOTSTRAP_TARGET=fakeroot "$makepkg" legacypair >/dev/null
+legacypairdir=$incoming/legacypair-ready
+mkdir "$legacypairdir"
+cp "$artifacts/x86_64/legacypair-1-r0.apk" "$legacypairdir/"
+printf '%s\n' legacypair > "$legacypairdir/target"
+printf '%s\n' '{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}' > "$legacypairdir/package-seed.json"
+pairsha=$(sha256sum "$legacypairdir/legacypair-1-r0.apk" | awk '{ print $1 }')
+printf '%s\n' '{"schema":"saphira-build-artifacts/v1","target":"legacypair","constructors":[{"constructor":"makepkg","producer":"legacypair","artifacts":[{"name":"legacypair","artifact":"legacypair-1-r0.apk","sha256":"'"$pairsha"'","backend":"userns-maproot","accounts":{"users":[{"name":"pairuser","uid":"676","primary":"pairgroup","home":"/var/lib/legacypair","shell":"/sbin/nologin"}],"groups":[{"name":"pairgroup","gid":"676"}],"dirs":[],"files":[],"legacy":{"users":[{"name":"pairuser","uid":"675","gid":"675"}],"groups":[{"name":"pairgroup","gid":"675"}]}}}]}],"package_seed":{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}}' > "$legacypairdir/artifact-manifest.json"
+(CDPATH= cd -- "$legacypairdir" && sha256sum legacypair-1-r0.apk > manifest.sha256)
+SAPHIRA_ACCOUNTS_TSV=$test_root/accounts.tsv run_signer > "$test_root/legacypair.out" 2> "$test_root/legacypair.err"
+test -f "$repo/legacypair-1-r0.apk"
+printf '%s\n' 'account identity gate, ledger carry-forward, UID-collision, base-seed convergence/conflict, range refusal, reserved-identity refusal, file-reference accept/refusal, legacy-history refusal, paired-legacy acceptance, and expansion-notice tests: OK'
 
 youngsterpub=$incoming/youngsterpub-ready
 mkdir "$youngsterpub"
@@ -800,3 +1009,508 @@ grep 'usr/sbin/shared' "$test_root/youngsterpub.err" >/dev/null
 test ! -f "$repo/youngster-1-r0.apk"
 
 printf '%s\n' 'privileged ready-transaction publication, identity, immutability, automatic pure-rebuild retirement, mixed-transaction refusal, ownership-collision gate, replaces-handover, legacy-dirt exemption, newest-NVR ownership, and selective fast-path tests: OK'
+
+# Hatched retention: the live generation keeps the newest 2 NVRs per
+# name; older NVRs retire inside the publication transaction unless a
+# live dependent pins them or they sit on SAPHIRA_RETAIN_NVR. Archive
+# generations never prune. Dual runs below target hatchling+hatched, so
+# the live view is the hatched test repository.
+run_signer_dual()
+{
+	SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
+	SAPHIRA_REPO_DIR=$test_root/repository SAPHIRA_INCOMING_DIR=$test_root/incoming \
+	SAPHIRA_PACKAGE_TMP=$test_root/package-tmp SAPHIRA_SIGN_KEY=$test_root/test-repository.rsa \
+	SAPHIRA_TRUST_KEY=$keys/test-repository.rsa.pub SAPHIRA_REPO_NAMES='hatchling hatched' \
+	SUDO_UID=0 SAPHIRA_REPO_GROUP=root \
+		unshare --map-root-user "$sign_repo" "$@"
+}
+fixture_pkg()
+{
+	# fixture_pkg name version path content depjson
+	# (re)builds one single-output producer; depjson is raw JSON
+	# (e.g. '"foo=1.0-r1"' or empty).
+	producer=$1 name=$2 version=$3 path=$4 content=$5 depjson=$6
+	rm -rf "$stage/$producer"
+	mkdir -p "$stage/$producer/pkg/$(dirname "$path")"
+	printf '%s\n' "$content" > "$stage/$producer/pkg/$path"
+	printf '%s\n' '{"arch":"x86_64","build_time":21,"license":"MIT","name":"'$producer'","origin":"'$name'","outputs":[{"dependencies":['$depjson'],"description":"'$name'","name":"'$name'","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"'$version'"}' > "$stage/$producer/manifest.json"
+	SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
+	SAPHIRA_BUILD_ROOT=$stage SAPHIRA_INCOMING_DIR=$artifacts \
+	SAPHIRA_PACKAGE_TMP=$test_root/makepkg-tmp SAPHIRA_FAKEROOT_BOOTSTRAP=1 \
+	SAPHIRA_BOOTSTRAP_TARGET=fakeroot "$makepkg" "$producer" >/dev/null
+}
+stage_txn()
+{
+	# stage_txn txn-dir target producer apk...
+	txn=$1 target=$2 producer=$3
+	shift 3
+	mkdir "$txn"
+	for apk in "$@"; do
+		cp "$artifacts/x86_64/$apk" "$txn/"
+	done
+	printf '%s\n' "$target" > "$txn/target"
+	printf '%s\n' '{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}' > "$txn/package-seed.json"
+	printf '%s\n' '{"schema":"saphira-build-artifacts/v1","target":"'$target'","constructors":[{"constructor":"makepkg","producer":"'$producer'"}],"package_seed":{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}}' > "$txn/artifact-manifest.json"
+	(CDPATH= cd -- "$txn" && sha256sum "$@" > manifest.sha256)
+}
+live_has()
+{
+	# live_has <apk|nofile:apk>... : assert presence/absence in hatched files+index+db
+	for want in "$@"; do
+		case $want in
+			nofile:*)
+				f=${want#nofile:}
+				test ! -e "$hatched_repo/$f" || return 1
+				apk adbdump "$hatched_repo/Packages.adb" | grep -q "$f" && return 1 || true
+				;;
+			*)
+				test -f "$hatched_repo/$want" || return 1
+				;;
+		esac
+	done
+}
+
+# Rollback generations: third publish retires the oldest from live only.
+fixture_pkg retfoo retfoo 1-r1 usr/bin/retfoo one ""
+stage_txn "$incoming/retent1-ready" retfoo retfoo retfoo-1-r1.apk
+run_signer_dual retfoo > "$test_root/retent1.out" 2> "$test_root/retent1.err"
+fixture_pkg retfoo retfoo 1-r2 usr/bin/retfoo two ""
+stage_txn "$incoming/retent2-ready" retfoo retfoo retfoo-1-r2.apk
+run_signer_dual retfoo > "$test_root/retent2.out" 2> "$test_root/retent2.err"
+fixture_pkg retfoo retfoo 1-r3 usr/bin/retfoo three ""
+stage_txn "$incoming/retent3-ready" retfoo retfoo retfoo-1-r3.apk
+run_signer_dual retfoo > "$test_root/retent3.out" 2> "$test_root/retent3.err"
+grep 'retention: retired 1 package' "$test_root/retent3.out" >/dev/null
+live_has retfoo-1-r3.apk retfoo-1-r2.apk nofile:retfoo-1-r1.apk
+test -f "$repo/retfoo-1-r1.apk"
+test -f "$repo/retfoo-1-r2.apk"
+test -f "$repo/retfoo-1-r3.apk"
+python3 - "$hatched_repo/repository.db" <<'PY'
+import sqlite3
+import sys
+
+conn = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+rows = sorted(r[0] for r in conn.execute("SELECT nvr FROM packages WHERE name='retfoo'"))
+assert rows == ["retfoo-1-r2", "retfoo-1-r3"], rows
+PY
+
+# Pinned dependency: an exact live pin on the oldest holds it. Fresh
+# package so the pinned NVR still exists when the third lands.
+fixture_pkg retpin retpin 1-r1 usr/bin/retpin one ""
+stage_txn "$incoming/retpin1-ready" retpin retpin retpin-1-r1.apk
+run_signer_dual retpin > "$test_root/retpin1.out" 2> "$test_root/retpin1.err"
+fixture_pkg retpin retpin 1-r2 usr/bin/retpin two ""
+stage_txn "$incoming/retpin2-ready" retpin retpin retpin-1-r2.apk
+run_signer_dual retpin > "$test_root/retpin2.out" 2> "$test_root/retpin2.err"
+fixture_pkg rethold rethold 1-r1 usr/bin/rethold hold '"retpin=1-r1"'
+stage_txn "$incoming/rethold-ready" rethold rethold rethold-1-r1.apk
+run_signer_dual rethold > "$test_root/rethold.out" 2> "$test_root/rethold.err"
+fixture_pkg retpin retpin 1-r3 usr/bin/retpin three ""
+stage_txn "$incoming/retpin3-ready" retpin retpin retpin-1-r3.apk
+run_signer_dual retpin > "$test_root/retpin3.out" 2> "$test_root/retpin3.err"
+grep 'retention: nothing to retire' "$test_root/retpin3.out" >/dev/null
+live_has retpin-1-r1.apk retpin-1-r2.apk retpin-1-r3.apk rethold-1-r1.apk
+
+# Split siblings retire atomically: one producer, two outputs, three
+# revisions. The old pair must vanish from the live view in the same
+# run - never one lingering without the other.
+fixture_pkg retsplit retsplit 1-r1 usr/bin/retsplit one ""
+stage_txn "$incoming/retsplit1-ready" retsplit retsplit retsplit-1-r1.apk
+run_signer_dual retsplit > "$test_root/retsplit1.out" 2> "$test_root/retsplit1.err"
+rm -rf "$stage/retsplitdev"
+mkdir -p "$stage/retsplitdev/pkg/usr/lib/pkgconfig"
+printf '%s\n' pc > "$stage/retsplitdev/pkg/usr/lib/pkgconfig/retsplit.pc"
+printf '%s\n' '{"arch":"x86_64","build_time":21,"license":"MIT","name":"retsplitdev","origin":"retsplit","outputs":[{"dependencies":[],"description":"retsplitdev","name":"retsplitdev","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r1"}' > "$stage/retsplitdev/manifest.json"
+SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
+SAPHIRA_BUILD_ROOT=$stage SAPHIRA_INCOMING_DIR=$artifacts \
+SAPHIRA_PACKAGE_TMP=$test_root/makepkg-tmp SAPHIRA_FAKEROOT_BOOTSTRAP=1 \
+SAPHIRA_BOOTSTRAP_TARGET=fakeroot "$makepkg" retsplitdev >/dev/null
+mkdir "$incoming/retsplitdev1-ready"
+cp "$artifacts/x86_64/retsplitdev-1-r1.apk" "$incoming/retsplitdev1-ready/"
+printf '%s\n' retsplitdev > "$incoming/retsplitdev1-ready/target"
+printf '%s\n' '{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}' > "$incoming/retsplitdev1-ready/package-seed.json"
+printf '%s\n' '{"schema":"saphira-build-artifacts/v1","target":"retsplitdev","constructors":[{"constructor":"makepkg","producer":"retsplitdev"}],"package_seed":{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}}' > "$incoming/retsplitdev1-ready/artifact-manifest.json"
+(CDPATH= cd -- "$incoming/retsplitdev1-ready" && sha256sum retsplitdev-1-r1.apk > manifest.sha256)
+run_signer_dual retsplitdev > "$test_root/retsplitdev1.out" 2> "$test_root/retsplitdev1.err"
+fixture_pkg retsplit retsplit 1-r2 usr/bin/retsplit two ""
+rm -rf "$stage/retsplitdev"
+mkdir -p "$stage/retsplitdev/pkg/usr/lib/pkgconfig"
+printf '%s\n' pc > "$stage/retsplitdev/pkg/usr/lib/pkgconfig/retsplit.pc"
+printf '%s\n' '{"arch":"x86_64","build_time":21,"license":"MIT","name":"retsplitdev","origin":"retsplit","outputs":[{"dependencies":[],"description":"retsplitdev","name":"retsplitdev","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r2"}' > "$stage/retsplitdev/manifest.json"
+SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
+SAPHIRA_BUILD_ROOT=$stage SAPHIRA_INCOMING_DIR=$artifacts \
+SAPHIRA_PACKAGE_TMP=$test_root/makepkg-tmp SAPHIRA_FAKEROOT_BOOTSTRAP=1 \
+SAPHIRA_BOOTSTRAP_TARGET=fakeroot "$makepkg" retsplitdev >/dev/null
+mkdir "$incoming/retsplit2-ready"
+cp "$artifacts/x86_64/retsplit-1-r2.apk" "$artifacts/x86_64/retsplitdev-1-r2.apk" "$incoming/retsplit2-ready/"
+printf '%s\n' retsplit > "$incoming/retsplit2-ready/target"
+printf '%s\n' '{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}' > "$incoming/retsplit2-ready/package-seed.json"
+printf '%s\n' '{"schema":"saphira-build-artifacts/v1","target":"retsplit","constructors":[{"constructor":"makepkg","producer":"retsplit"},{"constructor":"makepkg","producer":"retsplitdev"}],"package_seed":{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}}' > "$incoming/retsplit2-ready/artifact-manifest.json"
+(CDPATH= cd -- "$incoming/retsplit2-ready" && sha256sum retsplit-1-r2.apk retsplitdev-1-r2.apk > manifest.sha256)
+run_signer_dual retsplit > "$test_root/retsplit2.out" 2> "$test_root/retsplit2.err"
+fixture_pkg retsplit retsplit 1-r3 usr/bin/retsplit three ""
+rm -rf "$stage/retsplitdev"
+mkdir -p "$stage/retsplitdev/pkg/usr/lib/pkgconfig"
+printf '%s\n' pc > "$stage/retsplitdev/pkg/usr/lib/pkgconfig/retsplit.pc"
+printf '%s\n' '{"arch":"x86_64","build_time":21,"license":"MIT","name":"retsplitdev","origin":"retsplit","outputs":[{"dependencies":[],"description":"retsplitdev","name":"retsplitdev","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r3"}' > "$stage/retsplitdev/manifest.json"
+SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
+SAPHIRA_BUILD_ROOT=$stage SAPHIRA_INCOMING_DIR=$artifacts \
+SAPHIRA_PACKAGE_TMP=$test_root/makepkg-tmp SAPHIRA_FAKEROOT_BOOTSTRAP=1 \
+SAPHIRA_BOOTSTRAP_TARGET=fakeroot "$makepkg" retsplitdev >/dev/null
+mkdir "$incoming/retsplit3-ready"
+cp "$artifacts/x86_64/retsplit-1-r3.apk" "$artifacts/x86_64/retsplitdev-1-r3.apk" "$incoming/retsplit3-ready/"
+printf '%s\n' retsplit > "$incoming/retsplit3-ready/target"
+printf '%s\n' '{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}' > "$incoming/retsplit3-ready/package-seed.json"
+printf '%s\n' '{"schema":"saphira-build-artifacts/v1","target":"retsplit","constructors":[{"constructor":"makepkg","producer":"retsplit"},{"constructor":"makepkg","producer":"retsplitdev"}],"package_seed":{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}}' > "$incoming/retsplit3-ready/artifact-manifest.json"
+(CDPATH= cd -- "$incoming/retsplit3-ready" && sha256sum retsplit-1-r3.apk retsplitdev-1-r3.apk > manifest.sha256)
+run_signer_dual retsplit > "$test_root/retsplit3.out" 2> "$test_root/retsplit3.err"
+grep 'retention: retired 2 package' "$test_root/retsplit3.out" >/dev/null
+live_has retsplit-1-r3.apk retsplit-1-r2.apk retsplitdev-1-r3.apk retsplitdev-1-r2.apk \
+	nofile:retsplit-1-r1.apk nofile:retsplitdev-1-r1.apk
+python3 - "$hatched_repo/repository.db" <<'PY'
+import sqlite3
+import sys
+
+conn = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+for name, want in (("retsplit", ["retsplit-1-r2", "retsplit-1-r3"]),
+                   ("retsplitdev", ["retsplitdev-1-r2", "retsplitdev-1-r3"])):
+    rows = sorted(r[0] for r in conn.execute("SELECT nvr FROM packages WHERE name=?", (name,)))
+    assert rows == want, (name, rows)
+PY
+
+# Explicit hold: SAPHIRA_RETAIN_NVR keeps a rank-excess NVR with no
+# dependency excuse.
+fixture_pkg retholdme retholdme 1-r1 usr/bin/retholdme one ""
+stage_txn "$incoming/retholdme1-ready" retholdme retholdme retholdme-1-r1.apk
+run_signer_dual retholdme > "$test_root/retholdme1.out" 2> "$test_root/retholdme1.err"
+fixture_pkg retholdme retholdme 1-r2 usr/bin/retholdme two ""
+stage_txn "$incoming/retholdme2-ready" retholdme retholdme retholdme-1-r2.apk
+run_signer_dual retholdme > "$test_root/retholdme2.out" 2> "$test_root/retholdme2.err"
+fixture_pkg retholdme retholdme 1-r3 usr/bin/retholdme three ""
+stage_txn "$incoming/retholdme3-ready" retholdme retholdme retholdme-1-r3.apk
+SAPHIRA_RETAIN_NVR="retholdme-1-r1" run_signer_dual retholdme > "$test_root/retholdme3.out" 2> "$test_root/retholdme3.err"
+grep 'retention: nothing to retire' "$test_root/retholdme3.out" >/dev/null
+live_has retholdme-1-r1.apk retholdme-1-r2.apk retholdme-1-r3.apk
+printf '%s\n' 'hatched retention (rollback generations, pinned holds, split siblings, explicit holds): OK'
+
+# r0 inadmissibility in the live view: hatchling keeps historical r0
+# APKs forever as archive/history; hatched must not contain r0 at all.
+# Published r0 claims are history, never active claims - they cannot
+# block a successor, win selection, or satisfy a dependency.
+run_signer_live()
+{
+	SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
+	SAPHIRA_REPO_DIR=$test_root/repository SAPHIRA_INCOMING_DIR=$test_root/incoming \
+	SAPHIRA_PACKAGE_TMP=$test_root/package-tmp SAPHIRA_SIGN_KEY=$test_root/test-repository.rsa \
+	SAPHIRA_TRUST_KEY=$keys/test-repository.rsa.pub SAPHIRA_REPO_NAMES=hatched \
+	SUDO_UID=0 SAPHIRA_REPO_GROUP=root \
+		unshare --map-root-user "$sign_repo" "$@"
+}
+
+# Hatched seeded with r0 + r1: the r0 disappears from the live view on
+# the next production run, the r1 remains (files, index and rows).
+fixture_pkg r0mix r0mix 1-r0 usr/bin/r0mix zero ""
+stage_txn "$incoming/r0mix0-ready" r0mix r0mix r0mix-1-r0.apk
+run_signer_live r0mix > "$test_root/r0mix0.out" 2> "$test_root/r0mix0.err"
+fixture_pkg r0mix r0mix 1-r1 usr/bin/r0mix one ""
+stage_txn "$incoming/r0mix1-ready" r0mix r0mix r0mix-1-r1.apk
+run_signer_live r0mix > "$test_root/r0mix1.out" 2> "$test_root/r0mix1.err"
+live_has r0mix-1-r0.apk r0mix-1-r1.apk
+fixture_pkg r0trig r0trig 1-r1 usr/bin/r0trig trig ""
+stage_txn "$incoming/r0trig-ready" r0trig r0trig r0trig-1-r1.apk
+run_signer_dual r0trig > "$test_root/r0trig.out" 2> "$test_root/r0trig.err"
+grep 'r0mix-1-r0.apk' "$test_root/r0trig.out" >/dev/null
+live_has r0mix-1-r1.apk r0trig-1-r1.apk nofile:r0mix-1-r0.apk
+python3 - "$hatched_repo/repository.db" <<'PY'
+import sqlite3
+import sys
+
+conn = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+rows = sorted(r[0] for r in conn.execute("SELECT nvr FROM packages WHERE name='r0mix'"))
+assert rows == ["r0mix-1-r1"], rows
+PY
+
+# Hatched seeded with r0 only: the r0 disappears and the package is
+# absent rather than retained.
+fixture_pkg r0lone r0lone 1-r0 usr/bin/r0lone zero ""
+stage_txn "$incoming/r0lone-ready" r0lone r0lone r0lone-1-r0.apk
+run_signer_live r0lone > "$test_root/r0lone.out" 2> "$test_root/r0lone.err"
+live_has r0lone-1-r0.apk
+fixture_pkg r0trigb r0trigb 1-r1 usr/bin/r0trigb trig ""
+stage_txn "$incoming/r0trigb-ready" r0trigb r0trigb r0trigb-1-r1.apk
+run_signer_dual r0trigb > "$test_root/r0lone-trig.out" 2> "$test_root/r0lone-trig.err"
+live_has nofile:r0lone-1-r0.apk
+python3 - "$hatched_repo/repository.db" <<'PY'
+import sqlite3
+import sys
+
+conn = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+rows = list(conn.execute("SELECT nvr FROM packages WHERE name='r0lone'"))
+assert rows == [], rows
+PY
+
+# Exact dependency on an r0: publication fails closed and identifies the
+# broken dependent. The r0 is NOT preserved to satisfy it. Afterwards
+# the consumer is fixed at r1+ (r0need-1-r1, r0cons-1-r2 on the exact r1
+# pin), which unbreaks the live view and retires the r0 - otherwise the
+# broken pair would poison every later production run.
+fixture_pkg r0cons r0cons 1-r1 usr/bin/r0cons cons '"r0need=1-r0"'
+stage_txn "$incoming/r0cons-ready" r0cons r0cons r0cons-1-r1.apk
+run_signer_live r0cons > "$test_root/r0cons.out" 2> "$test_root/r0cons.err"
+fixture_pkg r0need r0need 1-r0 usr/bin/r0need zero ""
+stage_txn "$incoming/r0need-ready" r0need r0need r0need-1-r0.apk
+run_signer_live r0need > "$test_root/r0need.out" 2> "$test_root/r0need.err"
+live_before=$(find "$hatched_repo" -type f -printf '%P\n' | sort | sha256sum)
+fixture_pkg r0trigc r0trigc 1-r1 usr/bin/r0trigc trig ""
+stage_txn "$incoming/r0trigc-ready" r0trigc r0trigc r0trigc-1-r1.apk
+if run_signer_dual r0trigc > "$test_root/r0dep.out" 2> "$test_root/r0dep.err"; then
+	printf '%s\n' 'live dependency on r0 unexpectedly published' >&2
+	exit 1
+fi
+grep 'retention refused' "$test_root/r0dep.err" >/dev/null
+grep 'broken live dependency' "$test_root/r0dep.err" >/dev/null
+grep 'r0cons-1-r1' "$test_root/r0dep.err" >/dev/null
+grep "depends on 'r0need=1-r0'" "$test_root/r0dep.err" >/dev/null
+[ "$live_before" = "$(find "$hatched_repo" -type f -printf '%P\n' | sort | sha256sum)" ]
+live_has r0need-1-r0.apk r0cons-1-r1.apk
+rm -rf "$incoming/r0trigc-ready"
+fixture_pkg r0need r0need 1-r1 usr/bin/r0need zero ""
+stage_txn "$incoming/r0needfix-ready" r0need r0need r0need-1-r1.apk
+fixture_pkg r0cons r0cons 1-r2 usr/bin/r0cons cons '"r0need=1-r1"'
+stage_txn "$incoming/r0consfix-ready" r0cons r0cons r0cons-1-r2.apk
+run_signer_dual r0need r0cons > "$test_root/r0depfix.out" 2> "$test_root/r0depfix.err"
+grep 'r0need-1-r0.apk' "$test_root/r0depfix.out" >/dev/null
+live_has r0need-1-r1.apk r0cons-1-r1.apk r0cons-1-r2.apk nofile:r0need-1-r0.apk
+
+# Explicit SAPHIRA_RETAIN_NVR naming an r0: rejected loudly. The r0 is
+# then superseded by a same-name r1 so later runs stay clean.
+fixture_pkg r0held r0held 1-r0 usr/bin/r0held zero ""
+stage_txn "$incoming/r0held-ready" r0held r0held r0held-1-r0.apk
+run_signer_live r0held > "$test_root/r0held.out" 2> "$test_root/r0held.err"
+fixture_pkg r0trigd r0trigd 1-r1 usr/bin/r0trigd trig ""
+stage_txn "$incoming/r0trigd-ready" r0trigd r0trigd r0trigd-1-r1.apk
+if SAPHIRA_RETAIN_NVR="r0held-1-r0" run_signer_dual r0trigd > "$test_root/r0hold.out" 2> "$test_root/r0hold.err"; then
+	printf '%s\n' 'explicit hold on r0 unexpectedly published' >&2
+	exit 1
+fi
+grep 'retention refused' "$test_root/r0hold.err" >/dev/null
+grep 'explicit retention hold on r0 is rejected' "$test_root/r0hold.err" >/dev/null
+grep 'r0held-1-r0' "$test_root/r0hold.err" >/dev/null
+rm -rf "$incoming/r0trigd-ready"
+fixture_pkg r0held r0held 1-r1 usr/bin/r0held zero ""
+stage_txn "$incoming/r0heldfix-ready" r0held r0held r0held-1-r1.apk
+run_signer_live r0held > "$test_root/r0heldfix.out" 2> "$test_root/r0heldfix.err"
+
+# Hatchling containing a historical r0: the archive retains the APK and
+# its rows, and the r0 does not block the r1/r2 successor ownership.
+fixture_pkg r0arc r0arc 1-r0 usr/bin/r0arc zero ""
+stage_txn "$incoming/r0arc0-ready" r0arc r0arc r0arc-1-r0.apk
+run_signer r0arc > "$test_root/r0arc0.out" 2> "$test_root/r0arc0.err"
+fixture_pkg r0arc r0arc 1-r1 usr/bin/r0arc one ""
+stage_txn "$incoming/r0arc1-ready" r0arc r0arc r0arc-1-r1.apk
+run_signer_dual r0arc > "$test_root/r0arc1.out" 2> "$test_root/r0arc1.err"
+fixture_pkg r0arc r0arc 1-r2 usr/bin/r0arc two ""
+stage_txn "$incoming/r0arc2-ready" r0arc r0arc r0arc-1-r2.apk
+run_signer_dual r0arc > "$test_root/r0arc2.out" 2> "$test_root/r0arc2.err"
+test -f "$repo/r0arc-1-r0.apk"
+test -f "$repo/r0arc-1-r1.apk"
+test -f "$repo/r0arc-1-r2.apk"
+live_has r0arc-1-r1.apk r0arc-1-r2.apk nofile:r0arc-1-r0.apk
+python3 - "$repo/repository.db" <<'PY'
+import sqlite3
+import sys
+
+conn = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+rows = sorted(r[0] for r in conn.execute("SELECT nvr FROM packages WHERE name='r0arc'"))
+assert rows == ["r0arc-1-r0", "r0arc-1-r1", "r0arc-1-r2"], rows
+PY
+
+# The emscripten case: ems-6.0.5-r0 historically owned the .pc files and
+# was never rebuilt as a base r1; ems-dev-6.0.5-r1 now correctly owns
+# them. The historical r0 claim must not collide with the successor.
+# Hatchling keeps the r0 APK; hatched contains no r0.
+mkdir -p "$stage/ems/pkg/usr/lib/pkgconfig"
+printf '%s\n' pc > "$stage/ems/pkg/usr/lib/pkgconfig/ems.pc"
+printf '%s\n' '{"arch":"x86_64","build_time":22,"license":"MIT","name":"ems","origin":"ems","outputs":[{"dependencies":[],"description":"ems","name":"ems","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"6.0.5-r0"}' > "$stage/ems/manifest.json"
+SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
+SAPHIRA_BUILD_ROOT=$stage SAPHIRA_INCOMING_DIR=$artifacts \
+SAPHIRA_PACKAGE_TMP=$test_root/makepkg-tmp SAPHIRA_FAKEROOT_BOOTSTRAP=1 \
+SAPHIRA_BOOTSTRAP_TARGET=fakeroot "$makepkg" ems >/dev/null
+mkdir "$incoming/ems0-ready"
+cp "$artifacts/x86_64/ems-6.0.5-r0.apk" "$incoming/ems0-ready/"
+printf '%s\n' ems > "$incoming/ems0-ready/target"
+printf '%s\n' '{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}' > "$incoming/ems0-ready/package-seed.json"
+printf '%s\n' '{"schema":"saphira-build-artifacts/v1","target":"ems","constructors":[{"constructor":"makepkg","producer":"ems"}],"package_seed":{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}}' > "$incoming/ems0-ready/artifact-manifest.json"
+(CDPATH= cd -- "$incoming/ems0-ready" && sha256sum ems-6.0.5-r0.apk > manifest.sha256)
+run_signer ems > "$test_root/ems0.out" 2> "$test_root/ems0.err"
+mkdir -p "$stage/emsdev/pkg/usr/lib/pkgconfig"
+printf '%s\n' pc > "$stage/emsdev/pkg/usr/lib/pkgconfig/ems.pc"
+printf '%s\n' '{"arch":"x86_64","build_time":22,"license":"MIT","name":"emsdev","origin":"ems","outputs":[{"dependencies":[],"description":"ems-dev","name":"ems-dev","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"6.0.5-r1"}' > "$stage/emsdev/manifest.json"
+SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
+SAPHIRA_BUILD_ROOT=$stage SAPHIRA_INCOMING_DIR=$artifacts \
+SAPHIRA_PACKAGE_TMP=$test_root/makepkg-tmp SAPHIRA_FAKEROOT_BOOTSTRAP=1 \
+SAPHIRA_BOOTSTRAP_TARGET=fakeroot "$makepkg" emsdev >/dev/null
+mkdir "$incoming/emsdev1-ready"
+cp "$artifacts/x86_64/ems-dev-6.0.5-r1.apk" "$incoming/emsdev1-ready/"
+printf '%s\n' emsdev > "$incoming/emsdev1-ready/target"
+printf '%s\n' '{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}' > "$incoming/emsdev1-ready/package-seed.json"
+printf '%s\n' '{"schema":"saphira-build-artifacts/v1","target":"emsdev","constructors":[{"constructor":"makepkg","producer":"emsdev"}],"package_seed":{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}}' > "$incoming/emsdev1-ready/artifact-manifest.json"
+(CDPATH= cd -- "$incoming/emsdev1-ready" && sha256sum ems-dev-6.0.5-r1.apk > manifest.sha256)
+run_signer_dual emsdev > "$test_root/emsdev1.out" 2> "$test_root/emsdev1.err"
+test -f "$repo/ems-6.0.5-r0.apk"
+apk adbdump "$repo/Packages.adb" | grep -q '6\.0\.5-r0'
+live_has ems-dev-6.0.5-r1.apk nofile:ems-6.0.5-r0.apk
+python3 - "$repo/repository.db" <<'PY'
+import sqlite3
+import sys
+
+conn = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+rows = sorted(r[0] for r in conn.execute("SELECT nvr FROM packages WHERE name='ems'"))
+assert rows == ["ems-6.0.5-r0"], rows
+PY
+python3 - "$hatched_repo/repository.db" <<'PY'
+import sqlite3
+import sys
+
+conn = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+rows = list(conn.execute("SELECT nvr FROM packages WHERE name='ems'"))
+assert rows == [], rows
+rows = sorted(r[0] for r in conn.execute("SELECT nvr FROM packages WHERE name='ems-dev'"))
+assert rows == ["ems-dev-6.0.5-r1"], rows
+PY
+
+# Shared init selector: systemd + openrc co-own sbin/init (PID 1's
+# canonical path cannot move to /usr/sbin like the split halt/
+# poweroff/reboot/shutdown siblings). A third claimant still fails.
+mkdir -p "$stage/systemd/pkg/sbin" "$stage/openrc/pkg/sbin"
+ln -s ../lib/systemd/systemd "$stage/systemd/pkg/sbin/init"
+ln -s openrc-init "$stage/openrc/pkg/sbin/init"
+printf '%s\n' '{"arch":"x86_64","build_time":30,"license":"MIT","name":"systemd","origin":"systemd","outputs":[{"dependencies":[],"description":"systemd","name":"systemd","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r1"}' > "$stage/systemd/manifest.json"
+printf '%s\n' '{"arch":"x86_64","build_time":30,"license":"MIT","name":"openrc","origin":"openrc","outputs":[{"dependencies":[],"description":"openrc","name":"openrc","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r1"}' > "$stage/openrc/manifest.json"
+SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
+SAPHIRA_BUILD_ROOT=$stage SAPHIRA_INCOMING_DIR=$artifacts \
+SAPHIRA_PACKAGE_TMP=$test_root/makepkg-tmp SAPHIRA_FAKEROOT_BOOTSTRAP=1 \
+SAPHIRA_BOOTSTRAP_TARGET=fakeroot "$makepkg" systemd >/dev/null
+SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
+SAPHIRA_BUILD_ROOT=$stage SAPHIRA_INCOMING_DIR=$artifacts \
+SAPHIRA_PACKAGE_TMP=$test_root/makepkg-tmp SAPHIRA_FAKEROOT_BOOTSTRAP=1 \
+SAPHIRA_BOOTSTRAP_TARGET=fakeroot "$makepkg" openrc >/dev/null
+mkdir "$incoming/initselect-ready"
+cp "$artifacts/x86_64/systemd-1-r1.apk" "$artifacts/x86_64/openrc-1-r1.apk" "$incoming/initselect-ready/"
+printf '%s\n' systemd > "$incoming/initselect-ready/target"
+printf '%s\n' '{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}' > "$incoming/initselect-ready/package-seed.json"
+printf '%s\n' '{"schema":"saphira-build-artifacts/v1","target":"systemd","constructors":[{"constructor":"makepkg","producer":"systemd"}],"package_seed":{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}}' > "$incoming/initselect-ready/artifact-manifest.json"
+(CDPATH= cd -- "$incoming/initselect-ready" && sha256sum systemd-1-r1.apk openrc-1-r1.apk > manifest.sha256)
+run_signer_dual systemd > "$test_root/initselect.out" 2> "$test_root/initselect.err"
+grep 'shared init selector' "$test_root/initselect.out" >/dev/null
+grep 'sbin/init' "$test_root/initselect.out" >/dev/null
+test -f "$repo/systemd-1-r1.apk"
+test -f "$repo/openrc-1-r1.apk"
+test -f "$hatched_repo/systemd-1-r1.apk"
+test -f "$hatched_repo/openrc-1-r1.apk"
+mkdir -p "$stage/impostor/pkg/sbin"
+ln -s /bin/true "$stage/impostor/pkg/sbin/init"
+printf '%s\n' '{"arch":"x86_64","build_time":31,"license":"MIT","name":"impostor","origin":"impostor","outputs":[{"dependencies":[],"description":"impostor","name":"impostor","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r1"}' > "$stage/impostor/manifest.json"
+SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
+SAPHIRA_BUILD_ROOT=$stage SAPHIRA_INCOMING_DIR=$artifacts \
+SAPHIRA_PACKAGE_TMP=$test_root/makepkg-tmp SAPHIRA_FAKEROOT_BOOTSTRAP=1 \
+SAPHIRA_BOOTSTRAP_TARGET=fakeroot "$makepkg" impostor >/dev/null
+mkdir "$incoming/impostor-ready"
+cp "$artifacts/x86_64/impostor-1-r1.apk" "$incoming/impostor-ready/"
+printf '%s\n' impostor > "$incoming/impostor-ready/target"
+printf '%s\n' '{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}' > "$incoming/impostor-ready/package-seed.json"
+printf '%s\n' '{"schema":"saphira-build-artifacts/v1","target":"impostor","constructors":[{"constructor":"makepkg","producer":"impostor"}],"package_seed":{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}}' > "$incoming/impostor-ready/artifact-manifest.json"
+(CDPATH= cd -- "$incoming/impostor-ready" && sha256sum impostor-1-r1.apk > manifest.sha256)
+if run_signer_dual impostor > "$test_root/impostor.out" 2> "$test_root/impostor.err"; then
+	printf '%s\n' 'third init claimant unexpectedly published' >&2
+	exit 1
+fi
+grep 'file ownership collision' "$test_root/impostor.err" >/dev/null
+grep 'sbin/init' "$test_root/impostor.err" >/dev/null
+test ! -e "$repo/impostor-1-r1.apk"
+test ! -e "$hatched_repo/impostor-1-r1.apk"
+rm -rf "$incoming/impostor-ready"
+printf '%s\n' 'shared init selector (systemd+openrc co-own sbin/init, third claimant refused): OK'
+# The full audit resolves declaration-extraction providers, so the bare
+# helper deps of the earlier account fixtures (bash, coreutils,
+# saphira-baselayout - auto-added by makepkg) need published stubs
+# first, exactly like repo-state.sh seeds its own.
+fixture_pkg stubbash bash 1-r1 usr/bin/bash bash ""
+stage_txn "$incoming/stubbash-ready" bash stubbash bash-1-r1.apk
+fixture_pkg stubcore coreutils 1-r1 usr/bin/coreutils core ""
+stage_txn "$incoming/stubcore-ready" coreutils stubcore coreutils-1-r1.apk
+fixture_pkg stubbase saphira-baselayout 1-r1 usr/bin/base base ""
+stage_txn "$incoming/stubbase-ready" saphira-baselayout stubbase saphira-baselayout-1-r1.apk
+run_signer_dual bash coreutils saphira-baselayout > "$test_root/stubs.out" 2> "$test_root/stubs.err"
+fixture_pkg r0heal r0heal 1-r1 usr/bin/r0heal heal ""
+stage_txn "$incoming/r0heal-ready" r0heal r0heal r0heal-1-r1.apk
+run_signer_dual --full-audit r0heal > "$test_root/emsheal.out" 2> "$test_root/emsheal.err"
+grep 'full audit' "$test_root/emsheal.out" >/dev/null
+test -f "$repo/ems-6.0.5-r0.apk"
+live_has ems-dev-6.0.5-r1.apk r0heal-1-r1.apk nofile:ems-6.0.5-r0.apk
+python3 - "$repo/repository.db" <<'PY'
+import sqlite3
+import sys
+
+conn = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+rows = sorted(r[0] for r in conn.execute("SELECT nvr FROM packages WHERE name='ems'"))
+assert rows == ["ems-6.0.5-r0"], rows
+PY
+printf '%s\n' 'r0 inadmissibility (live purge, broken-dep refusal, hold rejection, archive history, emscripten split, heal): OK'
+
+# Heal mode: --full-audit with an empty stage reconciles indexes and
+# repository.db with disk truth after sanctioned out-of-band removal
+# of superseded artifacts, and publishes nothing. An empty stage
+# without --full-audit stays a refusal.
+fixture_pkg healkeep healkeep 1-r1 usr/bin/healkeep keep ""
+stage_txn "$incoming/healkeep-ready" healkeep healkeep healkeep-1-r1.apk
+fixture_pkg healdrop healdrop 1-r1 usr/bin/healdrop drop ""
+stage_txn "$incoming/healdrop-ready" healdrop healdrop healdrop-1-r1.apk
+run_signer healkeep healdrop >/dev/null
+test -f "$repo/healkeep-1-r1.apk"
+test -f "$repo/healdrop-1-r1.apk"
+# Heal needs a clean stage: stale refused *-ready residue elsewhere in
+# the shared incoming dir must keep taking the normal publish path
+# (loud refusal), never a silent heal. Scope the empty stage to a
+# fresh dir; the repo under repair stays shared by design.
+heal_stage=$test_root/heal-stage
+mkdir -p "$heal_stage"
+run_heal()
+{
+	SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
+	SAPHIRA_REPO_DIR=$test_root/repository SAPHIRA_INCOMING_DIR=$heal_stage \
+	SAPHIRA_PACKAGE_TMP=$test_root/package-tmp SAPHIRA_SIGN_KEY=$test_root/test-repository.rsa \
+	SAPHIRA_TRUST_KEY=$keys/test-repository.rsa.pub SAPHIRA_REPO_NAMES=hatchling \
+	SUDO_UID=0 SAPHIRA_REPO_GROUP=root \
+		unshare --map-root-user "$sign_repo" "$@"
+}
+if run_heal > "$test_root/healempty.out" 2> "$test_root/healempty.err"; then
+	printf '%s\n' 'empty stage unexpectedly published' >&2
+	exit 1
+fi
+grep 'no complete ready transactions' "$test_root/healempty.err" >/dev/null
+find "$incoming" -mindepth 1 -maxdepth 1 | sort > "$test_root/heal-incoming-before.txt"
+rm "$repo/healdrop-1-r1.apk"
+run_heal --full-audit > "$test_root/heal.out" 2> "$test_root/heal.err"
+grep 'heals repository indexes from disk state' "$test_root/heal.out" >/dev/null
+test -f "$repo/healkeep-1-r1.apk"
+test ! -e "$repo/healdrop-1-r1.apk"
+[ "$(apk adbdump "$repo/Packages.adb" | awk '/^  - name: healkeep$/ { count++ } END { print count + 0 }')" -eq 1 ]
+if apk adbdump "$repo/Packages.adb" | grep -q healdrop; then
+	printf '%s\n' 'removed package still indexed after heal' >&2
+	exit 1
+fi
+find "$incoming" -mindepth 1 -maxdepth 1 | sort > "$test_root/heal-incoming-after.txt"
+cmp "$test_root/heal-incoming-before.txt" "$test_root/heal-incoming-after.txt" >/dev/null
+# Heal stages nothing: no transaction dirs at any depth (the signer
+# may create an empty arch subdir as setup; contents are what matter).
+test -z "$(find "$heal_stage" -mindepth 2 -print -quit)"
+python3 - "$repo/repository.db" <<'PY'
+import sqlite3
+import sys
+
+conn = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+rows = sorted(r[0] for r in conn.execute("SELECT nvr FROM packages WHERE name IN ('healkeep', 'healdrop')"))
+assert rows == ["healkeep-1-r1"], rows
+PY
+printf '%s\n' 'heal mode (empty-stage refusal, out-of-band removal reconciliation, no publish): OK'

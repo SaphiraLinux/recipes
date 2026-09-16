@@ -1,0 +1,19 @@
+#!/sbin/openrc-run
+
+description="Net-SNMP trap receiver"
+
+command="/usr/sbin/snmptrapd"
+command_args="-f -C -c /etc/snmp/snmptrapd.conf -u snmp -g snmp"
+command_user="snmp:snmp"
+supervisor="supervise-daemon"
+
+depend()
+{
+	use net logger snmpd
+	after firewall snmpd
+}
+
+start_pre()
+{
+	checkpath -d -m 0750 -o snmp:snmp /var/lib/snmp
+}

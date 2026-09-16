@@ -10,7 +10,7 @@ repo=saphira
 url=https://github.com/util-linux/util-linux
 util_linux_sha256=be9ad9a276f4305ab7dd2f5225c8be1ff54352f565ff4dede9628c1aaa7dec57
 depends="zlib ncurses"
-makedepends="bison flex gcc gettext libxcrypt-dev saphira-kernel-headers=7.1.5 meson ninja pkgconf zlib-dev ncurses-dev"
+makedepends="bison flex gcc gettext libxcrypt-dev saphira-kernel-headers meson ninja pkgconf zlib-dev ncurses-dev"
 subpackages="$pkgname-dev $pkgname-doc"
 recipe_build()
 {

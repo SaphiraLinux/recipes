@@ -10,7 +10,7 @@ repo=saphira
 url=https://www.kernel.org/pub/software/network/ethtool/
 ethtool_sha256=4d78c26edc0255bc92f4b995b5fd66108d75ff966ed4694f6025a6d370bc2496
 depends="libmnl"
-makedepends="saphira-kernel-headers=7.1.5 gawk gcc make pkgconf libmnl-dev"
+makedepends="saphira-kernel-headers gawk gcc make pkgconf libmnl-dev"
 recipe_build() {
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$RECIPE_DIR/files/ethtool-7.1.tar.xz"
 	cd "$SRC"

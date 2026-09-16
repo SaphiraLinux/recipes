@@ -1,0 +1,179 @@
+--- a/Makefile
++++ b/Makefile
+@@ -121,29 +121,34 @@
+ compile auto_split.c
+ 	./compile auto_split.c
+ 
+-auto_uids.c: \
+-auto-uid auto-gid conf-users conf-groups
+-	( ./auto-uid auto_uida `head -n 1 conf-users` \
+-	&&./auto-uid auto_uidd `head -n 2 conf-users | tail -1` \
+-	&&./auto-uid auto_uidl `head -n 3 conf-users | tail -1` \
+-	&&./auto-uid auto_uido `head -n 4 conf-users | tail -1` \
+-	&&./auto-uid auto_uidp `head -n 5 conf-users | tail -1` \
+-	&&./auto-uid auto_uidq `head -n 6 conf-users | tail -1` \
+-	&&./auto-uid auto_uidr `head -n 7 conf-users | tail -1` \
+-	&&./auto-uid auto_uids `head -n 8 conf-users | tail -1` \
+-	&&./auto-uid auto_uidv `head -n 9 conf-users | tail -1` \
+-	&&./auto-gid auto_gidq `head -n 1 conf-groups` \
+-	&&./auto-gid auto_gidn `head -n 2 conf-groups | tail -1` \
+-	&&./auto-gid auto_gidv `head -n 3 conf-groups | tail -1` \
++# Saphira: fixed build-time identities (see accounts.d/qmail -
++# alias 133, qmaild 134, qmaill 135, root 0, qmailp 136, qmailq 137,
++# qmailr 138, qmails 139, vpopmail 140; qmail 132, nofiles 142,
++# vchkpw 141). Rootless builders cannot resolve these via getpwnam,
++# so the numbers are baked directly instead of probed.
++auto_uids.c:
++	( echo "int auto_uida = 133;" \
++	&&echo "int auto_uidd = 134;" \
++	&&echo "int auto_uidl = 135;" \
++	&&echo "int auto_uido = 0;" \
++	&&echo "int auto_uidp = 136;" \
++	&&echo "int auto_uidq = 137;" \
++	&&echo "int auto_uidr = 138;" \
++	&&echo "int auto_uids = 139;" \
++	&&echo "int auto_uidv = 140;" \
++	&&echo "int auto_gidq = 132;" \
++	&&echo "int auto_gidn = 142;" \
++	&&echo "int auto_gidv = 141;" \
+ 	) > auto_uids.c.tmp && mv auto_uids.c.tmp auto_uids.c
+ 
+ auto_uids.o: \
+ compile auto_uids.c
+ 	./compile auto_uids.c
+ 
+-auto_usera.c: \
+-auto-str conf-users
+-	./auto-str auto_usera `head -n 1 conf-users` > auto_usera.c
++# Saphira: byte-exact auto-str output for "alias" (see auto-str.c -
++# octal-escaped, backslash-newline wrapped), without running the probe.
++auto_usera.c:
++	printf 'char auto_usera[] = "\\\n\\141\\154\\151\\141\\163\\\n";\n' > auto_usera.c.tmp && mv auto_usera.c.tmp auto_usera.c
+ 
+ auto_usera.o: \
+ compile auto_usera.c
+@@ -2493,2 +2493,2 @@
+
+-dkim.o: dkim.c $(DKIMHDRS)
++dkim.o: compile dkim.c $(DKIMHDRS)
+@@ -2527,2 +2527,2 @@
+
+-policy.o: policy.c policy.h conf-policy conf-qmail
++policy.o: compile policy.c policy.h conf-policy conf-qmail
+--- a/install.c
++++ b/install.c
+@@ -1,5 +1,26 @@
+ #include <stdio.h>
+ #include <string.h>
++#include <stdlib.h>
++#include <unistd.h>
++
++/* Saphira rootless staging: DESTDIR prefixes every installed
++   path, and SAPHIRA_NO_CHOWN skips ownership changes (the
++   accounts.d file/dir stanzas apply them at install time).
++   Modes are still applied - chmod works unprivileged. */
++static const char *saphira_destdir = 0;
++static int saphira_no_chown = 0;
++static char *saphira_home(char *home)
++{
++  static char buf[512];
++  if (!saphira_destdir || !*saphira_destdir) return home;
++  snprintf(buf,sizeof buf,"%s%s",saphira_destdir,home);
++  return buf;
++}
++static int saphira_chown(const char *p, int u, int g)
++{
++  if (saphira_no_chown) return 0;
++  return chown(p,u,g);
++}
+ #include <sys/stat.h>
+ #include "fifo.h"
+ #include "substdio.h"
+@@ -17,10 +38,11 @@
+ 
+ void h(char *home, int uid, int gid, int mode)
+ {
++  home = saphira_home(home);
+   if (mkdir(home,0700) == -1)
+     if (errno != error_exist)
+       strerr_die4sys(111,FATAL,"unable to mkdir ",home,": ");
+-  if (chown(home,uid,gid) == -1)
++  if (saphira_chown(home,uid,gid) == -1)
+     strerr_die4sys(111,FATAL,"unable to chown ",home,": ");
+   if (chmod(home,mode) == -1)
+     strerr_die4sys(111,FATAL,"unable to chmod ",home,": ");
+@@ -28,12 +50,13 @@
+ 
+ void d(char *home, char *subdir, int uid, int gid, int mode)
+ {
++  home = saphira_home(home);
+   if (chdir(home) == -1)
+     strerr_die4sys(111,FATAL,"unable to switch to ",home,": ");
+   if (mkdir(subdir,0700) == -1)
+     if (errno != error_exist)
+       strerr_die6sys(111,FATAL,"unable to mkdir ",home,"/",subdir,": ");
+-  if (chown(subdir,uid,gid) == -1)
++  if (saphira_chown(subdir,uid,gid) == -1)
+     strerr_die6sys(111,FATAL,"unable to chown ",home,"/",subdir,": ");
+   if (chmod(subdir,mode) == -1)
+     strerr_die6sys(111,FATAL,"unable to chmod ",home,"/",subdir,": ");
+@@ -41,12 +64,13 @@
+ 
+ void p(char *home, char *fifo, int uid, int gid, int mode)
+ {
++  home = saphira_home(home);
+   if (chdir(home) == -1)
+     strerr_die4sys(111,FATAL,"unable to switch to ",home,": ");
+   if (fifo_make(fifo,0700) == -1)
+     if (errno != error_exist)
+       strerr_die6sys(111,FATAL,"unable to mkfifo ",home,"/",fifo,": ");
+-  if (chown(fifo,uid,gid) == -1)
++  if (saphira_chown(fifo,uid,gid) == -1)
+     strerr_die6sys(111,FATAL,"unable to chown ",home,"/",fifo,": ");
+   if (chmod(fifo,mode) == -1)
+     strerr_die6sys(111,FATAL,"unable to chmod ",home,"/",fifo,": ");
+@@ -74,6 +98,7 @@
+     strerr_die4sys(111,FATAL,"unable to read ",file,": ");
+   substdio_fdbuf(&ssin,(ssize_t (*)(int, const void *, size_t))read,fdin,inbuf,sizeof inbuf);
+ 
++  home = saphira_home(home);
+   if (chdir(home) == -1)
+     strerr_die4sys(111,FATAL,"unable to switch to ",home,": ");
+   if (chdir(subdir) == -1)
+@@ -110,8 +135,8 @@
+   if (close(fdout) == -1) /* NFS silliness */
+     strerr_die6sys(111,FATAL,"unable to write .../",subdir,"/",file,": ");
+ 
+-  if (!is_subdir && (chown(file,uid,gid) == -1)) strerr_die6sys(111,FATAL,"unable to chown .../",subdir,"/",file,": ");
+-  else if (is_subdir && chown(tok[1],uid,gid) == -1) strerr_die6sys(111,FATAL,"unable to chown .../",subdir,"/",tok[1],": ");
++  if (!is_subdir && (saphira_chown(file,uid,gid) == -1)) strerr_die6sys(111,FATAL,"unable to chown .../",subdir,"/",file,": ");
++  else if (is_subdir && saphira_chown(tok[1],uid,gid) == -1) strerr_die6sys(111,FATAL,"unable to chown .../",subdir,"/",tok[1],": ");
+ 
+   if (!is_subdir && chmod(file,mode) == -1) strerr_die6sys(111,FATAL,"unable to chmod .../",subdir,"/",file,": ");
+   else if (is_subdir && chmod(tok[1],mode) == -1) strerr_die6sys(111,FATAL,"unable to chmod .../",subdir,"/",tok[1],": ");
+@@ -121,6 +146,7 @@
+ {
+   int fdout;
+ 
++  home = saphira_home(home);
+   if (chdir(home) == -1)
+     strerr_die4sys(111,FATAL,"unable to switch to ",home,": ");
+ 
+@@ -140,7 +166,7 @@
+   if (close(fdout) == -1) /* NFS silliness */
+     strerr_die6sys(111,FATAL,"unable to write ",home,"/",file,": ");
+ 
+-  if (chown(file,uid,gid) == -1)
++  if (saphira_chown(file,uid,gid) == -1)
+     strerr_die6sys(111,FATAL,"unable to chown ",home,"/",file,": ");
+   if (chmod(file,mode) == -1)
+     strerr_die6sys(111,FATAL,"unable to chmod ",home,"/",file,": ");
+@@ -148,6 +174,8 @@
+ 
+ int main()
+ {
++  saphira_destdir = getenv("DESTDIR");
++  { char *e = getenv("SAPHIRA_NO_CHOWN"); saphira_no_chown = e && *e; }
+   fdsourcedir = open_read(".");
+   if (fdsourcedir == -1)
+     strerr_die2sys(111,FATAL,"unable to open current directory: ");

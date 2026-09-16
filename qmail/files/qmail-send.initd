@@ -1,0 +1,29 @@
+#!/sbin/openrc-run
+
+description="qmail mail delivery system"
+
+# qmail-send must start as root: it assumes the queue identities
+# itself for deliveries.
+command="/var/qmail/bin/qmail-start"
+command_args="./Maildir/"
+supervisor="supervise-daemon"
+
+depend()
+{
+	# Soft ordering on mariadb (mirrors the systemd After without a
+	# hard Requires): send starts and queues without MySQL; local
+	# delivery via vdelivermail retries until it returns.
+	use net logger dns mariadb
+	after firewall
+}
+
+start_pre()
+{
+	# The queue trigger fifo cannot ship in APK payloads: create it
+	# with ownership here, idempotently (mirrors the systemd
+	# ExecStartPre, heals drift on every start).
+	if [ ! -p /var/qmail/queue/lock/trigger ]; then
+		mkfifo -m 0622 /var/qmail/queue/lock/trigger || return 1
+	fi
+	chown qmails:qmail /var/qmail/queue/lock/trigger || return 1
+}

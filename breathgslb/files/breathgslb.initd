@@ -1,0 +1,58 @@
+#!/sbin/openrc-run
+# BreathGSLB initd adapted from upstream services/init.d/breathgslb:
+# Saphira paths (/usr/sbin, /usr/share/man) and service identity
+# (breathgslb:breathgslb via command_user); privileged port 53 comes
+# from file capabilities on the binary (set at package build time),
+# mirroring the net-snmp pattern.
+
+name="BreathGSLB"
+description="Authoritative GSLB DNS"
+
+SERVICE_USER="breathgslb"
+SERVICE_GROUP="breathgslb"
+LOG_DIR="/var/log/breathgslb"
+LOG_FILE="$LOG_DIR/breathgslb.log"
+PID_FILE="/run/breathgslb.pid"
+
+command="/usr/sbin/breathgslb"
+CONFIG_FILE="/etc/breathgslb/config.yaml"
+LICENSE_PAYLOAD=""
+EXTRA_ARGS=""
+command_args="-config ${CONFIG_FILE}"
+[ -n "${LICENSE_PAYLOAD}" ] && command_args="${command_args} -license-payload ${LICENSE_PAYLOAD}"
+[ -n "${EXTRA_ARGS}" ] && command_args="${command_args} ${EXTRA_ARGS}"
+command_user="${SERVICE_USER}:${SERVICE_GROUP}"
+
+supervisor="supervise-daemon"
+pidfile="$PID_FILE"
+output_log="$LOG_FILE"
+error_log="$LOG_FILE"
+
+extra_started_commands="reload"
+description_reload="Reload configuration (SIGHUP)"
+
+depend()
+{
+	need net dns logger
+	after firewall
+}
+
+start_pre()
+{
+	checkpath -d -m 0750 -o "${SERVICE_USER}:${SERVICE_GROUP}" "$LOG_DIR" /var/lib/breathgslb
+	[ -f "$CONFIG_FILE" ] || {
+		eerror "missing $CONFIG_FILE (provision it; see breathgslb.conf(5))"
+		return 1
+	}
+}
+
+reload()
+{
+	if ! service_started ; then
+		eerror "$name is not running"
+		return 1
+	fi
+	ebegin "Reloading $name (SIGHUP)"
+	supervise-daemon "$name" --signal HUP
+	eend $?
+}

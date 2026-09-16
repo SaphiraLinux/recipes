@@ -1,0 +1,12 @@
+[Unit]
+Description=OLSRv2 Routing agent
+Documentation=https://github.com/OLSR/OONF
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/olsrd2 --load=/etc/olsrd2/olsrd2.conf
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

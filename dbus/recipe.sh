@@ -1,7 +1,7 @@
 #!/bin/sh
 pkgname=dbus
 pkgver=1.16.0
-pkgrel=4
+pkgrel=6
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='D-Bus message bus system'
 license='GPL-2.0-or-later AFL-2.1'
@@ -9,8 +9,13 @@ origin=dbus
 repo=saphira
 url=https://www.freedesktop.org/wiki/Software/dbus/
 dbus_sha256=9f8ca5eb51cbe09951aec8624b86c292990ae2428b41b856e2bed17ec65c8849
-depends="expat systemd"
-makedepends="meson ninja expat-dev gcc pkgconf saphira-kernel-headers=7.1.5 systemd"
+# Init-coupling invariant: dbus links libsystemd (socket activation)
+# but must never resolve the PID-1 systemd package - that edge once
+# dragged systemd onto OpenRC hosts. Runtime and build links go to
+# the systemd-libs/systemd-dev splits only. A packaged .service unit
+# never justifies a dependency on an init system.
+depends="expat systemd-libs"
+makedepends="meson ninja expat-dev gcc pkgconf saphira-kernel-headers systemd-dev"
 subpackages="$pkgname-dev $pkgname-doc"
 recipe_build() {
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$RECIPE_DIR/files/dbus-1.16.0.tar.xz"
@@ -34,6 +39,12 @@ recipe_install() {
 	# system bus. makepkg generates the install scripts from this
 	# fragment; the package creates its identity at install time.
 	# r4: fragment added (payload change, revision bumps).
+	# r6: dbus.legacy sidecar (hatchling pre-canonical messagebus
+	# 65535:100/983): exact matches auto-migrate during install,
+	# upgrade and repair, so apk fix dbus self-heals (no manual
+	# saphira-identity reconcile step).
 	install -D -m 0644 "$RECIPE_DIR/files/accounts.d/dbus" \
 		"$PKGDEST/usr/share/saphira/accounts.d/dbus"
+	install -D -m 0644 "$RECIPE_DIR/files/accounts.d/dbus.legacy" \
+		"$PKGDEST/usr/share/saphira/accounts.d/dbus.legacy"
 }

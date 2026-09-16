@@ -1,0 +1,64 @@
+.TH BREATHGSLB-LICENSECTL 8 "September 2026" "BreathGSLB" "System Administration"
+.SH NAME
+breathgslb-licensectl \- list, revoke and regenerate BreathGSLB license keys
+.SH SYNOPSIS
+.B breathgslb-licensectl
+.B \-db
+.I path
+.RB [ list | revoke
+.IR key |
+.B regen
+.IR key ]
+.SH DESCRIPTION
+.B breathgslb-licensectl
+is the operator utility for managing the license keys stored in a
+BreathGSLB sqlite license database. It operates directly on the
+database file: stop the daemon, or at least ensure no concurrent
+writer, before mutating keys.
+.TP
+.B list
+Print one line per license showing the account email, the key, the
+support expiry date and the support level. The data comes from joining
+the
+.I licenses
+and
+.I users
+tables.
+.TP
+.BI "revoke " key
+Delete the license row holding
+.IR key .
+Exits non-zero with
+.I "revoke: no such key"
+when nothing was deleted.
+.TP
+.BI "regen " key
+Replace
+.I key
+with a freshly generated 32-character key, print the new key on
+stdout, and exit non-zero with
+.I "regen: no such key"
+when the old key does not exist. Hand the printed key to the licensee;
+the encrypted payload stays valid because only the wrapping key
+changes.
+.SH OPTIONS
+.TP
+.BI "\-db " path
+Path to the sqlite database file. Required; there is no default.
+.SH EXIT STATUS
+.B 0
+on success. Any usage error, missing key, or database failure exits
+non-zero with the reason on stderr (Go
+.IR log.Fatal ).
+.SH FILES
+.TP
+.I /etc/breathgslb/
+Configuration and state directory. The license database path is a
+deployment choice; pass it with
+.BR \-db .
+.SH SEE ALSO
+.BR breathgslb (8),
+.BR breathgslb-licensegen (8),
+.BR breathgslb.conf (5)
+.SH AUTHORS
+AKADATA LIMITED \- Breath Technology. MIT License; see source.

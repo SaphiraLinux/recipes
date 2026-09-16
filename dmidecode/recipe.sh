@@ -13,7 +13,7 @@ dmidecode_sha256=e40c65f3ec3dafe31ad8349a4ef1a97122d38f65004ed66575e1a8d575dd8ba
 makedepends="
 	binutils
 	gcc
-	saphira-kernel-headers=7.1.5
+	saphira-kernel-headers
 	make
 "
 

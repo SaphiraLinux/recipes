@@ -1,0 +1,17 @@
+# HAProxy GeoIP country gating (example only - adapt and include
+# from haproxy.cfg; nothing here loads automatically).
+#
+# 1. Fetch the database at runtime (license-keyed, weekly - never
+#    vendored) and build the maps with the packaged tools:
+#
+#    geoipupdate -d /var/lib/geoip
+#    haproxy-geoip-build-maps /var/lib/geoip/csv /etc/haproxy/geo
+#
+# 2. Frontend rules (map_ip returns UNKNOWN for unmapped ranges):
+#
+#    http-request set-var(txn.cc) src,map_ip(/etc/haproxy/geo/country-v4.map)
+#    http-request set-var(txn.cc) src,map_ip(/etc/haproxy/geo/country-v6.map) if { var(txn.cc) -m str UNKNOWN }
+#    http-request deny deny_status 403 if { var(txn.cc) -m str -f /etc/haproxy/geo/blocked-countries.lst }
+#
+# 3. Rebuild maps on the geoipupdate cadence (weekly cron) and
+#    reload haproxy; map files are read at reload.

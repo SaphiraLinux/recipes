@@ -21,7 +21,7 @@ makedepends="
 	binutils
 	cmake
 	gcc
-	saphira-kernel-headers=7.1.5
+	saphira-kernel-headers
 	ninja
 	python3
 "

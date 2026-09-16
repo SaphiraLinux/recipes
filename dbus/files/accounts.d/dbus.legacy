@@ -1,0 +1,9 @@
+# Recognised history for the messagebus identity (canonical UID 81,
+# primary GID 81): the pre-canonical hatchling state observed 2026-09
+# (user row UID 65535 with primary GID 100, group row GID 983).
+# An exact match auto-migrates during package install, upgrade and
+# repair (apk fix dbus heals this state with no manual step); any
+# other mismatch stays fatal, as do reserved identities and
+# occupied canonical targets.
+legacy user messagebus 65535 100
+legacy group messagebus 983

@@ -10,7 +10,7 @@ repo=saphira
 url=https://thekelleys.org.uk/dnsmasq/doc.html
 dnsmasq_sha256=0c00d4e5c97c8306e5fb932b348b34269c9c29a0e7df0e8e82958b407092bc19
 depends=""
-makedepends="saphira-kernel-headers=7.1.5 gcc make"
+makedepends="saphira-kernel-headers gcc make"
 recipe_build() {
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$RECIPE_DIR/files/dnsmasq-2.93.tar.xz"
 	cd "$SRC"

@@ -1,0 +1,110 @@
+.TH BREATHGSLB-LICENSEGEN 8 "September 2026" "BreathGSLB" "System Administration"
+.SH NAME
+breathgslb-licensegen \- mint BreathGSLB license keys and payloads
+.SH SYNOPSIS
+.B breathgslb-licensegen
+.RB [ \-email\ \fIaddr\fR ]
+.RB [ \-os\ \fIname\fR ]
+.RB [ \-supportExpiry\ \fIYYYY-MM-DD\fR ]
+.RB [ \-customerType\ \fItype\fR ]
+.RB [ \-supported ]
+.RB [ \-type\ \fItrial|standard|supported\fR ]
+.RB [ \-config\ \fIfile\fR ]
+.RB [ \-send ]
+.RB [ \-smtp\ \fIhost:port\fR ]
+.RB [ \-from\ \fIaddr\fR ]
+.SH DESCRIPTION
+.B breathgslb-licensegen
+mints a new license: a random 32-character key plus a JSON payload
+carrying the operating system, licensee email, salt, support expiry,
+support flag and customer type. The payload is sealed with AES-GCM
+under the key and printed base64-encoded alongside it:
+.PP
+.nf
+.RS
+key: <32-char key>
+payload: <base64 nonce+ciphertext>
+.RE
+.fi
+.PP
+Give the key to the licensee at runtime; supply the payload to the
+server via its license-payload channel. Missing values are prompted
+for interactively on stdin (email, support contract, expiry), so the
+tool works both scripted (all flags) and attended (bare invocation).
+.SH PRESETS
+The
+.B \-type
+preset sets the support posture before prompting:
+.TP
+.B trial , standard
+Support contract off.
+.TP
+.B supported
+Support contract on; defaults the expiry to one year from today when
+.B \-supportExpiry
+is empty.
+.PP
+A JSON config file given with
+.B \-config
+prefills the operating system default.
+.SH EMAIL
+With
+.B \-send ,
+the key is mailed to
+.B \-email
+via unauthenticated SMTP to
+.B \-smtp
+(default
+.BR localhost:25 ),
+which requires
+.B \-from .
+The payload itself is never emailed, only the key.
+.SH OPTIONS
+.TP
+.BI "\-email " addr
+Licensee email. Required (flag or prompt).
+.TP
+.BI "\-os " name
+Target operating system, matched case-insensitively
+.RB ( linux ,
+darwin, windows); empty falls back to the runtime OS.
+.TP
+.BI "\-supportExpiry " YYYY-MM-DD
+Support expiry date. Required when the contract is active.
+.TP
+.BI "\-customerType " type
+Free-form customer type recorded in the payload.
+.TP
+.B \-supported
+Mark the support contract active (may be set by preset or prompt).
+.TP
+.BI "\-type " preset
+One of
+.BR trial ,
+.BR standard ,
+.B supported .
+.TP
+.BI "\-config " file
+JSON config file prefilling defaults.
+.TP
+.B \-send
+Email the key after minting.
+.TP
+.BI "\-smtp " host:port
+SMTP server for
+.BR \-send .
+.TP
+.BI "\-from " addr
+Envelope sender for
+.BR \-send .
+Required with it.
+.SH EXIT STATUS
+.B 0
+on success. Missing required values and mail failures exit non-zero
+with the reason on stderr.
+.SH SEE ALSO
+.BR breathgslb (8),
+.BR breathgslb-licensectl (8),
+.BR breathgslb.conf (5)
+.SH AUTHORS
+AKADATA LIMITED \- Breath Technology. MIT License; see source.

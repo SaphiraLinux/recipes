@@ -1,0 +1,16 @@
+Saphira mail group
+===================
+
+Installing this package installs a working Saphira mail server
+stack: postfix (MTA), dovecot (MDA/IMAP), rspamd (filtering),
+clamav (antivirus with daemon and freshclam updater), and the
+saphira-maildragon glue (ported configuration set, management
+scripts and schema).
+
+This package carries no payload of its own beyond this file. The
+authoritative member list is the `depends` field of this package's
+APK metadata (`apk info -a saphira-mail`). Profiles and image
+definitions must name the group, never re-enumerate its closure.
+
+(The qmail/vpopmail Toaster stack is a separate, parallel mail
+path with its own integration; it is deliberately not a member.)

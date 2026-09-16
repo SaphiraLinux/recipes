@@ -1,0 +1,19 @@
+[Unit]
+Description=A.L.F.R.E.D. mesh information distribution daemon
+Documentation=https://www.open-mesh.org/projects/alfred/wiki
+After=network.target
+
+[Service]
+Type=simple
+User=alfred
+Group=alfred
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+RuntimeDirectory=alfred
+# Default: serve unix-socket clients, no mesh interface attached. Override
+# with `systemctl edit alfred` to set the mesh interface (e.g. bat0).
+Environment=ALFRED_IFACE=none
+ExecStart=/usr/sbin/alfred -i ${ALFRED_IFACE} -u /run/alfred/alfred.sock
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

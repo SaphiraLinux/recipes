@@ -11,7 +11,7 @@ url=https://xfs.wiki.kernel.org/
 xfsprogs_sha256=fa5ab77f8b5169ce48dd8de09446ad7e29834a05b8f52012bae411cf53ec1f58
 depends="userspace-rcu inih libaio util-linux readline"
 makedepends="userspace-rcu-dev inih-dev libaio-dev util-linux-dev readline-dev \
-	gawk gcc make pkgconf saphira-kernel-headers=7.1.5 gettext"
+	gawk gcc make pkgconf saphira-kernel-headers gettext"
 subpackages="$pkgname-doc"
 recipe_build() {
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$RECIPE_DIR/files/xfsprogs-6.14.0.tar.xz"

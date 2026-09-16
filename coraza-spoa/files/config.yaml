@@ -1,0 +1,27 @@
+# Saphira default: Coraza SPOA for HAProxy, localhost-only.
+# Adapted from upstream example/coraza-spoa.yaml: bind is 127.0.0.1
+# (upstream binds 0.0.0.0; run the agent on the HAProxy host) and the
+# engine starts in DetectionOnly - watch the logs, tune exclusions,
+# then flip to On. Rules are the embedded CRS LTS line (@owasp_crs),
+# the same family as the coreruleset package on the nginx side.
+
+bind: 127.0.0.1:9000
+
+log_level: info
+log_file: /dev/stdout
+log_format: console
+
+default_application: sample_app
+
+applications:
+  - name: sample_app
+    directives: |
+      Include @coraza.conf-recommended
+      Include @crs-setup.conf.example
+      Include @owasp_crs/*.conf
+      SecRuleEngine DetectionOnly
+    response_check: false
+    transaction_ttl_ms: 60000
+    log_level: info
+    log_file: /dev/stdout
+    log_format: console

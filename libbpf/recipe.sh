@@ -11,7 +11,7 @@ source=https://github.com/libbpf/libbpf/archive/refs/tags/v${pkgver}.tar.gz
 sha256=7ab5feffbf78557f626f2e3e3204788528394494715a30fc2070fcddc2051b7b
 
 depends="elfutils zlib"
-makedepends="elfutils-dev gcc make pkgconf saphira-kernel-headers=7.1.5 zlib-dev"
+makedepends="elfutils-dev gcc make pkgconf saphira-kernel-headers zlib-dev"
 subpackages="$pkgname-dev"
 
 recipe_build() {

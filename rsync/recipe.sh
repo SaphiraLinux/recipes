@@ -1,8 +1,8 @@
 #!/bin/sh
 
 pkgname=rsync
-pkgver=3.4.1
-pkgrel=2
+pkgver=3.5.0
+pkgrel=3
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='Fast incremental file transfer utility'
 license='GPL-3.0-or-later'
@@ -10,17 +10,38 @@ origin=rsync
 repo=saphira
 url=https://rsync.samba.org/
 source=https://download.samba.org/pub/rsync/src/rsync-${pkgver}.tar.gz
-sha256=2924bcb3a1ed8b551fc101f740b9f0fe0a202b115027647cf69850d65fd88c52
+sha256=c7ffd1ef653e99540f661e47cb00b7f9cad1ee6b972399b16f93d672656e0d33
 
-makedepends="gcc make pkgconf"
+# r3: declare the runtime libraries rsync links (r2 shipped with an
+# empty depends=, so installs missed liblz4/libxxhash and broke; and it
+# was built without acl-dev present, hence "no ACLs"). Features are
+# explicit, not autodetected: ACL + xattr + xxhash + zstd + lz4 +
+# openssl all on.
+depends="acl attr lz4 openssl xxhash zlib zstd"
+makedepends="
+    acl-dev
+    attr-dev
+    gcc
+    make
+    openssl-dev
+    pkgconf
+    xxhash-dev
+    zstd-dev
+    lz4-dev
+"
 
 subpackages="$pkgname-doc"
 
 recipe_build()
 {
 	cd "$SRC"
-	./configure --prefix=/usr --disable-md2man --disable-simd \
-		--disable-openssl --disable-xxhash --disable-zstd --disable-lz4
+	./configure --prefix=/usr \
+		--enable-acl-support \
+		--enable-xattr-support \
+		--enable-xxhash \
+		--enable-zstd \
+		--enable-lz4 \
+		--enable-openssl
 	make -j${JOBS:-$(nproc)}
 }
 

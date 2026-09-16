@@ -1,0 +1,51 @@
+# vpopmail runtime identities (canonical, fixed): user vpopmail
+# UID 140, primary group vchkpw GID 141. The classic Toaster pair:
+# every vpopmail binary installs mode 0711 vpopmail:vchkpw and the
+# domains tree is 0700; the MySQL credential file
+# etc/vpopmail.mysql is 0640. UIDs 140-141 sit in the preferred
+# 0..199 packaged range - never reuse them for other identities.
+# This fragment ships in the vpopmail main output; the filename must
+# match the output.
+user vpopmail 140 vchkpw /home/vpopmail /sbin/nologin
+group vchkpw 141
+dir /home/vpopmail/etc 0755 vpopmail vchkpw
+dir /home/vpopmail/domains 0700 vpopmail vchkpw
+# qmail-tree paths owned by the vpopmail identity (declared here, not
+# in the qmail fragment - one package owns each identity): the SMTP
+# cache qmail-smtpd writes and the overlimit channel qmail-send HUPs.
+# Leading components (/var/qmail, control) converge via qmail's own
+# stanzas regardless of install order.
+dir /var/qmail/control/cache 0755 vpopmail vchkpw
+dir /var/qmail/overlimit 0755 vpopmail vchkpw
+file /home/vpopmail/bin/vchkpw 0711 vpopmail vchkpw
+file /home/vpopmail/bin/vdelivermail 0711 vpopmail vchkpw
+file /home/vpopmail/bin/clearopensmtp 0711 vpopmail vchkpw
+file /home/vpopmail/bin/vadddomain 0711 vpopmail vchkpw
+file /home/vpopmail/bin/vdeldomain 0711 vpopmail vchkpw
+file /home/vpopmail/bin/vpasswd 0711 vpopmail vchkpw
+file /home/vpopmail/bin/vadduser 0711 vpopmail vchkpw
+file /home/vpopmail/bin/vdeluser 0711 vpopmail vchkpw
+file /home/vpopmail/bin/vaddaliasdomain 0711 vpopmail vchkpw
+file /home/vpopmail/bin/vsetuserquota 0711 vpopmail vchkpw
+file /home/vpopmail/bin/vpopbull 0711 vpopmail vchkpw
+file /home/vpopmail/bin/vdeloldusers 0711 vpopmail vchkpw
+file /home/vpopmail/bin/vmoduser 0711 vpopmail vchkpw
+file /home/vpopmail/bin/valias 0711 vpopmail vchkpw
+file /home/vpopmail/bin/vuserinfo 0711 vpopmail vchkpw
+file /home/vpopmail/bin/vmkpasswd 0711 vpopmail vchkpw
+file /home/vpopmail/bin/vipmap 0711 vpopmail vchkpw
+file /home/vpopmail/bin/vdominfo 0711 vpopmail vchkpw
+file /home/vpopmail/bin/vconvert 0711 vpopmail vchkpw
+file /home/vpopmail/bin/vkill 0711 vpopmail vchkpw
+file /home/vpopmail/bin/vmoddomlimits 0711 vpopmail vchkpw
+file /home/vpopmail/bin/vchangepw 0711 vpopmail vchkpw
+file /home/vpopmail/bin/dotqmail2valias 0711 vpopmail vchkpw
+file /home/vpopmail/bin/vpopmaild 0711 vpopmail vchkpw
+file /home/vpopmail/bin/vlist 0711 vpopmail vchkpw
+file /home/vpopmail/bin/authvchkpw 0711 vpopmail vchkpw
+file /home/vpopmail/bin/vusagec 0711 vpopmail vchkpw
+file /home/vpopmail/bin/vsavealiasdomains 0711 vpopmail vchkpw
+file /home/vpopmail/bin/vrcptcheck 0711 vpopmail vchkpw
+file /home/vpopmail/bin/vverifypw 0711 vpopmail vchkpw
+file /home/vpopmail/bin/vmakedotqmail 0711 vpopmail vchkpw
+file /home/vpopmail/etc/vpopmail.mysql 0640 vpopmail vchkpw

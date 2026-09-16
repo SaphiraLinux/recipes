@@ -78,7 +78,6 @@ trap cleanup EXIT HUP INT TERM
 
 shopt -s nullglob
 ready_transactions=("$incoming_dir"/*-ready)
-[ "${#ready_transactions[@]}" -gt 0 ] || die "no complete ready transactions in $incoming_dir"
 
 # Publication mode: full repository audit only on explicit request.
 # Otherwise the indexed repository.db gates just the staged set (fast
@@ -89,6 +88,7 @@ ready_transactions=("$incoming_dir"/*-ready)
 # the algorithm. No valid package target starts with `-`, so the
 # exact-match flag below cannot collide with a filter.
 force_full=0
+heal_mode=0
 if [ "${1:-}" = "--full-audit" ]; then
 	force_full=1
 	shift
@@ -119,6 +119,18 @@ if [ "$#" -gt 0 ]; then
 	[ "${#selected[@]}" -gt 0 ] ||
 		die "no ready transactions target the requested packages: $* (build one first: buildpkg $1)"
 	ready_transactions=("${selected[@]}")
+fi
+
+# Heal mode: --full-audit with an empty stage reconciles repository
+# indexes and repository.db with disk truth (e.g. after sanctioned
+# out-of-band removal of superseded artifacts) and publishes nothing.
+# Without --full-audit an empty stage is still a refusal.
+if [ "${#ready_transactions[@]}" -eq 0 ]; then
+	if [ "$force_full" -eq 0 ]; then
+		die "no complete ready transactions in $incoming_dir"
+	fi
+	heal_mode=1
+	printf 'sign-apk-repo: no staged transactions; --full-audit heals repository indexes from disk state (no publish, retention unchanged)\n'
 fi
 
 # Fast path (default): gate only the staged set against persisted
@@ -273,7 +285,7 @@ for transaction in "${ready_transactions[@]}"; do
 done
 if [ "${#publishable_transactions[@]}" -gt 0 ]; then
 	ready_transactions=("${publishable_transactions[@]}")
-else
+elif [ "$heal_mode" -eq 0 ]; then
 	printf 'sign-apk-repo: nothing left to publish after automatic retirement (%s transaction(s) auto-retired)\n' "$auto_retired"
 	trap - EXIT HUP INT TERM
 	cleanup
@@ -321,6 +333,26 @@ done
 
 # Stage, sign and verify the union exactly once. Per-repo iterations
 # below only publish the subset missing from that repository.
+# House packaging policy: no r0 package ever reaches a live generation.
+# SAPHIRA_REPO_NAMES lists oldest-first with the live repository last,
+# and every production run publishes to ALL of them - so any staged r0
+# in a multi-generation run would land live and dies here. Single-
+# generation runs are archive surgery (or tests): historical r0
+# artifacts stay in the archive generation only. resolvepkg and
+# buildpkg-single refuse r0 upstream; this is the publishing boundary
+# that makes hand-crafted transactions fail closed too. The other half
+# of the policy is the live prune below: any r0 already published to
+# the live view retires unconditionally there, so r0 can never linger
+# in Hatched no matter how it arrived.
+if [ "${#repo_names[@]}" -gt 1 ]; then
+	for name in "${!staged_sources[@]}"; do
+		case $name in
+			*-r0.apk)
+				die "r0 packages are forbidden in multi-generation publication (live view ${repo_names[${#repo_names[@]}-1]} would take it): $name (ship pkgrel>=1 - the initial publication of a package is r1)"
+				;;
+		esac
+	done
+fi
 for name in "${!staged_sources[@]}"; do
 	cp --reflink=auto -- "${staged_sources[$name]}" "$packages_dir/$name"
 done
@@ -366,6 +398,11 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(lib_path))
 import repo_db as rdb
 
+# Host /tmp is never Saphira scratch (SAPHIRA_TMPDIR, exported by the
+# sourced controller config, else the /build default).
+_sign_tmp_base = os.environ.get("SAPHIRA_TMPDIR", "/build/tmp")
+os.makedirs(_sign_tmp_base, exist_ok=True)
+
 staged_files = {line.strip() for line in Path(staged_list_path).read_text().splitlines()
                 if line.strip()}
 
@@ -387,24 +424,33 @@ if mode == "full":
     print("sign-apk-repo: full audit: census of repository APKs ...")
     census_data = rdb.census(apk, repo_dir)
     carriers = rdb.fragment_carriers(census_data)
-    with tempfile.TemporaryDirectory(prefix="sign-apk-repo-audit-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="sign-apk-repo-audit-", dir=_sign_tmp_base) as tmp:
         declarations = rdb.extract_declarations(apk, repo_dir, carriers, tmp)
     history_complete = rdb.get_meta(conn, "history_complete") == "1"
     notices = []
     try:
         rdb.sync_packages(conn, census_data, declarations, apk, rdb.utcnow())
-        if history_complete:
-            conn.execute("DELETE FROM reservations")
-            for row in rdb.derive_ledger(apk, census_data, declarations, notices):
-                conn.execute(
-                    "INSERT INTO reservations(kind, name, numeric_id, owning_package,"
-                    " first_nvr, last_nvr, status, declaration_sha256)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?)", row)
+        # Reservations rebuild is its own explicit transaction (same
+        # autocommit atomicity reason as sync_packages): a kill between
+        # the two phases leaves packages synced with a stale ledger,
+        # which the next stale-fingerprint audit heals - never a mix.
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            if history_complete:
+                conn.execute("DELETE FROM reservations")
+                for row in rdb.derive_ledger(apk, census_data, declarations, notices):
+                    conn.execute(
+                        "INSERT INTO reservations(kind, name, numeric_id, owning_package,"
+                        " first_nvr, last_nvr, status, declaration_sha256)"
+                        " VALUES (?, ?, ?, ?, ?, ?, ?, ?)", row)
+            else:
+                rdb.advance_reservations(conn, rdb.active_declarations(conn), False, notices)
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
         else:
-            rdb.advance_reservations(conn, rdb.active_declarations(conn), False, notices)
-        conn.commit()
+            conn.execute("COMMIT")
     except rdb.RepoDbError as exc:
-        conn.rollback()
         print(f"sign-apk-repo: full audit refused: {exc}", file=sys.stderr)
         raise SystemExit(1)
     for notice in notices:
@@ -453,15 +499,15 @@ PY
 # the next run, which refuses and points at --full-audit to heal.
 db_apply()
 {
-	local db_file=$1 staged_info=$2
-	shift 2
+	local db_file=$1 staged_info=$2 retire_file=$3
+	shift 3
 	"$SAPHIRA_PYTHON" - "$repo_db_lib" "$SAPHIRA_APK" "$db_file" "$staged_info" \
-		"$repo_dir" "$@" <<'PY'
+		"$repo_dir" "$retire_file" "$@" <<'PY'
 import json
 import os
 import sys
 
-(lib_path, apk, db_file, staged_info_path, repo_dir) = sys.argv[1:]
+(lib_path, apk, db_file, staged_info_path, repo_dir, retire_path) = sys.argv[1:7]
 sys.path.insert(0, os.path.dirname(lib_path))
 import repo_db as rdb
 
@@ -473,10 +519,15 @@ except rdb.RepoDbError as exc:
     raise SystemExit(2)
 with open(staged_info_path, encoding="utf-8") as stream:
     staged = json.load(stream)
+with open(retire_path, encoding="utf-8") as stream:
+    retired = sorted(line.strip() for line in stream if line.strip())
 notices = []
 conn.execute("BEGIN IMMEDIATE")
 try:
     rdb.apply_staged(conn, apk, repo_dir, staged, rdb.utcnow(), notices)
+    if retired:
+        rdb.apply_retire(conn, apk, retired,
+                         {item["name"] for item in staged.values()}, notices)
     rdb.set_meta(conn, "last_audit", rdb.utcnow())
     conn.commit()
 except rdb.RepoDbError as exc:
@@ -486,7 +537,8 @@ except rdb.RepoDbError as exc:
 for notice in notices:
     print(f"sign-apk-repo: notice: {notice}")
 print(f"sign-apk-repo: repository.db transaction committed:"
-      f" {len(staged)} staged package(s) applied")
+      f" {len(staged)} staged package(s) applied"
+      + (f", {len(retired)} retired package(s) removed" if retired else ""))
 PY
 }
 
@@ -497,9 +549,6 @@ for repo_name in "${repo_names[@]}"; do
 	for name in "${!staged_sources[@]}"; do
 		[ -e "$repo_dir/$name" ] || install_set+=("$packages_dir/$name")
 	done
-	all_packages=("$repo_dir"/*.apk)
-	[ "${#install_set[@]}" -eq 0 ] || all_packages+=("${install_set[@]}")
-	[ "${#all_packages[@]}" -gt 0 ] || die "publication set contains no APK files"
 identities=$workspace/package-identities.json
 	staged_list=$workspace/staged-packages.txt
 	: > "$staged_list"
@@ -545,6 +594,89 @@ identities=$workspace/package-identities.json
 		db_gate full "$db_file" "$staged_info" "$repo_dir/Packages.adb" "${staged_paths[@]}" \
 			|| die "full audit failed for $repo_name (see above)"
 	fi
+
+# Hatched retention + r0 inadmissibility: the live generation keeps the
+# newest SAPHIRA_RETAIN_GENERATIONS NVRs per name, and r0 never exists
+# here at all. Prune order: (1) every published r0 retires
+# unconditionally - explicit holds on r0 and live dependents needing an
+# r0 fail closed instead; (2) normal retention over r1+ (latest keep
+# generations, exact live dependency holds, explicit holds); (3) split
+# siblings retire atomically in the same pass; (4) indexes/identities
+# regenerate; (5) repository.db/claims update in the same transactional
+# publication flow. Archive generations are never pruned
+# (single-generation runs prune nothing: production always publishes to
+# all generations, live last). Files go before index regen, rows go with
+# the staged apply in one transaction - never bare rm.
+live_generation=${repo_names[${#repo_names[@]}-1]}
+retire_file=$workspace/$repo_name-retire.txt
+: > "$retire_file"
+# Heal mode skips retention: nothing new to make room for, and
+# policy pruning never runs as a heal side effect (it applies on
+# the next publish as usual).
+if [ "$heal_mode" -eq 0 ] && [ "${#repo_names[@]}" -gt 1 ] && [ "$repo_name" = "$live_generation" ]; then
+	case ${SAPHIRA_RETAIN_GENERATIONS:-2} in
+		''|*[!0-9]*|0) die "invalid SAPHIRA_RETAIN_GENERATIONS: ${SAPHIRA_RETAIN_GENERATIONS:-2} (positive integer required)" ;;
+	esac
+	"$SAPHIRA_PYTHON" - "$repo_db_lib" "$SAPHIRA_APK" "$db_file" "$repo_dir/Packages.adb" \
+		"${SAPHIRA_RETAIN_GENERATIONS:-2}" "$SAPHIRA_RETAIN_NVR" "$retire_file" "$identities" \
+		"${staged_paths[@]}" <<'PY' || die "retention planning failed for $repo_name (see above)"
+import json
+import os
+import sys
+
+(lib_path, apk, db_file, index_path, keep, holds, retire_path,
+ identities_path, *packages) = sys.argv[1:]
+sys.path.insert(0, os.path.dirname(lib_path))
+import repo_db as rdb
+
+staged = {}
+for raw in packages:
+    dumped = rdb.dump_package(apk, raw)
+    staged[(dumped["name"], dumped["version"])] = dumped.get("depends", [])
+conn = rdb.connect_readonly(db_file)
+try:
+    index_map = rdb.index_depends(apk, index_path)
+except rdb.RepoDbError as exc:
+    # No live index yet (first publish to a fresh generation) or a
+    # manually deleted one: dependency holds degrade to rank+holds only,
+    # loudly. Rank-based retirement stays exact (db-driven); the run's
+    # own index regen restores full precision afterwards.
+    print(f"sign-apk-repo: retention: WARNING: {exc} - continuing with rank-based retirement only")
+    index_map = {}
+retired = {}
+try:
+    retired = rdb.compute_retire_set(conn, apk, staged, index_map, int(keep),
+                                     holds.split() if holds.strip() else [])
+except rdb.RepoDbError as exc:
+    print(f"sign-apk-repo: retention refused: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+conn.close()
+with open(retire_path, "w", encoding="utf-8") as stream:
+    for filename in sorted(retired):
+        stream.write(filename + "\n")
+if retired:
+    with open(identities_path, encoding="utf-8") as stream:
+        idents = json.load(stream)
+    kept = [item for item in idents
+            if f"{item['name']}-{item['version']}.apk" not in retired]
+    with open(identities_path, "w", encoding="utf-8") as stream:
+        json.dump(kept, stream, sort_keys=True)
+        stream.write("\n")
+    print("sign-apk-repo: retention: retired "
+          + str(len(retired)) + " package(s): "
+          + ", ".join(sorted(retired)))
+else:
+    print("sign-apk-repo: retention: nothing to retire")
+PY
+	while IFS= read -r filename || [ -n "$filename" ]; do
+		[ -n "$filename" ] || continue
+		[ -e "$repo_dir/$filename" ] || die "retire set references missing file: $filename (repository inconsistent - run --full-audit)"
+		rm -f -- "$repo_dir/$filename"
+	done < "$retire_file"
+fi
+all_packages=("$repo_dir"/*.apk)
+[ "${#install_set[@]}" -eq 0 ] || all_packages+=("${install_set[@]}")
+[ "${#all_packages[@]}" -gt 0 ] || die "publication set contains no APK files"
 
 packages_adb=$workspace/$repo_name-Packages.adb
 apkindex=$workspace/$repo_name-APKINDEX.tar.gz
@@ -594,7 +726,7 @@ done
 # on the next run, which refuses and points at --full-audit to heal.
 # The frozen ownership.json beside the database is migration evidence
 # only and is never written here.
-db_apply "$db_file" "$staged_info" || die "repository.db transaction failed for $repo_name (see above)"
+db_apply "$db_file" "$staged_info" "$retire_file" || die "repository.db transaction failed for $repo_name (see above)"
 normalize_ownership "$repo_dir/repository.db"
 rmdir -- "$repo_dir/repository.db.lock" 2>/dev/null || true
 db_lock_held=""

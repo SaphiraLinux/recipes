@@ -8,6 +8,7 @@ import functools
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -161,7 +162,20 @@ def sandbox_metadata(recipe: Path, config: dict[str, str]) -> dict[str, str]:
     ]
     for directory in sorted(directories, key=lambda item: (item.count("/"), item)):
         command.extend(("--dir", directory))
-    command.extend(("--tmpfs", "/tmp", "--dev", "/dev"))
+    # No host /tmp, no tmpfs: the metadata sandbox's /tmp is backed by a
+    # persistent per-invocation dir under SAPHIRA_TMPDIR (visible, never
+    # host /tmp). Contents are purged before each run so one extraction
+    # can never observe another's leftovers.
+    ns_tmp_base = Path(
+        os.environ.get("SAPHIRA_TMPDIR") or config.get("SAPHIRA_TMPDIR", "") or "/build/tmp")
+    ns_tmp = ns_tmp_base / "resolvepkg-ns-tmp"
+    ns_tmp.mkdir(parents=True, exist_ok=True)
+    for child in ns_tmp.iterdir():
+        if child.is_symlink() or child.is_file():
+            child.unlink()
+        elif child.is_dir():
+            shutil.rmtree(child)
+    command.extend(("--dir", "/tmp", "--bind", str(ns_tmp), "/tmp", "--dev", "/dev"))
     for path in runtime:
         command.extend(("--ro-bind", path, path))
     command.extend(("--ro-bind", str(recipe.parent), "/recipe"))

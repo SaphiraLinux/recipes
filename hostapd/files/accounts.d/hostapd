@@ -1,0 +1,12 @@
+# hostapd runtime identity (canonical, fixed): user hostapd UID 124,
+# primary group hostapd GID 124. The daemon has no -u flag, so the
+# services run it as this user with file caps (OpenRC) / ambient caps
+# (systemd): CAP_NET_ADMIN + CAP_NET_RAW for interface config, nl80211
+# and packet injection. UID 124 sits in the preferred 0..199 packaged
+# range - never reuse it for another identity. Stateless daemon: no
+# persistent dirs (control sockets live in /var/run/hostapd, created
+# per-boot by the service runtimes). Operator-provisioned
+# /etc/hostapd/<iface>.conf must stay readable by this user (PSKs
+# inside - never auto-chmodded by packaging or service scripts).
+user hostapd 124 hostapd /var/empty /sbin/nologin
+group hostapd 124

@@ -1,0 +1,21 @@
+--- a/bin/check/Makefile.in
++++ b/bin/check/Makefile.in
+@@ -433,7 +433,7 @@
+ AM_CPPFLAGS = $(STD_CPPFLAGS) -include $(top_builddir)/config.h \
+ 	-I$(srcdir)/include $(LIBISC_CFLAGS) $(LIBDNS_CFLAGS) \
+ 	$(LIBNS_CFLAGS) $(LIBISCCFG_CFLAGS) \
+-	-DNAMED_CONFFILE=\"${sysconfdir}/named.conf\"
++	-DNAMED_CONFFILE=\"${sysconfdir}/bind/named.conf\"
+ AM_LDFLAGS = $(STD_LDFLAGS) $(am__append_1)
+ LDADD = libcheck-tool.la $(LIBISC_LIBS) $(LIBDNS_LIBS) $(LIBNS_LIBS) \
+ 	$(LIBISCCFG_LIBS)
+--- a/bin/named/include/named/globals.h
++++ b/bin/named/include/named/globals.h
+@@ -96,6 +96,6 @@
+  */
+ EXTERN cfg_obj_t *named_g_config	   INIT(NULL);
+ EXTERN const cfg_obj_t *named_g_defaults   INIT(NULL);
+-EXTERN const char *named_g_conffile	   INIT(NAMED_SYSCONFDIR "/named.conf");
++EXTERN const char *named_g_conffile	   INIT(NAMED_SYSCONFDIR "/bind/named.conf");
+ EXTERN const char *named_g_defaultbindkeys INIT(NULL);
+ EXTERN const char *named_g_keyfile	   INIT(NAMED_SYSCONFDIR "/rndc.key");

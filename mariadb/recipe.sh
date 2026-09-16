@@ -5,7 +5,7 @@
 
 pkgname=mariadb
 pkgver=11.8.8
-pkgrel=1
+pkgrel=2
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="MariaDB client programs, client library and tools"
 license="GPL-2.0-or-later"
@@ -67,6 +67,7 @@ recipe_build()
 		-DWITH_INNODB_SNAPPY=ON \
 		-DWITH_WSREP=OFF -DPLUGIN_ROCKSDB=NO -DPLUGIN_MROONGA=NO \
 		-DPLUGIN_OQGRAPH=NO -DPLUGIN_CONNECT=NO -DPLUGIN_SPIDER=NO \
+		-DPLUGIN_COLUMNSTORE=NO \
 		-DCMAKE_C_FLAGS="${CFLAGS-} -fpermissive" \
 		-DCMAKE_CXX_FLAGS="${CXXFLAGS-} -fpermissive" \
 		-DCMAKE_EXE_LINKER_FLAGS="${LDFLAGS-}"
@@ -78,6 +79,15 @@ recipe_install()
 	make -C "$BUILDDIR" DESTDIR="$PKGDEST" install
 	rm -rf "$PKGDEST/usr/lib/systemd"
 	rm -f "$PKGDEST/etc/init.d/mysql"
+	# The bundled Connector/C subdir ignores INSTALL_LIBDIR for its
+	# .pc file (lands in usr/lib64, though its libdir content
+	# already says lib/): relocate into the canonical dir. Proven
+	# by the r1 makepkg gate refusal; the gate re-verifies.
+	if [ -d "$PKGDEST/usr/lib64/pkgconfig" ]; then
+		mkdir -p "$PKGDEST/usr/lib/pkgconfig"
+		mv "$PKGDEST/usr/lib64/pkgconfig/"*.pc "$PKGDEST/usr/lib/pkgconfig/" 2>/dev/null || true
+		rmdir -p "$PKGDEST/usr/lib64/pkgconfig" 2>/dev/null || true
+	fi
 	# Server split ownership: mariadbd and the install/upgrade tools
 	# ship from the mariadb-server recipe (which depends on this
 	# client package). Leaving them here would co-own the same paths
@@ -85,6 +95,11 @@ recipe_install()
 	# Mirror mariadb-server's keep-list exactly.
 	rm -f "$PKGDEST/usr/sbin/mariadbd" "$PKGDEST/usr/sbin/mysqld" \
 		"$PKGDEST/usr/bin/mariadb-install-db" "$PKGDEST/usr/bin/mariadb-upgrade"
+	# Upstream make install also drops a default server.cnf: the tuned
+	# one ships from mariadb-server, so leaving this would co-own
+	# etc/my.cnf.d/server.cnf from two packages (proven by the r2
+	# sign gate refusal).
+	rm -f "$PKGDEST/etc/my.cnf.d/server.cnf"
 	install -D -m 0644 "$RECIPE_DIR/files/my.cnf" \
 		"$PKGDEST/etc/my.cnf"
 	install -D -m 0644 "$RECIPE_DIR/files/client.cnf" \

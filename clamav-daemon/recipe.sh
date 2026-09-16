@@ -2,7 +2,8 @@
 
 pkgname=clamav-daemon
 pkgver=1.5.3
-pkgrel=1
+# r2: rebuild against the branded rustc (x86_64-akadata-linux-musl).
+pkgrel=2
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="ClamAV scanner daemon (clamd)"
 license="GPL-2.0-or-later"

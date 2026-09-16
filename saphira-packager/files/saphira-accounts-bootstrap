@@ -48,6 +48,13 @@ import sys
 import tempfile
 from pathlib import Path
 
+def saphira_tmpdir():
+    """Host scratch base for temp dirs. Host /tmp is never Saphira scratch."""
+    base = os.environ.get("SAPHIRA_TMPDIR", "/build/tmp")
+    os.makedirs(base, exist_ok=True)
+    return base
+
+
 CONFIG_KEYS = (
     "SAPHIRA_REPO_DIR",
     "SAPHIRA_REPO_NAMES",
@@ -369,8 +376,9 @@ def extract_declarations(apk: str, repo_dir: Path, filenames: list[str],
     for filename in filenames:
         info = dumped(filename)
         frag_files = sorted({f[len(FRAGMENT_PREFIX):] for f in info["files"]
-                             if f.startswith(FRAGMENT_PREFIX)})
-        merged = {"users": [], "groups": [], "dirs": []}
+                             if f.startswith(FRAGMENT_PREFIX) and not f.endswith(".legacy")})
+        merged = {"users": [], "groups": [], "dirs": [], "files": []}
+        native = False
         for frag in frag_files:
             path = frag_dir / frag
             if not path.is_file():
@@ -378,9 +386,10 @@ def extract_declarations(apk: str, repo_dir: Path, filenames: list[str],
                     f"{filename} lists fragment {frag} but it did not install "
                     "(rebuild and re-publish the package)")
             decl, _notices = MK.parse_accounts_fragment(path)
-            for key in ("users", "groups", "dirs"):
+            for key in ("users", "groups", "dirs", "files"):
                 merged[key].extend(decl[key])
-        if not merged["users"] and not merged["groups"]:
+            native = native or decl.get("sysusers", False)
+        if not merged["users"] and not merged["groups"] and not native:
             raise BootstrapError(
                 f"{filename} ships an accounts.d fragment with no parseable "
                 "declaration (rebuild and re-publish the package)")
@@ -436,7 +445,7 @@ def bootstrap_repo(config: dict, repo: str, write: bool) -> str:
         if any(f.startswith(FRAGMENT_PREFIX) for f in info["files"]))
     print(f"saphira-accounts-bootstrap: {len(census_data)} APK identities,"
           f" {len(carriers)} fragment carriers", flush=True)
-    with tempfile.TemporaryDirectory(prefix="saphira-accounts-bootstrap-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="saphira-accounts-bootstrap-", dir=saphira_tmpdir()) as tmp:
         declarations = extract_declarations(apk, repo_dir, carriers, Path(tmp))
 
     tsv = parse_tsv(tsv_path)

@@ -1,0 +1,21 @@
+[Unit]
+Description=Coraza WAF SPOA daemon for HAProxy
+Documentation=https://coraza.io/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=coraza-spoa
+Group=coraza-spoa
+ExecStart=/usr/bin/coraza-spoa -config /etc/coraza-spoa/config.yaml
+Restart=on-failure
+RuntimeDirectory=coraza-spoa
+LogsDirectory=coraza-spoa
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

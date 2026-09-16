@@ -81,6 +81,23 @@ fi
 # under set -u regardless of which source path was taken.
 SOURCE_ARCHIVE=${SOURCE_ARCHIVE-}
 
+# Required build secrets fail fast, before any download or staging: a
+# kernel/kmod recipe declares saphira_sign_key_required=yes and the
+# worker refuses immediately when the builder did not expose a readable
+# key. Ordinary packages declare nothing and are unaffected. Nothing is
+# ever built unsigned.
+if [ -n "${saphira_sign_key_required-}" ]; then
+	_sign_key=/keys/module-signing.pem
+	if [ ! -e "$_sign_key" ]; then
+		printf 'buildpkg: required build secret unavailable: module-signing.pem (not exposed - builder key configuration?)\n' >&2
+		exit 1
+	fi
+	if [ ! -r "$_sign_key" ]; then
+		printf 'buildpkg: required build secret unavailable: module-signing.pem (exposed but unreadable - UID ACL missing on the host key?)\n' >&2
+		exit 1
+	fi
+fi
+
 work_dir=$SAPHIRA_BUILD_ROOT/$PACKAGE
 case $work_dir in
 	"$SAPHIRA_BUILD_ROOT"/*) ;;
@@ -125,7 +142,18 @@ else
 	mkdir -p "$source_cache" || die "cannot create source cache: $source_cache"
 	cached_archive=$source_cache/$source_sha256
 	source_archive=$work_dir/source.archive
-	if [ -f "$cached_archive" ]; then
+	# Local recipe mirror wins: <pkg>/files/<url-basename>, verified
+	# against sha256=, is the durable per-package archive store. A valid
+	# vendored archive is never re-downloaded and needs no cache entry.
+	# (The cache below still serves recipes whose archives are not yet
+	# vendored; every fetch lands in files/ via fetch-vendor-sources.)
+	source_base=${source_url##*/}; source_base=${source_base%%\?*}
+	vendored_archive=$RECIPE_DIR/files/$source_base
+	if [ -f "$vendored_archive" ]; then
+		printf '%s  %s\n' "$source_sha256" "$vendored_archive" | sha256sum -c - \
+			|| die "vendored source failed verification (re-fetch it into files/): $vendored_archive"
+		cp -- "$vendored_archive" "$source_archive"
+	elif [ -f "$cached_archive" ]; then
 		printf '%s  %s\n' "$source_sha256" "$cached_archive" | sha256sum -c - \
 			|| die "cached source failed verification (corrupt cache entry): $cached_archive"
 		cp -- "$cached_archive" "$source_archive"

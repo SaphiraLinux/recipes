@@ -1,0 +1,20 @@
+[Unit]
+Description=qmail mail delivery system
+Documentation=https://notes.sagredo.eu/en/qmail-notes-185/qmail-vpopmail-dovecot-roberto-s-qmail-notes-8.html
+After=network.target mariadb.service
+Wants=network.target
+
+[Service]
+Type=simple
+# qmail-send must start as root: it assumes the queue identities
+# itself for deliveries. No User= directive.
+# The queue trigger fifo cannot ship in APK payloads (the constructor
+# archives regular files only): create it with ownership here,
+# idempotently, healing drift on every start.
+ExecStartPre=/bin/sh -c '[ -p /var/qmail/queue/lock/trigger ] || mkfifo -m 0622 /var/qmail/queue/lock/trigger; chown qmails:qmail /var/qmail/queue/lock/trigger'
+ExecStart=/var/qmail/bin/qmail-start ./Maildir/
+Restart=always
+RestartSec=2s
+
+[Install]
+WantedBy=multi-user.target

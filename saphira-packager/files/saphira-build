@@ -303,13 +303,13 @@ def cmd_scan(args):
     b = conn.execute("SELECT count(*) c FROM builds WHERE state='BLOCKED'").fetchone()["c"]
     print(f"queue: {q} ready, {b} blocked")
     for r in conn.execute(
-        """SELECT package, count(*) c FROM builds
+        """SELECT package, count(DISTINCT version || ':' || revision) c FROM builds
            WHERE queued_at >= datetime('now', '-1 day')
            GROUP BY package HAVING c >= ? ORDER BY c DESC""",
         (REQUEUE_WARN_THRESHOLD,),
     ).fetchall():
         print(
-            f"churn warning: {r['package']} requeued {r['c']}x in 24h "
+            f"churn warning: {r['package']} queued {r['c']} distinct revisions in 24h "
             f"(>= {REQUEUE_WARN_THRESHOLD}) - verify each pkgrel bump fixes "
             "a proven defect; this is the r55555 smell"
         )

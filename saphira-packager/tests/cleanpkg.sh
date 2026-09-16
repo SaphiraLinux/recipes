@@ -15,7 +15,11 @@ set -eu
 
 cleanpkg=$1
 source_root=$(CDPATH= cd -- "$(dirname -- "$cleanpkg")/../.." && pwd)
-test_root=$(mktemp -d /tmp/saphira-cleanpkg-test.XXXXXX)
+test_tmp_base=${SAPHIRA_TMPDIR:-/build/test-tmp}
+mkdir -p "$test_tmp_base"
+test_root=$(mktemp -d "$test_tmp_base/saphira-cleanpkg-test.XXXXXX")
+export SAPHIRA_TMPDIR=$test_root/tool-tmp
+mkdir -p "$SAPHIRA_TMPDIR"
 trap 'find "$test_root" -depth -delete' EXIT HUP INT TERM
 build_root=$test_root/build
 mkdir -p "$build_root"

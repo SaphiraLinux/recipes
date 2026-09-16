@@ -1,0 +1,53 @@
+#!/bin/sh
+# Build HAProxy country maps from GeoIP CSV data.
+#
+# Usage: haproxy-geoip-build-maps <csv-dir> <out-dir>
+#
+# <csv-dir> holds MaxMind GeoLite2-Country CSVs (from
+# GeoLite2-Country-CSV.zip, fetched at runtime with geoipupdate -
+# the database is license-keyed and weekly, so it is never
+# vendored): GeoLite2-Country-Blocks-IPv4.csv,
+# GeoLite2-Country-Blocks-IPv6.csv, GeoLite2-Country-Locations-*.csv.
+# Writes <out-dir>/country-v4.map and country-v6.map as
+# "CIDR CODE" lines for map_ip().
+#
+# A second shape is accepted: legacy range feeds ("start end"
+# pairs, dotted or integer, optional trailing columns) are folded
+# to CIDR via iprange/ip6range first, so private/custom feeds work
+# through the same path. Pass such a file as <csv-dir> directly.
+
+set -eu
+
+[ "$#" -eq 2 ] || { echo "usage: $0 <csv-dir-or-range-file> <out-dir>" >&2; exit 1; }
+src=$1 out=$2
+mkdir -p "$out"
+
+# Legacy range feed (not a directory): fold to CIDR, tag UNKNOWN.
+if [ ! -d "$src" ]; then
+	case $src in
+		*ipv6*|*v6*) conv=ip6range ;;
+		*) conv=iprange ;;
+	esac
+	"$conv" < "$src" | awk '{ print $1, "UNKNOWN" }' > "$out/country-v4.map"
+	printf 'wrote %s/country-v4.map\n' "$out"
+	exit 0
+fi
+
+loc=$(ls "$src"/GeoLite2-Country-Locations-*.csv 2>/dev/null | head -n 1)
+[ -n "$loc" ] || { echo "$0: no GeoLite2-Country-Locations-*.csv in $src" >&2; exit 1; }
+
+# geoname_id -> ISO code table (skip header, strip quotes).
+awk -F, 'NR > 1 { gsub(/"/, "", $1); gsub(/"/, "", $5); if ($5 != "") print $1, $5 }' \
+	"$loc" > "$out/.geonames"
+
+for fam in 4 6; do
+	blk=$(ls "$src"/GeoLite2-Country-Blocks-IPv"$fam".csv 2>/dev/null | head -n 1)
+	[ -n "$blk" ] || { echo "$0: no Blocks-IPv$fam csv, skipping" >&2; continue; }
+	# network,geoname_id -> "CIDR CODE" via the id table.
+	awk -F, -v geo="$out/.geonames" '
+		BEGIN { while ((getline line < geo) > 0) { split(line, kv, " "); map[kv[1]] = kv[2] } }
+		NR > 1 { gsub(/"/, "", $1); gsub(/"/, "", $2); code = ($2 in map) ? map[$2] : "UNKNOWN"; print $1, code }
+	' "$blk" > "$out/country-v$fam.map"
+	printf 'wrote %s/country-v%samap (%s lines)\n' "$out" "$fam" "$(wc -l < "$out/country-v$fam.map")"
+done
+rm -f "$out/.geonames"
