@@ -6,7 +6,7 @@ Saphira is currently under active development.
 
 | Version / branch | Security support |
 | ---------------- | ---------------- |
-| `main` / current Saphira development | Supported |
+| Default branch (`Master`) / current Saphira development | Supported |
 | Historical recipe revisions, superseded package revisions and retired snapshots | Not supported |
 
 Security corrections are made against the current maintained Saphira
