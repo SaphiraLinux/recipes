@@ -1,0 +1,19 @@
+# lldpd FHS migration: privsep home/dir /run/lldpd -> /var/run/lldpd.
+#
+# The daemon itself was always correct: with --localstatedir=/var,
+# GNU runstatedir defaults to /var/run, so the privsep chroot
+# (/var/run/lldpd), control socket (/var/run/lldpd.socket) and pid
+# file (/var/run/lldpd.pid) were never wrong. Only the accounts.d
+# fragment named /run/lldpd (home + dir stanza), which additionally
+# created the wrong directory at install time. This fragment
+# converges the corrected dir and removes the wrong one once empty.
+#
+# Stale-state policy: pid and control socket are flat daemon-managed
+# files under /var/run (persistent by design); lifecycle and stale
+# validation belong to the supervising lifecycle, not the layout.
+# NOTE (out of scope): lldpd ships no initd/systemd unit in-tree;
+# service lifecycle files, if added later, must create
+# /var/run/lldpd with _lldpd ownership in both formats.
+
+dir /var/run/lldpd 0755 _lldpd _lldpd
+rmdir-if-empty /run/lldpd

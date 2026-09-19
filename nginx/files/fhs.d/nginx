@@ -1,0 +1,15 @@
+# nginx FHS migration: runtime state /run/nginx -> /var/run/nginx.
+#
+# Stale-state policy (/var/run is persistent by design, never wiped):
+# - PID file: a new master refuses to start while an old master holds
+#   the listen sockets (bind fails: no silent takeover). A dead
+#   master's pidfile is overwritten on start. Nothing is deleted.
+# - Lock file (accept mutex): flock semantics, stale-safe by design.
+# - New /var/run/nginx: created with nginx:nginx 0755 by checkpath
+#   (OpenRC) and tmpfiles.d (systemd); converged here on upgrade.
+# - Old /run/nginx: volatile residue. Removed once empty (old daemon
+#   gone); left in place and reported while the old daemon still
+#   runs. /run itself is tmpfs and vanishes on reboot regardless.
+
+dir /var/run/nginx 0755 nginx nginx
+rmdir-if-empty /run/nginx

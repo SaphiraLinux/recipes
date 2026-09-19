@@ -1,0 +1,11 @@
+# File capabilities for breathgslb (saphira-permissions V1).
+#
+# Privileged port 53 as an unprivileged service: the file
+# capability carries that single privilege (systemd additionally
+# grants it ambiently via the unit). Declared here instead of a
+# build-time setcap so the authority survives in the package as a
+# caps.d fragment (APK records no capability state): install,
+# upgrade, and ensure-permissions --system all converge from this
+# declaration via ensure-caps. r3 migration (setcap line removed
+# from recipe_install the same revision).
+cap /usr/sbin/breathgslb cap_net_bind_service+ep

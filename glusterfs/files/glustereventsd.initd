@@ -3,8 +3,8 @@
 
 description="GlusterFS events daemon"
 command="/usr/sbin/glustereventsd"
-command_args="${GLUSTEREVENTSD_ARGS:---pid-file /run/glustereventsd.pid}"
-pidfile="/run/glustereventsd.pid"
+command_args="${GLUSTEREVENTSD_ARGS:---pid-file /var/run/glustereventsd.pid}"
+pidfile="/var/run/glustereventsd.pid"
 command_background="yes"
 
 depend() {

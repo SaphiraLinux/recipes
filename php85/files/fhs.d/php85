@@ -1,0 +1,21 @@
+# php85 FHS migration: php-fpm runtime /run/php-fpm85 -> /var/run/php-fpm85.
+#
+# Stale-state policy (/var/run is persistent by design, never wiped):
+# - PID file: overwritten by each new master; cleared in start_pre /
+#   ExecStartPre alongside the socket so crash residue never blocks a
+#   restart. Both run only when the service is (re)starting, never
+#   against a tracked-live master.
+# - Socket: unix bind fails on an existing path, so the stale socket
+#   is removed at start; the master recreates it owned
+#   php-fpm:nginx 0660 per www.conf listen.owner/group/mode.
+# - New /var/run/php-fpm85: converged here on upgrade
+#   (php-fpm:php-fpm 0755); created by checkpath / ExecStartPre.
+# - Old /run/php-fpm85: volatile residue on tmpfs. Removed once
+#   empty; left in place and reported while the old master runs.
+# - NOTE: saphira-site templates historically generated pools under
+#   the unversioned /run/php-fpm/ prefix (already wrong before this
+#   move). That generator moves to /var/run/php-fpm85/ in its own
+#   saphira-tools slice; nothing here depends on it.
+
+dir /var/run/php-fpm85 0755 php-fpm php-fpm
+rmdir-if-empty /run/php-fpm85

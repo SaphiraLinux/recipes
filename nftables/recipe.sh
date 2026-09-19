@@ -17,6 +17,7 @@ recipe_build() {
 	cd "$SRC"
 	echo "$nftables_sha256  $RECIPE_DIR/files/nftables-1.1.6.tar.xz" | sha256sum -c -
 	./configure --prefix=/usr --sysconfdir=/etc --disable-man-doc \
+		--localstatedir=/var \
 		--disable-python --with-cli=readline --with-json
 	make -j${JOBS:-$(nproc)}
 }

@@ -29,7 +29,3 @@ Successful unsigned artifacts are promoted to a visible `*-ready` transaction be
 `sign-apk-repo` is the explicit privileged signing/publication boundary. It consumes only complete ready transactions, verifies immutable filenames and identities, signs and verifies APKs and both compatible indexes, then marks transactions `-published`. `installpkg` is the separate explicit privileged live-system installation boundary.
 
 Before `saphira-packager.apk` exists, an administrator may explicitly run `saphira-packager/files/install-saphira-packager` to install the controller scripts, configuration, and bootstrap manifest. It installs no recipe dependencies and publishes nothing. Once the signed APK is installed, the APK owns the permanent `/usr/bin` tools and `/etc/saphira` configuration.
-
-## Licensing
-
-This repository is mixed-licence. The top-level `LICENSE` states the rule: MIT is the default only where no more specific licence exists, and a file, directory or package carrying its own licence notice or `LICENSE` file is governed by that licence instead. Some Saphira-specific components (each carrying its own `LICENSE` file in its package directory) use Business Source License 1.1. Check the licence inside the relevant package before redistributing, incorporating or commercially using its contents.

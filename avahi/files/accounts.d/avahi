@@ -1,0 +1,14 @@
+# avahi runtime identity (canonical, fixed): user avahi UID 70,
+# primary group avahi GID 70. Required by avahi-daemon (drops
+# privilege after binding port 5353 and joining the mDNS multicast
+# group) and avahi-autoipd. Upstream ships no fixed ID (its own
+# sysusers.d fragment asks for a dynamic _avahi, which Saphira
+# deliberately replaces - nothing here invokes systemd-sysusers, so
+# this fragment is the sole live mechanism). UID/GID 70 freeness
+# audit: absent from the base seed, absent from every other
+# accounts.d fragment, and upstream claims no fixed ID. UID 70 sits
+# in the preferred 0..199 packaged range - never reuse it for another
+# identity. Home is the daemon runtime dir (messagebus/frr
+# precedent); the shell is nologin.
+user avahi 70 avahi /var/run/avahi-daemon /sbin/nologin
+group avahi 70

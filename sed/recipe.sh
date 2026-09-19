@@ -15,7 +15,7 @@ recipe_build() {
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$RECIPE_DIR/files/sed-4.9.tar.xz"
 	cd "$SRC"
 	echo "$sed_sha256  $RECIPE_DIR/files/sed-4.9.tar.xz" | sha256sum -c -
-	./configure --prefix=/usr --disable-nls
+	./configure --prefix=/usr --sysconfdir=/etc --disable-nls --localstatedir=/var
 	make -j${JOBS:-$(nproc)}
 }
 recipe_install() {

@@ -31,6 +31,8 @@ recipe_build()
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$LUBALL"
 	cd "$SRC"
 	./configure --prefix=/usr --disable-static --enable-shared \
+		--sysconfdir=/etc \
+		--localstatedir=/var \
 		--disable-udev-systemd-timer
 	make -j${JOBS:-$(nproc)}
 }

@@ -11,3 +11,8 @@
 user ftp 18 ftp /srv/ftp /sbin/nologin
 group ftp 18
 dir /srv/ftp 0755 root root
+# Daemon runtime directory (split-run policy): the daemon runs as
+# root and writes its PID file, scoreboard and delay table here (see
+# PidFile/ScoreboardFile/DelayTable in proftpd.conf). Managed by
+# ensure-identity like dbus /var/run/dbus - never /usr/var.
+dir /var/run/proftpd 0755 root root

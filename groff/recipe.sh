@@ -15,7 +15,7 @@ recipe_build() {
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$RECIPE_DIR/files/groff-1.23.0.tar.gz"
 	cd "$SRC"
 	echo "$groff_sha256  $RECIPE_DIR/files/groff-1.23.0.tar.gz" | sha256sum -c -
-	CFLAGS="${CFLAGS-} -std=gnu11" PAGE=A4 ./configure --prefix=/usr --without-x --without-libpng
+	CFLAGS="${CFLAGS-} -std=gnu11" PAGE=A4 ./configure --prefix=/usr --sysconfdir=/etc --without-x --without-libpng --localstatedir=/var
 	make -j${JOBS:-$(nproc)}
 }
 recipe_install() {

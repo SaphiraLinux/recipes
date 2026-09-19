@@ -2,7 +2,16 @@
 
 pkgname=saphira-gredist
 pkgver=0.1.0
-pkgrel=3
+pkgrel=5
+# r5: /etc/saphira ships 0750 (homer recon: operator configs and
+# key material live beneath it; the previous 0755 came from an
+# install -D side effect, never a decision). Payload change, bumps.
+# r4: documented stats path /run/saphira/gredist ->
+# /var/run/saphira/gredist (C default define + man page). The define
+# is currently unwired (stats go to the log); no directory is ever
+# created or consumed, so no fhs.d fragment by rule
+# (document-and-leave, unbound precedent). Payload change (man
+# page), revision bumps.
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='Protocol 47/GRE distributor with HRW backend selection'
 license='BUSL-1.1'
@@ -46,6 +55,9 @@ recipe_install()
 	install -D -m 0755 "$BUILDDIR/build/src/gredist" "$PKGDEST/usr/bin/gredist"
 	install -D -m 0755 "$BUILDDIR/build/src/gre-sink" "$PKGDEST/usr/bin/gre-sink"
 	install -D -m 0755 "$BUILDDIR/build/src/gre-send" "$PKGDEST/usr/bin/gre-send"
+	# Shared config root: operator-owned, root-only listing (this
+	# package owns the path via first-installer file-gate rule).
+	install -d -m 0750 "$PKGDEST/etc/saphira"
 	install -D -m 0644 "$RECIPE_DIR/files/man/gredist.1" \
 		"$PKGDEST/usr/share/man/man1/gredist.1"
 	install -D -m 0644 "$RECIPE_DIR/files/etc/saphira/gredist/example.conf" \

@@ -2,7 +2,7 @@
 
 pkgname=ca-certificates
 pkgver=20260831
-pkgrel=3
+pkgrel=4
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='CA certificate bundle + Saphira native update-ca-certificates'
 license='MPL-2.0'
@@ -36,7 +36,11 @@ recipe_install()
 	install -D -m 0755 update-ca-certificates "$PKGDEST/usr/sbin/update-ca-certificates"
 	install -d "$PKGDEST/usr/share/ca-certificates/mozilla" \
 		"$PKGDEST/etc/ssl/certs" "$PKGDEST/etc/ca-certificates/update.d" \
-		"$PKGDEST/usr/local/share/ca-certificates" "$PKGDEST/etc/apk"
+		"$PKGDEST/etc/apk"
+	# r4: /usr/local/share/ca-certificates search path and directory
+	# removed (Saphira policy: distribution packages do not populate
+	# /usr/local). Kept: /usr/share/ca-certificates,
+	# /etc/ca-certificates.conf, /etc/ssl/certs.
 	cp -a certs/mozilla/. "$PKGDEST/usr/share/ca-certificates/mozilla/"
 	install -m 0644 certlist "$PKGDEST/etc/ca-certificates.conf"
 	# Normal OpenSSL trust path (OPENSSLDIR=/etc/ssl: the default

@@ -1,0 +1,16 @@
+# bind FHS migration: named runtime /run/named -> /var/run/named.
+#
+# Stale-state policy (/var/run is persistent by design, never wiped):
+# - PID file: cleared at (re)start in both inits (tracked-start
+#   only, never against a live daemon); the daemon rewrites it.
+#   Session keys and control state are recreated by named itself.
+# - New /var/run/named: converged here on upgrade (named:named
+#   0755, TSV-reserved base identity); created by tmpfiles.d
+#   (systemd) and checkpath (OpenRC). The unit's old
+#   RuntimeDirectory= could only create under /run, so tmpfiles.d
+#   replaces it (rspamd precedent).
+# - Old /run/named: volatile residue on tmpfs. Removed once empty;
+#   left in place and reported while the old daemon runs.
+
+dir /var/run/named 0755 named named
+rmdir-if-empty /run/named

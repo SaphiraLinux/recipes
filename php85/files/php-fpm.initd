@@ -14,7 +14,14 @@ depend()
 
 start_pre()
 {
-	checkpath -d -o php-fpm:php-fpm -m 0755 /run/php-fpm85 /var/log/php85
+	# /var/run is persistent by design: recreate the runtime dir and
+	# clear stale pid/socket from an unclean shutdown (bind fails on
+	# an existing socket path). start_pre runs only when OpenRC is
+	# about to start the daemon, so no tracked-live master loses
+	# state here. (Under systemd the unit's ExecStartPre does the
+	# same before each start/restart.)
+	checkpath -d -o php-fpm:php-fpm -m 0755 /var/run/php-fpm85 /var/log/php85
+	rm -f /var/run/php-fpm85/php-fpm85.pid /var/run/php-fpm85/www.sock
 	ebegin "Checking PHP-FPM configuration"
 	/usr/sbin/php-fpm85 --test
 }

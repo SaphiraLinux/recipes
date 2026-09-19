@@ -8,7 +8,8 @@
 # base seed (no 81 user or group row), absent from every other
 # fragment, and upstream claims no fixed ID. UID 81 sits in the
 # preferred 0..199 packaged range - never reuse it for another
-# identity. No dir stanza: /run/dbus is ephemeral (tmpfiles.d,
-# already shipped, owns runtime creation).
-user messagebus 81 messagebus /run/dbus /sbin/nologin
+# identity. No dir stanza: /var/run/dbus holds ephemeral service
+# state (socket), created by the initd checkpath and the systemd
+# socket unit - not persistent package state.
+user messagebus 81 messagebus /var/run/dbus /sbin/nologin
 group messagebus 81

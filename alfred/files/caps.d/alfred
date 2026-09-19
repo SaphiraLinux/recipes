@@ -1,0 +1,12 @@
+# File capabilities for alfred (saphira-permissions V1).
+#
+# Least privilege by construction: the binary carries only the two
+# capabilities alfred retains across its setuid drop (netlink query
+# + raw multicast sockets). Both service units start it as alfred.
+# Declared here instead of build-time setcap so the authority
+# survives in the package as a caps.d fragment (APK records no
+# capability state): install, upgrade, and ensure-permissions
+# --system all converge from this declaration via ensure-caps. r3
+# migration (setcap line removed from recipe_install the same
+# revision).
+cap /usr/sbin/alfred cap_net_admin,cap_net_raw+ep

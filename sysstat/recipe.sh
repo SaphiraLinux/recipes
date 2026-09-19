@@ -32,6 +32,8 @@ recipe_build()
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$SYBALL"
 	cd "$SRC"
 	./configure --prefix=/usr \
+		--sysconfdir=/etc \
+		--localstatedir=/var \
 		--disable-man-group \
 		sa_lib_dir=/usr/lib/sa \
 		sa_dir=/var/log/sa

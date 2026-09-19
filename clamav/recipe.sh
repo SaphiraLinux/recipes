@@ -2,7 +2,10 @@
 
 pkgname=clamav
 pkgver=1.5.3
-pkgrel=3
+pkgrel=4
+# r4: shared service runtime dir /var/run/clamav (dir stanza +
+# tmpfiles.d, owned with the clamav:120 identity this output owns).
+# Payload change, revision bumps.
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="ClamAV antivirus engine: libraries and scanner utilities"
 license="GPL-2.0-or-later"
@@ -94,4 +97,6 @@ recipe_install()
 	# r3: fragment added (payload change, revision bumps).
 	install -D -m 0644 "$RECIPE_DIR/files/accounts.d/clamav" \
 		"$PKGDEST/usr/share/saphira/accounts.d/clamav"
+	install -D -m 0644 "$RECIPE_DIR/files/clamav.tmpfiles" \
+		"$PKGDEST/usr/lib/tmpfiles.d/clamav.conf"
 }

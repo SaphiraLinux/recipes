@@ -21,7 +21,7 @@ subpackages="$pkgname-dev"
 
 recipe_build()
 {
-	./configure --prefix=/usr --disable-static --disable-doc --disable-dependency-tracking
+	./configure --prefix=/usr --sysconfdir=/etc --disable-static --disable-doc --disable-dependency-tracking --localstatedir=/var
 	make -j${JOBS:-$(nproc)}
 }
 

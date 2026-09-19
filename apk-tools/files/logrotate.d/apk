@@ -1,0 +1,11 @@
+# Saphira APK package manager log. apk never holds the file open
+# across invocations, so plain rename rotation is correct.
+/var/log/apk.log {
+    weekly
+    rotate 4
+    missingok
+    notifempty
+    compress
+    delaycompress
+    dateext
+}

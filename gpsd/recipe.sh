@@ -2,7 +2,9 @@
 
 pkgname=gpsd
 pkgver=3.27.5
-pkgrel=1
+pkgrel=2
+# r2: control socket /run/gpsd.sock -> /var/run/gpsd/gpsd.sock
+# (scons rundir=). Payload change, revision bumps.
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="GPS daemon, libraries, and text-mode clients (cgps, gpsmon, gpspipe)"
 license="BSD-2-Clause"
@@ -49,7 +51,7 @@ scons_options="
     sbindir=sbin
     libdir=lib
     sysconfdir=/etc
-    rundir=/run
+    rundir=/var/run/gpsd
     systemd=false
     dbus_export=true
     bluez=false
@@ -96,4 +98,9 @@ recipe_install()
         "$PKGDEST/etc/init.d/gpsd"
     install -D -m 0644 "$RECIPE_DIR/files/gpsd.confd" \
         "$PKGDEST/etc/conf.d/gpsd"
+    # FHS migration declaration (hotfix/var-packaging-bug-var-run-isnot-run):
+    # root-started daemon (no accounts.d identity); makepkg runs
+    # ensure-fhs on install/upgrade.
+    install -D -m 0644 "$RECIPE_DIR/files/fhs.d/gpsd" \
+        "$PKGDEST/usr/share/saphira/fhs.d/gpsd"
 }

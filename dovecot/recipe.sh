@@ -2,7 +2,7 @@
 
 pkgname=dovecot
 pkgver=2.4.4
-pkgrel=2
+pkgrel=3
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="IMAP and POP3 email server"
 license="LGPL-2.1-or-later MIT"
@@ -50,7 +50,7 @@ recipe_build()
 		--without-pam --without-systemd --without-lua --without-icu \
 		--without-gssapi --without-ldap \
 		--with-sqlite --with-mysql \
-		--with-rundir=/run/dovecot \
+		--with-rundir=/var/run/dovecot \
 		--disable-static
 	make
 }
@@ -73,6 +73,13 @@ recipe_install()
 	# scripts from this fragment; the package creates its identities
 	# at install time.
 	# r2: fragment added (payload change, revision bumps).
+	# r3: base runtime dir /run/dovecot -> /var/run/dovecot
+	# (payload change, revision bumps).
 	install -D -m 0644 "$RECIPE_DIR/files/accounts.d/dovecot" \
 		"$PKGDEST/usr/share/saphira/accounts.d/dovecot"
+	# FHS migration declaration (hotfix/var-packaging-bug-var-run-isnot-run):
+	# root-owned state dir (master lifecycle); makepkg runs
+	# ensure-fhs on install/upgrade.
+	install -D -m 0644 "$RECIPE_DIR/files/fhs.d/dovecot" \
+		"$PKGDEST/usr/share/saphira/fhs.d/dovecot"
 }

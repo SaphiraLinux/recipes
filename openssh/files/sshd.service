@@ -4,6 +4,7 @@ After=network.target auditd.service
 
 [Service]
 Type=simple
+ExecStartPre=/usr/bin/install -d -m 0755 -o root -g root /var/run/sshd
 ExecStartPre=/usr/bin/ssh-keygen -A
 ExecStart=/usr/sbin/sshd -D -e
 ExecReload=/bin/kill -HUP $MAINPID

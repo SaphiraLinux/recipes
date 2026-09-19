@@ -51,7 +51,7 @@ recipe_build()
 	# Built against the repository musl-dev headers installed in the
 	# clean root from the package seed: same-ABI rebuild, no cross
 	# toolchain and no host files involved.
-	./configure --prefix=/usr --syslibdir=/lib
+	./configure --prefix=/usr --sysconfdir=/etc --syslibdir=/lib --localstatedir=/var
 	# Saphira policy: the static libc archive must support static PIE.
 	# Reuse musl's existing PIC libc object set (LOBJS, built with
 	# -fPIC for libc.so) instead of the default non-PIC AOBJS.

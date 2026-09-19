@@ -34,6 +34,8 @@ recipe_build() {
 	# seed /usr/bin/pip3 + site-packages/pip, colliding with python3-pip
 	# (which owns those files). Consumers add python3-pip explicitly.
 	./configure --prefix=/usr \
+		--sysconfdir=/etc \
+		--localstatedir=/var \
 		--enable-shared \
 		--with-ensurepip=no \
 		--with-system-ffi \

@@ -47,6 +47,7 @@ recipe_build()
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xJf "$SRCBALL"
 	cd "$SRC"
 	./configure --prefix=/usr --sysconfdir=/etc --sbindir=/usr/sbin \
+		--localstatedir=/var \
 		--disable-gss --with-rpcgen=internal
 	make -j${JOBS:-$(nproc)} LIBEVENT=-levent LIBSQLITE=-lsqlite3
 }

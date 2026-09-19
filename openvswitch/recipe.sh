@@ -2,7 +2,7 @@
 
 pkgname=openvswitch
 pkgver=3.7.1
-pkgrel=3
+pkgrel=4
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='Open vSwitch: production-quality multilayer virtual switch (OVS bridge dataplane for libvirt/qemu)'
 license='Apache-2.0'
@@ -39,7 +39,7 @@ recipe_build()
 	./configure --prefix=/usr \
 		--sysconfdir=/etc \
 		--localstatedir=/var \
-		--with-rundir=/run/openvswitch \
+		--with-rundir=/var/run/openvswitch \
 		--disable-static --enable-shared --disable-libcapng
 	make -j${JOBS:-$(nproc)}
 }
@@ -56,4 +56,10 @@ recipe_install()
 	install -D -m 0644 "$RECIPE_DIR/files/openvswitch.confd" \
 		"$PKGDEST/etc/conf.d/openvswitch"
 	install -d -m 0755 "$PKGDEST/etc/openvswitch" "$PKGDEST/var/log/openvswitch"
+	# FHS migration declaration (hotfix/var-packaging-bug-var-run-isnot-run):
+	# root-run suite (no accounts.d identity); ovs-ctl owns lifecycle.
+	# r4: rundir /run/openvswitch -> /var/run/openvswitch
+	# (payload change, revision bumps).
+	install -D -m 0644 "$RECIPE_DIR/files/fhs.d/openvswitch" \
+		"$PKGDEST/usr/share/saphira/fhs.d/openvswitch"
 }

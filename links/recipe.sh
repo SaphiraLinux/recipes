@@ -25,6 +25,8 @@ recipe_build()
 {
 	mkdir -p "$BUILDDIR" && cd "$BUILDDIR"
 	"$SRC/configure" --prefix=/usr --disable-graphics --without-x \
+		--sysconfdir=/etc \
+		--localstatedir=/var \
 		--with-ssl --with-zlib
 	make
 }

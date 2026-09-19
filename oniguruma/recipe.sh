@@ -16,7 +16,7 @@ recipe_build() {
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$RECIPE_DIR/files/onig-6.9.10.tar.gz"
 	cd "$SRC"
 	echo "$oniguruma_sha256  $RECIPE_DIR/files/onig-6.9.10.tar.gz" | sha256sum -c -
-	./configure --prefix=/usr --libdir=/usr/lib --disable-static
+	./configure --prefix=/usr --sysconfdir=/etc --libdir=/usr/lib --disable-static --localstatedir=/var
 	make -j${JOBS:-$(nproc)}
 }
 recipe_install() {

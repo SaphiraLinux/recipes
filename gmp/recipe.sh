@@ -33,6 +33,8 @@ recipe_build()
 	mkdir -p "$BUILDDIR" && cd "$BUILDDIR"
 	CFLAGS="${CFLAGS-} -std=gnu17" "$SRC/configure" \
 		--prefix=/usr \
+		--sysconfdir=/etc \
+		--localstatedir=/var \
 		--libdir=/usr/lib \
 		--enable-cxx \
 		--enable-shared \

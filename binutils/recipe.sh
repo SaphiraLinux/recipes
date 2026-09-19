@@ -34,6 +34,8 @@ recipe_build()
 	cd "$BUILDDIR"
 	../source/configure \
 		--prefix=/usr \
+		--sysconfdir=/etc \
+		--localstatedir=/var \
 		--with-sysroot=/ \
 		--build=x86_64-akadata-linux-musl \
 		--host=x86_64-akadata-linux-musl \

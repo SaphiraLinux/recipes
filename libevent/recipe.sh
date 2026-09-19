@@ -18,6 +18,8 @@ recipe_build() {
 	mkdir -p "$BUILDDIR" && cd "$BUILDDIR"
 	"$SRC/configure" \
 		--prefix=/usr \
+		--sysconfdir=/etc \
+		--localstatedir=/var \
 		--libdir=/usr/lib \
 		--disable-static \
 		--enable-openssl

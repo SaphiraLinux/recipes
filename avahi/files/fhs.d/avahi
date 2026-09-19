@@ -1,0 +1,9 @@
+# avahi FHS: daemon runtime /var/run/avahi-daemon (pid file, request
+# socket). Split-/run invariant: localstatedir=/var already puts the
+# daemon paths here; this fragment converges ownership (avahi:70) on
+# install/upgrade. Stale-state policy (/var/run is persistent by
+# design, never wiped): a stale pid file from an unclean shutdown is
+# cleared by the OpenRC start_pre, which runs only when OpenRC is
+# about to start the daemon. No legacy /run path: avahi is new to
+# Saphira, so no migration stanzas.
+dir /var/run/avahi-daemon 0755 avahi avahi

@@ -25,7 +25,7 @@ recipe_build()
 	mkdir -p "$BUILDDIR/shims"
 	printf '#!/bin/sh\nexec bison -y "$@"\n' > "$BUILDDIR/shims/yacc"
 	chmod +x "$BUILDDIR/shims/yacc"
-	PATH="$BUILDDIR/shims:$PATH" ./configure --prefix=/usr --enable-sixel
+	PATH="$BUILDDIR/shims:$PATH" ./configure --prefix=/usr --sysconfdir=/etc --enable-sixel --localstatedir=/var
 	make -j${JOBS:-$(nproc)}
 }
 

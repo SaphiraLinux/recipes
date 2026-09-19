@@ -1,7 +1,7 @@
 #!/bin/sh
 pkgname=dbus
 pkgver=1.16.0
-pkgrel=6
+pkgrel=7
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='D-Bus message bus system'
 license='GPL-2.0-or-later AFL-2.1'
@@ -25,7 +25,13 @@ recipe_build() {
 		-Dsystemd=enabled -Dsystemd_system_unitdir=/usr/lib/systemd/system \
 		-Dx11_autolaunch=disabled -Dxml_docs=disabled \
 		-Dmodular_tests=disabled \
-		-Dsysconfdir=/etc -Dlocalstatedir=/var
+		-Dsysconfdir=/etc -Dlocalstatedir=/var \
+		-Druntime_dir=/var/run
+	# r7: runtime_dir /run -> /var/run (split-/run invariant): the
+	# system bus socket becomes /var/run/dbus/system_bus_socket
+	# (meson derives it as prefix/runstatedir/dbus/system_bus_socket;
+	# the shipped dbus.socket unit carries it, systemd creates the
+	# parents for socket units). Payload change, revision bumps.
 	meson compile -C _build
 }
 recipe_install() {
@@ -35,6 +41,11 @@ recipe_install() {
 	# is auto-enabled.
 	install -D -m 0755 "$RECIPE_DIR/files/dbus.initd" \
 		"$PKGDEST/etc/init.d/dbus"
+	# FHS migration declaration (hotfix/var-packaging-bug-var-run-isnot-run):
+	# messagebus owns the corrected runtime dir; makepkg runs
+	# ensure-fhs after ensure-identity on install/upgrade.
+	install -D -m 0644 "$RECIPE_DIR/files/fhs.d/dbus" \
+		"$PKGDEST/usr/share/saphira/fhs.d/dbus"
 	# Runtime identity declaration: messagebus:81 required by the
 	# system bus. makepkg generates the install scripts from this
 	# fragment; the package creates its identity at install time.

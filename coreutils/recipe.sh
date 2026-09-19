@@ -30,6 +30,8 @@ recipe_build()
 	cd "$SRC"
 	export FORCE_UNSAFE_CONFIGURE=1
 	./configure --prefix=/usr \
+		--sysconfdir=/etc \
+		--localstatedir=/var \
 		--bindir=/bin \
 		--enable-install-program=arch,hostname \
 		--disable-nls \

@@ -38,7 +38,7 @@ recipe_build()
 	echo "$libxslt_sha256  $LXBALL" | sha256sum -c -
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$LXBALL"
 	autoreconf -fi
-	./configure --prefix=/usr --without-python --without-crypto --without-debug
+	./configure --prefix=/usr --sysconfdir=/etc --without-python --without-crypto --without-debug --localstatedir=/var
 	make -j${JOBS:-$(nproc)}
 }
 

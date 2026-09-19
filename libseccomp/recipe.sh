@@ -14,7 +14,7 @@ makedepends="gcc make pkgconf gawk gperf"
 subpackages="$pkgname-dev $pkgname-doc"
 
 recipe_build() {
-	./configure --prefix=/usr --disable-python
+	./configure --prefix=/usr --sysconfdir=/etc --disable-python --localstatedir=/var
 	make -j${JOBS:-$(nproc)}
 }
 

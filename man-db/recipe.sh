@@ -26,6 +26,7 @@ recipe_build() {
 	cd "$SRC"
 	echo "$man_db_sha256  $RECIPE_DIR/files/man-db-2.13.0.tar.xz" | sha256sum -c -
 	./configure --prefix=/usr --sysconfdir=/etc \
+		--localstatedir=/var \
 		--disable-nls --disable-static \
 		--with-db=gdbm --with-pager=less \
 		--disable-setuid --enable-automatic-create

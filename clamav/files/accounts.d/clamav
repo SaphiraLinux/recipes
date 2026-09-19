@@ -6,6 +6,11 @@
 # identity. UID 120 sits in the preferred 0..199 packaged range -
 # never reuse it for another identity. Database-directory mode 0755
 # mirrors recipe staging.
+# The shared service runtime dir lives here too (same ownership
+# reason): neither daemon package may declare an identity it does
+# not own, so the dir converges with the identity that owns it.
+# Created at boot by tmpfiles.d (same package); see clamav.tmpfiles.
 user clamav 120 clamav /var/lib/clamav /sbin/nologin
 group clamav 120
 dir /var/lib/clamav 0755 clamav clamav
+dir /var/run/clamav 0750 clamav clamav

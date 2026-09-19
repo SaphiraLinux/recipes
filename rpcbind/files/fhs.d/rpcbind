@@ -1,0 +1,21 @@
+# rpcbind FHS migration: state dir and lock /run/* -> /var/run/*.
+#
+# --with-statedir=/var/run/rpcbind moves the warm-start state dir
+# (configure knob). The lock file RPCBINDDLOCK is hardcoded upstream
+# with no knob, so files/rpcbind-run-lock.patch moves it to the flat
+# /var/run/rpcbind.lock (upstream flat shape preserved).
+#
+# Stale-state policy (/var/run is persistent by design, never wiped):
+# - Liveness is lock-validated by the daemon itself (open + err on
+#   a live lock, unlink on clean exit). The OpenRC pidfile is
+#   tracking-only. No pid/lock cleanup in service logic.
+# - New /var/run/rpcbind: converged here on upgrade (root-owned
+#   0755; root-run suite, no accounts.d identity); created by
+#   checkpath (OpenRC) and ExecStartPre (systemd, root unit).
+# - Old /run/rpcbind: volatile residue on tmpfs. Removed once
+#   empty; left in place and reported while the old daemon runs.
+#   The old flat /run/rpcbind.pid was tracking-only tmpfs residue
+#   needing no migration.
+
+dir /var/run/rpcbind 0755 root root
+rmdir-if-empty /run/rpcbind

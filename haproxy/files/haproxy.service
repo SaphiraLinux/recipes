@@ -10,7 +10,6 @@ ExecStart=/usr/sbin/haproxy -db -f /etc/haproxy/haproxy.cfg
 ExecReload=/usr/sbin/haproxy -c -f /etc/haproxy/haproxy.cfg
 ExecReload=/bin/kill -USR2 $MAINPID
 Restart=on-failure
-RuntimeDirectory=haproxy
 
 [Install]
 WantedBy=multi-user.target

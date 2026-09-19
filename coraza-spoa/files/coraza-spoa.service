@@ -10,7 +10,6 @@ User=coraza-spoa
 Group=coraza-spoa
 ExecStart=/usr/bin/coraza-spoa -config /etc/coraza-spoa/config.yaml
 Restart=on-failure
-RuntimeDirectory=coraza-spoa
 LogsDirectory=coraza-spoa
 NoNewPrivileges=true
 ProtectSystem=strict

@@ -90,6 +90,9 @@ install_bootstrap_ghc()
 		awk -F/ 'NF { print $1; exit }')
 	test -n "$boot_top" || fatal "bootstrap archive has no top-level directory"
 	cd "$BUILDDIR/boot-src/$boot_top"
+	# layout-exception (bootstrap only): scratch prefix, never
+	# installed - GNU dir flags are noise here. The packaged builds
+	# below carry the full explicit baseline.
 	./configure --prefix="$BUILDDIR/bootstrap" >/dev/null ||
 		fatal "bootstrap GHC configure failed"
 	make install >/dev/null ||
@@ -114,7 +117,7 @@ recipe_build()
 		-d hadrian/bootstrap/plan-bootstrap-9_12_2.json ||
 		fatal "hadrian bootstrap failed"
 	test -x _build/bin/hadrian || fatal "no hadrian binary produced"
-	./configure --prefix=/usr || fatal "configure failed"
+	./configure --prefix=/usr --sysconfdir=/etc --localstatedir=/var || fatal "configure failed"
 	./hadrian/build -j"${JOBS:-$(nproc)}" || fatal "hadrian build failed"
 	./hadrian/build binary-dist -j"${JOBS:-$(nproc)}" || fatal "binary-dist failed"
 	bindist=$(echo _build/bindist/ghc-9.14.1-*.tar.xz)
@@ -129,7 +132,7 @@ recipe_install()
 	tar -xf "$SRC/$bindist" -C "$BUILDDIR/bindist"
 	inst_top=$(tar -tf "$SRC/$bindist" | awk -F/ 'NF { print $1; exit }')
 	cd "$BUILDDIR/bindist/$inst_top"
-	./configure --prefix=/usr || fatal "bindist configure failed"
+	./configure --prefix=/usr --sysconfdir=/etc --localstatedir=/var || fatal "bindist configure failed"
 	make install DESTDIR="$PKGDEST" || fatal "bindist install failed"
 	# Skew checks: the staged toolchain must identify as this exact
 	# release and compile against the actual Saphira musl.

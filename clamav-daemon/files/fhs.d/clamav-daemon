@@ -1,0 +1,20 @@
+# clamav-daemon FHS migration: unify the split-brain on /var/run/clamav.
+#
+# This package shipped LocalSocket /run/clamav/clamd.sock while its
+# own initd and unit created /var/run/clamav: the socket's directory
+# was never created where the socket was configured. The socket path
+# is corrected here; directory lifecycle (accounts.d dir stanza +
+# tmpfiles.d) lives in the base clamav output that owns the
+# clamav:120 identity - this package declares no identity it does
+# not own.
+#
+# Stale-state policy (/var/run is persistent by design, never wiped):
+# - clamd socket: cleared at (re)start in both inits (tracked-start
+#   only); the daemon recreates it. No daemon-side reclaim exists in
+#   source, so service logic owns it.
+# - Old /run/clamav: volatile residue on tmpfs. Removed once empty;
+#   left in place and reported while old daemons run. (The same old
+#   dir served freshclam; one removal declaration covers the shared
+#   path - exact-path union refuses duplicates.)
+
+rmdir-if-empty /run/clamav

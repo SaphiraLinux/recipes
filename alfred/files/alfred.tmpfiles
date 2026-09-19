@@ -1,0 +1,6 @@
+# tmpfiles.d entry for alfred. The unit runs unprivileged
+# (User=alfred), so it cannot create its own runtime dir under
+# /var/run (RuntimeDirectory= only covers /run): tmpfiles.d owns
+# creation with the service identity. /var/run is persistent by
+# design, never wiped at boot.
+d /var/run/alfred 0755 alfred alfred -

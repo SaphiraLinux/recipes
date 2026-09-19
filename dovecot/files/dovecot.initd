@@ -5,7 +5,7 @@ description="Dovecot IMAP/POP3 email server"
 command="/usr/sbin/dovecot"
 command_args="-F"
 supervisor="supervise-daemon"
-pidfile="/run/dovecot/master.pid"
+pidfile="/var/run/dovecot/master.pid"
 
 depend()
 {
@@ -14,7 +14,7 @@ depend()
 
 start_pre()
 {
-	checkpath -d -m 0755 /run/dovecot /var/log/dovecot
+	checkpath -d -m 0755 /var/run/dovecot /var/log/dovecot
 	ebegin "Checking dovecot configuration"
 	/usr/sbin/dovecot configtest
 }

@@ -24,6 +24,8 @@ makedepends="
 recipe_build()
 {
 	./configure --prefix=/usr --disable-static --disable-documentation \
+		--sysconfdir=/etc \
+		--localstatedir=/var \
 		--disable-dependency-tracking
 	make -j${JOBS:-$(nproc)}
 }

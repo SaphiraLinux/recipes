@@ -28,6 +28,8 @@ recipe_build()
 {
 	mkdir -p "$BUILDDIR" && cd "$BUILDDIR"
 	"$SRC/configure" --prefix=/usr \
+		--sysconfdir=/etc \
+		--localstatedir=/var \
 		--without-examples --without-tests --without-docbook \
 		--disable-static
 	make

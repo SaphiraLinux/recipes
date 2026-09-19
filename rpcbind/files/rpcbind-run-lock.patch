@@ -1,0 +1,24 @@
+From 8d0b4b0e2b3c4d5e6f708192a3b4c5d6e7f809 Mon Sep 17 00:00:00 2001
+From: Saphira packaging <saphira@vm2.uk>
+Date: Thu, 17 Sep 2026 00:00:00 +0000
+Subject: [PATCH] rpcbind lock file follows the split-/run layout
+
+Upstream hardcodes RPCBINDDLOCK as /run/rpcbind.lock with no
+configure knob (only --with-statedir is configurable, and it does
+not cover the lock). Saphira keeps ordinary daemon state under
+/var/run, so the lock moves with the state dir. The lock remains a
+flat file (upstream shape preserved), now beside the state dir
+instead of under the base runtime.
+
+--- a/src/rpcbind.c
++++ b/src/rpcbind.c
+@@ -106,7 +106,7 @@
+ /* who to suid to if -s is given */
+ #define RUN_AS  "daemon"
+ 
+-#define RPCBINDDLOCK "/run/rpcbind.lock"
++#define RPCBINDDLOCK "/var/run/rpcbind.lock"
+ 
+ /* --- Write my pid to a file  (for debugging only?) --- */
+ --
+2.47.0

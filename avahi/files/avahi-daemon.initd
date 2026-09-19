@@ -1,0 +1,30 @@
+#!/sbin/openrc-run
+
+description="Avahi mDNS/DNS-SD responder daemon (SHAMPOO discovery foundation)"
+
+# Classic forking daemon with a pidfile: -D daemonizes after startup
+# (implies -s, syslog) and writes /var/run/avahi-daemon/pid; the daemon
+# drops to avahi:70 itself after binding. Neither init wraps the
+# other; nothing is auto-enabled at install. The daemon reaches the
+# system bus at /var/run/dbus/system_bus_socket (baked at configure
+# time); without a bus it runs degraded (use, not need).
+command="/usr/sbin/avahi-daemon"
+command_args="-D"
+pidfile="/var/run/avahi-daemon/pid"
+
+depend()
+{
+	use dbus
+	after dbus
+}
+
+start_pre()
+{
+	# /var/run is persistent by design: the runtime dir is created
+	# here, and a stale pid from an unclean shutdown must be cleared
+	# or the daemon misdetects a running instance. start_pre runs
+	# only when OpenRC is about to start the daemon, so no live
+	# daemon loses its pid file here.
+	checkpath -d -m 0755 -o avahi:avahi /var/run/avahi-daemon
+	rm -f /var/run/avahi-daemon/pid
+}

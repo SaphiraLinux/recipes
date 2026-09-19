@@ -1,7 +1,10 @@
 #!/bin/sh
 pkgname=openssl
 pkgver=3.6.3
-pkgrel=2
+pkgrel=3
+# r3: /etc/ssl/private ships 0700 (homer recon carries 0700;
+# upstream install_ssldirs leaves 0755 on the private-key
+# directory). Payload change, revision bumps.
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='TLS/SSL and crypto library (Genesis base)'
 license='Apache-2.0'
@@ -44,4 +47,6 @@ recipe_build() {
 recipe_install() {
 	make -C "$SRC" DESTDIR="$PKGDEST" install_sw install_ssldirs
 	find "$PKGDEST" -name '*.la' -delete
+	# Private-key directory: root-only listing.
+	install -d -m 0700 "$PKGDEST/etc/ssl/private"
 }

@@ -39,6 +39,8 @@ recipe_build()
 {
 	mkdir -p "$BUILDDIR" && cd "$BUILDDIR"
 	"$SRC/configure" --prefix=/usr \
+		--sysconfdir=/etc \
+		--localstatedir=/var \
 		--with-openssl --with-libxml --with-readline --with-zlib \
 		--with-lz4 --with-icu \
 		--without-ldap --without-pam --without-systemd --without-selinux \

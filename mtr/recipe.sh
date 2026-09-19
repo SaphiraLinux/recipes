@@ -23,7 +23,7 @@ makedepends="
 recipe_build()
 {
 	cd "$SRC"
-	./configure --prefix=/usr --without-gtk
+	./configure --prefix=/usr --sysconfdir=/etc --without-gtk --localstatedir=/var
 	make
 }
 

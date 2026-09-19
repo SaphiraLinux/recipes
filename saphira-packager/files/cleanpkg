@@ -10,7 +10,14 @@ die()
 	exit 1
 }
 
-[ "$#" -ge 1 ] || die "usage: $0 PACKAGE..."
+[ "$#" -ge 1 ] || die "usage: $0 [--unmarked] PACKAGE..."
+
+unmarked=0
+if [ "${1-}" = "--unmarked" ]; then
+	unmarked=1
+	shift
+	[ "$#" -ge 1 ] || die "usage: $0 [--unmarked] PACKAGE..."
+fi
 
 kill_recorded_holder()
 {
@@ -63,6 +70,27 @@ wait_overlay_gone()
 	die "overlay for $1 is still mounted; refusing to remove the workspace"
 }
 
+workspace_holder_live()
+{
+	# Liveness probe WITHOUT killing: true only when the recorded holder
+	# pid is alive AND its cmdline still carries the holder marker for
+	# exactly this workspace. A dead pid, an unreadable cmdline, or a
+	# recycled pid (marker mismatch) all prove "not live".
+	record=$1/overlay-holder.json
+	[ -f "$record" ] && [ ! -L "$record" ] || return 1
+	pid=$(sed -n 's/.*"pid":\([0-9]*\).*/\1/p' "$record")
+	case $pid in
+		''|*[!0-9]*) return 1 ;;
+	esac
+	[ "$pid" -gt 1 ] || return 1
+	[ -r "/proc/$pid/cmdline" ] || return 1
+	cmdline=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null) 2>/dev/null || return 1
+	case $cmdline in
+		*saphira-overlay-holder*"$1"*) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
 for PACKAGE do
 	case $PACKAGE in
 		''|*[!A-Za-z0-9._+-]*) die "invalid package name: $PACKAGE" ;;
@@ -74,6 +102,24 @@ for PACKAGE do
 	esac
 	[ -e "$workspace" ] || [ -L "$workspace" ] || continue
 	[ -d "$workspace" ] && [ ! -L "$workspace" ] || die "workspace is not a real directory: $workspace"
+	if [ "$unmarked" -eq 1 ]; then
+		# Explicit unmarked removal (aborted/killed workspaces that never
+		# earned a FAILED marker). Marked workspaces stay on the default
+		# path; live workspaces are never touched.
+		marker=$workspace/FAILED
+		if [ -f "$marker" ] && [ ! -L "$marker" ] && [ "$(cat "$marker")" = saphira-buildpkg-failed/v1 ]; then
+			die "workspace is marked FAILED; use plain cleanpkg without --unmarked: $workspace"
+		fi
+		if workspace_holder_live "$workspace"; then
+			die "workspace appears live (holder running); refusing --unmarked removal: $workspace"
+		fi
+		kill_recorded_holder "$workspace"
+		wait_overlay_gone "$workspace/upper"
+		chmod -R u+rwX -- "$workspace" 2>/dev/null || true
+		rm -rf -- "$workspace"
+		printf 'cleanpkg: removed unmarked workspace %s\n' "$workspace"
+		continue
+	fi
 	marker=$workspace/FAILED
 	[ -f "$marker" ] && [ ! -L "$marker" ] || die "refusing unmarked workspace: $workspace"
 	[ "$(cat "$marker")" = saphira-buildpkg-failed/v1 ] || die "FAILED marker is not trusted: $marker"

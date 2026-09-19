@@ -3,9 +3,9 @@
 description="ClamAV virus signature updater (freshclam)"
 
 command="/usr/bin/freshclam"
-command_args="--daemon --pid=/run/clamav/freshclam.pid"
+command_args="--daemon --pid=/var/run/clamav/freshclam.pid"
 command_background="yes"
-pidfile="/run/clamav/freshclam.pid"
+pidfile="/var/run/clamav/freshclam.pid"
 command_user="clamav:clamav"
 
 depend()
@@ -15,6 +15,9 @@ depend()
 
 start_pre()
 {
-	checkpath -d -o clamav:clamav -m 0750 /run/clamav /var/log/clamav
+	checkpath -d -o clamav:clamav -m 0750 /var/run/clamav /var/log/clamav
 	checkpath -d -o clamav:clamav -m 0755 /var/lib/clamav
+	# Stale pid from an unclean shutdown blocks restart; start_pre
+	# runs only when OpenRC is about to start the daemon.
+	rm -f /var/run/clamav/freshclam.pid
 }

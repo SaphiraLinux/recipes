@@ -7,7 +7,10 @@ pkgver=261.2
 # files/sysusers-static-ids.patch pins oom/coredump, post-install runs
 # systemd-sysusers. Legacy sidecar removed with the census (a lone
 # sidecar is incoherent); stale dynamic IDs need manual userdel.
-pkgrel=9
+pkgrel=11
+# r10: split-/run patch (PID 1, tmpfiles, D-Bus API and taint no
+# longer rewrite/reject /var/run; var.conf alias line removed).
+# Payload change, revision bumps.
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="System and service manager"
 license="LGPL-2.1-or-later"
@@ -71,6 +74,14 @@ recipe_build()
 	# knob, so their fixed IDs arrive via patch (fails closed on
 	# upstream drift); the five templated ones pin below.
 	patch -d "$SRC" -Np1 -i "$RECIPE_DIR/files/sysusers-static-ids.patch"
+	# Split-/run layout: upstream rewrites /var/run to /run in unit
+	# parsing (Listen*, PIDFile), transient-unit properties, and
+	# tmpfiles entries, taints non-symlink /var/run, and recreates
+	# the alias via tmpfiles.d/var.conf. Saphira keeps both real:
+	# the patch neuters the rewrites, drops the taint and the alias
+	# line, touching no genuine systemd-owned /run path (fails
+	# closed on upstream drift like the IDs patch).
+	patch -d "$SRC" -Np1 -i "$RECIPE_DIR/files/saphira-split-run.patch"
 	meson setup "$BUILDDIR" "$SRC" \
 		--prefix=/usr \
 		--sysconfdir=/etc \

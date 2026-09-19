@@ -1,7 +1,10 @@
 #!/bin/sh
 pkgname=rpcbind
 pkgver=1.2.9
-pkgrel=1
+pkgrel=2
+# r2: state dir + lock /run/* -> /var/run/* (statedir flag + source
+# patch for the hardcoded lock); initd/unit wired into payload (were
+# dead files); fhs.d migration. Payload change, revision bumps.
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="Portmap replacement for ONC RPC (required for NFSv3 and other RPC services)"
 license="BSD-3-Clause"
@@ -37,7 +40,13 @@ recipe_build()
 	# errors out. The house unit is packaged instead (files/rpcbind.service).
 	mkdir -p "$SRC/sys"
 	cp "$RECIPE_DIR/files/queue-compat/sys/queue.h" "$SRC/sys/queue.h"
+	# Saphira split-/run layout: the lock file is hardcoded upstream
+	# with no knob (only statedir is configurable).
+	patch -d "$SRC" -Np1 -i "$RECIPE_DIR/files/rpcbind-run-lock.patch"
 	./configure --prefix=/usr --sbindir=/usr/sbin \
+		--sysconfdir=/etc \
+		--localstatedir=/var \
+		--with-statedir=/var/run/rpcbind \
 		--with-systemdsystemunitdir=no
 	make -j${JOBS:-$(nproc)}
 }
@@ -45,4 +54,16 @@ recipe_build()
 recipe_install()
 {
 	make DESTDIR="$PKGDEST" install
+	# Dual-format service package (both inits ship unconditionally):
+	# the house initd/unit existed in files/ but were never
+	# installed - wired up here so the corrected paths take effect.
+	install -D -m 0755 "$RECIPE_DIR/files/rpcbind.initd" \
+		"$PKGDEST/etc/init.d/rpcbind"
+	install -D -m 0644 "$RECIPE_DIR/files/rpcbind.service" \
+		"$PKGDEST/usr/lib/systemd/system/rpcbind.service"
+	# FHS migration declaration (hotfix/var-packaging-bug-var-run-isnot-run):
+	# root-run suite (no accounts.d identity); makepkg runs
+	# ensure-fhs on install/upgrade.
+	install -D -m 0644 "$RECIPE_DIR/files/fhs.d/rpcbind" \
+		"$PKGDEST/usr/share/saphira/fhs.d/rpcbind"
 }

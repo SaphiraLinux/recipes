@@ -44,6 +44,8 @@ recipe_build()
 {
 	mkdir -p "$BUILDDIR" && cd "$BUILDDIR"
 	"$SRC/configure" --prefix=/usr \
+		--sysconfdir=/etc \
+		--localstatedir=/var \
 		--with-ivykis=internal --with-jsonc=yes --enable-json \
 		--enable-http --enable-geoip2 --enable-linux-caps \
 		--enable-slog --enable-python --with-python=3 \

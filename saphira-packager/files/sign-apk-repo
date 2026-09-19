@@ -216,7 +216,9 @@ for raw in sys.argv[2:]:
                 raise SystemExit(f"staged filename does not match artifact name: {filename}")
             version = filename[len(name) + 1:-len(".apk")]
             accounts = artifact.get("accounts", {"users": [], "groups": [], "dirs": []})
-            entry = {"name": name, "version": version, "accounts": accounts}
+            fhs = artifact.get("fhs", {"dirs": [], "replaces": [], "removals": []})
+            caps = artifact.get("caps", {"caps": []})
+            entry = {"name": name, "version": version, "accounts": accounts, "fhs": fhs, "caps": caps}
             if filename in merged and merged[filename] != entry:
                 raise SystemExit(f"conflicting staged receipts for filename: {filename}")
             merged[filename] = entry

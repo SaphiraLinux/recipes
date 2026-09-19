@@ -7,10 +7,15 @@ Type=simple
 User=mysql
 Group=mysql
 LimitNOFILE=65536
-ExecStartPre=/usr/bin/install -d -m 0750 -o mysql -g mysql /run/mysqld /var/lib/mysql /var/log/mysql
-ExecStartPre=/bin/rm -f /run/mysqld/mariadbd.pid /run/mysqld/openrc-mariadb.pid
+# No privileged directory repair here: /var/run/mysqld and
+# /var/log/mysql are created with mysql ownership by tmpfiles.d, and
+# /var/lib/mysql converges via ensure-identity. The stale pid/socket
+# cleanup below runs as mysql against a mysql-owned dir, so no
+# privilege is needed. Both ExecStartPre lines run only when the
+# service is (re)starting, never against a live server.
+ExecStartPre=/bin/rm -f /var/run/mysqld/mariadbd.pid /var/run/mysqld/openrc-mariadb.pid /var/run/mysqld/mysqld.sock
 ExecStartPre=/bin/sh -c 'test -d /var/lib/mysql/mysql || /usr/bin/mariadb-install-db --user=mysql --basedir=/usr --datadir=/var/lib/mysql'
-ExecStart=/usr/sbin/mariadbd --defaults-file=/etc/my.cnf --datadir=/var/lib/mysql --pid-file=/run/mysqld/mariadbd.pid
+ExecStart=/usr/sbin/mariadbd --defaults-file=/etc/my.cnf --datadir=/var/lib/mysql --pid-file=/var/run/mysqld/mariadbd.pid
 
 [Install]
 WantedBy=multi-user.target

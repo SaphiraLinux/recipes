@@ -40,7 +40,7 @@ recipe_build()
 	# --disable-mysql: this package targets the SQLite backend; without
 	# the switch upstream's main.h unconditionally includes
 	# <mysql/mysql.h> and MySQL support is compiled in.
-	./configure --prefix=/usr --sysconfdir=/etc --disable-mysql
+	./configure --prefix=/usr --sysconfdir=/etc --disable-mysql --localstatedir=/var
 	make -j${JOBS:-$(nproc)}
 }
 

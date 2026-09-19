@@ -35,6 +35,8 @@ recipe_build()
 {
 	mkdir -p "$BUILDDIR" && cd "$BUILDDIR"
 	"$SRC/configure" --prefix=/usr \
+		--sysconfdir=/etc \
+		--localstatedir=/var \
 		--with-openssl --with-libxml --with-zlib \
 		--without-icu --without-ldap --without-pam --without-systemd \
 		--without-selinux --without-llvm --without-python --without-perl \
@@ -47,6 +49,12 @@ recipe_install()
 {
 	make -C "$BUILDDIR/src/interfaces/libpq" DESTDIR="$PKGDEST" install
 	make -C "$BUILDDIR/src/bin/pg_config" DESTDIR="$PKGDEST" install
+	# libpq-fe.h includes "postgres_ext.h" (same directory): without
+	# this sibling, libpq's own public header is unusable and
+	# consumers (php85 pdo_pgsql) fail. It is a static source header
+	# from this same tree, not server build output.
+	install -D -m 0644 "$SRC/src/include/postgres_ext.h" \
+		"$PKGDEST/usr/include/postgres_ext.h"
 	rm -rf "$PKGDEST/usr/share/locale"
 	install -D -m 0644 "$SRC/COPYRIGHT" \
 		"$PKGDEST/usr/share/licenses/libpq/COPYRIGHT"

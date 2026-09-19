@@ -1,0 +1,19 @@
+# mariadb-server FHS migration: runtime /run/mysqld -> /var/run/mysqld.
+#
+# Stale-state policy (/var/run is persistent by design, never wiped):
+# - PID files (both the server pid and the OpenRC supervisor pid)
+#   and the unix socket are cleared at (re)start in both inits, which
+#   run only when the service is starting, never against a live
+#   server. The server recreates all three on start.
+# - New /var/run/mysqld: converged here on upgrade (mysql:mysql
+#   0750); created by tmpfiles.d (systemd) and checkpath (OpenRC).
+# - /var/log/mysql: package-owned log dir, created by tmpfiles.d /
+#   checkpath with mysql ownership (this retires the old privileged
+#   ExecStartPre directory repair in the systemd unit).
+# - /var/lib/mysql: persistent state, converges via ensure-identity
+#   (accounts.d dir stanza) - untouched by this fragment.
+# - Old /run/mysqld: volatile residue on tmpfs. Removed once empty;
+#   left in place and reported while the old server runs.
+
+dir /var/run/mysqld 0750 mysql mysql
+rmdir-if-empty /run/mysqld

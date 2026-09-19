@@ -1,0 +1,4 @@
+# Saphira defaults for the upstream slapd.service unit
+# (EnvironmentFile= referenced by the unit; upstream ships none).
+SLAPD_URLS="ldap:/// ldapi:///"
+SLAPD_OPTIONS=""

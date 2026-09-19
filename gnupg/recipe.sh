@@ -17,6 +17,8 @@ recipe_build() {
 	cd "$SRC"
 	echo "$gnupg_sha256  $RECIPE_DIR/files/gnupg-2.4.9.tar.bz2" | sha256sum -c -
 	./configure --prefix=/usr --disable-nls --disable-ldap \
+		--sysconfdir=/etc \
+		--localstatedir=/var \
 		--disable-gnutls --enable-symcryptrun
 	make -j${JOBS:-$(nproc)}
 }

@@ -29,6 +29,9 @@ makedepends="
 
 recipe_build()
 {
+	# layout-exception: custom configure script exits nonzero on any
+	# unknown option (verified); it defines no localstatedir concept
+	# and fio installs no state. GNU dir flags must stay off this line.
 	./configure --prefix=/usr
 	make -j${JOBS:-$(nproc)}
 }

@@ -1,0 +1,17 @@
+# openssh FHS migration: pid dir /run -> /var/run/sshd.
+#
+# Stale-state policy (/var/run is persistent by design, never wiped):
+# - sshd runs foreground (-D) under supervise-daemon/systemd, which
+#   track the process itself, not the pidfile. A new daemon
+#   overwrites /var/run/sshd/sshd.pid at start; nothing validates
+#   or deletes the old file.
+# - Old residue is the FLAT file /run/sshd.pid on tmpfs: reboot-
+#   cleared, and unread by anything once the compiled default moves.
+#   No directory stanza can or should remove a file, so no removal
+#   is declared: document-and-leave is the correct convergence.
+# - No ssh-unix-local/socket units ship in this tree (no generator
+#   or socket unit installed by the recipe), so there is no second
+#   path to migrate. If one is ever shipped, it belongs under
+#   /var/run/ssh-unix-local/ by the same invariant.
+
+dir /var/run/sshd 0755 root root

@@ -14,6 +14,7 @@ depend()
 
 start_pre()
 {
+	checkpath -d -m 0755 /var/run/sshd
 	ebegin "Checking sshd configuration"
 	/usr/sbin/sshd -t
 }

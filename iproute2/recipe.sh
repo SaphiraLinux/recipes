@@ -16,6 +16,9 @@ recipe_build() {
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$RECIPE_DIR/files/iproute2-7.1.0.tar.xz"
 	cd "$SRC"
 	echo "$iproute2_sha256  $RECIPE_DIR/files/iproute2-7.1.0.tar.xz" | sha256sum -c -
+	# layout-exception: iproute2's configure only probes libbpf/iptables
+	# support; it takes no prefix/sysconfdir/statedir options and the
+	# package Makefile carries Saphira's explicit install paths.
 	./configure --libbpf-force=off
 	make -j${JOBS:-$(nproc)}
 }

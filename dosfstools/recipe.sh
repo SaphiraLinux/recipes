@@ -16,7 +16,7 @@ recipe_build() {
 	cd "$SRC"
 	echo "$dosfstools_sha256  $RECIPE_DIR/files/dosfstools-4.2.tar.gz" | sha256sum -c -
 	# release tarball ships pre-generated configure
-	./configure --prefix=/usr --disable-static --enable-compat-symlinks
+	./configure --prefix=/usr --sysconfdir=/etc --disable-static --enable-compat-symlinks --localstatedir=/var
 	make -j${JOBS:-$(nproc)}
 }
 recipe_install() {

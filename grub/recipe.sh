@@ -47,6 +47,7 @@ grub_build_platform()
 	AWK=/usr/bin/gawk "$SRC/configure" \
 		--prefix=/usr \
 		--sysconfdir=/etc \
+		--localstatedir=/var \
 		--with-platform=$platform \
 		--with-arch=$arch \
 		--disable-werror \

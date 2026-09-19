@@ -21,6 +21,8 @@ recipe_build() {
 	# via kernel headers is available but glib/gio notifications are
 	# pulled separately), no tree-sitter (not in the tree), no lcms2.
 	./configure --prefix=/usr --without-x --without-sound \
+		--sysconfdir=/etc \
+		--localstatedir=/var \
 		--without-file-notification --without-tree-sitter \
 		--without-javascript --with-gameuser=root \
 		--with-gnutls=ifavailable \

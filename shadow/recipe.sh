@@ -18,6 +18,7 @@ recipe_build() {
 	echo "$shadow_sha256  $RECIPE_DIR/files/shadow-4.17.3.tar.gz" | sha256sum -c -
 	# official release tarball ships pre-generated configure
 	./configure --prefix=/usr --sysconfdir=/etc --disable-static \
+		--localstatedir=/var \
 		--without-libpam --without-selinux \
 		--without-audit --without-subordinate-ids \
 		--without-btrfs --disable-nls \

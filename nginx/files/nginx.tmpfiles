@@ -1,2 +1,4 @@
-# tmpfiles.d entry for the nginx service; /run is a fresh tmpfs every boot.
-d /run/nginx 0755 nginx nginx -
+# tmpfiles.d entry for the nginx service; /var/run is persistent by
+# design (never wiped at boot), so this creates the runtime dir with
+# the service identity on first boot after install.
+d /var/run/nginx 0755 nginx nginx -

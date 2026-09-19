@@ -107,6 +107,8 @@ recipe_build()
 		--host=x86_64-akadata-linux-musl \
 		--target=x86_64-akadata-linux-musl \
 		--prefix=/usr \
+		--sysconfdir=/etc \
+		--localstatedir=/var \
 		--with-sysroot=/ \
 		--with-toolexeclibdir=/usr/lib \
 		--with-native-system-header-dir=/usr/include \

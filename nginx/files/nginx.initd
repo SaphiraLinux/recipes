@@ -14,7 +14,7 @@ depend()
 
 start_pre()
 {
-	checkpath -d -o nginx:nginx -m 0755 /run/nginx /var/log/nginx
+	checkpath -d -o nginx:nginx -m 0755 /var/run/nginx /var/log/nginx
 	ebegin "Checking nginx configuration"
 	/usr/sbin/nginx -t
 }

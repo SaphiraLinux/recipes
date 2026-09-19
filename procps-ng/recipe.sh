@@ -20,6 +20,8 @@ recipe_build() {
 	# watch.c uses bool/true without stdbool.h under gcc-16/C23-era headers
 	CPPFLAGS="${CPPFLAGS-} -include stdbool.h" \
 	./configure --prefix=/usr --disable-static --disable-kill \
+		--sysconfdir=/etc \
+		--localstatedir=/var \
 		--enable-watch8bit --without-systemd --without-systemdsystemunitdir
 	make -j${JOBS:-$(nproc)}
 }

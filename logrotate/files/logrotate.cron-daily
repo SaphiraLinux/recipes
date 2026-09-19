@@ -1,0 +1,12 @@
+#!/bin/sh
+# Daily logrotate run for cronie/anacron via /etc/cron.daily.
+# Mirrors upstream's logrotate.cron example; logger is optional.
+
+/usr/sbin/logrotate /etc/logrotate.conf
+EXITVALUE=$?
+if [ $EXITVALUE != 0 ]; then
+	if command -v logger >/dev/null 2>&1; then
+		/usr/bin/logger -t logrotate "ALERT exited abnormally with [$EXITVALUE]"
+	fi
+fi
+exit $EXITVALUE

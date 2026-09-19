@@ -16,7 +16,7 @@ recipe_build() {
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$RECIPE_DIR/files/libpcap-1.10.6.tar.gz"
 	cd "$SRC"
 	echo "$libpcap_sha256  $RECIPE_DIR/files/libpcap-1.10.6.tar.gz" | sha256sum -c -
-	./configure --prefix=/usr --disable-static --disable-dbus --without-libnl --disable-rdma
+	./configure --prefix=/usr --sysconfdir=/etc --disable-static --disable-dbus --without-libnl --disable-rdma --localstatedir=/var
 	make -j${JOBS:-$(nproc)}
 }
 recipe_install() {

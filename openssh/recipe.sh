@@ -2,7 +2,7 @@
 
 pkgname=openssh
 pkgver=10.3_p1
-pkgrel=7
+pkgrel=8
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="OpenBSD Secure Shell server and client"
 license="BSD-2-Clause"
@@ -35,15 +35,17 @@ subpackages="openssh-doc"
 recipe_build()
 {
 	# Preserve the proven Saphira v0 openssh build decisions: separate
-	# libexecdir, /var/empty privilege-separation directory, pid in /run,
-	# no PAM/selinux/rpath, no strip phase.
+	# libexecdir, /var/empty privilege-separation directory, pid in
+	# /var/run/sshd (r8: split-/run invariant, was /run), no
+	# PAM/selinux/rpath, no strip phase.
 	./configure \
 		--prefix=/usr \
 		--sysconfdir=/etc/ssh \
+		--localstatedir=/var \
 		--libexecdir=/usr/lib/ssh \
 		--with-privsep-user=sshd \
 		--with-privsep-path=/var/empty \
-		--with-pid-dir=/run \
+		--with-pid-dir=/var/run/sshd \
 		--without-pam \
 		--without-selinux \
 		--without-rpath \
@@ -65,6 +67,13 @@ recipe_install()
 	install -m 0644 "$RECIPE_DIR/files/sshd.service" \
 		"$PKGDEST/usr/lib/systemd/system/sshd.service"
 	find "$PKGDEST/etc/ssh" -type f -name 'ssh_host_*' -delete
+	# FHS migration declaration (hotfix/var-packaging-bug-var-run-isnot-run):
+	# sshd starts as root, so the runtime dir is root-owned; makepkg
+	# runs ensure-fhs on install/upgrade (no accounts.d ordering need
+	# beyond the privsep identity, which is unchanged).
+	# r8: pid dir /run -> /var/run/sshd (payload change, revision bumps).
+	install -D -m 0644 "$RECIPE_DIR/files/fhs.d/openssh" \
+		"$PKGDEST/usr/share/saphira/fhs.d/openssh"
 	# Runtime identity declaration: sshd:101 required by privilege
 	# separation. makepkg generates the install scripts from this
 	# fragment; the package creates its identity at install time.

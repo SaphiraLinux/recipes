@@ -143,8 +143,14 @@ The Egg hatches.
   is never reused for execution: it moves aside to
   `PACKAGE.buildpkg.stale-<timestamp>` with logs intact while a fresh workspace
   builds from the current base. Same-generation retries keep the marker
-  lifecycle. Never delete, bless, or overwrite an unmarked workspace — use
-  `cleanpkg` or move it aside visibly for diagnosis.
+  lifecycle. A pre-build refusal (resolvepkg/plan validation before any
+  build step begins) is not a failed build: the workspace is removed
+  completely and no FAILED marker is written. A successful build removes
+  its workspace and all `PACKAGE.buildpkg.stale-*` siblings; a genuine
+  failure caps stale siblings at the newest one. Never delete, bless, or
+  overwrite an unmarked workspace — use `cleanpkg` (or `cleanpkg
+  --unmarked` for dead unmarked workspaces after proving no live holder)
+  or move it aside visibly for diagnosis.
 
 ## Bootstrap inputs (one thing, not two)
 
@@ -237,6 +243,9 @@ No CI exists. Run affected suites locally before every commit, plus `git diff --
     saphira-packager/tests/recipe-rules.sh
     saphira-packager/tests/recipe-coverage.sh
     saphira-packager/tests/cleanpkg.sh saphira-packager/files/cleanpkg
+    saphira-packager/tests/buildpkg-lifecycle.sh saphira-packager/files/buildpkg
+    SAPHIRA_TMPDIR=/build/tmp saphira-packager/tests/sync-public-mirror.sh \
+        saphira-packager/files/sync-public-mirror
     saphira-packager/tests/publication.sh saphira-packager/files/sign-apk-repo \
         saphira-packager/files/makepkg saphira-packager/files/checkpkg
     saphira-packager/tests/repo-state.sh saphira-packager/files/sign-apk-repo \

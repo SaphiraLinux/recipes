@@ -43,6 +43,8 @@ recipe_build()
 {
 	mkdir -p "$BUILDDIR" && cd "$BUILDDIR"
 	"$SRC/configure" --prefix=/usr \
+		--sysconfdir=/etc \
+		--localstatedir=/var \
 		--enable-acl --enable-xattr --with-openssl \
 		--with-lz4 --with-bz2lib --with-lzma --with-zstd \
 		--with-xml2 --without-expat --without-nettle \

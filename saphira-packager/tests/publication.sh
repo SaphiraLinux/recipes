@@ -721,6 +721,227 @@ conn = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
 row = conn.execute("SELECT status FROM reservations WHERE kind='user' AND name='acctuser'").fetchone()
 assert row is not None and row[0] == "ACTIVE", row
 PY
+# FHS migration gate: a staged fhs.d fragment publishes and registers
+# its migrated paths; a second staged package claiming the same exact
+# path refuses with an fhs collision and nothing mutates.
+mkdir -p "$stage/fhspubsvc/pkg/usr/bin" "$stage/fhspubsvc/pkg/usr/share/saphira/fhs.d"
+printf '%s\n' fhspubsvc > "$stage/fhspubsvc/pkg/usr/bin/fhspubsvc"
+printf '%s\n' 'dir /var/run/fhspubsvc 0755 root root' 'rmdir-if-empty /run/fhspubsvc' > "$stage/fhspubsvc/pkg/usr/share/saphira/fhs.d/fhspubsvc"
+printf '%s\n' '{"arch":"x86_64","build_time":12,"license":"MIT","name":"fhspubsvc","origin":"fhspubsvc","outputs":[{"dependencies":[],"description":"fhspubsvc","name":"fhspubsvc","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r1"}' > "$stage/fhspubsvc/manifest.json"
+SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
+SAPHIRA_BUILD_ROOT=$stage SAPHIRA_INCOMING_DIR=$artifacts \
+SAPHIRA_PACKAGE_TMP=$test_root/makepkg-tmp SAPHIRA_FAKEROOT_BOOTSTRAP=1 \
+SAPHIRA_BOOTSTRAP_TARGET=fakeroot "$makepkg" fhspubsvc >/dev/null
+fhspub=$incoming/fhspub-ready
+mkdir "$fhspub"
+cp "$artifacts/x86_64/fhspubsvc-1-r1.apk" "$fhspub/"
+printf '%s\n' fhspubsvc > "$fhspub/target"
+printf '%s\n' '{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}' > "$fhspub/package-seed.json"
+fhssha=$(sha256sum "$fhspub/fhspubsvc-1-r1.apk" | awk '{ print $1 }')
+printf '%s\n' '{"schema":"saphira-build-artifacts/v1","target":"fhspubsvc","constructors":[{"constructor":"makepkg","producer":"fhspubsvc","artifacts":[{"name":"fhspubsvc","artifact":"fhspubsvc-1-r1.apk","sha256":"'"$fhssha"'","backend":"userns-maproot","accounts":{"users":[],"groups":[],"dirs":[],"files":[]},"fhs":{"dirs":[{"path":"/var/run/fhspubsvc","mode":"0755","owner":"root","group":"root"}],"replaces":[],"removals":[{"op":"rmdir-if-empty","path":"/run/fhspubsvc"}]}}]}],"package_seed":{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}}' > "$fhspub/artifact-manifest.json"
+(CDPATH= cd -- "$fhspub" && sha256sum fhspubsvc-1-r1.apk > manifest.sha256)
+SAPHIRA_ACCOUNTS_TSV=$test_root/accounts.tsv run_signer > "$test_root/fhspub.out" 2> "$test_root/fhspub.err"
+test -f "$repo/fhspubsvc-1-r1.apk"
+# Same path as both dir and replace-symlink-dir (the baselayout
+# global-fragment shape) publishes cleanly: ownership is per exact
+# path, so the ledger keeps one row, never a UNIQUE violation.
+mkdir -p "$stage/fhsdual/pkg/usr/bin" "$stage/fhsdual/pkg/usr/share/saphira/fhs.d"
+printf '%s\n' fhsdual > "$stage/fhsdual/pkg/usr/bin/fhsdual"
+printf '%s\n' 'dir /var/run/fhsdual 0755 root root' 'replace-symlink-dir /var/run/fhsdual ../run/fhsdual 0755 root root' > "$stage/fhsdual/pkg/usr/share/saphira/fhs.d/fhsdual"
+printf '%s\n' '{"arch":"x86_64","build_time":18,"license":"MIT","name":"fhsdual","origin":"fhsdual","outputs":[{"dependencies":[],"description":"fhsdual","name":"fhsdual","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://www.gnu.org/software/make/","version":"1-r1"}' > "$stage/fhsdual/manifest.json"
+SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
+SAPHIRA_BUILD_ROOT=$stage SAPHIRA_INCOMING_DIR=$artifacts \
+SAPHIRA_PACKAGE_TMP=$test_root/makepkg-tmp SAPHIRA_FAKEROOT_BOOTSTRAP=1 \
+SAPHIRA_BOOTSTRAP_TARGET=fakeroot "$makepkg" fhsdual >/dev/null
+dualpub=$incoming/dualpub-ready
+mkdir "$dualpub"
+cp "$artifacts/x86_64/fhsdual-1-r1.apk" "$dualpub/"
+printf '%s\n' fhsdual > "$dualpub/target"
+printf '%s\n' '{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}' > "$dualpub/package-seed.json"
+dualsha=$(sha256sum "$dualpub/fhsdual-1-r1.apk" | awk '{ print $1 }')
+printf '%s\n' '{"schema":"saphira-build-artifacts/v1","target":"fhsdual","constructors":[{"constructor":"makepkg","producer":"fhsdual","artifacts":[{"name":"fhsdual","artifact":"fhsdual-1-r1.apk","sha256":"'"$dualsha"'","backend":"userns-maproot","accounts":{"users":[],"groups":[],"dirs":[],"files":[]},"fhs":{"dirs":[{"path":"/var/run/fhsdual","mode":"0755","owner":"root","group":"root"}],"replaces":[{"linkpath":"/var/run/fhsdual","target":"../run/fhsdual","mode":"0755","owner":"root","group":"root"}],"removals":[]}}]}],"package_seed":{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}}' > "$dualpub/artifact-manifest.json"
+(CDPATH= cd -- "$dualpub" && sha256sum fhsdual-1-r1.apk > manifest.sha256)
+SAPHIRA_ACCOUNTS_TSV=$test_root/accounts.tsv run_signer > "$test_root/dualpub.out" 2> "$test_root/dualpub.err"
+test -f "$repo/fhsdual-1-r1.apk"
+python3 - "$repo/repository.db" <<'PY'
+import sqlite3
+import sys
+conn = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+rows = conn.execute("SELECT path, COUNT(*) FROM fhs_paths WHERE package_id=(SELECT package_id FROM packages WHERE name='fhsdual' AND version='1-r1') GROUP BY path").fetchall()
+assert rows == [("/var/run/fhsdual", 1)], rows
+PY
+printf '%s\n' 'fhs dual-claim gate: ok (dir+replace same path keeps one row)'
+mkdir -p "$stage/fhsclash/pkg/usr/bin" "$stage/fhsclash/pkg/usr/share/saphira/fhs.d"
+printf '%s\n' fhsclash > "$stage/fhsclash/pkg/usr/bin/fhsclash"
+printf '%s\n' 'dir /var/run/fhspubsvc 0750 root root' > "$stage/fhsclash/pkg/usr/share/saphira/fhs.d/fhsclash"
+printf '%s\n' '{"arch":"x86_64","build_time":13,"license":"MIT","name":"fhsclash","origin":"fhsclash","outputs":[{"dependencies":[],"description":"fhsclash","name":"fhsclash","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r1"}' > "$stage/fhsclash/manifest.json"
+SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
+SAPHIRA_BUILD_ROOT=$stage SAPHIRA_INCOMING_DIR=$artifacts \
+SAPHIRA_PACKAGE_TMP=$test_root/makepkg-tmp SAPHIRA_FAKEROOT_BOOTSTRAP=1 \
+SAPHIRA_BOOTSTRAP_TARGET=fakeroot "$makepkg" fhsclash >/dev/null
+clashpub=$incoming/clashpub-ready
+mkdir "$clashpub"
+cp "$artifacts/x86_64/fhsclash-1-r1.apk" "$clashpub/"
+printf '%s\n' fhsclash > "$clashpub/target"
+printf '%s\n' '{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}' > "$clashpub/package-seed.json"
+clashsha=$(sha256sum "$clashpub/fhsclash-1-r1.apk" | awk '{ print $1 }')
+printf '%s\n' '{"schema":"saphira-build-artifacts/v1","target":"fhsclash","constructors":[{"constructor":"makepkg","producer":"fhsclash","artifacts":[{"name":"fhsclash","artifact":"fhsclash-1-r1.apk","sha256":"'"$clashsha"'","backend":"userns-maproot","accounts":{"users":[],"groups":[],"dirs":[],"files":[]},"fhs":{"dirs":[{"path":"/var/run/fhspubsvc","mode":"0750","owner":"root","group":"root"}],"replaces":[],"removals":[]}}]}],"package_seed":{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}}' > "$clashpub/artifact-manifest.json"
+(CDPATH= cd -- "$clashpub" && sha256sum fhsclash-1-r1.apk > manifest.sha256)
+if SAPHIRA_ACCOUNTS_TSV=$test_root/accounts.tsv run_signer > "$test_root/clashpub.out" 2> "$test_root/clashpub.err"; then
+	printf '%s\n' 'fhs exact-path collision unexpectedly published' >&2
+	exit 1
+fi
+grep 'fhs migration collision' "$test_root/clashpub.err" >/dev/null
+test ! -f "$repo/fhsclash-1-r1.apk"
+mv "$clashpub" "$clashpub.superseded-conflict"
+printf '%s\n' 'fhs migration gate: ok (publish registers paths, exact-path clash refuses)'
+
+# Native sysusers continuity: a census predecessor followed by a
+# sysusers-native successor for the same package/name/IDs keeps ONE
+# continuous ACTIVE ownership (no tombstone); dropping an identity
+# tombstones only that one; a different owner colliding fails.
+mkdir -p "$stage/natpubsvc/pkg/usr/bin" "$stage/natpubsvc/pkg/usr/share/saphira/accounts.d"
+printf '%s\n' natpubsvc > "$stage/natpubsvc/pkg/usr/bin/natpubsvc"
+printf '%s\n' 'user natown 680 natown /var/lib/natpubsvc /sbin/nologin' 'group natown 680' > "$stage/natpubsvc/pkg/usr/share/saphira/accounts.d/natpubsvc"
+printf '%s\n' '{"arch":"x86_64","build_time":14,"license":"MIT","name":"natpubsvc","origin":"natpubsvc","outputs":[{"dependencies":[],"description":"natpubsvc","name":"natpubsvc","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r0"}' > "$stage/natpubsvc/manifest.json"
+SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
+SAPHIRA_BUILD_ROOT=$stage SAPHIRA_INCOMING_DIR=$artifacts \
+SAPHIRA_PACKAGE_TMP=$test_root/makepkg-tmp SAPHIRA_FAKEROOT_BOOTSTRAP=1 \
+SAPHIRA_BOOTSTRAP_TARGET=fakeroot "$makepkg" natpubsvc >/dev/null
+natpub=$incoming/natpub-ready
+mkdir "$natpub"
+cp "$artifacts/x86_64/natpubsvc-1-r0.apk" "$natpub/"
+printf '%s\n' natpubsvc > "$natpub/target"
+printf '%s\n' '{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}' > "$natpub/package-seed.json"
+natsha=$(sha256sum "$natpub/natpubsvc-1-r0.apk" | awk '{ print $1 }')
+printf '%s\n' '{"schema":"saphira-build-artifacts/v1","target":"natpubsvc","constructors":[{"constructor":"makepkg","producer":"natpubsvc","artifacts":[{"name":"natpubsvc","artifact":"natpubsvc-1-r0.apk","sha256":"'"$natsha"'","backend":"userns-maproot","accounts":{"users":[{"name":"natown","uid":"680","primary":"natown","home":"/var/lib/natpubsvc","shell":"/sbin/nologin"}],"groups":[{"name":"natown","gid":"680"}],"dirs":[],"files":[]}}]}],"package_seed":{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}}' > "$natpub/artifact-manifest.json"
+(CDPATH= cd -- "$natpub" && sha256sum natpubsvc-1-r0.apk > manifest.sha256)
+SAPHIRA_ACCOUNTS_TSV=$test_root/accounts.tsv run_signer > "$test_root/natpub.out" 2> "$test_root/natpub.err"
+test -f "$repo/natpubsvc-1-r0.apk"
+# Successor switches mechanism (census -> sysusers-native), same IDs.
+rm -rf "$stage/natpubsvc/pkg"
+mkdir -p "$stage/natpubsvc/pkg/usr/bin" "$stage/natpubsvc/pkg/usr/share/saphira/accounts.d" "$stage/natpubsvc/pkg/usr/lib/sysusers.d"
+printf '%s\n' natpubsvc > "$stage/natpubsvc/pkg/usr/bin/natpubsvc"
+printf '%s\n' 'sysusers' > "$stage/natpubsvc/pkg/usr/share/saphira/accounts.d/natpubsvc"
+printf '%s\n' 'u! natown 680 "Nat Owner"' > "$stage/natpubsvc/pkg/usr/lib/sysusers.d/natpubsvc.conf"
+printf '%s\n' '{"arch":"x86_64","build_time":15,"license":"MIT","name":"natpubsvc","origin":"natpubsvc","outputs":[{"dependencies":[],"description":"natpubsvc","name":"natpubsvc","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r1"}' > "$stage/natpubsvc/manifest.json"
+rm -f "$stage/natpubsvc/artifact-manifest.json"
+SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
+SAPHIRA_BUILD_ROOT=$stage SAPHIRA_INCOMING_DIR=$artifacts \
+SAPHIRA_PACKAGE_TMP=$test_root/makepkg-tmp SAPHIRA_FAKEROOT_BOOTSTRAP=1 \
+SAPHIRA_BOOTSTRAP_TARGET=fakeroot "$makepkg" natpubsvc >/dev/null
+nat2pub=$incoming/nat2pub-ready
+mkdir "$nat2pub"
+cp "$artifacts/x86_64/natpubsvc-1-r1.apk" "$nat2pub/"
+printf '%s\n' natpubsvc > "$nat2pub/target"
+printf '%s\n' '{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}' > "$nat2pub/package-seed.json"
+nat2sha=$(sha256sum "$nat2pub/natpubsvc-1-r1.apk" | awk '{ print $1 }')
+printf '%s\n' '{"schema":"saphira-build-artifacts/v1","target":"natpubsvc","constructors":[{"constructor":"makepkg","producer":"natpubsvc","artifacts":[{"name":"natpubsvc","artifact":"natpubsvc-1-r1.apk","sha256":"'"$nat2sha"'","backend":"userns-maproot","accounts":{"users":[{"name":"natown","uid":"680","primary":"natown","home":"","shell":""}],"groups":[{"name":"natown","gid":"680"}],"dirs":[],"files":[],"sysusers":true}}]}],"package_seed":{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}}' > "$nat2pub/artifact-manifest.json"
+(CDPATH= cd -- "$nat2pub" && sha256sum natpubsvc-1-r1.apk > manifest.sha256)
+SAPHIRA_ACCOUNTS_TSV=$test_root/accounts.tsv run_signer > "$test_root/nat2pub.out" 2> "$test_root/nat2pub.err"
+test -f "$repo/natpubsvc-1-r1.apk"
+if grep -q 'ombstone' "$test_root/nat2pub.out" "$test_root/nat2pub.err"; then
+	printf '%s\n' 'mechanism switch tombstoned continuous ownership' >&2
+	exit 1
+fi
+python3 - "$repo/repository.db" <<'PY'
+import sqlite3
+import sys
+conn = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+row = conn.execute("SELECT numeric_id, owning_package, status FROM reservations WHERE kind='user' AND name='natown'").fetchone()
+assert row is not None and row[0] == 680 and row[1] == "natpubsvc" and row[2] == "ACTIVE", row
+row = conn.execute("SELECT numeric_id, owning_package, status FROM reservations WHERE kind='group' AND name='natown'").fetchone()
+assert row is not None and row[0] == 680 and row[1] == "natpubsvc" and row[2] == "ACTIVE", row
+PY
+printf '%s\n' 'native continuity gate: ok (census -> sysusers-native keeps ACTIVE ownership)'
+# Reactivation proof (models the live systemd r10 aftermath): force
+# the v2-owned rows to TOMBSTONED inside the hermetic test DB, then
+# republish a native successor - same package/name/IDs must flip
+# back to ACTIVE through the normal apply path, with no manual
+# ledger surgery.
+python3 - "$repo/repository.db" <<'PY'
+import sqlite3
+import sys
+conn = sqlite3.connect(sys.argv[1])
+conn.execute("UPDATE reservations SET status='TOMBSTONED', last_nvr='natpubsvc-1-r1' WHERE owning_package='natpubsvc'")
+conn.commit()
+row = conn.execute("SELECT COUNT(*) FROM reservations WHERE owning_package='natpubsvc' AND status='TOMBSTONED'").fetchone()
+assert row[0] == 2, row
+PY
+# Reactivation: v3 republishes the native declaration over the
+# force-tombstoned rows. Same package/name/IDs must flip back to
+# ACTIVE through the normal apply path (this is the live-13 proof
+# shape: tombstoned rows + native successor => ACTIVE, no surgery).
+rm -rf "$stage/natpubsvc/pkg"
+mkdir -p "$stage/natpubsvc/pkg/usr/bin" "$stage/natpubsvc/pkg/usr/share/saphira/accounts.d" "$stage/natpubsvc/pkg/usr/lib/sysusers.d"
+printf '%s\n' natpubsvc > "$stage/natpubsvc/pkg/usr/bin/natpubsvc"
+printf '%s\n' 'sysusers' > "$stage/natpubsvc/pkg/usr/share/saphira/accounts.d/natpubsvc"
+printf '%s\n' 'u! natown 680 "Nat Owner"' > "$stage/natpubsvc/pkg/usr/lib/sysusers.d/natpubsvc.conf"
+printf '%s\n' '{"arch":"x86_64","build_time":16,"license":"MIT","name":"natpubsvc","origin":"natpubsvc","outputs":[{"dependencies":[],"description":"natpubsvc","name":"natpubsvc","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r2"}' > "$stage/natpubsvc/manifest.json"
+rm -f "$stage/natpubsvc/artifact-manifest.json"
+SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
+SAPHIRA_BUILD_ROOT=$stage SAPHIRA_INCOMING_DIR=$artifacts \
+SAPHIRA_PACKAGE_TMP=$test_root/makepkg-tmp SAPHIRA_FAKEROOT_BOOTSTRAP=1 \
+SAPHIRA_BOOTSTRAP_TARGET=fakeroot "$makepkg" natpubsvc >/dev/null
+nat3pub=$incoming/nat3pub-ready
+mkdir "$nat3pub"
+cp "$artifacts/x86_64/natpubsvc-1-r2.apk" "$nat3pub/"
+printf '%s\n' natpubsvc > "$nat3pub/target"
+printf '%s\n' '{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}' > "$nat3pub/package-seed.json"
+nat3sha=$(sha256sum "$nat3pub/natpubsvc-1-r2.apk" | awk '{ print $1 }')
+printf '%s\n' '{"schema":"saphira-build-artifacts/v1","target":"natpubsvc","constructors":[{"constructor":"makepkg","producer":"natpubsvc","artifacts":[{"name":"natpubsvc","artifact":"natpubsvc-1-r2.apk","sha256":"'"$nat3sha"'","backend":"userns-maproot","accounts":{"users":[{"name":"natown","uid":"680","primary":"natown","home":"","shell":""}],"groups":[{"name":"natown","gid":"680"}],"dirs":[],"files":[],"sysusers":true}}]}],"package_seed":{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}}' > "$nat3pub/artifact-manifest.json"
+(CDPATH= cd -- "$nat3pub" && sha256sum natpubsvc-1-r2.apk > manifest.sha256)
+SAPHIRA_ACCOUNTS_TSV=$test_root/accounts.tsv run_signer > "$test_root/nat3pub.out" 2> "$test_root/nat3pub.err"
+test -f "$repo/natpubsvc-1-r2.apk"
+if grep -q 'ombstone' "$test_root/nat3pub.out" "$test_root/nat3pub.err"; then
+	printf '%s\n' 'reactivation run tombstoned continuous ownership' >&2
+	exit 1
+fi
+python3 - "$repo/repository.db" <<'PY'
+import sqlite3
+import sys
+conn = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+row = conn.execute("SELECT numeric_id, owning_package, status, last_nvr FROM reservations WHERE kind='user' AND name='natown'").fetchone()
+assert row is not None and row[0] == 680 and row[1] == "natpubsvc" and row[2] == "ACTIVE" and row[3] == "natpubsvc-1-r2", row
+row = conn.execute("SELECT numeric_id, owning_package, status, last_nvr FROM reservations WHERE kind='group' AND name='natown'").fetchone()
+assert row is not None and row[0] == 680 and row[1] == "natpubsvc" and row[2] == "ACTIVE" and row[3] == "natpubsvc-1-r2", row
+PY
+printf '%s\n' 'native reactivation gate: ok (tombstoned + same native owner => ACTIVE)'
+# Disappearance still tombstones: v4 drops the native identity
+# entirely (dynamic-only conf parses to nothing).
+rm -rf "$stage/natpubsvc/pkg"
+mkdir -p "$stage/natpubsvc/pkg/usr/bin" "$stage/natpubsvc/pkg/usr/share/saphira/accounts.d" "$stage/natpubsvc/pkg/usr/lib/sysusers.d"
+printf '%s\n' natpubsvc > "$stage/natpubsvc/pkg/usr/bin/natpubsvc"
+printf '%s\n' 'sysusers' > "$stage/natpubsvc/pkg/usr/share/saphira/accounts.d/natpubsvc"
+printf '%s\n' 'u dynuser - "Dyn"' > "$stage/natpubsvc/pkg/usr/lib/sysusers.d/natpubsvc.conf"
+printf '%s\n' '{"arch":"x86_64","build_time":17,"license":"MIT","name":"natpubsvc","origin":"natpubsvc","outputs":[{"dependencies":[],"description":"natpubsvc","name":"natpubsvc","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r3"}' > "$stage/natpubsvc/manifest.json"
+rm -f "$stage/natpubsvc/artifact-manifest.json"
+SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
+SAPHIRA_BUILD_ROOT=$stage SAPHIRA_INCOMING_DIR=$artifacts \
+SAPHIRA_PACKAGE_TMP=$test_root/makepkg-tmp SAPHIRA_FAKEROOT_BOOTSTRAP=1 \
+SAPHIRA_BOOTSTRAP_TARGET=fakeroot "$makepkg" natpubsvc >/dev/null
+nat4pub=$incoming/nat4pub-ready
+mkdir "$nat4pub"
+cp "$artifacts/x86_64/natpubsvc-1-r3.apk" "$nat4pub/"
+printf '%s\n' natpubsvc > "$nat4pub/target"
+printf '%s\n' '{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}' > "$nat4pub/package-seed.json"
+nat4sha=$(sha256sum "$nat4pub/natpubsvc-1-r3.apk" | awk '{ print $1 }')
+printf '%s\n' '{"schema":"saphira-build-artifacts/v1","target":"natpubsvc","constructors":[{"constructor":"makepkg","producer":"natpubsvc","artifacts":[{"name":"natpubsvc","artifact":"natpubsvc-1-r3.apk","sha256":"'"$nat4sha"'","backend":"userns-maproot","accounts":{"users":[],"groups":[],"dirs":[],"files":[],"sysusers":true}}]}],"package_seed":{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}}' > "$nat4pub/artifact-manifest.json"
+(CDPATH= cd -- "$nat4pub" && sha256sum natpubsvc-1-r3.apk > manifest.sha256)
+SAPHIRA_ACCOUNTS_TSV=$test_root/accounts.tsv run_signer > "$test_root/nat4pub.out" 2> "$test_root/nat4pub.err"
+test -f "$repo/natpubsvc-1-r3.apk"
+grep 'reservation tombstoned: user natown' "$test_root/nat4pub.out" >/dev/null
+grep 'reservation tombstoned: group natown' "$test_root/nat4pub.out" >/dev/null
+python3 - "$repo/repository.db" <<'PY'
+import sqlite3
+import sys
+conn = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+row = conn.execute("SELECT status FROM reservations WHERE kind='user' AND name='natown'").fetchone()
+assert row is not None and row[0] == "TOMBSTONED", row
+row = conn.execute("SELECT status FROM reservations WHERE kind='group' AND name='natown'").fetchone()
+assert row is not None and row[0] == "TOMBSTONED", row
+PY
+printf '%s\n' 'native disappearance gate: ok (dropped native identity tombstones)'
 # A staged UID collision with the registered identity refuses loudly.
 mkdir -p "$stage/acctevil/pkg/usr/bin" "$stage/acctevil/pkg/usr/share/saphira/accounts.d"
 printf '%s\n' acctevil > "$stage/acctevil/pkg/usr/bin/acctevil"
@@ -1457,6 +1678,63 @@ rows = sorted(r[0] for r in conn.execute("SELECT nvr FROM packages WHERE name='e
 assert rows == ["ems-6.0.5-r0"], rows
 PY
 printf '%s\n' 'r0 inadmissibility (live purge, broken-dep refusal, hold rejection, archive history, emscripten split, heal): OK'
+# Full audit isolates same-name generations: two published NVRs of one
+# carrier must each extract their OWN declaration. The archive keeps
+# retired generations with mutually exclusive pins, so one shared
+# install root either refuses outright or, worse, silently attributes
+# the newest payload's census to the older NVR (its fragment path
+# exists on disk, but with the wrong generation's content).
+mkdir -p "$stage/genfoo/pkg/usr/bin" "$stage/genfoo/pkg/usr/share/saphira/accounts.d"
+printf '%s\n' genfoo > "$stage/genfoo/pkg/usr/bin/genfoo"
+printf '%s\n' 'user genfoo1 690 genfoo1 /var/lib/genfoo1 /sbin/nologin' 'group genfoo1 690' > "$stage/genfoo/pkg/usr/share/saphira/accounts.d/genfoo"
+printf '%s\n' '{"arch":"x86_64","build_time":41,"license":"MIT","name":"genfoo","origin":"genfoo","outputs":[{"dependencies":[],"description":"genfoo","name":"genfoo","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r1"}' > "$stage/genfoo/manifest.json"
+SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
+SAPHIRA_BUILD_ROOT=$stage SAPHIRA_INCOMING_DIR=$artifacts \
+SAPHIRA_PACKAGE_TMP=$test_root/makepkg-tmp SAPHIRA_FAKEROOT_BOOTSTRAP=1 \
+SAPHIRA_BOOTSTRAP_TARGET=fakeroot "$makepkg" genfoo >/dev/null
+gen1pub=$incoming/gen1pub-ready
+mkdir "$gen1pub"
+cp "$artifacts/x86_64/genfoo-1-r1.apk" "$gen1pub/"
+printf '%s\n' genfoo > "$gen1pub/target"
+printf '%s\n' '{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}' > "$gen1pub/package-seed.json"
+gen1sha=$(sha256sum "$gen1pub/genfoo-1-r1.apk" | awk '{ print $1 }')
+printf '%s\n' '{"schema":"saphira-build-artifacts/v1","target":"genfoo","constructors":[{"constructor":"makepkg","producer":"genfoo","artifacts":[{"name":"genfoo","artifact":"genfoo-1-r1.apk","sha256":"'"$gen1sha"'","backend":"userns-maproot","accounts":{"users":[{"name":"genfoo1","uid":"690","primary":"genfoo1","home":"/var/lib/genfoo1","shell":"/sbin/nologin"}],"groups":[{"name":"genfoo1","gid":"690"}],"dirs":[],"files":[]}}]}],"package_seed":{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}}' > "$gen1pub/artifact-manifest.json"
+(CDPATH= cd -- "$gen1pub" && sha256sum genfoo-1-r1.apk > manifest.sha256)
+SAPHIRA_ACCOUNTS_TSV=$test_root/accounts.tsv run_signer_dual genfoo > "$test_root/gen1pub.out" 2> "$test_root/gen1pub.err"
+rm -rf "$stage/genfoo/pkg"
+mkdir -p "$stage/genfoo/pkg/usr/bin" "$stage/genfoo/pkg/usr/share/saphira/accounts.d"
+printf '%s\n' genfoo > "$stage/genfoo/pkg/usr/bin/genfoo"
+printf '%s\n' 'user genfoo2 691 genfoo2 /var/lib/genfoo2 /sbin/nologin' 'group genfoo2 691' > "$stage/genfoo/pkg/usr/share/saphira/accounts.d/genfoo"
+printf '%s\n' '{"arch":"x86_64","build_time":42,"license":"MIT","name":"genfoo","origin":"genfoo","outputs":[{"dependencies":[],"description":"genfoo","name":"genfoo","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r2"}' > "$stage/genfoo/manifest.json"
+rm -f "$stage/genfoo/artifact-manifest.json"
+SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
+SAPHIRA_BUILD_ROOT=$stage SAPHIRA_INCOMING_DIR=$artifacts \
+SAPHIRA_PACKAGE_TMP=$test_root/makepkg-tmp SAPHIRA_FAKEROOT_BOOTSTRAP=1 \
+SAPHIRA_BOOTSTRAP_TARGET=fakeroot "$makepkg" genfoo >/dev/null
+gen2pub=$incoming/gen2pub-ready
+mkdir "$gen2pub"
+cp "$artifacts/x86_64/genfoo-1-r2.apk" "$gen2pub/"
+printf '%s\n' genfoo > "$gen2pub/target"
+printf '%s\n' '{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}' > "$gen2pub/package-seed.json"
+gen2sha=$(sha256sum "$gen2pub/genfoo-1-r2.apk" | awk '{ print $1 }')
+printf '%s\n' '{"schema":"saphira-build-artifacts/v1","target":"genfoo","constructors":[{"constructor":"makepkg","producer":"genfoo","artifacts":[{"name":"genfoo","artifact":"genfoo-1-r2.apk","sha256":"'"$gen2sha"'","backend":"userns-maproot","accounts":{"users":[{"name":"genfoo2","uid":"691","primary":"genfoo2","home":"/var/lib/genfoo2","shell":"/sbin/nologin"}],"groups":[{"name":"genfoo2","gid":"691"}],"dirs":[],"files":[]}}]}],"package_seed":{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}}' > "$gen2pub/artifact-manifest.json"
+(CDPATH= cd -- "$gen2pub" && sha256sum genfoo-1-r2.apk > manifest.sha256)
+SAPHIRA_ACCOUNTS_TSV=$test_root/accounts.tsv run_signer_dual genfoo > "$test_root/gen2pub.out" 2> "$test_root/gen2pub.err"
+fixture_pkg genaudit genaudit 1-r1 usr/bin/genaudit audit ""
+stage_txn "$incoming/genaudit-ready" genaudit genaudit genaudit-1-r1.apk
+SAPHIRA_ACCOUNTS_TSV=$test_root/accounts.tsv run_signer_dual --full-audit genaudit > "$test_root/genaudit.out" 2> "$test_root/genaudit.err"
+grep 'full audit' "$test_root/genaudit.out" >/dev/null
+python3 - "$repo/repository.db" <<'PY'
+import sqlite3
+import sys
+conn = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+rows = sorted(conn.execute(
+    "SELECT p.version, u.name, u.uid FROM users u"
+    " JOIN packages p ON p.package_id = u.package_id"
+    " WHERE p.name='genfoo' ORDER BY p.version").fetchall())
+assert rows == [("1-r1", "genfoo1", 690), ("1-r2", "genfoo2", 691)], rows
+PY
+printf '%s\n' 'full-audit generation isolation gate: ok (same-name NVRs extract their own declarations)'
 
 # Heal mode: --full-audit with an empty stage reconciles indexes and
 # repository.db with disk truth after sanctioned out-of-band removal
@@ -1514,3 +1792,102 @@ rows = sorted(r[0] for r in conn.execute("SELECT nvr FROM packages WHERE name IN
 assert rows == ["healkeep-1-r1"], rows
 PY
 printf '%s\n' 'heal mode (empty-stage refusal, out-of-band removal reconciliation, no publish): OK'
+
+# Capability coherence at the publish gate: a caps-carrying package
+# publishes (receipt, payload, and gate agree); a shipped fragment
+# with an empty receipt, or a receipt declaring caps with no
+# shipped fragment, refuses with the selective integrity message
+# (a manifest lacking a caps field is never deficient on its own).
+mkdir -p "$stage/cappub/pkg/usr/bin" "$stage/cappub/pkg/usr/share/saphira/caps.d"
+printf '%s\n' cappub > "$stage/cappub/pkg/usr/bin/cappub"
+printf '%s\n' 'cap /usr/bin/cappub cap_net_bind_service+ep' > "$stage/cappub/pkg/usr/share/saphira/caps.d/cappub"
+printf '%s\n' '{"arch":"x86_64","build_time":40,"license":"MIT","name":"cappub","origin":"cappub","outputs":[{"dependencies":[],"description":"cappub","name":"cappub","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r0"}' > "$stage/cappub/manifest.json"
+SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
+SAPHIRA_BUILD_ROOT=$stage SAPHIRA_INCOMING_DIR=$artifacts \
+SAPHIRA_PACKAGE_TMP=$test_root/makepkg-tmp SAPHIRA_FAKEROOT_BOOTSTRAP=1 \
+SAPHIRA_BOOTSTRAP_TARGET=fakeroot "$makepkg" cappub >/dev/null
+# A caps-free producer for the declares-without-ships refusal.
+mkdir -p "$stage/capplain/pkg/usr/bin"
+printf '%s\n' capplain > "$stage/capplain/pkg/usr/bin/capplain"
+printf '%s\n' '{"arch":"x86_64","build_time":41,"license":"MIT","name":"capplain","origin":"capplain","outputs":[{"dependencies":[],"description":"capplain","name":"capplain","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r0"}' > "$stage/capplain/manifest.json"
+SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
+SAPHIRA_BUILD_ROOT=$stage SAPHIRA_INCOMING_DIR=$artifacts \
+SAPHIRA_PACKAGE_TMP=$test_root/makepkg-tmp SAPHIRA_FAKEROOT_BOOTSTRAP=1 \
+SAPHIRA_BOOTSTRAP_TARGET=fakeroot "$makepkg" capplain >/dev/null
+# Wrap stage receipts into ready transactions (buildpkg's promote
+# shape, minimal): real receipt, grafted-empty receipt, grafted
+# declaration without payload.
+make_ready()
+{
+	name=$1
+	version=$2
+	src=$3
+	mode=$4
+	dest=$incoming/$name-fixture-ready
+	rm -rf "$dest"
+	mkdir "$dest"
+	cp "$artifacts/x86_64/$name-$version.apk" "$dest/"
+	printf '%s\n' "$name" > "$dest/target"
+	printf '%s\n' '{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}' > "$dest/package-seed.json"
+	python3 - "$stage/$src/artifact-manifest.json" "$dest/artifact-manifest.json" "$mode" <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as stream:
+    receipt = json.load(stream)
+mode = sys.argv[3]
+artifacts = []
+for artifact in receipt["artifacts"]:
+    entry = dict(artifact)
+    entry["artifact"] = entry["artifact"][entry["artifact"].rindex("/x86_64/") + len("/x86_64/"):]
+    if mode == "strip-caps":
+        entry["caps"] = {"caps": []}
+    elif mode == "graft-caps":
+        entry["caps"] = {"caps": [{"path": "/usr/bin/capplain", "spec": "cap_net_bind_service+ep"}]}
+    artifacts.append(entry)
+manifest = {"schema": "saphira-build-artifacts/v1", "target": receipt["producer"],
+            "constructors": [{"schema": receipt["schema"], "constructor": "makepkg",
+                               "producer": receipt["producer"], "artifacts": artifacts}],
+            "package_seed": {"schema": "saphira-package-seed/v1", "generation": "test",
+                              "seed": ["test"], "resolved": []}}
+with open(sys.argv[2], "w", encoding="utf-8") as stream:
+    json.dump(manifest, stream, sort_keys=True, separators=(",", ":"))
+    stream.write("\n")
+PY
+	(CDPATH= cd -- "$dest" && sha256sum "$name-$version.apk" > manifest.sha256)
+}
+make_ready cappub 1-r0 cappub real
+run_signer cappub >/dev/null
+test -f "$repo/cappub-1-r0.apk"
+apk adbdump "$repo/cappub-1-r0.apk" | grep -q 'caps.d/cappub' >/dev/null || {
+	printf '%s\n' 'caps fragment missing after publication' >&2
+	exit 1
+}
+printf '%s\n' 'caps publication: ok (fragment, receipt, and gate agree)'
+# Second revision (still carrying the fragment) with the caps
+# declaration stripped from its receipt: unpublished NVR, so the
+# refusal comes from the coherence gate, not the filename gate or
+# the pure-rebuild auto-retire path.
+printf '%s\n' '{"arch":"x86_64","build_time":42,"license":"MIT","name":"cappub","origin":"cappub","outputs":[{"dependencies":[],"description":"cappub","name":"cappub","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r1"}' > "$stage/cappub/manifest.json"
+rm "$stage/cappub/artifact-manifest.json"
+SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
+SAPHIRA_BUILD_ROOT=$stage SAPHIRA_INCOMING_DIR=$artifacts \
+SAPHIRA_PACKAGE_TMP=$test_root/makepkg-tmp SAPHIRA_FAKEROOT_BOOTSTRAP=1 \
+SAPHIRA_BOOTSTRAP_TARGET=fakeroot "$makepkg" cappub >/dev/null
+make_ready cappub 1-r1 cappub strip-caps
+if run_signer cappub > "$test_root/capstrip.out" 2> "$test_root/capstrip.err"; then
+	printf '%s\n' 'stripped caps receipt unexpectedly published' >&2
+	exit 1
+fi
+grep 'ships a caps.d fragment but its build receipt declares nothing' "$test_root/capstrip.out" "$test_root/capstrip.err" >/dev/null
+test ! -e "$repo/cappub-1-r1.apk"
+rm -rf "$incoming/cappub-fixture-ready"
+printf '%s\n' 'caps gate refusal: ok (ships fragment, declares nothing)'
+make_ready capplain 1-r0 capplain graft-caps
+if run_signer capplain > "$test_root/capgraft.out" 2> "$test_root/capgraft.err"; then
+	printf '%s\n' 'grafted caps receipt unexpectedly published' >&2
+	exit 1
+fi
+grep 'receipt declares file capabilities but ships no caps.d fragment' "$test_root/capgraft.out" "$test_root/capgraft.err" >/dev/null
+test ! -e "$repo/capplain-1-r0.apk"
+rm -rf "$incoming/capplain-fixture-ready"
+printf '%s\n' 'caps gate refusal: ok (declares capabilities, ships no fragment)'

@@ -2,7 +2,7 @@
 
 pkgname=kea
 pkgver=3.0.2
-pkgrel=1
+pkgrel=2
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="ISC Kea DHCPv4, DHCPv6, DHCP-DDNS and control-agent servers"
 license="MPL-2.0"
@@ -46,11 +46,18 @@ recipe_build()
 	meson setup "$BUILDDIR" "$SRC" \
 		--prefix=/usr \
 		-Dlibdir=lib \
-		-Drunstatedir=run \
+		-Drunstatedir=/var/run \
 		-Dcrypto=openssl \
 		-Dkrb5=disabled -Dnetconf=disabled \
 		-Dmysql=enabled -Dpostgresql=enabled \
 		-Dtests=disabled -Dfuzz=disabled
+	# r2: -Drunstatedir was the relative "run" (meson prefix-joins it
+	# to /usr/run/kea for PIDFILE_DIR and the payload empty dir),
+	# while the initds tracked flat /run/kea-*.pid - three-way
+	# disagreement, all wrong. Absolute /var/run yields
+	# /var/run/kea (pidfiles, control sockets, payload dir) and the
+	# initds now track /var/run/kea/<daemon>.pid. Payload change,
+	# revision bumps.
 	ninja -C "$BUILDDIR"
 }
 
@@ -66,4 +73,9 @@ recipe_install()
 		install -m 0644 "$RECIPE_DIR/files/$service.service" \
 			"$PKGDEST/usr/lib/systemd/system/$service.service"
 	done
+	# FHS migration declaration (hotfix/var-packaging-bug-var-run-isnot-run):
+	# root-run suite (no accounts.d identity); makepkg runs
+	# ensure-fhs on install/upgrade.
+	install -D -m 0644 "$RECIPE_DIR/files/fhs.d/kea" \
+		"$PKGDEST/usr/share/saphira/fhs.d/kea"
 }

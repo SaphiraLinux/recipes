@@ -1,0 +1,24 @@
+# kea FHS migration: runtime /run/kea* -> /var/run/kea/.
+#
+# Archaeology: -Drunstatedir was the relative "run", which meson
+# prefix-joins to /usr/run/kea (PIDFILE_DIR, payload empty dir),
+# while the initds tracked flat /run/kea-*.pid files that no build
+# ever wrote - a three-way disagreement. Absolute /var/run makes
+# pidfiles (/var/run/kea/<daemon>.pid), control sockets and the
+# payload dir agree, and the initds track the real pidfiles.
+#
+# Stale-state policy (/var/run is persistent by design, never wiped):
+# - PID files: cleared at (re)start in both inits (tracked-start
+#   only, never against a live daemon); daemons rewrite them and
+#   delete their own on clean exit.
+# - Control sockets: daemon-managed inside the rundir.
+# - New /var/run/kea: converged here on upgrade (root-owned 0755;
+#   the suite runs as root, no accounts.d identity); created by
+#   checkpath (OpenRC), ExecStartPre (systemd), and the payload.
+# - Old /run/kea: volatile residue on tmpfs. Removed once empty;
+#   left in place and reported while old daemons run. Old flat
+#   /run/kea-*.pid files were never written by any build - tmpfs
+#   orphans needing no migration.
+
+dir /var/run/kea 0755 root root
+rmdir-if-empty /run/kea

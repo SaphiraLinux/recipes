@@ -14,7 +14,7 @@ subpackages="$pkgname-dev $pkgname-doc"
 makedepends="gcc make pkgconf gawk"
 
 recipe_build() {
-	./configure --prefix=/usr --disable-nls --disable-rpath
+	./configure --prefix=/usr --sysconfdir=/etc --disable-nls --disable-rpath --localstatedir=/var
 	make -j${JOBS:-$(nproc)}
 }
 

@@ -15,7 +15,7 @@ recipe_build() {
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$RECIPE_DIR/files/which-2.25.tar.gz"
 	cd "$SRC"
 	echo "$which_sha256  $RECIPE_DIR/files/which-2.25.tar.gz" | sha256sum -c -
-	CFLAGS="${CFLAGS-} -std=gnu11" ./configure --prefix=/usr --disable-static
+	CFLAGS="${CFLAGS-} -std=gnu11" ./configure --prefix=/usr --sysconfdir=/etc --disable-static --localstatedir=/var
 	make -j${JOBS:-$(nproc)}
 }
 recipe_install() {

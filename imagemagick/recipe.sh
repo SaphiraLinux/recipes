@@ -39,6 +39,8 @@ recipe_build()
 	# jpeg/png/webp/xml/perl/Magick++ enabled (deps exist); freetype/tiff/
 	# x/lcms2/openjp2 stay off until their recipes land (BLOCKED_BY_*).
 	"$SRC/configure" --prefix=/usr --disable-static \
+		--sysconfdir=/etc \
+		--localstatedir=/var \
 		--with-modules --with-perl --with-magick-plus-plus=yes \
 		--with-jpeg=yes --with-png=yes --with-webp=yes --with-xml=yes \
 		--without-freetype --without-tiff --without-x \

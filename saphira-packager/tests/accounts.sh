@@ -454,6 +454,10 @@ printf 'messagebus:!:0:0:99999:7:::\n' >> "$RL2/etc/shadow"
 cp "$source_root/dbus/files/accounts.d/dbus" "$test_root/dbusfrag"
 cp "$source_root/dbus/files/accounts.d/dbus.legacy" "$test_root/dbusfrag.legacy"
 as_root "$RL2" "$test_root/dbusfrag" > "$test_root/16b.log" 2>&1
+# Legacy migration renumbers UID/GID only (database rows); non-ID
+# fields such as home are preserved by design (see ensure-identity
+# header + RECIPE_RULES). The fragment's /var/run/dbus home governs
+# fresh installs; a migrated row keeps its historical home.
 grep '^messagebus:x:81:81:dbus:/run/dbus:/sbin/nologin$' "$RL2/etc/passwd" >/dev/null
 grep '^messagebus:x:81:$' "$RL2/etc/group" >/dev/null
 grep 'user messagebus migrated from legacy to 81:81' "$test_root/16b.log" >/dev/null
@@ -517,5 +521,30 @@ if as_root "$RL" "$test_root/legfrag" > "$test_root/16d2.log" 2>&1; then
 fi
 grep 'never a legacy identity' "$test_root/16d2.log" >/dev/null
 
+# 17. The sysusers stanza is a caller mechanism selector, not an
+# identity declaration: every helper pass skips it (ensure still
+# converges sibling stanzas; disable treats it as a no-op), while a
+# malformed sysusers line still fails closed in both modes.
+R5=$test_root/root5
+seed_root "$R5"
+printf 'sysusers\nuser sysuser 660 sysgroup /var/lib/sysuser /sbin/nologin\ngroup sysgroup 660\n' > "$test_root/sysfrag"
+as_root "$R5" "$test_root/sysfrag" > "$test_root/17.log" 2>&1
+grep '^sysuser:x:660:660:sysuser:/var/lib/sysuser:/sbin/nologin$' "$R5/etc/passwd" >/dev/null
+grep '^sysgroup:x:660:$' "$R5/etc/group" >/dev/null
+printf 'sysusers\n' > "$test_root/sysonly"
+as_root "$R5" "$test_root/sysonly" > "$test_root/17b.log" 2>&1
+printf 'sysusers extra-fields\n' > "$test_root/sysbad"
+if as_root "$R5" "$test_root/sysbad" > "$test_root/17c.log" 2>&1; then
+	printf '%s\n' 'malformed sysusers stanza unexpectedly accepted (ensure)' >&2
+	exit 1
+fi
+grep 'sysusers takes no fields' "$test_root/17c.log" >/dev/null
+as_root "$R5" --disable "$test_root/sysonly" > "$test_root/17d.log" 2>&1
+if as_root "$R5" --disable "$test_root/sysbad" > "$test_root/17e.log" 2>&1; then
+	printf '%s\n' 'malformed sysusers stanza unexpectedly accepted (disable)' >&2
+	exit 1
+fi
+grep 'sysusers takes no fields' "$test_root/17e.log" >/dev/null
+
 [ "$host_before" = "$(sha256sum /etc/passwd /etc/group)" ]
-printf '%s\n' 'account reconciler unit tests (rootless): creation, idempotency, serialization, conflict refusal, range refusal, reserved-identity refusal, local convergence, credential refusal, disable/restore, idempotent disable, absent no-op, disable foreign retention (user/group/primary/mixed), state retention, reinstall convergence, file ownership/mode, file idempotency, file failure closure, file disable retention, fifo ownership, legacy auto-repair: OK'
+printf '%s\n' 'account reconciler unit tests (rootless): creation, idempotency, serialization, conflict refusal, range refusal, reserved-identity refusal, local convergence, credential refusal, disable/restore, idempotent disable, absent no-op, disable foreign retention (user/group/primary/mixed), state retention, reinstall convergence, file ownership/mode, file idempotency, file failure closure, file disable retention, fifo ownership, legacy auto-repair, sysusers stanza tolerance: OK'

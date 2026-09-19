@@ -7,9 +7,8 @@ After=network.target
 # Foreground per upstream (rpcbind -f); -w keeps warm-start state across
 # restarts. Upstream runs as root by default (--with-rpcuser=root).
 Type=simple
+ExecStartPre=/usr/bin/install -d -m 0755 /var/run/rpcbind
 ExecStart=/usr/sbin/rpcbind -f -w
-RuntimeDirectory=rpcbind
-RuntimeDirectoryMode=0755
 Restart=on-failure
 
 [Install]

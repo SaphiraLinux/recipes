@@ -1,0 +1,17 @@
+# openldap FHS migration: slapd runtime /run/slapd -> /var/run/slapd.
+#
+# Stale-state policy (/var/run is persistent by design, never wiped):
+# - pidfile/argsfile: overwritten by slapd at every start; stale
+#   files are never validated or deleted.
+# - ldapi socket: upstream default derives from --localstatedir
+#   (/var/run/slapd/slapd.sock); recreated by the daemon on start.
+# - New /var/run/slapd: converged here on upgrade (ldap:ldap 0755);
+#   created by checkpath (OpenRC) and the unit drop-in (systemd).
+# - Old /run/slapd: volatile residue on tmpfs. Removed once empty;
+#   left in place and reported while the old server runs.
+# - NOTED, untouched: the upstream systemd unit runs slapd without
+#   -u/-g (root) while slapd.initd drops to ldap:ldap. Identity
+#   alignment is an author decision, not part of this path move.
+
+dir /var/run/slapd 0755 ldap ldap
+rmdir-if-empty /run/slapd

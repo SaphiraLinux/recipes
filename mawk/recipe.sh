@@ -16,7 +16,7 @@ recipe_build() {
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$RECIPE_DIR/files/mawk-1.3.4-20260302.tgz"
 	cd "$SRC"
 	echo "$mawk_sha256  $RECIPE_DIR/files/mawk-1.3.4-20260302.tgz" | sha256sum -c -
-	./configure --prefix=/usr
+	./configure --prefix=/usr --sysconfdir=/etc --localstatedir=/var
 	make -j${JOBS:-$(nproc)}
 }
 recipe_install() {

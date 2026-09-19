@@ -1,0 +1,7 @@
+# tmpfiles.d entry for the ClamAV service runtime dir. Both service
+# units run unprivileged (User=clamav), so neither can create its own
+# runtime dir under /var/run (RuntimeDirectory= only covers /run):
+# tmpfiles.d owns creation with the service identity, shipped by the
+# base clamav package that also owns the identity and the dir stanza.
+# /var/run is persistent by design, never wiped at boot.
+d /var/run/clamav 0750 clamav clamav -

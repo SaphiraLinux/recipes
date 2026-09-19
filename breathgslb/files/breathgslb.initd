@@ -12,7 +12,7 @@ SERVICE_USER="breathgslb"
 SERVICE_GROUP="breathgslb"
 LOG_DIR="/var/log/breathgslb"
 LOG_FILE="$LOG_DIR/breathgslb.log"
-PID_FILE="/run/breathgslb.pid"
+PID_FILE="/var/run/breathgslb.pid"
 
 command="/usr/sbin/breathgslb"
 CONFIG_FILE="/etc/breathgslb/config.yaml"

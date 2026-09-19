@@ -23,7 +23,7 @@ recipe_build() {
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$RECIPE_DIR/files/expat-2.8.2.tar.gz"
 	cd "$SRC"
 	echo "$expat_sha256  $RECIPE_DIR/files/expat-2.8.2.tar.gz" | sha256sum -c -
-	./configure --prefix=/usr --disable-static 
+	./configure --prefix=/usr --sysconfdir=/etc --disable-static  --localstatedir=/var
 	make -j${JOBS:-$(nproc)}
 }
 recipe_install() {

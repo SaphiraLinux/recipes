@@ -2,7 +2,10 @@
 
 pkgname=saphira-maildragon
 pkgver=0.2
-pkgrel=3
+pkgrel=4
+# r4: rspamd antivirus backend socket aligned to the real clamd
+# LocalSocket (/var/run/clamav/clamd.sock - the old path was wrong
+# on both axes: dir and filename). Payload change, revision bumps.
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="mailDragon: sqlite-backed mail stack glue for Saphira (postfix/dovecot/rspamd/clamav)"
 license="BUSL-1.1"

@@ -1,0 +1,172 @@
+From saphira@vm2.uk Thu Sep 17 00:00:00 2026
+Subject: [PATCH] Saphira split-/run layout: /var/run is canonical, never rewritten
+
+Upstream systemd assumes /var/run is a legacy alias for /run and
+rewrites, canonicalises or rejects it in five places. Saphira keeps
+/run and /var/run as separate real directories (no FHS aliases), so
+unit-declared /var/run paths must reach PID 1, tmpfiles and the
+D-Bus API unchanged:
+
+- src/core/load-fragment.c: patch_var_run() (Listen*, PIDFile) neutered
+- src/core/dbus-service.c: transient PIDFile rewrite removed
+- src/tmpfiles/tmpfiles.c: patch_var_run() neutered
+- src/core/taint.c: var-run-bad taint removed (a real /var/run is correct)
+- tmpfiles.d/var.conf.in: the L /var/run -> ../run alias line removed
+
+Genuine systemd-owned /run paths are untouched: this patch only
+removes /var/run -> /run transformations, never /run itself.
+
+--- a/src/core/dbus-service.c	2026-09-17 02:34:55.627415894 +0000
++++ b/src/core/dbus-service.c	2026-09-17 02:35:03.011100319 +0000
+@@ -653,7 +653,7 @@
+ 
+         if (streq(name, "PIDFile")) {
+                 _cleanup_free_ char *n = NULL;
+-                const char *v, *e;
++                const char *v;
+ 
+                 r = sd_bus_message_read(message, "s", &v);
+                 if (r < 0)
+@@ -669,20 +669,6 @@
+                         if (!path_is_normalized(n))
+                                 return sd_bus_error_setf(reterr_error, SD_BUS_ERROR_INVALID_ARGS, "PIDFile= path '%s' is not valid", n);
+ 
+-                        e = path_startswith(n, "/var/run/");
+-                        if (e) {
+-                                char *z;
+-
+-                                z = path_join("/run", e);
+-                                if (!z)
+-                                        return log_oom();
+-
+-                                if (!UNIT_WRITE_FLAGS_NOOP(flags))
+-                                        log_unit_notice(u, "Transient unit's PIDFile= property references path below legacy directory /var/run, updating %s %s %s; please update client accordingly.",
+-                                                        n, glyph(GLYPH_ARROW_RIGHT), z);
+-
+-                                free_and_replace(n, z);
+-                        }
+                 }
+ 
+                 if (!UNIT_WRITE_FLAGS_NOOP(flags)) {
+--- a/src/core/load-fragment.c	2026-09-17 02:34:55.625256227 +0000
++++ b/src/core/load-fragment.c	2026-09-17 02:35:03.010642230 +0000
+@@ -566,26 +566,15 @@
+                 const char *lvalue,
+                 char **path) {
+ 
+-        const char *e;
+-        char *z;
+-
++        /* Saphira split-/run layout: /var/run is a real directory, not a
++         * legacy alias for /run. Unit-declared /var/run paths are canonical
++         * and must reach PID 1 unchanged: no rewrite, no notice. */
++        (void) unit;
++        (void) filename;
++        (void) line;
++        (void) lvalue;
+         assert(path);
+-
+-        e = path_startswith(*path, "/var/run/");
+-        if (!e)
+-                return 0;
+-
+-        z = path_join("/run/", e);
+-        if (!z)
+-                return log_oom();
+-
+-        log_syntax(unit, LOG_NOTICE, filename, line, 0,
+-                   "%s= references a path below legacy directory /var/run/, updating %s → %s; "
+-                   "please update the unit file accordingly.", lvalue, *path, z);
+-
+-        free_and_replace(*path, z);
+-
+-        return 1;
++        return 0;
+ }
+ 
+ int config_parse_socket_listen(
+--- a/src/core/taint.c	2026-09-17 02:34:55.631291153 +0000
++++ b/src/core/taint.c	2026-09-17 02:35:03.011920249 +0000
+@@ -40,7 +40,7 @@
+          * runtime should be tagged here. For stuff that is known during compilation, emit a warning in the
+          * configuration phase. */
+ 
+-        _cleanup_free_ char *bin = NULL, *usr_sbin = NULL, *var_run = NULL;
++        _cleanup_free_ char *bin = NULL, *usr_sbin = NULL;
+ 
+         if (readlink_malloc("/bin", &bin) < 0 || !PATH_IN_SET(bin, "usr/bin", "/usr/bin"))
+                 stage[n++] = "unmerged-usr";
+@@ -50,8 +50,9 @@
+         if (readlink_malloc("/usr/sbin", &usr_sbin) < 0 || !PATH_IN_SET(usr_sbin, "bin", "/usr/bin"))
+                 stage[n++] = "unmerged-bin";
+ 
+-        if (readlink_malloc("/var/run", &var_run) < 0 || !PATH_IN_SET(var_run, "../run", "/run"))
+-                stage[n++] = "var-run-bad";
++        /* Saphira split-/run layout: /var/run is a real directory by
++         * design, never an alias. A non-symlink /var/run is correct and
++         * must not taint. */
+ 
+         if (clock_is_localtime(NULL) > 0)
+                 stage[n++] = "local-hwclock";
+--- a/src/tmpfiles/tmpfiles.c	2026-09-17 02:34:55.629349537 +0000
++++ b/src/tmpfiles/tmpfiles.c	2026-09-17 02:35:03.011755226 +0000
+@@ -3721,42 +3721,13 @@
+ }
+ 
+ static int patch_var_run(const char *fname, unsigned line, char **path) {
+-        const char *k;
+-        char *n;
+-
++        /* Saphira split-/run layout: /var/run is a real directory, not a
++         * legacy alias for /run. tmpfiles.d entries naming /var/run paths
++         * are canonical and must be applied unchanged. */
++        (void) fname;
++        (void) line;
+         assert(path);
+         assert(*path);
+-
+-        /* Optionally rewrites lines referencing /var/run/, to use /run/ instead. Why bother? tmpfiles merges
+-         * lines in some cases and detects conflicts in others. If files/directories are specified through
+-         * two equivalent lines this is problematic as neither case will be detected. Ideally we'd detect
+-         * these cases by resolving symlinks early, but that's precisely not what we can do here as this code
+-         * very likely is running very early on, at a time where the paths in question are not available yet,
+-         * or even more importantly, our own tmpfiles rules might create the paths that are intermediary to
+-         * the listed paths. We can't really cover the generic case, but the least we can do is cover the
+-         * specific case of /var/run vs. /run, as /var/run is a legacy name for /run only, and we explicitly
+-         * document that and require that on systemd systems the former is a symlink to the latter. Moreover
+-         * files below this path are by far the primary use case for tmpfiles.d/. */
+-
+-        k = path_startswith(*path, "/var/run/");
+-        if (isempty(k)) /* Don't complain about paths other than under /var/run,
+-                         * and not about /var/run itself either. */
+-                return 0;
+-
+-        n = path_join("/run", k);
+-        if (!n)
+-                return log_oom();
+-
+-        /* Also log about this briefly. We do so at LOG_NOTICE level, as we fixed up the situation
+-         * automatically, hence there's no immediate need for action by the user. However, in the interest of
+-         * making things less confusing to the user, let's still inform the user that these snippets should
+-         * really be updated. */
+-        log_syntax(NULL, LOG_NOTICE, fname, line, 0,
+-                   "Line references path below legacy directory /var/run/, updating %s → %s; please update the tmpfiles.d/ drop-in file accordingly.",
+-                   *path, n);
+-
+-        free_and_replace(*path, n);
+-
+         return 0;
+ }
+ 
+--- a/tmpfiles.d/var.conf.in	2026-09-17 02:34:55.632959833 +0000
++++ b/tmpfiles.d/var.conf.in	2026-09-17 02:35:03.011990786 +0000
+@@ -9,7 +9,8 @@
+ 
+ q /var 0755 - - -
+ 
+-L /var/run - - - - ../run
++# Saphira split-/run layout: /var/run is a real directory shipped
++# by saphira-baselayout, never an alias. No L line here.
+ 
+ d /var/log 0755 - - -
+ {% if ENABLE_UTMP %}

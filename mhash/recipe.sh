@@ -27,7 +27,7 @@ recipe_build()
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xzf "$TARBALL"
 	cd "$SRC"
 	patch -p1 < "$RECIPE_DIR/files/mhash-modern-toolchain.patch"
-	./configure --prefix=/usr --disable-static
+	./configure --prefix=/usr --sysconfdir=/etc --disable-static --localstatedir=/var
 	make -j${JOBS:-$(nproc)}
 }
 

@@ -85,7 +85,7 @@ lldpd_fragment=$source_root/lldpd/files/accounts.d/lldpd
 	printf '%s\n' 'lldpd fragment is missing (_lldpd identity unowned)' >&2
 	exit 1
 }
-grep -Eq '^user _lldpd 124 _lldpd /run/lldpd /sbin/nologin$' "$lldpd_fragment" || {
+grep -Eq '^user _lldpd 124 _lldpd /var/run/lldpd /sbin/nologin$' "$lldpd_fragment" || {
 	printf '%s\n' 'lldpd fragment does not declare user _lldpd 124' >&2
 	exit 1
 }
@@ -351,4 +351,217 @@ done
 }
 rm -rf "$sys_tmp"
 
+# FHS migration declarations (hotfix/var-packaging-bug-var-run-isnot-run):
+# every files/fhs.d/* fragment must parse under makepkg's strict
+# grammar, migrated exact paths must be unique across the whole tree
+# (one package owns each path; parent/child pairs coexist), and the
+# baselayout global fragment must pin the historical alias swap plus
+# the /usr/var residue removal.
+fhs_base=$source_root/saphira-baselayout/files/fhs.d/saphira-baselayout
+[ -f "$fhs_base" ] || {
+	printf '%s\n' 'baselayout global fhs.d fragment is missing' >&2
+	exit 1
+}
+grep -Eq '^replace-symlink-dir /var/run \.\./run 0755 root root$' "$fhs_base" || {
+	printf '%s\n' 'baselayout fragment must declare the /var/run historical swap' >&2
+	exit 1
+}
+grep -Eq '^dir /var/run 0755 root root$' "$fhs_base" || {
+	printf '%s\n' 'baselayout fragment must declare the real /var/run directory' >&2
+	exit 1
+}
+grep -Eq '^replace-symlink-dir /var/lock \.\./run/lock 0755 root root$' "$fhs_base" || {
+	printf '%s\n' 'baselayout fragment must declare the /var/lock historical swap' >&2
+	exit 1
+}
+grep -Eq '^rmtree-or-fail /usr/var$' "$fhs_base" || {
+	printf '%s\n' 'baselayout fragment must declare the /usr/var residue removal' >&2
+	exit 1
+}
+"${SAPHIRA_PYTHON:-python3}" - "$source_root" <<'PY'
+import importlib.machinery
+import importlib.util
+import sys
+from pathlib import Path
+source_root = Path(sys.argv[1])
+loader = importlib.machinery.SourceFileLoader(
+    "makepkg_rules", str(source_root / "saphira-packager/files/makepkg"))
+spec = importlib.util.spec_from_loader("makepkg_rules", loader)
+mk = importlib.util.module_from_spec(spec)
+loader.exec_module(mk)
+seen: dict[str, str] = {}
+errors: list[str] = []
+for fragment in sorted(source_root.glob("*/files/fhs.d/*")):
+    if fragment.name.endswith(".legacy"):
+        errors.append(f"{fragment}: no legacy sidecars in fhs.d")
+        continue
+    try:
+        decl = mk.parse_fhs_fragment(fragment)
+    except Exception as exc:
+        errors.append(f"{fragment}: {exc}")
+        continue
+    owner = fragment.parent.parent.parent.name
+    for entry in decl["dirs"]:
+        path = entry["path"]
+        if path in seen and seen[path] != owner:
+            errors.append(f"FHS path {path}: claimed by {seen[path]} and {owner}")
+        seen.setdefault(path, owner)
+    for entry in decl["replaces"]:
+        path = entry["linkpath"]
+        if path in seen and seen[path] != owner:
+            errors.append(f"FHS path {path}: claimed by {seen[path]} and {owner}")
+        seen.setdefault(path, owner)
+    for entry in decl["removals"]:
+        path = entry["path"]
+        if path in seen and seen[path] != owner:
+            errors.append(f"FHS path {path}: claimed by {seen[path]} and {owner}")
+        seen.setdefault(path, owner)
+if errors:
+    for error in errors:
+        print(f"fhs.d gate: {error}", file=sys.stderr)
+    sys.exit(1)
+PY
+
+# saphira-permissions V1: every files/caps.d/* fragment must parse
+# under makepkg's strict caps grammar, capped paths must be unique
+# across the whole tree (one package owns each path - the
+# same-payload-target rule plus the file gate enforce it at
+# publish; this asserts the static tree), every caps target must
+# ship in the owning recipe's payload (install line present), and
+# the Python capability list must match the shell override
+# helper's OVR_CAP_NAMES exactly (two canonical copies, one test).
+"${SAPHIRA_PYTHON:-python3}" - "$source_root" <<'PY'
+import importlib.machinery
+import importlib.util
+import re
+import sys
+from pathlib import Path
+source_root = Path(sys.argv[1])
+loader = importlib.machinery.SourceFileLoader(
+    "makepkg_rules", str(source_root / "saphira-packager/files/makepkg"))
+spec = importlib.util.spec_from_loader("makepkg_rules", loader)
+mk = importlib.util.module_from_spec(spec)
+loader.exec_module(mk)
+seen: dict[str, str] = {}
+errors: list[str] = []
+for fragment in sorted(source_root.glob("*/files/caps.d/*")):
+    owner = fragment.parent.parent.parent.name
+    try:
+        decl = mk.parse_caps_fragment(fragment)
+    except Exception as exc:
+        errors.append(f"{fragment}: {exc}")
+        continue
+    for entry in decl["caps"]:
+        path = entry["path"]
+        if path in seen and seen[path] != owner:
+            errors.append(f"caps path {path}: claimed by {seen[path]} and {owner}")
+        seen.setdefault(path, owner)
+# Every caps target must be installed by the owning recipe (a
+# declaration for a file the recipe never ships fails the build;
+# this pins the install lines statically).
+for fragment in sorted(source_root.glob("*/files/caps.d/*")):
+    owner = fragment.parent.parent.parent.name
+    try:
+        recipe = (source_root / owner / "recipe.sh").read_text(encoding="utf-8")
+    except OSError:
+        errors.append(f"{fragment}: owning recipe is missing")
+        continue
+    try:
+        decl = mk.parse_caps_fragment(fragment)
+    except Exception:
+        continue
+    for entry in decl["caps"]:
+        if f"files/caps.d/{fragment.name}" not in recipe:
+            errors.append(f"{owner}: caps.d/{fragment.name} is not installed by recipe.sh")
+# Capability list parity: makepkg (Python) vs override helper (sh).
+helper = (source_root / "saphira-baselayout/files/libexec/permissions-override.sh").read_text(encoding="utf-8")
+match = re.search(r'^OVR_CAP_NAMES="([^"]*)"', helper, re.M)
+if not match:
+    errors.append("permissions-override.sh: OVR_CAP_NAMES is missing")
+elif set(match.group(1).split()) != set(mk.SAPHIRA_CAP_NAMES):
+    errors.append("capability lists differ: makepkg SAPHIRA_CAP_NAMES vs OVR_CAP_NAMES")
+if errors:
+    for error in errors:
+        print(f"caps.d gate: {error}", file=sys.stderr)
+    sys.exit(1)
+PY
+
+# V1 migration pins: breathgslb and alfred carry declarative caps.d
+# fragments (alfred exercises all three fragment kinds at once);
+# their build-time setcap lines are gone.
+for migrated in breathgslb alfred; do
+	fragment=$source_root/$migrated/files/caps.d/$migrated
+	[ -f "$fragment" ] || {
+		printf '%s\n' "$migrated caps.d fragment is missing" >&2
+		exit 1
+	}
+	if grep -Eq '^[[:space:]]*setcap ' "$source_root/$migrated/recipe.sh"; then
+		printf '%s\n' "$migrated still runs build-time setcap (migrate to caps.d)" >&2
+		exit 1
+	fi
+done
+grep -Eq '^cap /usr/sbin/breathgslb cap_net_bind_service\+ep$' \
+	"$source_root/breathgslb/files/caps.d/breathgslb" || {
+	printf '%s\n' 'breathgslb caps.d must declare cap_net_bind_service on /usr/sbin/breathgslb' >&2
+	exit 1
+}
+grep -Eq '^cap /usr/sbin/alfred cap_net_admin,cap_net_raw\+ep$' \
+	"$source_root/alfred/files/caps.d/alfred" || {
+	printf '%s\n' 'alfred caps.d must declare cap_net_admin,cap_net_raw on /usr/sbin/alfred' >&2
+	exit 1
+}
+
 printf '%s\n' 'recipe metadata rules tests: OK'
+
+# Incident: proftpd compiled PR_RUN_DIR=/usr/var (bare --prefix without
+# --localstatedir) and lynx installed to /usr/etc (bare --prefix without
+# --sysconfdir) - autoconf silently derives both from the prefix. The
+# configure-layout baseline for genuine Autoconf recipes is explicit
+# --prefix, --sysconfdir and --localstatedir; recipes whose configure
+# is custom (fio/talloc/lzip), waf-driven, cabal-driven, or otherwise
+# outside GNU dir-flag semantics carry a documented layout-exception
+# instead. Naive greps would flag those; this gate understands the
+# distinction: a recipe invoking configure must either pass all three
+# flags or document its exception.
+"${SAPHIRA_PYTHON:-python3}" - "$source_root" <<'PY'
+import re
+import sys
+from pathlib import Path
+source_root = Path(sys.argv[1])
+LINE_RE = re.compile(
+    r"^(\s*)(?:[A-Za-z_]+=(?:\"[^\"]*\"|'[^']*'|\S+)\s+)*(\S+)(.*)$")
+
+
+def is_configure_cmd(token):
+    token = token.strip("\"'")
+    base = token.rsplit("/", 1)[-1]
+    return base in ("configure", "configure.sh")
+
+
+errors: list[str] = []
+for recipe in sorted(source_root.glob("*/recipe.sh")):
+    text = recipe.read_text(encoding="utf-8")
+    invoked = False
+    for line in text.splitlines():
+        m = LINE_RE.match(line)
+        if m and is_configure_cmd(m.group(2)):
+            invoked = True
+            break
+    if not invoked:
+        continue
+    has_all = ("--prefix=" in text and "--sysconfdir=" in text
+               and "--localstatedir=" in text)
+    exempt = "layout-exception:" in text
+    if not has_all and not exempt:
+        missing = [flag for flag in ("--prefix=", "--sysconfdir=",
+                                     "--localstatedir=") if flag not in text]
+        errors.append(f"{recipe.parent.name}/recipe.sh: configure layout "
+                      f"baseline incomplete (missing {', '.join(missing)}); "
+                      f"add the flags or document a layout-exception")
+if errors:
+    for error in errors:
+        print(f"configure layout gate: {error}", file=sys.stderr)
+    sys.exit(1)
+PY
+
+printf '%s\n' 'configure layout rules tests: OK'

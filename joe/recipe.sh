@@ -14,7 +14,7 @@ depends="ncurses"
 makedepends="gcc make pkgconf gawk ncurses-dev"
 
 recipe_build() {
-	./configure --prefix=/usr --sysconfdir=/etc
+	./configure --prefix=/usr --sysconfdir=/etc --localstatedir=/var
 	make -j${JOBS:-$(nproc)}
 }
 

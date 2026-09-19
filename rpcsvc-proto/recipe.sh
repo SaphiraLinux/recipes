@@ -38,7 +38,7 @@ recipe_build()
 	fi
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$RPCBALL"
 	cd "$SRC"
-	./configure --prefix=/usr --sysconfdir=/etc --disable-static
+	./configure --prefix=/usr --sysconfdir=/etc --disable-static --localstatedir=/var
 	make -j${JOBS:-$(nproc)}
 }
 

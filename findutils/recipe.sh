@@ -15,7 +15,7 @@ recipe_build() {
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$RECIPE_DIR/files/findutils-4.10.0.tar.xz"
 	cd "$SRC"
 	echo "$findutils_sha256  $RECIPE_DIR/files/findutils-4.10.0.tar.xz" | sha256sum -c -
-	./configure --prefix=/usr --disable-nls --localstatedir=/var/lib/locate
+	./configure --prefix=/usr --sysconfdir=/etc --disable-nls --localstatedir=/var/lib/locate
 	make -j${JOBS:-$(nproc)}
 }
 recipe_install() {

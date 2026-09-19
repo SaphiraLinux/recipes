@@ -5,7 +5,7 @@ description="Kea DHCPv6 server"
 command="/usr/sbin/kea-dhcp6"
 command_args="-c /etc/kea/kea-dhcp6.conf"
 command_background="yes"
-pidfile="/run/kea-dhcp6.pid"
+pidfile="/var/run/kea/kea-dhcp6.pid"
 
 depend()
 {
@@ -14,5 +14,8 @@ depend()
 
 start_pre()
 {
-	checkpath -d -m 0755 /run/kea
+	checkpath -d -m 0755 /var/run/kea
+	# Stale pid from an unclean shutdown blocks restart; start_pre
+	# runs only when OpenRC is about to start the daemon.
+	rm -f /var/run/kea/kea-dhcp6.pid
 }

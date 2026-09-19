@@ -1,7 +1,11 @@
 #!/bin/sh
 pkgname=wireguard-tools
 pkgver=1.0.20260223
-pkgrel=2
+pkgrel=3
+# r3: /etc/wireguard ships 0700 (homer recon: Arch carries 0700;
+# the directory will hold private keys, so list access stays
+# root-only even though key files themselves are 0600).
+# Payload change, revision bumps.
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='WireGuard userspace tools (wg, wg-quick)'
 license='GPL-2.0-only'
@@ -23,4 +27,6 @@ recipe_install() {
 	make -C "$SRC/src" install \
 		WITH_BASHCOMPLETION=yes WITH_SYSTEMDUNITS=no \
 		WITH_WGQUICK=yes PREFIX=/usr DESTDIR="$PKGDEST"
+	# Private-key directory: root-only listing on top of 0600 keys.
+	install -d -m 0700 "$PKGDEST/etc/wireguard"
 }

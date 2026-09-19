@@ -16,7 +16,7 @@ recipe_build() {
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$RECIPE_DIR/files/libmnl-1.0.5.tar.bz2"
 	cd "$SRC"
 	echo "$libmnl_sha256  $RECIPE_DIR/files/libmnl-1.0.5.tar.bz2" | sha256sum -c -
-	./configure --prefix=/usr --disable-static --disable-static
+	./configure --prefix=/usr --sysconfdir=/etc --disable-static --disable-static --localstatedir=/var
 	make -j${JOBS:-$(nproc)}
 }
 recipe_install() {

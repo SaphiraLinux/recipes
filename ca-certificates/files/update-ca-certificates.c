@@ -3,13 +3,11 @@
  *
  * Reads /etc/ca-certificates.conf (one relative path per line under
  * /usr/share/ca-certificates, '#' comments), symlinks every enabled
- * certificate into /etc/ssl/certs/, appends /usr/local/share/
- * ca-certificates/*.crt, and concatenates the enabled set into
- * /etc/ssl/certs/ca-certificates.crt via mkstemp + rename.
+ * certificate into /etc/ssl/certs/, and concatenates the enabled set
+ * into /etc/ssl/certs/ca-certificates.crt via mkstemp + rename.
  * Hooks: run-parts /etc/ca-certificates/update.d
  */
 #define _POSIX_C_SOURCE 200809L
-#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -20,7 +18,6 @@
 
 #define CONF "/etc/ca-certificates.conf"
 #define CERTSDIR "/usr/share/ca-certificates/"
-#define LOCALDIR "/usr/local/share/ca-certificates/"
 #define OUTDIR "/etc/ssl/certs/"
 #define BUNDLE OUTDIR "ca-certificates.crt"
 
@@ -59,26 +56,6 @@ static void link_cert(const char *rel)
 			dst, src);
 }
 
-static void process_local(void)
-{
-	DIR *d = opendir(LOCALDIR);
-	struct dirent *e;
-	char src[4096], dst[4096];
-	if (!d)
-		return;
-	while ((e = readdir(d))) {
-		size_t len = strlen(e->d_name);
-		if (len < 5 || strcmp(e->d_name + len - 4, ".crt"))
-			continue;
-		snprintf(src, sizeof src, LOCALDIR "%s", e->d_name);
-		snprintf(dst, sizeof dst, OUTDIR "%s", e->d_name);
-		(void)unlink(dst);
-		symlink(src, dst);
-		bundle_append(src);
-	}
-	closedir(d);
-}
-
 int main(void)
 {
 	FILE *conf;
@@ -115,7 +92,6 @@ int main(void)
 		}
 	}
 	fclose(conf);
-	process_local();
 	if (close(bundle_fd) != 0) {
 		perror("bundle write");
 		unlink(tmp);

@@ -2,7 +2,12 @@
 
 pkgname=haproxy
 pkgver=3.4.3
-pkgrel=1
+pkgrel=2
+# r2: OpenRC-tracked pidfile /run/haproxy.pid -> /var/run/haproxy.pid;
+# RuntimeDirectory=haproxy removed (created an unconsumed /run/haproxy
+# dir - nothing ever referenced it). No fhs.d fragment by rule: no
+# directory ever consumed, flat tmpfs pidfile needs no migration
+# (document-and-leave, unbound precedent). Payload change, revision bumps.
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='Reliable, high performance TCP/HTTP load balancer'
 license='GPL-2.0-or-later LGPL-2.1-or-later'

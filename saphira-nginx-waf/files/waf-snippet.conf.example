@@ -1,0 +1,16 @@
+# Saphira nginx WAF opt-in snippet (example only - copy the lines
+# that apply; nothing here is loaded automatically).
+#
+# 1. Top-level context (main section, outside events{}), once:
+#
+# load_module /usr/lib/nginx/modules/ngx_http_modsecurity_module.so;
+#
+# 2. Inside the server{} to protect:
+#
+# modsecurity on;
+# modsecurity_rules_file /etc/nginx/modsec/main.conf;
+#
+# 3. Reload and watch the audit log:
+#
+# nginx -t && rc-service nginx reload   (OpenRC)
+# tail -F /var/log/nginx/modsec_audit.log

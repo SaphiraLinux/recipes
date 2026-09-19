@@ -21,7 +21,7 @@ recipe_build() {
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$RECIPE_DIR/files/userspace-rcu-0.15.1.tar.bz2"
 	cd "$SRC"
 	echo "$liburcu_sha256  $RECIPE_DIR/files/userspace-rcu-0.15.1.tar.bz2" | sha256sum -c -
-	./configure --prefix=/usr --disable-static --disable-werror
+	./configure --prefix=/usr --sysconfdir=/etc --disable-static --disable-werror --localstatedir=/var
 	make -j${JOBS:-$(nproc)}
 }
 recipe_install() {

@@ -1,0 +1,9 @@
+# lastlog is a sparse indexed file; rotate conservatively and
+# only when it actually carries data.
+/var/log/lastlog {
+    missingok
+    monthly
+    create 0644 root root
+    minsize 1M
+    rotate 1
+}

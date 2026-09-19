@@ -59,6 +59,7 @@ recipe_build()
 	cd "$SRC/zfs"
 
 	./configure --prefix=/usr --sysconfdir=/etc \
+		--localstatedir=/var \
 		--with-linux="$KDIR" --with-linux-obj="$KDIR" \
 		--with-config=all
 	make -j${JOBS:-$(nproc)}

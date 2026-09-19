@@ -28,6 +28,8 @@ recipe_build()
 {
 	cd "$SRC"
 	./configure --prefix=/usr --without-zenmap --with-openssl=/usr \
+		--sysconfdir=/etc \
+		--localstatedir=/var \
 		--with-libpcap=/usr --with-libpcre=/usr --with-liblua=included \
 		--without-libssh2
 	make

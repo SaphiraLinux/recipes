@@ -15,7 +15,7 @@ recipe_build() {
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$RECIPE_DIR/files/autoconf-2.73.tar.xz"
 	cd "$SRC"
 	echo "$autoconf_sha256  $RECIPE_DIR/files/autoconf-2.73.tar.xz" | sha256sum -c -
-	./configure --prefix=/usr
+	./configure --prefix=/usr --sysconfdir=/etc --localstatedir=/var
 	make
 }
 recipe_install() {

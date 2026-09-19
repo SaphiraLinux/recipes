@@ -44,6 +44,8 @@ recipe_build()
 -DNO_WRAP_LSTAT64_SYMBOL -DNO_WRAP_FSTAT64_SYMBOL -DNO_WRAP_FSTATAT64_SYMBOL" \
 	./configure \
 		--prefix=/usr \
+		--sysconfdir=/etc \
+		--localstatedir=/var \
 		--libdir=/usr/lib \
 		--disable-static \
 		ac_cv_func_capset=0

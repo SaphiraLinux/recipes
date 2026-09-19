@@ -1,0 +1,30 @@
+# Minimal slapd config template (Saphira). Copy to slapd.conf and adapt:
+# set suffix/rootdn credentials, TLS cert paths, and access rules.
+# Both inits (systemd unit, OpenRC slapd.initd) read /etc/openldap/slapd.conf.
+#
+# Rotation: slapd owns its own log rotation (logfile-rotate); no
+# logrotate.d fragment is shipped or needed.
+
+include		/etc/openldap/schema/core.schema
+include		/etc/openldap/schema/cosine.schema
+include		/etc/openldap/schema/inetorgperson.schema
+
+pidfile		/var/run/slapd/slapd.pid
+argsfile	/var/run/slapd/slapd.args
+
+# Argon2 password scheme: loadable module shipped in moduledir.
+# modulepath	/usr/libexec/openldap
+# moduleload	argon2.so
+
+logfile		/var/log/openldap/slapd.log
+logfile-rotate	7 10 24
+
+database	mdb
+suffix		"dc=example,dc=com"
+rootdn		"cn=admin,dc=example,dc=com"
+# rootpw MUST be set by the operator (slappasswd -h '{ARGON2}').
+# rootpw		{ARGON2}...
+
+directory	/var/lib/openldap
+
+index		objectClass eq

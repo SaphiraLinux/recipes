@@ -20,7 +20,13 @@
 
 pkgname=coraza-spoa
 pkgver=0.7.1
-pkgrel=1
+pkgrel=2
+# r2: OpenRC-tracked pidfile /run/coraza-spoa.pid ->
+# /var/run/coraza-spoa.pid; RuntimeDirectory=coraza-spoa removed
+# (created an unconsumed /run/coraza-spoa dir - the stateless daemon
+# uses no runtime dir). No fhs.d fragment by rule: flat tmpfs
+# pidfile needs no migration (document-and-leave, haproxy
+# precedent). Payload change, revision bumps.
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="Coraza WAF SPOA daemon for HAProxy"
 license=Apache-2.0

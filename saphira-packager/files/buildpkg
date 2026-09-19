@@ -217,6 +217,116 @@ def overlay_mounts_referencing(path: str) -> list[tuple[int, str]]:
     return references
 
 
+def _workspace_name_ok(build_root: Path, path: Path) -> bool:
+    """Identity check for the canonical safe-removal path: ``path`` must
+    resolve inside ``build_root`` and be named ``<pkg>.buildpkg`` or
+    ``<pkg>.buildpkg.stale-*`` for a valid package name."""
+    try:
+        path.resolve().relative_to(build_root.resolve())
+    except (OSError, ValueError):
+        return False
+    name = path.name
+    if name.endswith(".buildpkg"):
+        stem = name[: -len(".buildpkg")]
+    elif ".buildpkg.stale-" in name:
+        stem = name.split(".buildpkg.stale-", 1)[0]
+    else:
+        return False
+    return bool(stem and PACKAGE_RE.fullmatch(stem))
+
+
+def _kill_workspace_holder(workspace: Path) -> None:
+    """Terminate the overlay holder recorded by one workspace, if it is
+    still alive. The pid is only signalled when its cmdline still carries
+    the holder marker for exactly this workspace, so a recycled pid is
+    never killed. Silent when there is no (valid) record."""
+    record = workspace / "overlay-holder.json"
+    if not record.is_file() or record.is_symlink():
+        return
+    try:
+        pid = int(json.loads(record.read_text(encoding="utf-8"))["pid"])
+    except (OSError, ValueError, KeyError, json.JSONDecodeError):
+        return
+    if pid <= 1:
+        return
+    try:
+        cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode("utf-8", "replace")
+    except OSError:
+        return
+    if "saphira-overlay-holder" not in cmdline or str(workspace) not in cmdline:
+        return
+    try:
+        os.killpg(os.getpgid(pid), signal.SIGTERM)
+    except (OSError, ProcessLookupError):
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            return
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and Path(f"/proc/{pid}").exists():
+        time.sleep(0.1)
+    if Path(f"/proc/{pid}").exists():
+        try:
+            os.killpg(os.getpgid(pid), signal.SIGKILL)
+        except (OSError, ProcessLookupError):
+            pass
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+        time.sleep(0.5)
+
+
+def _wait_overlay_released(workspace: Path) -> None:
+    """Fail closed until no process still mounts this workspace's overlay
+    upper layer (an orphaned mount refuses removal instead of racing it)."""
+    deadline = time.monotonic() + 10
+    while overlay_mounts_referencing(str(workspace / "upper")):
+        if time.monotonic() > deadline:
+            die(f"overlay for {workspace} is still mounted; refusing to remove the workspace")
+        time.sleep(0.1)
+
+
+def _restore_owner_access(path: Path) -> None:
+    """Restore owner access over a workspace tree before removal: the
+    kernel creates the overlay workdir's internal work/ directory with
+    mode 0000, which refuses host-side removal (buildpkg's own
+    in-namespace removal never notices, having the capability). Walk
+    top-down without following symlinks so each directory regains access
+    before descending into it (a build tree may link outside the
+    workspace, and only the link itself may go). Failures are ignored
+    here; rmtree below stays fail-closed."""
+    for root, dirs, files in os.walk(path, topdown=True, followlinks=False):
+        for name in (*dirs, *files):
+            entry = Path(root) / name
+            try:
+                if entry.is_symlink():
+                    continue
+                os.chmod(entry, 0o700 if entry.is_dir() else 0o600)
+            except OSError:
+                pass
+    try:
+        os.chmod(path, 0o700)
+    except OSError:
+        pass
+
+
+def _remove_workspace_tree(build_root: Path, path: Path) -> None:
+    """The one canonical safe workspace-removal path: identity check, then
+    recorded-holder termination, overlay-release wait, owner-access
+    restore, then removal. Everything that deletes a workspace (pre-build
+    abort, success, stale-history pruning) funnels through here; no
+    scattered rm trees."""
+    if not _workspace_name_ok(build_root, path):
+        die(f"refusing workspace outside build root or bad workspace name: {path}")
+    if path.is_symlink() or not path.is_dir():
+        die(f"workspace is not a real directory: {path}")
+    _kill_workspace_holder(path)
+    _wait_overlay_released(path)
+    _restore_owner_access(path)
+    shutil.rmtree(path)
+
+
 def dynamic_runtime_files(executable: str) -> list[str]:
     try:
         result = subprocess.run(["ldd", executable], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -298,6 +408,12 @@ class Transaction:
         self.work = self.workspace / "work"
         self.holder: subprocess.Popen | None = None
         self.holder_pid: int | None = None
+        self.last_stdout = ""
+        self.last_stderr = ""
+        # Set once this run has created (or recreated) its workspace in
+        # prepare(): fail() must never bless a pre-existing unmarked
+        # workspace it did not create (e.g. a prepare-time collision).
+        self._own_workspace = False
 
     def prepare(self) -> None:
         self.build_root.mkdir(parents=True, exist_ok=True)
@@ -321,6 +437,7 @@ class Transaction:
                 self._kill_recorded_holder()
                 shutil.rmtree(self.workspace)
         self.workspace.mkdir()
+        self._own_workspace = True
         for directory in (
             self.root, self.upper, self.work,
             self.stage, self.artifacts / self.config["SAPHIRA_ARCH"],
@@ -370,6 +487,7 @@ class Transaction:
 
     def run(self, command: list[str], *, env: dict[str, str] | None = None, capture: bool = False) -> subprocess.CompletedProcess[str]:
         self.log(f"RUN {shlex.join(command)}")
+        self.last_stdout, self.last_stderr = "", ""
         try:
             result = subprocess.run(
                 command, check=True, text=True,
@@ -378,11 +496,15 @@ class Transaction:
         except FileNotFoundError:
             die(f"required tool is missing: {command[0]}")
         except subprocess.CalledProcessError as exc:
+            self.last_stdout = exc.stdout or ""
+            self.last_stderr = exc.stderr or ""
             if exc.stdout:
                 self.log(exc.stdout)
             if exc.stderr:
                 self.log(exc.stderr)
             die(f"command failed ({exc.returncode}): {command[0]}")
+        self.last_stdout = result.stdout or ""
+        self.last_stderr = result.stderr or ""
         if result.stdout:
             self.log(result.stdout)
         if result.stderr:
@@ -393,41 +515,7 @@ class Transaction:
         """A retried failed workspace still has its overlay holder running;
         stop it before the workspace (and its upper/work dirs) are replaced,
         so two holders can never claim the same workspace."""
-        record = self.workspace / "overlay-holder.json"
-        if not record.is_file():
-            return
-        try:
-            pid = int(json.loads(record.read_text(encoding="utf-8"))["pid"])
-        except (OSError, ValueError, KeyError, json.JSONDecodeError):
-            return
-        if pid <= 1:
-            return
-        try:
-            cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode("utf-8", "replace")
-        except OSError:
-            return
-        if "saphira-overlay-holder" not in cmdline or str(self.workspace) not in cmdline:
-            return
-        try:
-            os.killpg(os.getpgid(pid), signal.SIGTERM)
-        except (OSError, ProcessLookupError):
-            try:
-                os.kill(pid, signal.SIGTERM)
-            except OSError:
-                return
-        deadline = time.monotonic() + 10
-        while time.monotonic() < deadline and Path(f"/proc/{pid}").exists():
-            time.sleep(0.1)
-        if Path(f"/proc/{pid}").exists():
-            try:
-                os.killpg(os.getpgid(pid), signal.SIGKILL)
-            except (OSError, ProcessLookupError):
-                pass
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except OSError:
-                pass
-            time.sleep(0.5)
+        _kill_workspace_holder(self.workspace)
 
     def start_overlay(self) -> None:
         unshare = shutil.which("unshare")
@@ -572,7 +660,15 @@ class Transaction:
 
     def resolve(self) -> dict[str, object]:
         resolver = str(Path(self.config["SAPHIRA_BINDIR"]) / "resolvepkg")
-        result = self.run([resolver, self.target], capture=True)
+        try:
+            result = self.run([resolver, self.target], capture=True)
+        except BuildError:
+            # Surface the resolver's own refusal (not the bare rc wrapper):
+            # the refusal text is the operator-facing diagnostic and the
+            # pre-build abort path prints it verbatim.
+            refusal = self.last_stderr.strip().splitlines()
+            detail = refusal[-1].strip() if refusal else "no diagnostic"
+            die(f"resolver refused {self.target}: {detail}")
         try:
             plan = json.loads(result.stdout)
         except json.JSONDecodeError as exc:
@@ -697,14 +793,100 @@ class Transaction:
             f"SEED installed {len(resolved)} repository packages into clean root"
         )
 
+    def _seed_script_summary(self) -> dict[str, dict[str, object]]:
+        """Newest-file adbdump summary per seed name: scripts presence plus
+        fhs.d/accounts.d fragment carriage. Seed assembly runs no package
+        scripts (see below); this gates which script effects are
+        reproduced explicitly and fails closed on anything else."""
+        repo = live_repo_dir(self.config)
+        apk = self.config["SAPHIRA_APK"]
+        summary: dict[str, dict[str, object]] = {}
+        for name in shlex.split(self.config["SAPHIRA_BUILD_SEED"]):
+            best: str | None = None
+            best_version = ""
+            for path in sorted(repo.glob(f"{name}-*.apk")):
+                if not path.is_file() or path.is_symlink():
+                    continue
+                dump = subprocess.run(
+                    [apk, "adbdump", str(path)], check=True, text=True,
+                    capture_output=True).stdout
+                ver = ""
+                for line in dump.splitlines():
+                    if line.startswith("  version: "):
+                        ver = line.split(": ", 1)[1].strip()
+                        break
+                if best is None:
+                    best, best_version = path.name, ver
+                    continue
+                newer = subprocess.run(
+                    [apk, "version", "-t", ver, best_version],
+                    check=True, text=True, capture_output=True).stdout.strip()
+                if newer == ">":
+                    best, best_version = path.name, ver
+            if best is None:
+                die(f"seed package has no repository file: {name}")
+            dump = subprocess.run(
+                [apk, "adbdump", str(repo / best)], check=True, text=True,
+                capture_output=True).stdout
+            in_scripts = False
+            has_scripts = False
+            for line in dump.splitlines():
+                if line == "scripts:":
+                    in_scripts = True
+                    continue
+                if in_scripts:
+                    if line.startswith("  ") and line.strip():
+                        has_scripts = True
+                    elif line and not line.startswith(" "):
+                        break
+            summary[name] = {
+                "filename": best,
+                "scripts": has_scripts,
+                "fhs": "usr/share/saphira/fhs.d/" in dump,
+                "accounts": "usr/share/saphira/accounts.d/" in dump,
+            }
+        return summary
+
     def seed_root_packages(self) -> None:
         seed = shlex.split(self.config["SAPHIRA_BUILD_SEED"])
         if not seed:
             die("configured Saphira build seed is empty")
+        # Seed assembly runs NO package install scripts: virgin staging
+        # roots cannot satisfy script interpreters or helpers that only
+        # exist later in seed order (first proven by baselayout r17:
+        # #!/bin/sh with no /bin/sh yet, then ensure-fhs needing sed).
+        # Only fhs.d convergence is reproduced explicitly below; any
+        # other script-bearing seed package fails closed here instead
+        # of diverging silently.
+        script_summary = self._seed_script_summary()
+        uncovered = sorted(
+            name for name, info in script_summary.items()
+            if info["scripts"] and (info["accounts"] or not info["fhs"]))
+        if uncovered:
+            die("seed packages carry install scripts with effects seed assembly"
+                " does not reproduce (only fhs.d convergence runs here): "
+                + ", ".join(f"{name} ({script_summary[name]['filename']})"
+                            for name in uncovered))
+        # /bin/sh for the root-initialization sessions below and the
+        # explicit fhs.d convergence: virgin staging has none until bash
+        # installs (an early seed package), and apk scripts - where they
+        # run at all - need the interpreter present. No seed package
+        # ships bin/sh as a file, so no payload collides with the
+        # pre-created link; the post-install block below still verifies it.
+        shell_pre = self.root / "bin" / "sh"
+        if not os.path.lexists(shell_pre):
+            shell_pre.parent.mkdir(parents=True, exist_ok=True)
+            os.symlink("bash", shell_pre)
         self._bootstrap_bwrap([
             "--root", "/target", "--initdb", "--no-cache", "--no-network",
             "--repositories-file", "/dev/null", "--keys-dir", "/keys",
-            "--repository", "/repository/Packages.adb", "add", *seed,
+            "--repository", "/repository/Packages.adb",
+            # Install files only, never converge: scripts cannot run
+            # meaningfully in an incomplete virgin root (see above), and
+            # their one current effect (fhs.d convergence) is reproduced
+            # explicitly below. Same --no-scripts rule as workspace
+            # dependency installs and repo_db scratch installs.
+            "--no-scripts", "add", *seed,
         ])
         ca_update = self.root / "usr/sbin/update-ca-certificates"
         if not ca_update.is_file():
@@ -773,6 +955,25 @@ class Transaction:
                 "printf 'root:!:0:0:99999:7:::\\n' >> /etc/shadow && "
                 "chmod 0600 /etc/shadow",
             ])
+        # Explicit fhs.d convergence for the seed set: the install above
+        # runs --no-scripts, so reproduce the one script effect seed
+        # packages may carry (today: only saphira-baselayout's global
+        # fragment; the guard above fails closed on anything else).
+        # The root is complete here (shell, helpers, account database),
+        # which is exactly what inline script execution could not assume.
+        fhs_dir = self.root / "usr/share/saphira/fhs.d"
+        if fhs_dir.is_dir():
+            for fragment in sorted(fhs_dir.iterdir()):
+                if not fragment.is_file():
+                    continue
+                self.run([
+                    self.config["SAPHIRA_BWRAP"], "--die-with-parent", "--new-session",
+                    "--unshare-all", "--uid", "0", "--gid", "0", "--clearenv",
+                    "--bind", str(self.root), "/",
+                    "--setenv", "PATH", "/usr/bin:/bin:/usr/sbin:/sbin",
+                    "/bin/sh", "/usr/libexec/saphira/ensure-fhs",
+                    f"/usr/share/saphira/fhs.d/{fragment.name}",
+                ])
 
     def root_apk(self, arguments: list[str], *, allow_untrusted: bool = False) -> None:
         repo_dir = live_repo_dir(self.config)
@@ -1112,6 +1313,43 @@ class Transaction:
         self.incoming_building = None
         return ready
 
+    def _stale_siblings(self) -> list[Path]:
+        """Older retained workspaces for this target, oldest first (the
+        timestamp in the stale name sorts chronologically)."""
+        return sorted(self.build_root.glob(f"{self.target}.buildpkg.stale-*"))
+
+    def _purge_stale_siblings(self, keep_newest: int) -> None:
+        """Remove stale siblings beyond the newest ``keep_newest`` (0 removes
+        all). Best effort with a loud warning: pruning must never mask the
+        outcome it runs under (a success stays a success, a failure keeps
+        its original message)."""
+        siblings = [path for path in self._stale_siblings()
+                    if path.is_dir() and not path.is_symlink()]
+        victims = siblings if keep_newest <= 0 else (
+            siblings[:-keep_newest] if len(siblings) > keep_newest else [])
+        for victim in victims:
+            try:
+                _remove_workspace_tree(self.build_root, victim)
+            except BuildError as exc:
+                print(f"buildpkg: WARNING: could not remove stale workspace {victim}: {exc}",
+                      file=sys.stderr)
+
+    def abort_prebuild(self, message: str) -> None:
+        """Pre-build refusal (resolve/plan validation): nothing was built
+        or installed, so no diagnostic workspace is retained. Releases the
+        overlay, then removes the workspace completely through the
+        canonical safe-removal path. Never writes FAILED: a refusal is not
+        a failed build. Removal trouble propagates (fail-closed); the
+        caller in main() then falls back to retaining via fail()."""
+        self.stop_overlay()
+        if self.incoming_building and self.incoming_building.exists():
+            shutil.rmtree(self.incoming_building)
+        if self.log_stream and not self.log_stream.closed:
+            self.log(f"ABORTED pre-build refusal: {message}")
+            self.log_stream.close()
+        if self.workspace.is_dir() or self.workspace.is_symlink():
+            _remove_workspace_tree(self.build_root, self.workspace)
+
     def fail(self, message: str) -> None:
         # Release the overlay holder first: the workspace (logs, plan,
         # upper/work, holder record, recovery notes) is retained for
@@ -1126,18 +1364,26 @@ class Transaction:
         if self.log_stream and not self.log_stream.closed:
             self.log(f"FAILED {message}")
             self.log_stream.close()
-        if self.workspace.is_dir():
+        # Only a workspace this run created may be marked: a prepare-time
+        # collision (unmarked or malformed pre-existing workspace) must
+        # never be blessed with a FAILED marker it did not earn.
+        if self._own_workspace and self.workspace.is_dir():
             (self.workspace / "FAILED").write_text(FAILED_MARKER, encoding="utf-8")
             # Failed workspaces stay diagnosable: the upper layer, workdir,
             # logs, plan and holder record are all retained; re-mount the
             # merged view for inspection per OVERLAY-RECOVER.txt.
             self._write_overlay_recover()
+            # Cap stale history at the newest ONE sibling: the live FAILED
+            # workspace stays the newest diagnostic per package.
+            self._purge_stale_siblings(keep_newest=1)
 
     def succeed(self) -> None:
         self.stop_overlay()
         if self.log_stream and not self.log_stream.closed:
             self.log_stream.close()
         shutil.rmtree(self.workspace)
+        # A later success retires the whole stale history for this target.
+        self._purge_stale_siblings(keep_newest=0)
 
 
 class BaseRoot:
@@ -1311,7 +1557,18 @@ def main() -> int:
         transaction = Transaction(config, sys.argv[1], sys.argv[2] if len(sys.argv) == 3 else None)
         transaction.prepare()
         transaction.start_overlay()
-        plan = transaction.resolve()
+        try:
+            plan = transaction.resolve()
+        except (BuildError, OSError, ValueError, json.JSONDecodeError) as exc:
+            # Resolve/plan-validation refusal before any build step began:
+            # not a failed build, so leave no diagnostic workspace behind.
+            # (If the clean removal itself fails it raises into the outer
+            # handler, which retains via fail() - fail-closed.)
+            transaction.abort_prebuild(str(exc))
+            print(f"buildpkg: {exc}", file=sys.stderr)
+            print("buildpkg: pre-build refusal; workspace removed, no diagnostic retained",
+                  file=sys.stderr)
+            return 1
         transaction.install_repository_requirements(plan)
         receipts = transaction.build(plan)
         ready = transaction.promote(receipts)

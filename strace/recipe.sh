@@ -20,6 +20,8 @@ recipe_build()
 {
 	cd "$SRC"
 	./configure --prefix=/usr --with-libunwind=no --enable-mpers=no \
+		--sysconfdir=/etc \
+		--localstatedir=/var \
 		--enable-bundled=yes
 	make -j${JOBS:-$(nproc)}
 }

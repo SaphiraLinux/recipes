@@ -1,0 +1,29 @@
+#!/sbin/openrc-run
+
+description="OpenLDAP directory server"
+
+# Same daemon, same config as the systemd unit: /usr/libexec/slapd
+# reading /etc/openldap/slapd.conf. -d 0 keeps slapd in the foreground
+# (no_detach) for supervise-daemon; logging goes to the configured
+# logfile (native logfile-rotate owns rotation, no logrotate fragment).
+command="/usr/libexec/slapd"
+command_args="-d 0 -h 'ldap:/// ldapi:///' -u ldap -g ldap"
+supervisor="supervise-daemon"
+
+depend()
+{
+	need localmount
+	use net logger dns
+}
+
+start_pre()
+{
+	checkpath -d -o ldap:ldap -m 0755 /var/run/slapd /var/log/openldap
+	checkpath -d -o ldap:ldap -m 0700 /var/lib/openldap
+	if [ ! -f /etc/openldap/slapd.conf ]; then
+		eerror "Missing /etc/openldap/slapd.conf (copy slapd.conf.example and adapt it)"
+		return 1
+	fi
+	ebegin "Checking slapd configuration"
+	/usr/libexec/slapd -Tt
+}

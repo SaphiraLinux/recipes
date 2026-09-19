@@ -37,6 +37,38 @@ untouched.
 - If a build must be verified, hand it to saphira-builder and check the
   result afterwards. Do not babysit long builds in an agent session.
 
+## Saphira builder immutability rule
+
+Package, recipe, porting, dependency, feature, and application work MUST NOT
+modify the Saphira build infrastructure.
+
+Without explicit author approval for a builder-specific task, agents MUST NOT
+change:
+
+- buildpkg
+- buildpkg-single
+- resolvepkg
+- saphira-builder service/controller
+- package_builder.sh or equivalent controller configuration
+- package splitting/resolution machinery
+- repository publication/signing machinery
+- builder sandbox/overlay behaviour
+- builder dependency-resolution semantics
+
+A recipe that cannot be expressed using the existing build system is NOT
+permission to modify the build system.
+
+Instead:
+1. report the exact limitation;
+2. demonstrate why the existing machinery cannot express the requirement;
+3. propose the smallest builder change separately;
+4. wait for explicit author GO.
+
+Builder behaviour that exposes a recipe/test failure must not be weakened to
+make the recipe pass.
+
+The author alone decides when Saphira build infrastructure changes.
+
 ## Bubblewrap boundary
 
 - Every build runs inside the existing Bubblewrap sandbox
@@ -191,6 +223,90 @@ Recognised history lives in a legacy sidecar,
   <pkg> --apply` migrates, `apk fix <pkg>` re-runs the scripts and
   converges.
 
+## Filesystem invariant (no FHS directory may be a symlink or alias)
+
+No symlink may substitute for an FHS directory in Saphira. Period.
+
+- `/run` is a real directory; `/var/run` is a separate real directory.
+- `/usr`, `/var`, `/bin`, `/sbin`, `/lib`, etc. are real directories.
+- Compatibility aliases are not part of the filesystem design.
+
+FORBIDDEN examples: `/var/run -> /run`, `/run -> /var/run`,
+`/usr/var` as prefix/configure fallout, any symlink used to
+substitute one FHS directory for another.
+
+This rule concerns the filesystem/FHS layout. It does not prohibit
+normal functional symlinks created inside packages or runtime trees
+where a symlink is genuinely the object being represented.
+
+Service runtime placement follows from the invariant: ordinary
+packaged-daemon PID/socket/state paths live under
+`/var/run/<service>/`. Base/boot runtime plumbing (systemd, udev,
+user, credentials, varlink, mount, log, lock, tmpfiles.d, blkid,
+agetty.reload, saphira-network, the iproute2 `/var/run/netns`
+convention) stays under `/run`. Never treat a path as correct
+merely because it historically resolved through a `/var/run ->
+/run` alias: that symlink hid package bugs.
+
+`/var/run` holds volatile runtime state but is a real directory on
+the root filesystem (no tmpfs mandate: mounting on the pathname
+before reconciliation risks following the historical alias). Boot
+convergence handles stale volatile state per declaration.
+
+## FHS migration declarations (fhs.d, mirrors accounts.d)
+
+A corrected package payload fixes fresh installs only. Installed
+systems converge on upgrade through per-package declarations plus a
+global reconciler — the same ownership split as accounts.d:
+
+- `saphira-baselayout` owns the Saphira-native reconciler
+  `/usr/libexec/saphira/ensure-fhs` and the global filesystem
+  declaration (the historical `/var/run` symlink, `/usr/var`
+  residue, required core directories).
+- Every affected recipe owns its package-specific historical
+  migration in `files/fhs.d/<output>`, installed to
+  `/usr/share/saphira/fhs.d/<output>`. The package that published
+  the bad path owns the declaration converging it. A future
+  package adds an FHS migration without editing the reconciler.
+
+Fragment grammar (strict; malformed fails the build):
+
+- `dir <abspath> <mode> <owner> <group>` — ensure corrected
+  real directory.
+- `replace-symlink-dir <linkpath> <declared-target> <mode>
+  <owner> <group>` — replace ONE known historical symlink.
+  `<declared-target>` is literal link text, never normalized
+  (`../run` is valid; readlink must equal it exactly).
+- `rmdir-if-empty <abspath>` / `rmtree-if-empty <abspath>` —
+  volatile residue: empty removes, non-empty is left in place
+  and reported (never fails an upgrade for a running daemon).
+- `rmdir-or-fail <abspath>` / `rmtree-or-fail <abspath>` —
+  structurally forbidden residue: non-empty is a loud failure
+  requiring manual intervention.
+
+`ensure-fhs` never follows symlinks in any stanza (lstat the
+target, inspect parent components without following). `dir` on a
+symlink fails unless an exact `replace-symlink-dir` declaration
+authorises that historical link. Recursive removals never
+traverse a symlink. No stanza creates symlinks, copies, or moves:
+PID/socket migration is inexpressible by construction.
+
+Generated install/upgrade callers run `ensure-identity` first
+where an accounts.d fragment exists, then `ensure-fhs` — never
+the reverse (fresh installs need the identity before chown).
+Named non-root owners must resolve deterministically: the same
+output's accounts.d declaration or a recognised baselayout base
+identity. There is no deinstall/reversal operation: layout never
+reverts on `apk del`, and accounts.d disable behaviour is
+unchanged. The global `/var/run` symlink swap never runs in a
+live post-upgrade: it converges at a safe early-boot point
+before ordinary services start (boot-convergence service, both
+init systems).
+
+Publish collision is exact-path only: two packages migrating the
+same path refuse, while parent/child declarations (baselayout
+`/var/run`, mariadb `/var/run/mysqld`) coexist.
+
 ## Runtime library placement (FHS non-usrmerged)
 
 Saphira is non-usrmerged: `/bin`, `/sbin`, `/usr/bin`, `/usr/sbin`
@@ -221,8 +337,43 @@ Shared-library placement follows FHS 3.0:
 - `/lib64` and `/usr/lib64` are forbidden in seeds and payloads;
   `buildpkg` enforces this.
 
-## Toolchain dependencies
+## Configure layout baseline (prefix/sysconfdir/localstatedir)
 
+For genuine GNU/Autoconf-style configure recipes, Saphira's explicit
+baseline is:
+
+- `--prefix=/usr`
+- `--sysconfdir=/etc`
+- `--localstatedir=/var`
+
+These must not be inherited from upstream defaults: autoconf derives
+`sysconfdir` as `$prefix/etc` and `localstatedir` as `$prefix/var`, so a
+missing flag silently publishes `usr/etc` or `usr/var` payload paths
+(proftpd compiled `PR_RUN_DIR=/usr/var`; lynx installed to `/usr/etc`).
+This is packaging intent, not cosmetic consistency.
+
+`--runstatedir` is deliberately NOT mass-added: with
+`--localstatedir=/var`, normal Autoconf inheritance yields `/var/run`,
+which is valid under Saphira's deliberate `/run` vs `/var/run` split.
+Set it explicitly only where upstream supports it AND the package has a
+deliberate runtime-location requirement.
+
+Custom/non-Autoconf recipes (custom configure scripts, waf wrappers,
+cabal `Setup.hs configure`, make-only builds, bootstrap scratch
+prefixes) MUST NOT be forced onto GNU dir flags - some reject unknown
+options fatally (fio, talloc). They carry a documented
+`# layout-exception:` comment instead. Flags are acceptable on a custom
+configure only where silently accepted or natively supported (musl
+ignores `VAR=*` silently; dhcpcd implements `--localstatedir`
+natively). The static gate understands this distinction: a recipe
+invoking configure must pass all three flags or document its exception.
+
+Payload backstop: `makepkg` refuses any file or directory beneath
+`usr/etc`, `usr/var` or `usr/com` unless covered by an explicit
+reviewed `LAYOUT_ALLOW` entry (owner-bound, exact paths; ancestor dirs
+implicitly covered). Default state is refusal.
+
+## Toolchain dependencies
 A compiler is self-contained: main `gcc` ships the compiler drivers,
 assembler integration, CRT objects, static libgcc and all headers.
 There is no `gcc-dev` split (retired; `gcc` replaces it). Runtime-only
@@ -292,6 +443,54 @@ set as the desired native Saphira configuration.
 - Toolchain guardrails: `gcc-no-gcc-branch-cost` is obsolete (branch-cost
   policy lives in `/recipes/gcc`); do NOT rebuild GCC 12.1/13.2 or musl-libc
   as part of migrations. If a port seems to require that, STOP and report.
+
+## Feature policy authority
+
+The Saphira author decides feature policy.
+
+Agents must not classify supported upstream features as niche,
+unnecessary, unwanted, optional, excessive, or out-of-scope on the
+author's behalf.
+
+Preserve upstream capability by default.
+
+A capability may be omitted only when:
+- explicitly decided by the author, or
+- blocked by a concrete technical, security, licensing, architectural,
+  or unavailable-dependency reason.
+
+Every --disable-* / --without-* requires an explicit documented reason.
+
+"Not installed by default" does NOT mean "unimportant" or "unsupported".
+
+Perl is the concrete precedent:
+it may not be in every base installation, but it is essential supported
+Saphira infrastructure because software such as ldirectord depends on it.
+
+## logrotate.d fragments (first-class convention, mirrors accounts.d)
+
+If the recipe creates or configures persistent file logging, it owns
+a rotation fragment — unless rotation is explicitly handled
+elsewhere (the service logs only to journald, only to syslog, or the
+logger itself owns its outputs, e.g. syslog-ng, sysstat/sa):
+
+- Fragment lives at `files/logrotate.d/<name>` (name it after the
+  package or service) and installs to `/etc/logrotate.d/<name>`
+  (`install -D -m 0644`, same idiom as accounts.d fragments).
+- The owning recipe knows the reload semantics, so it declares them:
+  daemon reopen/signal where supported, copytruncate otherwise.
+- Every stanza carries `missingok`: the fragment activates whenever
+  logrotate is installed, possibly before the service ever writes.
+- Never reference `/var/log/journal` (journald retention owns that);
+  never invent `/var/log/messages`-style files no logger writes.
+- Do NOT add a `depends` on logrotate: the fragment is inert without
+  it, and installing the package must never drag logrotate into
+  minimal systems.
+
+Ownership is single: one package owns each `/etc/logrotate.d/<name>`
+(the publish gate fails dual-owned paths). `logrotate` itself ships
+only the master config, scheduling, and genuinely ownerless generics.
+`logrotate-fragments.sh` enforces the mapping statically.
 
 ## Provenance discipline
 

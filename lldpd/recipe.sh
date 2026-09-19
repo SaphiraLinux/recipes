@@ -7,7 +7,7 @@
 
 pkgname=lldpd
 pkgver=1.0.22
-pkgrel=1
+pkgrel=2
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="LLDP daemon for link-layer discovery"
 license="ISC"
@@ -45,6 +45,14 @@ recipe_install()
 	# Runtime identity declaration: _lldpd:124 for privilege
 	# separation (matches the configure --with-privsep-* user/group
 	# and the default chroot/run directory).
+	# r2: home/dir /run/lldpd -> /var/run/lldpd (the daemon defaults
+	# were always /var/run via GNU runstatedir; only the fragment
+	# was wrong). Payload change, revision bumps.
 	install -D -m 0644 "$RECIPE_DIR/files/accounts.d/lldpd" \
 		"$PKGDEST/usr/share/saphira/accounts.d/lldpd"
+	# FHS migration declaration (hotfix/var-packaging-bug-var-run-isnot-run):
+	# _lldpd:124 owns the corrected runtime dir; makepkg runs
+	# ensure-fhs after ensure-identity on install/upgrade.
+	install -D -m 0644 "$RECIPE_DIR/files/fhs.d/lldpd" \
+		"$PKGDEST/usr/share/saphira/fhs.d/lldpd"
 }

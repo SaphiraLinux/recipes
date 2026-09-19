@@ -1,0 +1,24 @@
+#!/sbin/openrc-run
+# One-shot MaxMind GeoIP database update. There is no daemon to
+# supervise: run `rc-service geoipupdate start` manually or schedule
+# it, e.g. weekly via cron:
+#
+#   17 4 * * 1  root  /sbin/rc-service geoipupdate start
+
+description="MaxMind GeoIP database updater (geoipupdate)"
+
+command="/usr/bin/geoipupdate"
+
+depend()
+{
+	use net dns
+}
+
+start_pre()
+{
+	if [ ! -f /etc/GeoIP.conf ]; then
+		eerror "Missing /etc/GeoIP.conf - copy /etc/GeoIP.conf.example and add AccountID/LicenseKey (mode 0600)"
+		return 1
+	fi
+	checkpath -d -m 0755 /var/lib/GeoIP
+}

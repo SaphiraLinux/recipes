@@ -17,6 +17,8 @@ recipe_build() {
 	echo "$pinentry_sha256  $RECIPE_DIR/files/pinentry-1.3.3.tar.bz2" | sha256sum -c -
 	# NCURSES_WIDECHAR exposes addnwstr and friends in curses.h on musl.
 	CFLAGS="${CFLAGS-} -DNCURSES_WIDECHAR=1" ./configure --prefix=/usr \
+		--sysconfdir=/etc \
+		--localstatedir=/var \
 		--enable-pinentry-curses --enable-fallback-curses \
 		--disable-pinentry-emacs --disable-pinentry-fltk \
 		--disable-pinentry-qt --disable-pinentry-tty

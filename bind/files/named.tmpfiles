@@ -1,0 +1,6 @@
+# tmpfiles.d entry for BIND. The unit runs unprivileged
+# (User=named), so it cannot create its own runtime dir under
+# /var/run (RuntimeDirectory= only covers /run): tmpfiles.d owns
+# creation with the service identity. /var/run is persistent by
+# design, never wiped at boot.
+d /var/run/named 0755 named named -

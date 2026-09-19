@@ -15,7 +15,7 @@ recipe_build() {
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$RECIPE_DIR/files/socat-1.8.1.1.tar.gz"
 	cd "$SRC"
 	echo "$socat_sha256  $RECIPE_DIR/files/socat-1.8.1.1.tar.gz" | sha256sum -c -
-	./configure --prefix=/usr --disable-static
+	./configure --prefix=/usr --sysconfdir=/etc --disable-static --localstatedir=/var
 	make -j${JOBS:-$(nproc)}
 }
 recipe_install() {

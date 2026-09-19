@@ -16,7 +16,7 @@ recipe_build() {
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$RECIPE_DIR/files/xz-5.8.3.tar.xz"
 	cd "$SRC"
 	echo "$xz_sha256  $RECIPE_DIR/files/xz-5.8.3.tar.xz" | sha256sum -c -
-	./configure --prefix=/usr --disable-scripts --disable-nls
+	./configure --prefix=/usr --sysconfdir=/etc --disable-scripts --disable-nls --localstatedir=/var
 	make -j${JOBS:-$(nproc)}
 }
 recipe_install() {

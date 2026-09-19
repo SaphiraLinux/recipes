@@ -17,7 +17,7 @@ recipe_build() {
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$RECIPE_DIR/files/zlib-1.3.1.tar.gz"
 	cd "$SRC"
 	echo "$zlib_sha256  $RECIPE_DIR/files/zlib-1.3.1.tar.gz" | sha256sum -c -
-	./configure --prefix=/usr --libdir=/usr/lib --shared
+	./configure --prefix=/usr --sysconfdir=/etc --libdir=/usr/lib --shared --localstatedir=/var
 	make -j${JOBS:-$(nproc)}
 }
 recipe_install() {

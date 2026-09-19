@@ -16,6 +16,9 @@ recipe_build() {
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$RECIPE_DIR/files/talloc-2.4.4.tar.gz"
 	cd "$SRC"
 	echo "$talloc_sha256  $RECIPE_DIR/files/talloc-2.4.4.tar.gz" | sha256sum -c -
+	# layout-exception: ./configure is a waf wrapper whose wscript
+	# defines no localstatedir option (waf rejects unknown options);
+	# the library installs no state. GNU dir flags must stay off.
 	./configure --prefix=/usr --disable-python
 	make -j${JOBS:-$(nproc)} PYTHON=python3 WAF_BIN="$SRC/buildtools/bin/waf"
 }

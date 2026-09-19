@@ -1,0 +1,31 @@
+From: Saphira Egg <egg@saphira>
+Subject: [PATCH] honour the split-/run layout for the daemon runtime dir
+
+Upstream hardcodes avahi_runtime_dir="/run" (configure.ac:1007), so
+the client-request socket compiles to /run/avahi-daemon/socket and
+`make install` ships an empty top-level /run directory. On Saphira
+/run is a tmpfs that never carries daemon state: ordinary daemon
+state lives under /var/run/<service>/ (persistent by design), and
+nothing creates /run/avahi-daemon at runtime, so the daemon could
+never bind its socket there.
+
+Point the runtime dir at /var/run (consistent with
+--localstatedir=/var and the fhs.d/avahi convergence). The socket
+macro, the install mkdir, and the pid-adjacent paths all derive from
+this one variable, so they move together.
+
+Deliberately patched against the generated `configure` script, not
+configure.ac: regenerating would drag the autotools chain into the
+closure for a one-line substitution, and no other patch touches
+autotools inputs (no autoreconf anywhere in this recipe).
+--- a/configure
++++ b/configure
+@@ -24638,7 +24638,7 @@
+ #
+ # Avahi runtime dir
+ #
+-avahi_runtime_dir="/run"
++avahi_runtime_dir="/var/run"
+ avahi_socket="${avahi_runtime_dir}/avahi-daemon/socket"
+
+

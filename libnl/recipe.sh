@@ -25,7 +25,7 @@ makedepends="
 subpackages="libnl-dev libnl-doc"
 recipe_build()
 {
-	./configure --prefix=/usr --sysconfdir=/etc --disable-static --disable-cli
+	./configure --prefix=/usr --sysconfdir=/etc --disable-static --disable-cli --localstatedir=/var
 	make -j${JOBS:-$(nproc)}
 }
 

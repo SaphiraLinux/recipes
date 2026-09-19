@@ -24,6 +24,9 @@ recipe_build()
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$BCBALL"
 	cd "$SRC"
 	export CC=gcc
+	# layout-exception: bc's configure.sh is a custom script with
+	# space-separated args and no GNU dir flags; it installs programs
+	# and manpages only, no state.
 	./configure.sh --prefix /usr
 	make -j${JOBS:-$(nproc)}
 }

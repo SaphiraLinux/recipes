@@ -7,7 +7,7 @@ command="/usr/sbin/alfred"
 # ALFRED_IFACE (e.g. bat0) in /etc/conf.d/alfred to distribute data
 # over the mesh via IPv6 link-local multicast.
 : ${ALFRED_IFACE:=none}
-command_args="-i $ALFRED_IFACE -u /run/alfred/alfred.sock"
+command_args="-i $ALFRED_IFACE -u /var/run/alfred/alfred.sock"
 command_user="alfred:alfred"
 supervisor="supervise-daemon"
 
@@ -19,5 +19,8 @@ depend()
 
 start_pre()
 {
-	checkpath -d -m 0755 -o alfred:alfred /run/alfred
+	checkpath -d -m 0755 -o alfred:alfred /var/run/alfred
+	# Stale socket from an unclean shutdown blocks bind; start_pre
+	# runs only when OpenRC is about to start the daemon.
+	rm -f /var/run/alfred/alfred.sock
 }

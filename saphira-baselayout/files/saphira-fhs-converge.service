@@ -1,0 +1,17 @@
+[Unit]
+Description=Saphira FHS layout convergence (before ordinary services)
+# Early-boot structural migration only: the historical /var/run alias
+# swap must happen before daemons start, never in a live post-upgrade.
+# A failed run marks this unit failed (loud) without halting boot.
+DefaultDependencies=no
+After=local-fs.target
+Before=sysinit.target
+ConditionPathExists=/usr/share/saphira/fhs.d/saphira-baselayout
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/saphira/ensure-fhs /usr/share/saphira/fhs.d/saphira-baselayout
+
+[Install]
+WantedBy=sysinit.target

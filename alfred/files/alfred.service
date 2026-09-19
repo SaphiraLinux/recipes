@@ -8,11 +8,13 @@ Type=simple
 User=alfred
 Group=alfred
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
-RuntimeDirectory=alfred
+# RuntimeDirectory= cannot cover /var/run (always under /run) and
+# the unit runs unprivileged: tmpfiles.d owns creation instead.
+ExecStartPre=/bin/rm -f /var/run/alfred/alfred.sock
 # Default: serve unix-socket clients, no mesh interface attached. Override
 # with `systemctl edit alfred` to set the mesh interface (e.g. bat0).
 Environment=ALFRED_IFACE=none
-ExecStart=/usr/sbin/alfred -i ${ALFRED_IFACE} -u /run/alfred/alfred.sock
+ExecStart=/usr/sbin/alfred -i ${ALFRED_IFACE} -u /var/run/alfred/alfred.sock
 Restart=on-failure
 
 [Install]

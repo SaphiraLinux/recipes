@@ -5,6 +5,7 @@ Conflicts=systemd-timesyncd.service
 
 [Service]
 Type=simple
+ExecStartPre=/usr/bin/install -d -m 0755 -o root -g root /var/run/chrony
 ExecStart=/usr/sbin/chronyd -n -u root $OPTIONS
 PrivateTmp=yes
 ProtectHome=yes

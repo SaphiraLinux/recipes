@@ -2,7 +2,7 @@
 
 pkgname=rspamd
 pkgver=4.1.4
-pkgrel=2
+pkgrel=3
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="Rapid spam filtering system"
 license="Apache-2.0"
@@ -48,7 +48,7 @@ recipe_build()
 		-DCMAKE_INSTALL_PREFIX=/usr \
 		-DCMAKE_BUILD_TYPE=Release \
 		-DCONFDIR=/etc/rspamd \
-		-DRUNDIR=/run/rspamd \
+		-DRUNDIR=/var/run/rspamd \
 		-DDBDIR=/var/lib/rspamd \
 		-DLOGDIR=/var/log/rspamd \
 		-DRSPAMD_USER=rspamd \
@@ -70,6 +70,7 @@ recipe_install()
 	DESTDIR="$PKGDEST" ninja -C build install
 	install -d -m 0755 "$PKGDEST/etc/init.d" \
 		"$PKGDEST/usr/lib/systemd/system" \
+		"$PKGDEST/usr/lib/tmpfiles.d" \
 		"$PKGDEST/etc/rspamd/local.d" \
 		"$PKGDEST/var/lib/rspamd" "$PKGDEST/var/log/rspamd"
 	install -m 0644 "$RECIPE_DIR/files/rspamd.service" \
@@ -78,10 +79,20 @@ recipe_install()
 		"$PKGDEST/etc/init.d/rspamd"
 	install -m 0644 "$RECIPE_DIR/files/worker-normal.inc" \
 		"$PKGDEST/etc/rspamd/local.d/worker-normal.inc"
+	install -m 0644 "$RECIPE_DIR/files/rspamd.tmpfiles" \
+		"$PKGDEST/usr/lib/tmpfiles.d/rspamd.conf"
 	# Runtime identity declaration: rspamd:117 required by the shipped
 	# service unit. makepkg generates the install scripts from this
 	# fragment; the package creates its identity at install time.
 	# r2: fragment added (payload change, revision bumps).
+	# r3: runtime dir /run/rspamd -> /var/run/rspamd via tmpfiles.d
+	# (unit runs unprivileged; RuntimeDirectory= cannot cover
+	# /var/run). Payload change, revision bumps.
 	install -D -m 0644 "$RECIPE_DIR/files/accounts.d/rspamd" \
 		"$PKGDEST/usr/share/saphira/accounts.d/rspamd"
+	# FHS migration declaration (hotfix/var-packaging-bug-var-run-isnot-run):
+	# rspamd:117 owns the corrected runtime dir; makepkg runs
+	# ensure-fhs after ensure-identity on install/upgrade.
+	install -D -m 0644 "$RECIPE_DIR/files/fhs.d/rspamd" \
+		"$PKGDEST/usr/share/saphira/fhs.d/rspamd"
 }

@@ -48,6 +48,8 @@ recipe_build()
 
         "$SRC/configure" \
                 --prefix=/usr \
+                --sysconfdir=/etc \
+                --localstatedir=/var \
                 --libdir=/usr/lib \
                 --enable-static
 

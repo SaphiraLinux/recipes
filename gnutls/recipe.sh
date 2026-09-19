@@ -31,6 +31,8 @@ subpackages="$pkgname-dev"
 recipe_build()
 {
 	./configure --prefix=/usr --disable-static --disable-doc --disable-tests \
+		--sysconfdir=/etc \
+		--localstatedir=/var \
 		--without-p11-kit --without-idn --without-zstd --without-brotli \
 		--without-tpm2 --without-tpm \
 		--disable-dependency-tracking

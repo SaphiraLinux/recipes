@@ -1,0 +1,20 @@
+# postfix FHS migration: remove the stray /run/postfix runtime dir.
+#
+# Split-brain resolved, not moved: the OpenRC initd tracked a flat
+# pidfile at /run/postfix-master.pid and created an otherwise
+# unconsumed /run/postfix directory, while the systemd unit and
+# postfix itself always used the queue-native
+# /var/spool/postfix/pid/master.pid. The fix aligns the initd to the
+# queue-native path (initd pidfile corrected alongside); there is no
+# /var/run path for postfix at all - queue state lives under
+# /var/spool/postfix (accounts.d dir stanza, persistent).
+#
+# Stale-state policy: the master validates pid liveness itself
+# (live duplicate refused, stale reclaimed); `postfix check`
+# validates queue structure at every start in both inits.
+# Old residue is the empty-or-absent /run/postfix dir plus the flat
+# /run/postfix-master.pid file, both on tmpfs: the dir is removed
+# once empty, the pidfile needs no migration (reboot-cleared,
+# unread post-move).
+
+rmdir-if-empty /run/postfix
