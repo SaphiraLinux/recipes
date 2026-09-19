@@ -21,6 +21,8 @@ recipe_build()
 	# historical recipe while bootstrapping with GCC 16.
 	CFLAGS="${CFLAGS-} -std=gnu17" ./configure \
 		--prefix=/usr \
+		--sysconfdir=/etc \
+		--localstatedir=/var \
 		--disable-dependency-tracking \
 		--without-guile
 	# GNU make's bootstrap script builds the first make without requiring

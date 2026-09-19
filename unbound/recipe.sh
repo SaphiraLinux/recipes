@@ -1,7 +1,12 @@
 #!/bin/sh
 pkgname=unbound
 pkgver=1.25.2
-pkgrel=4
+pkgrel=5
+# r5: compiled pidfile default /run/unbound.pid -> /var/run/unbound.pid
+# (split-/run invariant). No fhs.d fragment by rule: no directory ever
+# existed (flat pidfile on tmpfs, reboot-cleared, unread post-move),
+# so document-and-leave is the complete convergence. Payload change
+# (compiled default), revision bumps.
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='Validating, recursive, caching DNS resolver'
 license='BSD-3-Clause'
@@ -17,7 +22,8 @@ recipe_build() {
 	cd "$SRC"
 	echo "$unbound_sha256  $RECIPE_DIR/files/unbound-1.25.2.tar.gz" | sha256sum -c -
 	./configure --prefix=/usr --sysconfdir=/etc --disable-static \
-		--with-pidfile=/run/unbound.pid \
+		--localstatedir=/var \
+		--with-pidfile=/var/run/unbound.pid \
 		--with-rootkey-file=/usr/share/dnssec-root/trusted-key.key \
 		--with-username=unbound
 	make -j${JOBS:-$(nproc)}

@@ -71,6 +71,8 @@ recipe_build()
 	test -d others/libinjection -a -d others/mbedtls ||
 		{ echo "ERROR: bundled third-party sources missing" >&2; return 1; }
 	./configure --prefix=/usr \
+		--sysconfdir=/etc \
+		--localstatedir=/var \
 		--with-yajl=/usr \
 		--disable-examples \
 		--disable-doxygen-doc

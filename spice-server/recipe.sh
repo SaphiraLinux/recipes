@@ -45,6 +45,8 @@ recipe_build()
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$SPBALL"
 	cd "$SRC"
 	./configure --prefix=/usr \
+		--sysconfdir=/etc \
+		--localstatedir=/var \
 		--disable-static \
 		--enable-opus \
 		--disable-smartcard \

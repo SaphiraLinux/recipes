@@ -19,6 +19,8 @@ recipe_build() {
 	echo "$xfsprogs_sha256  $RECIPE_DIR/files/xfsprogs-6.14.0.tar.xz" | sha256sum -c -
 	make configure
 	./configure --prefix=/usr \
+		--sysconfdir=/etc \
+		--localstatedir=/var \
 		--disable-libuuid --disable-libblkid \
 		--enable-gettext=yes
 	make -j${JOBS:-$(nproc)}

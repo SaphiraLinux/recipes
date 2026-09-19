@@ -39,6 +39,8 @@ recipe_build()
 	mkdir -p "$SRC/build" && cd "$SRC/build"
 	export LIBS="-largp -lfts -lobstack"
 	../configure --prefix=/usr \
+		--sysconfdir=/etc \
+		--localstatedir=/var \
 		--disable-debuginfod \
 		--disable-libdebuginfod \
 		--disable-debuginfod-ima-verification \

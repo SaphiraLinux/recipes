@@ -217,7 +217,7 @@ body()
 	printf '%s\n' '    location ^~ /.well-known/acme-challenge/ {' "        root $ROOT;" '        try_files $uri =404;' '    }'
 	case $TYPE in
 		static) printf '    root %s;\n    index index.html index.htm;\n' "$ROOT";;
-		php) printf '%s\n' "    root $ROOT;" '    index index.php index.html;' '    location ~ \\.php$ {' '        try_files $uri =404;' '        include fastcgi_params;' '        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;' "        fastcgi_pass unix:/run/php-fpm/$HOST.sock;" '    }';;
+		php) printf '%s\n' "    root $ROOT;" '    index index.php index.html;' '    location ~ \\.php$ {' '        try_files $uri =404;' '        include fastcgi_params;' '        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;' "        fastcgi_pass unix:/var/run/php-fpm85/$HOST.sock;" '    }';;
 		node) printf '%s\n' "    root $ROOT;" '    location / {' '        proxy_set_header Host $host;' '        proxy_set_header X-Real-IP $remote_addr;' '        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;' '        proxy_set_header X-Forwarded-Proto $scheme;' "        proxy_pass http://127.0.0.1:$NODE_PORT;" '    }';;
 	esac
 }
@@ -238,7 +238,7 @@ render()
 make_pool()
 {
 	file=$1
-	printf '[%s]\nuser = php-fpm\ngroup = php-fpm\nlisten = /run/php-fpm/%s.sock\nlisten.owner = nginx\nlisten.group = nginx\npm = ondemand\npm.max_children = 10\n' "$HOST" "$HOST" > "$file"
+	printf '[%s]\nuser = php-fpm\ngroup = php-fpm\nlisten = /var/run/php-fpm85/%s.sock\nlisten.owner = nginx\nlisten.group = nginx\npm = ondemand\npm.max_children = 10\n' "$HOST" "$HOST" > "$file"
 }
 
 review() { say 'Candidate configuration:'; sed 's/^/  /' "$1"; yes_no 'Install this configuration?' No; }

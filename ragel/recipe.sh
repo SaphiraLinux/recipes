@@ -21,7 +21,7 @@ makedepends="
 recipe_build()
 {
 	mkdir -p "$BUILDDIR" && cd "$BUILDDIR"
-	"$SRC/configure" --prefix=/usr --disable-manual
+	"$SRC/configure" --prefix=/usr --sysconfdir=/etc --disable-manual --localstatedir=/var
 	make
 }
 

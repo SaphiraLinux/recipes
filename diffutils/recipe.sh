@@ -15,7 +15,7 @@ recipe_build() {
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$RECIPE_DIR/files/diffutils-3.12.tar.xz"
 	cd "$SRC"
 	echo "$diffutils_sha256  $RECIPE_DIR/files/diffutils-3.12.tar.xz" | sha256sum -c -
-	./configure --prefix=/usr --disable-nls
+	./configure --prefix=/usr --sysconfdir=/etc --disable-nls --localstatedir=/var
 	make -j${JOBS:-$(nproc)}
 }
 recipe_install() {

@@ -17,6 +17,8 @@ recipe_build() {
 	cd "$SRC/icu/source"
 	echo "$icu_sha256  $RECIPE_DIR/files/icu4c-78.3-src.tgz" | sha256sum -c -
 	./configure --prefix=/usr --libdir=/usr/lib \
+		--sysconfdir=/etc \
+		--localstatedir=/var \
 		--disable-tests --disable-samples --disable-extras \
 		--with-data-packaging=library
 	make -j${JOBS:-$(nproc)}

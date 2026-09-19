@@ -33,6 +33,9 @@ subpackages="$pkgname-dev"
 
 recipe_build()
 {
+	# layout-exception: node uses its own python configure dialect;
+	# GNU dir flags do not apply. Installed paths follow the explicit
+	# --prefix plus node defaults (never prefix-derived state).
 	./configure \
 		--prefix=/usr \
 		--ninja \

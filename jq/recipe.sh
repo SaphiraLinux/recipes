@@ -22,7 +22,7 @@ makedepends="
 recipe_build()
 {
 	mkdir -p "$BUILDDIR" && cd "$BUILDDIR"
-	"$SRC/configure" --prefix=/usr --with-oniguruma
+	"$SRC/configure" --prefix=/usr --sysconfdir=/etc --with-oniguruma --localstatedir=/var
 	make
 }
 

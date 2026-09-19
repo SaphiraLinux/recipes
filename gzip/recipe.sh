@@ -15,7 +15,7 @@ recipe_build() {
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$RECIPE_DIR/files/gzip-1.13.tar.xz"
 	cd "$SRC"
 	echo "$gzip_sha256  $RECIPE_DIR/files/gzip-1.13.tar.xz" | sha256sum -c -
-	./configure --prefix=/usr --disable-gcc-warnings
+	./configure --prefix=/usr --sysconfdir=/etc --disable-gcc-warnings --localstatedir=/var
 	make -j${JOBS:-$(nproc)}
 }
 recipe_install() {

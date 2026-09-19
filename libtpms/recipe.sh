@@ -37,6 +37,8 @@ recipe_build()
 	cd "$SRC"
 	autoreconf -i
 	./configure --prefix=/usr --libdir=/usr/lib \
+		--sysconfdir=/etc \
+		--localstatedir=/var \
 		--with-tpm2 --with-openssl
 	make -j${JOBS:-$(nproc)}
 }

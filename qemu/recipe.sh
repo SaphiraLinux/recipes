@@ -49,6 +49,8 @@ recipe_build()
 	# r2: VNC enabled for remote management (virt-manager/virt-viewer
 	# from homer). GTK/SDL/OpenGL stay off; pixman not required for VNC.
 	./configure --prefix=/usr \
+		--sysconfdir=/etc \
+		--localstatedir=/var \
 		--target-list=x86_64-softmmu \
 		--disable-gtk --disable-sdl --disable-opengl --enable-vnc \
 		--enable-spice --enable-usb-redir --enable-linux-aio --enable-tpm \

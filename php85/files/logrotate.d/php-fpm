@@ -1,0 +1,14 @@
+# PHP-FPM holds its logs open across several possible instances
+# (php-fpm, php-fpm85, php85/*) with varying pid paths, so
+# copytruncate is the robust generic choice here.
+/var/log/php-fpm.log /var/log/php-fpm85.log /var/log/php85/*.log {
+    weekly
+    rotate 4
+    missingok
+    notifempty
+    compress
+    delaycompress
+    dateext
+    copytruncate
+    sharedscripts
+}

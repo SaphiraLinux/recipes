@@ -13,7 +13,7 @@ sha256=fd87e0aba7e43ae054837afd6cd4db03a3f2693deb3619085e6ed9d8d9604ad8
 makedepends="gcc make gawk"
 
 recipe_build() {
-	./configure --prefix=/usr
+	./configure --prefix=/usr --sysconfdir=/etc --localstatedir=/var
 	make -j${JOBS:-$(nproc)}
 }
 

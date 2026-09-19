@@ -15,7 +15,7 @@ recipe_build() {
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$RECIPE_DIR/files/cpio-2.15.tar.gz"
 	cd "$SRC"
 	echo "$cpio_sha256  $RECIPE_DIR/files/cpio-2.15.tar.gz" | sha256sum -c -
-	CFLAGS="${CFLAGS-} -std=gnu11" ./configure --prefix=/usr --disable-nls
+	CFLAGS="${CFLAGS-} -std=gnu11" ./configure --prefix=/usr --sysconfdir=/etc --disable-nls --localstatedir=/var
 	make -j${JOBS:-$(nproc)}
 }
 recipe_install() {

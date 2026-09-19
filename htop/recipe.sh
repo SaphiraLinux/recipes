@@ -21,6 +21,8 @@ recipe_build()
 {
 	cd "$SRC"
 	./configure --prefix=/usr \
+		--sysconfdir=/etc \
+		--localstatedir=/var \
 		--enable-capabilities --enable-delayacct \
 		--enable-unicode --disable-sensors
 	make -j${JOBS:-$(nproc)}

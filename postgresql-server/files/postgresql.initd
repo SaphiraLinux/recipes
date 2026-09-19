@@ -7,7 +7,7 @@ command=/usr/bin/postgres
 command_user=postgres:postgres
 command_background=true
 pidfile=${data_directory}/postmaster.pid
-command_args="-D ${data_directory} -c listen_addresses=${listen_addresses} -c unix_socket_directories=/run/postgresql"
+command_args="-D ${data_directory} -c listen_addresses=${listen_addresses} -c unix_socket_directories=/var/run/postgresql"
 
 depend()
 {
@@ -17,7 +17,7 @@ depend()
 
 start_pre()
 {
-	checkpath -d -m 0755 -o postgres:postgres /run/postgresql
+	checkpath -d -m 0755 -o postgres:postgres /var/run/postgresql
 	checkpath -d -m 0700 -o postgres:postgres /var/lib/postgresql
 	if test ! -s "${data_directory}/PG_VERSION"; then
 		eerror "PostgreSQL is not initialized; run postgresql-initdb"

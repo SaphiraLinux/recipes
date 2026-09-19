@@ -42,6 +42,11 @@ recipe_build()
 	cd "$SRC"
 	rm -f include/linux/if_pppol2tp.h  # stale bundled header shadows system uapi
 	sed -i 's/-DIPX_CHANGE //; s/^FILTER=y/# FILTER=y/; s/^CHAPMS=y/# CHAPMS=y/; s/^MPPE=y/# MPPE=y/' pppd/Makefile.linux
+	# layout-exception: pppd's configure speaks a prefix-only dialect
+	# (no GNU dir flags to set); install paths are fully explicit
+	# absolute destinations in recipe_install below (verified: no
+	# prefix-derived etc/var in the payload). GNU dir flags must stay
+	# off this line.
 	./configure --prefix=/usr
 	make -j${JOBS:-$(nproc)} -C pppd COPTS="-O2 -pipe -Wall -g -std=gnu99 -include time.h"
 	make -j${JOBS:-$(nproc)} -C chat COPTS="-O2 -pipe -Wall -g -std=gnu89"

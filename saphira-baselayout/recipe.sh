@@ -2,7 +2,15 @@
 
 pkgname=saphira-baselayout
 pkgver=0.1
-pkgrel=15
+pkgrel=20
+# r20: reconciler failure semantics (live Egg incident: orchestrated
+# ensure-fhs died usage on `--root ""` and the deaths were counted
+# as drift inside a success-style summary). --root accepts an empty
+# value as live in ensure-fhs; check-mode execution errors exit 2
+# (drift stays 1) in ensure-fhs/ensure-identity.sh; check-mode
+# identity resolution falls back to the fragment index for
+# declared-but-absent users/groups (audit must not die on what
+# apply would create). Payload change, revision bumps.
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="Saphira filesystem skeleton and platform tools (init-system neutral)"
 license="BUSL-1.1"
@@ -15,6 +23,34 @@ depends=""
 
 makedepends=""
 
+# r19: permissions V1 foundation (saphira-permissions slice):
+# ensure-fhs gains [--root PATH] (offline recovery against a mounted
+# root, honouring $SAPHIRA_ENSURE_ROOT) and --check (drift report,
+# exit 1 on drift, zero mutation); ensure-identity.sh gains --check
+# (same contract, including legacy-migration and database-mode
+# reporting); both honour administrator overrides from
+# /etc/saphira/permissions/override.d via the new shared
+# permissions-override.sh library (ignore/pin/pin-cap, exact-path
+# only, never additive). Generated package callers are unchanged
+# (no flags), so install/upgrade behaviour is byte-identical.
+# Payload change, revision bumps.
+# r18: virgin-assembly fixes (canonical base rebuild ran r17's new
+# post-install in a root with no /bin/sh and no sed): ensure-fhs uses
+# POSIX expansion instead of sed, and chowns root by numeric 0:0 (no
+# NSS lookup). Payload change, revision bumps.
+# r17: ensure-identity.sh tolerates the sysusers stanza (mechanism
+# selector for the generated caller, not an identity declaration):
+# every helper pass skips it with arity enforced, so sysusers-native
+# fragments (systemd r9+) converge instead of failing post-upgrade
+# with "unknown stanza". Payload change, revision bumps.
+# r16: FHS invariant slice (hotfix/var-packaging-bug-var-run-isnot-run):
+# ships real /var/run AND /run (separate real directories, never
+# aliases), the Saphira-native ensure-fhs reconciler, the baselayout
+# global fhs.d fragment (historical /var/run symlink, /usr/var
+# residue, core dirs), and the saphira-fhs-converge boot service
+# (both inits, runs before ordinary services). Baselayout's own
+# install/upgrade callers for its fragment need the makepkg fhs.d
+# support from the same branch: build only after that slice lands.
 # r15: ensure-identity.sh auto-repairs exact legacy mappings in
 # place (locked, backed up, post-verified), so apk fix/upgrade
 # self-heal recognised drift with no manual reconcile step;
@@ -51,8 +87,10 @@ recipe_install()
 		"$PKGDEST/etc/profile.d" "$PKGDEST/etc/skel" \
 		"$PKGDEST/etc/network.d" "$PKGDEST/sbin" \
 		"$PKGDEST/usr/libexec/saphira" "$PKGDEST/usr/share/saphira" \
+		"$PKGDEST/usr/share/saphira/fhs.d" \
 		"$PKGDEST/var/empty" "$PKGDEST/var/lib/saphira-firstboot" \
-		"$PKGDEST/var/spool/mail"
+		"$PKGDEST/var/spool/mail" \
+		"$PKGDEST/var/run" "$PKGDEST/run"
 	install -m 0644 "$RECIPE_DIR/files/inittab" "$PKGDEST/etc/inittab"
 	install -m 0644 "$RECIPE_DIR/files/profile" "$PKGDEST/etc/profile"
 	install -m 0644 "$RECIPE_DIR/files/network.conf" \
@@ -79,6 +117,21 @@ recipe_install()
 		"$PKGDEST/usr/libexec/saphira/apply-accounts.sh"
 	install -m 0755 "$RECIPE_DIR/files/libexec/ensure-identity.sh" \
 		"$PKGDEST/usr/libexec/saphira/ensure-identity.sh"
+install -m 0755 "$RECIPE_DIR/files/libexec/ensure-fhs" \
+	"$PKGDEST/usr/libexec/saphira/ensure-fhs"
+# Shared administrator-override lookup, sourced by ensure-identity.sh,
+# ensure-fhs, and the saphira-permissions tools (read-only library:
+# never executed directly).
+install -m 0644 "$RECIPE_DIR/files/libexec/permissions-override.sh" \
+	"$PKGDEST/usr/libexec/saphira/permissions-override.sh"
+	install -m 0644 "$RECIPE_DIR/files/fhs.d/saphira-baselayout" \
+		"$PKGDEST/usr/share/saphira/fhs.d/saphira-baselayout"
+	# Boot convergence (both inits, unconditional like any service
+	# package): the historical alias swap runs here, never live.
+	install -D -m 0755 "$RECIPE_DIR/files/saphira-fhs-converge.initd" \
+		"$PKGDEST/etc/init.d/saphira-fhs-converge"
+	install -D -m 0644 "$RECIPE_DIR/files/saphira-fhs-converge.service" \
+		"$PKGDEST/usr/lib/systemd/system/saphira-fhs-converge.service"
 	install -m 0755 "$RECIPE_DIR/files/libexec/apply-network.sh" \
 		"$PKGDEST/usr/libexec/saphira/apply-network.sh"
 	install -m 0644 "$RECIPE_DIR/files/accounts.tsv" \

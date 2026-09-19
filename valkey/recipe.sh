@@ -2,7 +2,11 @@
 
 pkgname=valkey
 pkgver=9.1.1
-pkgrel=2
+pkgrel=3
+# r3: state dir ships 0700 (homer recon carries 0700; the daemon
+# runs as valkey:valkey with no group consumers, so group access
+# was never needed). Recipe payload and accounts.d declaration
+# move together. Payload change, revision bumps.
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="Valkey: high-performance key/value datastore (Redis-compatible)"
 license="BSD-3-Clause"
@@ -34,8 +38,10 @@ recipe_install()
 		"$PKGDEST/usr/share/doc/valkey/README.md"
 	install -D -m 0644 "$SRC/valkey.conf" \
 		"$PKGDEST/etc/valkey/valkey.conf"
-	install -d -m 0750 "$PKGDEST/var/lib/valkey" \
-		"$PKGDEST/var/log/valkey"
+	install -d -m 0750 "$PKGDEST/var/log/valkey"
+	# State dir is daemon-private (homer recon); the log dir keeps
+	# group readability for log readers.
+	install -d -m 0700 "$PKGDEST/var/lib/valkey"
 	install -D -m 0755 "$RECIPE_DIR/files/valkey.initd" \
 		"$PKGDEST/etc/init.d/valkey"
 	install -D -m 0644 "$RECIPE_DIR/files/valkey.service" \

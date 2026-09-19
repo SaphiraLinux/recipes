@@ -3,8 +3,8 @@
 
 description="GlusterFS management daemon"
 command="/usr/sbin/glusterd"
-command_args="${GLUSTERD_ARGS:--p /run/glusterd.pid}"
-pidfile="/run/glusterd.pid"
+command_args="${GLUSTERD_ARGS:--p /var/run/glusterd.pid}"
+pidfile="/var/run/glusterd.pid"
 command_background="yes"
 
 depend() {

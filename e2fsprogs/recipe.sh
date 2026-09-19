@@ -17,6 +17,7 @@ recipe_build() {
 	cd "$SRC"
 	echo "$e2fsprogs_sha256  $RECIPE_DIR/files/e2fsprogs-1.47.2.tar.xz" | sha256sum -c -
 	./configure --prefix=/usr --sysconfdir=/etc \
+		--localstatedir=/var \
 		--disable-libuuid --disable-libblkid --disable-libss \
 		--disable-fsck --disable-uuidd --disable-static \
 		--disable-e2initrd-helper

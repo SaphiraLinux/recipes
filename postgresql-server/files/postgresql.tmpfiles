@@ -1,0 +1,5 @@
+# tmpfiles.d entry for postgresql-server. The unit runs
+# unprivileged (User=postgres), so it cannot create its own socket
+# dir under /var/run: tmpfiles.d owns creation with the service
+# identity. /var/run is persistent by design, never wiped at boot.
+d /var/run/postgresql 0755 postgres postgres -

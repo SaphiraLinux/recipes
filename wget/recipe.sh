@@ -16,7 +16,7 @@ recipe_build() {
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$RECIPE_DIR/files/wget-1.25.0.tar.gz"
 	cd "$SRC"
 	echo "$wget_sha256  $RECIPE_DIR/files/wget-1.25.0.tar.gz" | sha256sum -c -
-	./configure --prefix=/usr --sysconfdir=/etc --disable-static --disable-iri --with-ssl=openssl
+	./configure --prefix=/usr --sysconfdir=/etc --disable-static --disable-iri --with-ssl=openssl --localstatedir=/var
 	make -j${JOBS:-$(nproc)}
 }
 recipe_install() {

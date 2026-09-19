@@ -15,7 +15,7 @@ subpackages="$pkgname-dev $pkgname-doc"
 makedepends="gcc make pkgconf zlib-dev gawk"
 
 recipe_build() {
-	./configure --prefix=/usr --without-python --without-lzma --without-iconv --disable-static
+	./configure --prefix=/usr --sysconfdir=/etc --without-python --without-lzma --without-iconv --disable-static --localstatedir=/var
 	make -j${JOBS:-$(nproc)}
 }
 

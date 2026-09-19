@@ -220,6 +220,8 @@ recipe_build()
 	cd "$BUILDDIR/binutils"
 	"$DEPSRC/binutils/configure" \
 		--prefix=/usr \
+		--sysconfdir=/etc \
+		--localstatedir=/var \
 		--with-sysroot=$SYSROOT_ABS \
 		--build=$HOST_TRIPLET --host=$HOST_TRIPLET --target=$CROSS_TARGET \
 		$PROGRAM_PREFIX \
@@ -245,6 +247,8 @@ recipe_build()
 	cd "$BUILDDIR/gcc-boot"
 	"$SRC/configure" \
 		--prefix=/usr \
+		--sysconfdir=/etc \
+		--localstatedir=/var \
 		--with-sysroot=$SYSROOT_ABS \
 		--build=$HOST_TRIPLET --host=$HOST_TRIPLET --target=$CROSS_TARGET \
 		$PROGRAM_PREFIX \
@@ -281,7 +285,7 @@ recipe_build()
 	patch -d "$DEPSRC/musl" -Np1 -i "$RECIPE_DIR/files/0002-netinet-in6-kernel-uapi-coordination.patch"
 	cd "$DEPSRC/musl"
 	CC=$CROSS_TARGET-gcc CROSS_COMPILE=$CROSS_TARGET- \
-		./configure --prefix=/usr --syslibdir=/lib
+		./configure --prefix=/usr --sysconfdir=/etc --localstatedir=/var --syslibdir=/lib
 	make -j${JOBS:-$(nproc)}
 	make DESTDIR="$SYSSTAGE" install
 
@@ -297,6 +301,8 @@ recipe_build()
 	cd "$BUILDDIR/gcc-final"
 	"$SRC/configure" \
 		--prefix=/usr \
+		--sysconfdir=/etc \
+		--localstatedir=/var \
 		--with-sysroot=$SYSROOT_ABS \
 		--with-build-sysroot="$PKGDEST$SYSROOT_ABS" \
 		--with-toolexeclibdir=$TOOLEXECLIB \

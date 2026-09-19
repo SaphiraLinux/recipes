@@ -20,7 +20,7 @@ recipe_build()
 {
 	cd "$SRC"
 	./autogen.sh
-	./configure --prefix=/usr --disable-static
+	./configure --prefix=/usr --sysconfdir=/etc --disable-static --localstatedir=/var
 	make -j${JOBS:-$(nproc)}
 }
 

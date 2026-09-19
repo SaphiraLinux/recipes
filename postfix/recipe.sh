@@ -2,7 +2,7 @@
 
 pkgname=postfix
 pkgver=3.11.6
-pkgrel=4
+pkgrel=5
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="Mail transfer agent (SMTP) with sqlite/mysql/lmdb map support"
 license="IPL-1.0 EPL-2.0 OR MPL-2.0"
@@ -75,6 +75,13 @@ recipe_install()
 	# this fragment; the package creates its identities at install
 	# time.
 	# r4: fragment added (payload change, revision bumps).
+	# r5: initd pidfile aligned to queue-native
+	# /var/spool/postfix/pid/master.pid; stray /run/postfix
+	# creation removed (payload change, revision bumps).
 	install -D -m 0644 "$RECIPE_DIR/files/accounts.d/postfix" \
 		"$PKGDEST/usr/share/saphira/accounts.d/postfix"
+	# FHS migration declaration (hotfix/var-packaging-bug-var-run-isnot-run):
+	# removal-only (no new dir: queue state stays in /var/spool).
+	install -D -m 0644 "$RECIPE_DIR/files/fhs.d/postfix" \
+		"$PKGDEST/usr/share/saphira/fhs.d/postfix"
 }

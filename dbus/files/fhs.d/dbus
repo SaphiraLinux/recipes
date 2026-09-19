@@ -1,0 +1,17 @@
+# dbus FHS migration: system bus runtime /run/dbus -> /var/run/dbus.
+#
+# Stale-state policy (/var/run is persistent by design, never wiped):
+# - Socket: the daemon does not reclaim a stale socket file (bind
+#   fails on an existing path). The OpenRC start_pre removes
+#   /var/run/dbus/system_bus_socket when starting (runs only when
+#   OpenRC is about to start the daemon); the systemd socket unit
+#   binds -- and reclaims -- the socket itself. Ownership of stale
+#   cleanup therefore lives in service logic, never in this fragment.
+# - New /var/run/dbus: converged here on upgrade (messagebus:81);
+#   created by checkpath/socket unit on fresh installs.
+# - Old /run/dbus: volatile residue on tmpfs. Removed once empty
+#   (old daemon gone, socket file gone with reboot or cleanup);
+#   left in place and reported while occupied.
+
+dir /var/run/dbus 0755 messagebus messagebus
+rmdir-if-empty /run/dbus

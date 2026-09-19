@@ -2,7 +2,11 @@
 
 pkgname=inetutils
 pkgver=2.6
-pkgrel=3
+pkgrel=4
+# r4: OpenRC-tracked pidfile /run/inetd.pid -> /var/run/inetd.pid
+# (flat, root-run, no subdir). No fhs.d fragment by rule: flat tmpfs
+# pidfile needs no migration (document-and-leave, unbound
+# precedent). Payload change, revision bumps.
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="GNU network utilities (clients and servers)"
 license="GPL-3.0-or-later"
@@ -32,6 +36,8 @@ recipe_build()
 	# pinned here per policy) so /usr/bin/ftp is a declared contract of
 	# this package, never an autodetection accident.
 	"$SRC/configure" --prefix=/usr \
+		--sysconfdir=/etc \
+		--localstatedir=/var \
 		--without-pam --disable-static \
 		--enable-ftp
 	make

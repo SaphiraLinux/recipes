@@ -21,6 +21,8 @@ recipe_build()
 {
 	cd "$SRC"
 	./configure --prefix=/usr --with-features=normal --enable-multibyte \
+		--sysconfdir=/etc \
+		--localstatedir=/var \
 		--enable-gui=no --without-x --disable-gpm \
 		--disable-netbeans --with-tlib=ncursesw
 	make -j${JOBS:-$(nproc)}

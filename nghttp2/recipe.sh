@@ -42,7 +42,7 @@ makedepends="
 recipe_build()
 {
 	mkdir -p "$BUILDDIR" && cd "$BUILDDIR"
-	"$SRC/configure" --prefix=/usr --enable-app --disable-static
+	"$SRC/configure" --prefix=/usr --sysconfdir=/etc --enable-app --disable-static --localstatedir=/var
 	make -j${JOBS:-$(nproc)}
 }
 

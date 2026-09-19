@@ -6,8 +6,9 @@ After=network.target
 Type=forking
 User=clamav
 Group=clamav
-PIDFile=/run/clamav/freshclam.pid
-ExecStart=/usr/bin/freshclam --daemon --pid=/run/clamav/freshclam.pid
+PIDFile=/var/run/clamav/freshclam.pid
+ExecStartPre=/bin/rm -f /var/run/clamav/freshclam.pid
+ExecStart=/usr/bin/freshclam --daemon --pid=/var/run/clamav/freshclam.pid
 Restart=on-failure
 
 [Install]

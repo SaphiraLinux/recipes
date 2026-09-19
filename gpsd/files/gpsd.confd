@@ -12,5 +12,5 @@ DEVICES="/dev/gps0"
 OPTIONS=""
 
 # Control socket location for gpsdctl and hotplug. Empty means the
-# compiled default (/run/gpsd.sock).
+# compiled default (/var/run/gpsd/gpsd.sock).
 CONTROL_SOCKET=""

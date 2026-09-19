@@ -17,7 +17,12 @@ depend()
 
 start_pre()
 {
-	# /run is tmpfs: the system bus runtime directory must exist before
-	# the daemon creates its socket.
-	checkpath -d -m 0755 /run/dbus
+	# /var/run is persistent by design: the runtime dir is created
+	# here, and a stale socket from an unclean shutdown must be
+	# cleared or bind fails. start_pre runs only when OpenRC is
+	# about to start the daemon, so no tracked-live bus loses its
+	# socket here. (Under systemd the socket unit owns this: PID 1
+	# binds -- and reclaims -- the socket file itself.)
+	checkpath -d -m 0755 /var/run/dbus
+	rm -f /var/run/dbus/system_bus_socket
 }

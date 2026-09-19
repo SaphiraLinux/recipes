@@ -1,0 +1,682 @@
+#!/bin/sh
+# ensure-permissions --system [--root PATH] [--check|--apply]
+# Full installed-system metadata reconciliation (audit/recovery).
+#
+# Saphira-owned infrastructure (saphira-permissions). This is the
+# explicit full-system operation: normal package transactions keep
+# reconciling only their own fragments and must never invoke it.
+#
+# Authority (deliberately distributed, never duplicated):
+#   APK installed database  packaged paths/modes, installed scope
+#   accounts.d fragments    users/groups, identity-owned paths
+#   fhs.d fragments         runtime/service structure
+#   caps.d fragments        file capabilities (no other home)
+#   baselayout              canonical FHS roots
+#   overrides               administrator pins/ignores (wins)
+#
+# Safety contract (all enforced):
+# - exact-path, leaf-only, non-recursive: a claim on /var/lib/foo
+#   converges that inode, never the tree beneath it;
+# - symlink-safe: symlinks are never followed, never converged,
+#   refused loudly (drift in check, recorded failure in apply);
+# - diff-first: default mode is --check (report only, exit 1 on
+#   drift); --apply is explicit;
+# - deterministic: claims processed in byte-sorted path order,
+#   fragments in sorted package order; repeats converge clean;
+# - installed scope only: packages in the target's installed DB
+#   (world's dependency closure as actually installed), never
+#   uninstalled packages, never /usr/local (outside distribution
+#   management);
+# - protected configs (/etc + protected_paths.d trees) converge
+#   like everything else (damage repair is the point) but are
+#   flagged `protected:` in the report so review is easy; use
+#   `ignore` overrides for deliberate deviations.
+# - missing packaged files are reported, never restored (content
+#   is apk's domain: `apk fix`), and never affect the exit code.
+#
+# Tooling discipline: POSIX sh plus coreutils/sort/comm/stat, awk
+# (mawk dependency of saphira-permissions), the sibling reconciler
+# tools, and libcap's getcap/setcap. No grep/sed/python: the
+# guaranteed on-target set is bash+coreutils (identity deps),
+# mawk+libcap (this package's deps).
+set -eu
+
+prog=ensure-permissions
+die() { printf '%s: %s\n' "$prog" "$*" >&2; exit 1; }
+report() { printf '%s: %s\n' "$prog" "$*" >&2; }
+
+[ "${1:-}" = "--system" ] || die "usage: ensure-permissions --system [--root PATH] [--check|--apply]"
+shift
+ROOT=
+APPLY=0
+while [ $# -gt 0 ]; do
+	case $1 in
+	--root)
+		# An explicitly empty root is invalid (fail closed).
+		# Live operation passes no --root at all.
+		[ -n "${2:-}" ] || die "usage: ensure-permissions --system [--root PATH] [--check|--apply]"
+		ROOT=$2
+		shift 2
+		;;
+	--check)
+		APPLY=0
+		shift
+		;;
+	--apply)
+		APPLY=1
+		shift
+		;;
+	*)
+		die "usage: ensure-permissions --system [--root PATH] [--check|--apply]"
+		;;
+	esac
+done
+[ -n "$ROOT" ] || ROOT=${SAPHIRA_ENSURE_ROOT:-}
+case $ROOT in
+'' | /) ROOT= ;;
+*/) ROOT=${ROOT%/} ;;
+esac
+case $ROOT in
+*//* | *..*) die "refusing unsafe target root: $ROOT" ;;
+esac
+[ -z "$ROOT" ] || [ -d "$ROOT" ] || die "target root is not a directory: $ROOT"
+
+INSTDB=$ROOT/lib/apk/db/installed
+[ -f "$INSTDB" ] || die "not a Saphira root (missing $INSTDB)"
+command -v awk >/dev/null 2>&1 || die "awk is missing (install mawk)"
+command -v getcap >/dev/null 2>&1 || die "getcap is missing (install libcap)"
+if [ "$APPLY" -eq 1 ]; then
+	command -v setcap >/dev/null 2>&1 || die "setcap is missing (install libcap)"
+fi
+
+TAB=$(printf '\t')
+NL='
+'
+
+OVERRIDE_DIR=$ROOT/etc/saphira/permissions/override.d
+helper_dir=$(dirname -- "$0")
+if [ -f "$helper_dir/permissions-override.sh" ]; then
+	# shellcheck disable=SC1091
+	. "$helper_dir/permissions-override.sh"
+elif [ -f /usr/libexec/saphira/permissions-override.sh ]; then
+	# shellcheck disable=SC1091
+	. /usr/libexec/saphira/permissions-override.sh
+else
+	die "permissions-override.sh is missing (reinstall saphira-baselayout)"
+fi
+ovr_init
+
+tool_path() {
+	if [ -x "$helper_dir/$1" ]; then
+		printf '%s' "$helper_dir/$1"
+	elif [ -x "/usr/libexec/saphira/$1" ]; then
+		printf '%s' "/usr/libexec/saphira/$1"
+	else
+		die "reconciler tool is missing: $1"
+	fi
+}
+IDENTITY_TOOL=$(tool_path ensure-identity.sh)
+FHS_TOOL=$(tool_path ensure-fhs)
+CAPS_TOOL=$(tool_path ensure-caps)
+
+WORK=${PERMISSIONS_TMPDIR:-${TMPDIR:-/tmp}}/ensure-permissions.$$
+mkdir -p "$WORK" || die "cannot create work dir: $WORK"
+trap 'rm -rf -- "$WORK"' EXIT HUP INT TERM
+
+DRIFT=0
+FRAGDRIFT=0
+CHILDFAIL=0
+FAIL=0
+WARN=0
+LINKSKIP=0
+drift() { DRIFT=$((DRIFT + 1)); report "drift: $1"; }
+failrec() { FAIL=$((FAIL + 1)); report "failed: $1"; }
+warn() { WARN=$((WARN + 1)); report "warning: $1"; }
+
+norm_mode() {
+	stripped=$1
+	while [ "${stripped#0}" != "$stripped" ]; do
+		stripped=${stripped#0}
+	done
+	[ -n "$stripped" ] || stripped=0
+	printf '%s' "$stripped"
+}
+
+# resolve_id $1(user|group) $2(name): numeric ID from the target
+# root's own database (offline runs must never consult the host
+# NSS). Installed-database claims arrive numeric already; override
+# pins may name identities, so pins resolve here (fail closed).
+resolve_id() {
+	case $2 in
+	root | 0) printf '0'; return 0 ;;
+	esac
+	case $1 in
+	user) db=$ROOT/etc/passwd ;;
+	group) db=$ROOT/etc/group ;;
+	*) return 1 ;;
+	esac
+	[ -f "$db" ] || return 1
+	while IFS=: read -r name _ id _ _ _ _ || [ -n "$name" ]; do
+		if [ "$name" = "$2" ]; then
+			printf '%s' "$id"
+			return 0
+		fi
+	done <"$db"
+	return 1
+}
+
+# --- 1. installed database: claims + package set --------------------
+# claims.tsv: <path><TAB><type d|f><TAB><uid><TAB><gid><TAB><mode>
+# scope.tsv: every packaged path (caps-sweep intersection universe)
+# pkgs: installed package names (fragment orchestration scope)
+report "reading installed database: $INSTDB"
+awk -v claims="$WORK/claims.tsv" -v scope="$WORK/scope.tsv" -v pkgs="$WORK/pkgs" '
+function flushdir() {
+	if (dir != "") {
+		print dir "\td\t" duid "\t" dgid "\t" dmode >> claims
+		print dir >> scope
+	}
+	dir = ""
+}
+function flushfile() {
+	if (f != "") {
+		# Every R: entry becomes a claim, including recorded-777
+		# ones: apk-tools masks file-type bits at archive read
+		# (tar.c: mode & 07777), so the installed database cannot
+		# distinguish a symlink from a genuine 0777 file. The
+		# 777 value is a pre-filter only; converge_claim
+		# disambiguates authoritatively with lstat (packaged
+		# symlink = silent skip, anything else converges).
+		print f "\tf\t" fuid "\t" fgid "\t" fmode >> claims
+		print f >> scope
+	}
+	f = ""
+}
+/^C:/ { flushdir(); flushfile(); pkg = "" }
+/^P:/ { flushdir(); flushfile(); pkg = substr($0, 3); print pkg >> pkgs }
+/^F:/ { flushdir(); flushfile(); dir = "/" substr($0, 3); duid = 0; dgid = 0; dmode = "755" }
+/^M:/ { n = split(substr($0, 3), a, ":"); if (n == 3 && dir != "") { duid = a[1]; dgid = a[2]; dmode = a[3] } }
+/^R:/ { flushfile(); if (dir != "") f = dir "/" substr($0, 3); else f = "/" substr($0, 3); fuid = 0; fgid = 0; fmode = "644" }
+/^a:/ { n = split(substr($0, 3), a, ":"); if (n == 3 && f != "") { fuid = a[1]; fgid = a[2]; fmode = a[3] } }
+END { flushdir(); flushfile() }
+' "$INSTDB" || die "cannot parse installed database"
+LC_ALL=C sort -u -o "$WORK/pkgs" "$WORK/pkgs"
+LC_ALL=C sort -u -o "$WORK/scope.tsv" "$WORK/scope.tsv"
+# Whole-line uniqueness only (no -k): identical co-owned claims
+# (every package ships var/log) collapse to one, while differing
+# claims for one path survive side by side (a latent packaging
+# conflict - warned about below, converged deterministically in
+# byte order so repeats are stable).
+LC_ALL=C sort -u -o "$WORK/claims.tsv" "$WORK/claims.tsv"
+cut -d"$TAB" -f1 "$WORK/claims.tsv" | uniq -d >"$WORK/claim_conflicts" || true
+while IFS= read -r hit || [ -n "$hit" ]; do
+	[ -n "$hit" ] || continue
+	warn "conflicting claims for $hit (packaging conflict: co-owning packages disagree; apply converges in sorted order)"
+done <"$WORK/claim_conflicts"
+report "installed packages: $(wc -l <"$WORK/pkgs"), packaged paths: $(wc -l <"$WORK/scope.tsv")"
+
+# --- 2. protected-config detection -----------------------------------
+# Default +etc plus /etc/apk/protected_paths.d trees (same authority
+# apk itself uses; `+path` lines, exact-tree prefix match).
+PROTECTED_TREES=/etc
+if [ -d "$ROOT/etc/apk/protected_paths.d" ]; then
+	for pp in "$ROOT/etc/apk/protected_paths.d"/*; do
+		[ -f "$pp" ] || continue
+		while IFS= read -r line || [ -n "$line" ]; do
+			case $line in
+			\#* | '') continue ;;
+			esac
+			entry=${line#+}
+			case $entry in
+			/*) PROTECTED_TREES=$PROTECTED_TREES$NL$entry ;;
+			esac
+		done <"$pp"
+	done
+fi
+is_protected() {
+	rest=$PROTECTED_TREES
+	while :; do
+		tree=${rest%%"$NL"*}
+		case $1 in
+		"$tree" | "$tree"/*) return 0 ;;
+		esac
+		[ "$rest" = "$tree" ] && break
+		rest=${rest#*"$NL"}
+	done
+	return 1
+}
+
+# Child invocation shape (safety-critical, one place per tool):
+# a non-empty ROOT passes --root explicitly; an empty ROOT (live
+# system) passes NO --root flag at all. An explicit empty value is
+# a usage error in every tool, so an unset shell variable can never
+# silently become /. $1 is check|apply, $2 the fragment path.
+run_fhs_frag() {
+	if [ "$1" = apply ]; then
+		if [ -n "$ROOT" ]; then "$FHS_TOOL" --root "$ROOT" "$2"; else "$FHS_TOOL" "$2"; fi
+	else
+		if [ -n "$ROOT" ]; then "$FHS_TOOL" --root "$ROOT" --check "$2"; else "$FHS_TOOL" --check "$2"; fi
+	fi
+}
+
+run_caps_frag() {
+	if [ "$1" = apply ]; then
+		if [ -n "$ROOT" ]; then "$CAPS_TOOL" --root "$ROOT" "$2"; else "$CAPS_TOOL" "$2"; fi
+	else
+		if [ -n "$ROOT" ]; then "$CAPS_TOOL" --root "$ROOT" --check "$2"; else "$CAPS_TOOL" --check "$2"; fi
+	fi
+}
+
+# --- 3. per-package fragment orchestration ---------------------------
+# Sub-tools stay authoritative for their fragments (no logic
+# duplicated here): identity, then fhs, then caps per installed
+# package, sorted. Check mode accumulates per-fragment drift (the
+# stanza detail flows through the sub-tools' own reports); apply
+# mode converges maximally (a failing package is recorded and the
+# run continues with the next package, never abortive).
+run_fragments() {
+	while IFS= read -r pkg || [ -n "$pkg" ]; do
+		[ -n "$pkg" ] || continue
+		for kind in accounts fhs caps; do
+			case $kind in
+			accounts) frag=$ROOT/usr/share/saphira/accounts.d/$pkg ;;
+			fhs) frag=$ROOT/usr/share/saphira/fhs.d/$pkg ;;
+			caps) frag=$ROOT/usr/share/saphira/caps.d/$pkg ;;
+			esac
+			[ -f "$frag" ] || continue
+			if [ -L "$frag" ]; then
+				warn "$kind fragment is a symlink (refusing): $frag"
+				continue
+			fi
+			# Argument shape (safety-critical): a non-empty ROOT
+			# passes --root explicitly; an empty ROOT (live
+			# system) passes NO --root flag at all. An explicit
+			# empty value is a usage error in every tool, so an
+			# unset shell variable can never silently become /.
+			if [ "$APPLY" -eq 1 ]; then
+				case $kind in
+				accounts) SAPHIRA_ENSURE_ROOT=$ROOT "$IDENTITY_TOOL" "$frag" ;;
+				fhs) run_fhs_frag apply "$frag" ;;
+				caps) run_caps_frag apply "$frag" ;;
+				esac || failrec "$kind fragment for $pkg exited $?"
+			else
+				rc=0
+				case $kind in
+				accounts) SAPHIRA_ENSURE_ROOT=$ROOT "$IDENTITY_TOOL" --check "$frag" || rc=$? ;;
+				fhs) run_fhs_frag check "$frag" || rc=$? ;;
+				caps) run_caps_frag check "$frag" || rc=$? ;;
+				esac
+				# Sub-tool exit contract in check mode: 0 clean,
+				# 1 drift found, 2 execution error (could not
+				# assess). An error is not drift: it fails the
+				# run and suppresses the normal summary, so a
+				# dead child can never hide inside a
+				# success-style report.
+				if [ "$rc" -eq 2 ]; then
+					CHILDFAIL=$((CHILDFAIL + 1))
+					report "$kind fragment for $pkg FAILED to execute (see $kind output above) - results incomplete"
+				elif [ "$rc" -ne 0 ]; then
+					FRAGDRIFT=$((FRAGDRIFT + 1))
+					report "$kind fragment for $pkg reported drift (see $kind output above)"
+				fi
+			fi
+		done
+	done <"$WORK/pkgs"
+}
+
+# --- 4. installed-database claim convergence --------------------------
+# Fragment declarations override DB records for the same exact path
+# (fresher Saphira intent, e.g. service state dirs): the DB pass
+# runs first, fragment tools converge on top in apply mode. In
+# check mode both report against current state independently.
+converge_claim() {
+	ctype=$1
+	cpath=$2
+	cuid=$3
+	cgid=$4
+	cmode=$(norm_mode "$5")
+	case $cpath in
+	/usr/local | /usr/local/*) return 0 ;;
+	esac
+	eff=$(ovr_lookup "$cpath")
+	case $eff in
+	ignore)
+		report "claim $cpath skipped (administrator override)"
+		return 0
+		;;
+	pin\|*)
+		rest=${eff#pin|}
+		pin_o=${rest%%|*}
+		rest=${rest#*|}
+		pin_g=${rest%%|*}
+		rest=${rest#*|}
+		cuid=$(resolve_id user "$pin_o") || die "override pins unknown owner: $pin_o"
+		cgid=$(resolve_id group "$pin_g") || die "override pins unknown group: $pin_g"
+		cmode=$(norm_mode "${rest%%|*}")
+		report "claim $cpath pinned by administrator override"
+		;;
+	esac
+	if is_protected "$cpath"; then
+		ptag="protected: "
+	else
+		ptag=
+	fi
+	if [ -L "$ROOT$cpath" ]; then
+		# Symlink on disk: a recorded-777 claim is a packaged
+		# symlink (normal, never converged, never drift); any
+		# other recorded mode means a real file was replaced by
+		# a link (attack or damage: drift in check, recorded
+		# failure in apply). The database carries no file-type
+		# bits, so lstat — not the recorded mode — decides.
+		if [ "$cmode" = "777" ]; then
+			LINKSKIP=$((LINKSKIP + 1))
+			return 0
+		fi
+		if [ "$APPLY" -eq 1 ]; then
+			failrec "${ptag}claim $cpath is a symlink (refusing to follow)"
+		else
+			drift "${ptag}claim $cpath is a symlink (refusing to follow)"
+		fi
+		return 0
+	fi
+	if [ ! -e "$ROOT$cpath" ]; then
+		warn "${ptag}claim $cpath is missing (content is apk's domain, never restored here)"
+		return 0
+	fi
+	if [ "$ctype" = "d" ]; then
+		if [ ! -d "$ROOT$cpath" ]; then
+			if [ "$APPLY" -eq 1 ]; then failrec "${ptag}claim $cpath is not a directory"; else drift "${ptag}claim $cpath is not a directory"; fi
+			return 0
+		fi
+	else
+		if [ ! -f "$ROOT$cpath" ] && [ ! -p "$ROOT$cpath" ]; then
+			if [ "$APPLY" -eq 1 ]; then failrec "${ptag}claim $cpath is not a regular file"; else drift "${ptag}claim $cpath is not a regular file"; fi
+			return 0
+		fi
+	fi
+	cur=$(stat -c '%a %u %g' "$ROOT$cpath" 2>/dev/null) || {
+		if [ "$APPLY" -eq 1 ]; then failrec "${ptag}claim $cpath cannot be statted"; else drift "${ptag}claim $cpath cannot be statted"; fi
+		return 0
+	}
+	cur_mode=${cur%% *}
+	rest=${cur#* }
+	cur_uid=${rest%% *}
+	cur_gid=${rest#* }
+	if [ "$cur_mode" = "$cmode" ] && [ "$cur_uid" = "$cuid" ] && [ "$cur_gid" = "$cgid" ]; then
+		return 0
+	fi
+	if [ "$APPLY" -eq 1 ]; then
+		chown "$cuid:$cgid" "$ROOT$cpath" 2>/dev/null || { failrec "${ptag}claim $cpath cannot be chowned to $cuid:$cgid"; return 0; }
+		chmod "$cmode" "$ROOT$cpath" 2>/dev/null || { failrec "${ptag}claim $cpath cannot be chmodded to $cmode"; return 0; }
+		report "${ptag}claim $cpath converged ($cuid:$cgid $cmode)"
+	else
+		drift "${ptag}claim $cpath is ($cur_uid:$cur_gid $cur_mode) want ($cuid:$cgid $cmode)"
+	fi
+}
+
+converge_db() {
+	while IFS=$TAB read -r cpath ctype cuid cgid cmode || [ -n "$cpath" ]; do
+		[ -n "$cpath" ] || continue
+		converge_claim "$ctype" "$cpath" "$cuid" "$cgid" "$cmode"
+	done <"$WORK/claims.tsv"
+}
+
+# --- 5. fragment path + declared-capability inventory ------------------
+# Claimed-path universe for override matching (DB scope plus every
+# fragment stanza path): overrides never add claims, so a rule for
+# a path outside this universe is inert and warned about.
+collect_fragment_paths() {
+	: > "$WORK/fragpaths"
+	: > "$WORK/declared_caps"
+	while IFS= read -r pkg || [ -n "$pkg" ]; do
+		[ -n "$pkg" ] || continue
+		for kind in accounts fhs caps; do
+			case $kind in
+			accounts) frag=$ROOT/usr/share/saphira/accounts.d/$pkg ;;
+			fhs) frag=$ROOT/usr/share/saphira/fhs.d/$pkg ;;
+			caps) frag=$ROOT/usr/share/saphira/caps.d/$pkg ;;
+			esac
+			[ -f "$frag" ] || continue
+			while IFS= read -r raw || [ -n "$raw" ]; do
+				# shellcheck disable=SC2086
+				set -- $raw
+				[ $# -eq 0 ] && continue
+				case $1 in \#*) continue ;; esac
+				case $1 in
+				dir | file | cap)
+					[ $# -ge 2 ] || continue
+					printf '%s\n' "$2" >>"$WORK/fragpaths"
+					[ "$1" = "cap" ] && printf '%s\n' "$2" >>"$WORK/declared_caps"
+					;;
+				replace-symlink-dir)
+					[ $# -ge 2 ] || continue
+					printf '%s\n' "$2" >>"$WORK/fragpaths"
+					;;
+				rmdir-if-empty | rmtree-if-empty | rmdir-or-fail | rmtree-or-fail)
+					[ $# -ge 2 ] || continue
+					printf '%s\n' "$2" >>"$WORK/fragpaths"
+					;;
+				esac
+			done <"$frag"
+		done
+	done <"$WORK/pkgs"
+	LC_ALL=C sort -u -o "$WORK/fragpaths" "$WORK/fragpaths"
+	LC_ALL=C sort -u -o "$WORK/declared_caps" "$WORK/declared_caps"
+	LC_ALL=C sort -u -m -o "$WORK/claimed_paths" "$WORK/scope.tsv" "$WORK/fragpaths"
+}
+
+# --- 6. capability sweep ----------------------------------------------
+# Declared caps converge via fragments; this sweep catches the rest:
+# files under distribution trees carrying capabilities no installed
+# declaration (or pin-cap override) covers. Check reports, apply
+# strips (setcap -r). Capped files outside the packaged set are
+# reported as unowned notices (visible, never touched).
+caps_sweep() {
+	: > "$WORK/capped"
+	for tree in bin sbin lib usr; do
+		[ -d "$ROOT/$tree" ] || continue
+		getcap -r "$ROOT/$tree" 2>/dev/null >>"$WORK/capped" || die "capability sweep failed under $ROOT/$tree"
+	done
+	: > "$WORK/capped_paths"
+	while IFS= read -r line || [ -n "$line" ]; do
+		[ -n "$line" ] || continue
+		# libcap prints `<path> = <spec>` or `<path> <spec>`:
+		# the spec is always last, the path everything before.
+		case $line in
+		*' = '*) entry=${line%% = *} ;;
+		*' '*) entry=${line% *} ;;
+		*) continue ;;
+		esac
+		case $entry in
+		"$ROOT"/*) entry=${entry#"$ROOT"} ;;
+		*) continue ;;
+		esac
+		[ -n "$entry" ] || continue
+		printf '%s\n' "$entry" >>"$WORK/capped_paths"
+	done <"$WORK/capped"
+	LC_ALL=C sort -u -o "$WORK/capped_paths" "$WORK/capped_paths"
+	# pin-cap overrides protect their paths from stripping (admin
+	# authority) without converging anything (overrides never add).
+	if [ -d "$OVERRIDE_DIR" ]; then
+		for conf in "$OVERRIDE_DIR"/*.conf; do
+			[ -f "$conf" ] || continue
+			while IFS= read -r raw || [ -n "$raw" ]; do
+				# shellcheck disable=SC2086
+				set -- $raw
+				[ $# -eq 0 ] && continue
+				case $1 in \#*) continue ;; esac
+				[ "$1" = "pin-cap" ] && [ $# -eq 3 ] || continue
+				printf '%s\n' "$2" >>"$WORK/declared_caps"
+			done <"$conf"
+		done
+		LC_ALL=C sort -u -o "$WORK/declared_caps" "$WORK/declared_caps"
+	fi
+	comm -12 "$WORK/scope.tsv" "$WORK/capped_paths" >"$WORK/capped_owned" || true
+	comm -13 "$WORK/scope.tsv" "$WORK/capped_paths" >"$WORK/capped_unowned" || true
+	while IFS= read -r hit || [ -n "$hit" ]; do
+		[ -n "$hit" ] || continue
+		warn "unowned capped file (not packaged, never touched): $hit"
+	done <"$WORK/capped_unowned"
+	comm -23 "$WORK/capped_owned" "$WORK/declared_caps" >"$WORK/capped_rogue" || true
+	while IFS= read -r hit || [ -n "$hit" ]; do
+		[ -n "$hit" ] || continue
+		if [ "$APPLY" -eq 1 ]; then
+			setcap -r "$ROOT$hit" 2>/dev/null || { failrec "cannot strip undeclared capabilities: $hit"; continue; }
+			report "stripped undeclared capabilities: $hit"
+		else
+			drift "undeclared capabilities: $hit"
+		fi
+	done <"$WORK/capped_rogue"
+}
+
+# --- 7. sysusers-native identity drift ---------------------------------
+# Fragments carrying the sysusers stanza declare identities in
+# shipped sysusers.d confs, not in census form. Fixed-ID presence
+# is verified here (check and apply); apply refreshes via the
+# target's own systemd-sysusers --root when available
+# (install-faithful replay), else names the manual step.
+db_has() {
+	# $1(file) $2(name): 0 when a line starts with `name:`.
+	while IFS= read -r line || [ -n "$line" ]; do
+		case $line in
+		"$2:"*) return 0 ;;
+		esac
+	done <"$1"
+	return 1
+}
+
+sysusers_drift() {
+	: > "$WORK/sysusers_pkgs"
+	while IFS= read -r pkg || [ -n "$pkg" ]; do
+		[ -n "$pkg" ] || continue
+		frag=$ROOT/usr/share/saphira/accounts.d/$pkg
+		[ -f "$frag" ] || continue
+		while IFS= read -r raw || [ -n "$raw" ]; do
+			# shellcheck disable=SC2086
+			set -- $raw
+			[ $# -eq 0 ] && continue
+			case $1 in \#*) continue ;; esac
+			if [ "$1" = "sysusers" ]; then
+				printf '%s\n' "$pkg" >>"$WORK/sysusers_pkgs"
+				break
+			fi
+		done <"$frag"
+	done <"$WORK/pkgs"
+	[ -s "$WORK/sysusers_pkgs" ] || return 0
+	[ -d "$ROOT/usr/lib/sysusers.d" ] || { warn "sysusers packages installed but $ROOT/usr/lib/sysusers.d is absent"; return 0; }
+	: > "$WORK/sysusers_want"
+	for conf in "$ROOT/usr/lib/sysusers.d"/*.conf; do
+		[ -f "$conf" ] || continue
+		while IFS= read -r raw || [ -n "$raw" ]; do
+			# shellcheck disable=SC2086
+			set -- $raw
+			[ $# -eq 0 ] && continue
+			case $1 in \#* | m | r) continue ;; esac
+			kind=${1%!}
+			case $kind in
+			u | g) ;;
+			*) continue ;;
+			esac
+			[ $# -ge 3 ] || continue
+			[ "$2" = "-" ] && continue
+			case $3 in
+			'' | *[!0-9]*) continue ;;
+			esac
+			[ "$3" -le 887 ] || continue
+			printf '%s %s\n' "$kind $2" "$3" >>"$WORK/sysusers_want"
+		done <"$conf"
+	done
+	need_sysusers=0
+	while IFS= read -r raw || [ -n "$raw" ]; do
+		# shellcheck disable=SC2086
+		set -- $raw
+		[ $# -eq 3 ] || continue
+		case $1 in
+		u)
+			if ! db_has "$ROOT/etc/passwd" "$2"; then
+				need_sysusers=1
+				if [ "$APPLY" -eq 1 ]; then
+					failrec "sysusers user is missing (reinstall the owning package or run systemd-sysusers): $2"
+				else
+					drift "sysusers user is missing: $2"
+				fi
+			fi
+			;;
+		g)
+			if ! db_has "$ROOT/etc/group" "$2"; then
+				need_sysusers=1
+				if [ "$APPLY" -eq 1 ]; then
+					failrec "sysusers group is missing (reinstall the owning package or run systemd-sysusers): $2"
+				else
+					drift "sysusers group is missing: $2"
+				fi
+			fi
+			;;
+		esac
+	done <"$WORK/sysusers_want"
+	if [ "$APPLY" -eq 1 ] && [ "$need_sysusers" -eq 1 ]; then
+		if [ -x "$ROOT/usr/bin/systemd-sysusers" ]; then
+			"$ROOT/usr/bin/systemd-sysusers" --root="$ROOT" || warn "systemd-sysusers --root refresh failed (reinstall affected packages)"
+		else
+			warn "systemd-sysusers is absent on the target (reinstall affected packages to refresh native identities)"
+		fi
+	fi
+}
+
+# --- 8. unmatched overrides ----------------------------------------------
+# A rule for a path outside the claimed universe (packaged paths
+# plus fragment stanza paths) is inert: overrides never add claims.
+override_audit() {
+	[ -d "$OVERRIDE_DIR" ] || return 0
+	: > "$WORK/override_paths"
+	for conf in "$OVERRIDE_DIR"/*.conf; do
+		[ -f "$conf" ] || continue
+		while IFS= read -r raw || [ -n "$raw" ]; do
+			# shellcheck disable=SC2086
+			set -- $raw
+			[ $# -eq 0 ] && continue
+			case $1 in \#*) continue ;; esac
+			case $1 in
+			ignore | pin | pin-cap)
+				[ $# -ge 2 ] || continue
+				printf '%s\n' "$2" >>"$WORK/override_paths"
+				;;
+			esac
+		done <"$conf"
+	done
+	[ -s "$WORK/override_paths" ] || return 0
+	LC_ALL=C sort -u -o "$WORK/override_paths" "$WORK/override_paths"
+	comm -23 "$WORK/override_paths" "$WORK/claimed_paths" >"$WORK/override_inert" || true
+	while IFS= read -r hit || [ -n "$hit" ]; do
+		[ -n "$hit" ] || continue
+		warn "override without a claim (inert, check spelling/scope): $hit"
+	done <"$WORK/override_inert"
+}
+
+# --- main ---------------------------------------------------------------
+run_fragments
+converge_db
+collect_fragment_paths
+caps_sweep
+sysusers_drift
+override_audit
+
+if [ "$APPLY" -eq 1 ]; then
+	report "--system apply: $FAIL failure(s), $WARN warning(s), $LINKSKIP packaged symlink(s) skipped"
+	[ "$FAIL" -eq 0 ] || exit 1
+	exit 0
+fi
+# A dead child poisons the whole check: the normal summary is
+# suppressed and replaced by a failure banner, so an operator can
+# never mistake "8 checks never ran" for "0 warnings". Exit 2
+# (execution error) stays distinct from exit 1 (drift found).
+if [ "$CHILDFAIL" -ne 0 ]; then
+	report "--system check FAILED: $CHILDFAIL fragment(s) could not be assessed - results incomplete, NOT a clean bill"
+	exit 2
+fi
+if [ "$DRIFT" -eq 0 ] && [ "$FRAGDRIFT" -eq 0 ]; then
+	report "--system check: clean ($WARN warning(s), $LINKSKIP packaged symlink(s) skipped)"
+	exit 0
+fi
+report "--system check: $DRIFT drift(s) in database claims, $FRAGDRIFT fragment(s) with drift, $WARN warning(s), $LINKSKIP packaged symlink(s) skipped"
+exit 1

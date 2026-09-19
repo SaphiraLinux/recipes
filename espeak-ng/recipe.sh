@@ -61,6 +61,8 @@ recipe_build()
 	# without it (/usr/lib is a default search path), so no
 	# rpath leaks into the payload (asserted below).
 	./configure --prefix=/usr \
+		--sysconfdir=/etc \
+		--localstatedir=/var \
 		--disable-static
 	make -j${JOBS:-$(nproc)}
 }

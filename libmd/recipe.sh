@@ -16,7 +16,7 @@ recipe_build() {
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$RECIPE_DIR/files/libmd-1.1.0.tar.xz"
 	cd "$SRC"
 	echo "$libmd_sha256  $RECIPE_DIR/files/libmd-1.1.0.tar.xz" | sha256sum -c -
-	./configure --prefix=/usr --libdir=/usr/lib --disable-static
+	./configure --prefix=/usr --sysconfdir=/etc --libdir=/usr/lib --disable-static --localstatedir=/var
 	make -j${JOBS:-$(nproc)}
 }
 recipe_install() {

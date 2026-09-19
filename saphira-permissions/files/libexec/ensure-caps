@@ -1,0 +1,280 @@
+#!/bin/sh
+# ensure-caps [--root PATH] [--check] FRAGMENT — additive, idempotent
+# file-capability reconciler.
+#
+# Exit codes: 0 converged/clean, 1 drift found (--check) or
+# failure, 2 execution error in --check mode (could not assess).
+# Parent orchestrators treat 2 as fatal-to-the-report, never
+# as drift.
+#
+# Saphira-owned infrastructure (saphira-permissions). Called from
+# makepkg-generated package install/upgrade callers (after
+# ensure-identity and ensure-fhs when the package carries those
+# declarations) and from ensure-permissions --system for the
+# installed closure. There is no disable/deinstall operation:
+# capabilities die with the payload files that carry them.
+#
+# Why this exists: setcap state applied during builds is invisible
+# to every downstream consumer (APK records no xattr/capability
+# field — verified against adbdump). The caps.d fragment is the
+# persistent declarative authority for file capabilities, the same
+# way accounts.d owns identities and fhs.d owns runtime structure.
+#
+# Fragment grammar (strict; anything malformed fails closed):
+#   cap <abspath> <capspec>
+# Blank lines and '#' comments are ignored.
+# capspec form: <name>[,<name>...]<+|=>flags, e.g.
+#   cap_net_bind_service+ep
+# Names must be known Linux capabilities (pinned list in
+# permissions-override.sh, shared with makepkg); flags 1-3 of e/p/i.
+#
+# Safety rules (all enforced, none are intentions):
+# - Exact paths only, leaf semantics: the capability set of the
+#   named file itself, never recursive, never inherited.
+# - No stanza follows a symlink. Targets are lstat'ed; every parent
+#   component is inspected without following. Any symlink refuses.
+# - Targets must be regular files (never directories, never
+#   symlinks, never specials).
+# - Protected roots (/ /usr /var /etc /bin /sbin /lib /run) are
+#   refused, mirroring ensure-fhs: capabilities on foundation paths
+#   are a packaging bug, not a declaration.
+# - --check reports drift without changing anything (exit 1).
+# - Administrator overrides: `ignore` skips, `pin-cap` substitutes
+#   the spec. Overrides never add claims.
+set -eu
+
+die() { printf 'ensure-caps: %s\n' "$*" >&2; if [ "${CHECK:-0}" -eq 1 ]; then exit 2; else exit 1; fi; }
+report() { printf 'ensure-caps: %s\n' "$*" >&2; }
+
+ROOT=
+CHECK=0
+while [ $# -gt 1 ]; do
+	case $1 in
+	--root)
+		# An explicitly empty root is invalid (fail closed: an
+		# unset shell variable must never silently become the
+		# live root). Live operation passes no --root at all.
+		[ -n "${2:-}" ] || die "usage: ensure-caps [--root PATH] [--check] FRAGMENT"
+		ROOT=$2
+		shift 2
+		;;
+	--check)
+		CHECK=1
+		shift
+		;;
+	-*)
+		die "usage: ensure-caps [--root PATH] [--check] FRAGMENT"
+		;;
+	*)
+		break
+		;;
+	esac
+done
+[ $# -eq 1 ] || die "usage: ensure-caps [--root PATH] [--check] FRAGMENT"
+[ -n "$ROOT" ] || ROOT=${SAPHIRA_ENSURE_ROOT:-}
+case $ROOT in
+'' | /) ROOT= ;;
+*/) ROOT=${ROOT%/} ;;
+esac
+case $ROOT in
+*//* | *..*) die "refusing unsafe target root: $ROOT" ;;
+esac
+fragment=$1
+case $fragment in
+-*) die "usage: ensure-caps [--root PATH] [--check] FRAGMENT" ;;
+esac
+[ -f "$fragment" ] || die "fragment not found: $fragment"
+[ ! -L "$fragment" ] || die "fragment must not be a symlink: $fragment"
+[ -z "$ROOT" ] || [ -d "$ROOT" ] || die "target root is not a directory: $ROOT"
+command -v getcap >/dev/null 2>&1 || die "getcap is missing (install libcap)"
+[ "$CHECK" -eq 1 ] || command -v setcap >/dev/null 2>&1 || die "setcap is missing (install libcap)"
+
+OVERRIDE_DIR=$ROOT/etc/saphira/permissions/override.d
+helper_dir=$(dirname -- "$0")
+if [ -f "$helper_dir/permissions-override.sh" ]; then
+	# shellcheck disable=SC1091
+	. "$helper_dir/permissions-override.sh"
+elif [ -f /usr/libexec/saphira/permissions-override.sh ]; then
+	# shellcheck disable=SC1091
+	. /usr/libexec/saphira/permissions-override.sh
+else
+	die "permissions-override.sh is missing (reinstall saphira-baselayout)"
+fi
+ovr_init
+
+DRIFT=0
+drift() { DRIFT=$((DRIFT + 1)); printf 'ensure-caps: drift: %s\n' "$*" >&2; }
+
+valid_abspath() {
+	case $1 in
+	/ | /*) ;;
+	*) return 1 ;;
+	esac
+	case $1 in
+	*//* | */ | *..*) return 1 ;;
+	esac
+	return 0
+}
+
+guard_roots() {
+	case $1 in
+	/ | /usr | /var | /etc | /bin | /sbin | /lib | /run)
+		die "refusing operation on protected root: $1" ;;
+	esac
+}
+
+no_symlink_parents() {
+	p=$ROOT$1
+	while :; do
+		p=${p%/*}
+		[ -n "$p" ] || p=/
+		if [ -L "$p" ]; then
+			die "refusing: parent component is a symlink: $p"
+		fi
+		[ "$p" = "/" ] && break
+	done
+}
+
+# caps_norm $1(spec): print the canonical comparison form
+# `names-sorted-joined,flags-sorted` (operator-insensitive: +ep and
+# =ep describe the same resulting state). Dies on invalid specs so
+# live state and declarations are judged by the same rule.
+# POSIX sh only (no bash expansions): sort/paste come from the
+# guaranteed coreutils set; everything else is expansion.
+caps_norm() {
+	spec=$1
+	ovr_valid_capspec "$spec" || die "invalid capability spec: $spec"
+	names=${spec%%[+=]*}
+	flags=${spec##*[+=]}
+	oldifs=$IFS
+	IFS=,
+	# shellcheck disable=SC2086
+	set -- $names
+	IFS=$oldifs
+	sorted_names=$(printf '%s\n' "$@" | LC_ALL=C sort | paste -sd, -)
+	sorted_flags=
+	case $flags in *e*) sorted_flags=${sorted_flags}e ;; esac
+	case $flags in *i*) sorted_flags=${sorted_flags}i ;; esac
+	case $flags in *p*) sorted_flags=${sorted_flags}p ;; esac
+	printf '%s|%s' "$sorted_names" "$sorted_flags"
+}
+
+# strip_ws $1: print $1 with all whitespace removed (POSIX expansion).
+strip_ws() {
+	rest=$1
+	clean=
+	while [ -n "$rest" ]; do
+		ch=${rest%"${rest#?}"}
+		rest=${rest#?}
+		case $ch in
+		[[:space:]]) ;;
+		*) clean=$clean$ch ;;
+		esac
+	done
+	printf '%s' "$clean"
+}
+
+# current_caps $1(path): print the live comparison form (same shape
+# as caps_norm), or `none` when the file carries no capabilities.
+# libcap's text format varies by version (`<path> = <spec>` vs
+# `<path> <spec>`); the capability spec is always the last field
+# and always carries its operator, so parse that and nothing else.
+current_caps() {
+	out=$(getcap "$ROOT$1" 2>/dev/null) || die "cannot read capabilities: $1"
+	case $out in
+	'') printf 'none'; return 0 ;;
+	esac
+	last=${out##* }
+	case $last in
+	*?=*) ;;
+	*) printf 'none'; return 0 ;;
+	esac
+	spec=$(strip_ws "$last")
+	case $spec in
+	*[+=]*) caps_norm "$spec" ;;
+	*) printf 'none'; return 0 ;;
+	esac
+}
+
+do_cap() {
+	# $1 lineno $2 path $3 spec
+	valid_abspath "$2" || die "$fragment:$1: cap path must be absolute and normalized"
+	guard_roots "$2"
+	eff=$(ovr_lookup "$2")
+	case $eff in
+	ignore)
+		report "cap $2 skipped (administrator override)"
+		return 0
+		;;
+	esac
+	cap_eff=$(ovr_lookup_cap "$2")
+	case $cap_eff in
+	pincap\|*)
+		spec=${cap_eff#pincap|}
+		report "cap $2 pinned by administrator override ($spec)"
+		set -- "$1" "$2" "$spec"
+		;;
+	esac
+	want=$(caps_norm "$3")
+	no_symlink_parents "$2"
+	if [ -L "$ROOT$2" ]; then
+		if [ "$CHECK" -eq 1 ]; then
+			drift "cap $2 is a symlink (refusing to follow)"
+			return 0
+		fi
+		die "$fragment:$1: cap target is a symlink (refusing to follow): $2"
+	fi
+	if [ -d "$ROOT$2" ]; then
+		if [ "$CHECK" -eq 1 ]; then
+			drift "cap $2 is a directory (capabilities apply to files only)"
+			return 0
+		fi
+		die "$fragment:$1: cap target is a directory: $2"
+	fi
+	if [ ! -f "$ROOT$2" ]; then
+		if [ "$CHECK" -eq 1 ]; then
+			drift "cap $2 is missing (files must ship in the package payload)"
+			return 0
+		fi
+		die "$fragment:$1: cap target is missing: $2 (files must ship in the package payload)"
+	fi
+	cur=$(current_caps "$2")
+	if [ "$cur" = "$want" ]; then
+		[ "$CHECK" -eq 1 ] || report "cap $2 ($3)"
+		return 0
+	fi
+	if [ "$CHECK" -eq 1 ]; then
+		drift "cap $2 differs (want $3)"
+		return 0
+	fi
+	setcap "$3" "$ROOT$2" || die "$fragment:$1: cannot set capabilities on $2"
+	report "cap $2 ($3)"
+}
+
+lineno=0
+seen=
+while IFS= read -r raw || [ -n "$raw" ]; do
+	lineno=$((lineno + 1))
+	# shellcheck disable=SC2086
+	set -- $raw
+	[ $# -eq 0 ] && continue
+	case $1 in
+	\#*) continue ;;
+	esac
+	[ "$1" = "cap" ] && [ $# -eq 3 ] || die "$fragment:$lineno: malformed stanza"
+	case $seen in
+	*"|$2|"*) die "$fragment:$lineno: duplicate cap stanza for $2" ;;
+	esac
+	seen="$seen|$2|"
+	do_cap "$lineno" "$2" "$3"
+done <"$fragment"
+
+if [ "$CHECK" -eq 1 ]; then
+	if [ "$DRIFT" -eq 0 ]; then
+		report "check: $fragment clean"
+		exit 0
+	fi
+	report "check: $fragment: $DRIFT drift(s)"
+	exit 1
+fi
+report "converged: $fragment"

@@ -1,6 +1,6 @@
 pkgname=proftpd
 pkgver=1.3.9
-pkgrel=4
+pkgrel=5
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='High-performance, scalable FTP server (with TLS via mod_tls)'
 license='GPL-2.0-or-later'
@@ -15,7 +15,14 @@ makedepends="gcc make libcap-dev openssl-dev pkgconf saphira-kernel-headers"
 subpackages="$pkgname-doc"
 
 recipe_build() {
-	./configure --prefix=/usr --sysconfdir=/etc \
+	# --localstatedir=/var is load-bearing, not hygiene: without it
+	# autoconf defaults PR_RUN_DIR to $prefix/var, compiling
+	# /usr/var/proftpd.{pid,scoreboard,delay} into the daemon (r4
+	# shipped exactly that; found live as /usr/var on saphira-website
+	# via baselayout's rmtree-or-fail tripwire). Runtime paths are
+	# pinned explicitly in proftpd.conf plus the accounts.d runtime
+	# dir; the flag keeps every non-overridden fallback FHS-sane.
+	./configure --prefix=/usr --sysconfdir=/etc --localstatedir=/var \
 		--enable-openssl \
 		--with-modules=mod_tls \
 		--disable-strip
@@ -54,6 +61,10 @@ recipe_install() {
 	# Runtime identity declaration: ftp:18 required by the shipped
 	# server config. makepkg generates the install scripts from this
 	# fragment; the package creates its identity at install time.
+	# r5: runtime state out of /usr/var (compiled PR_RUN_DIR was
+	# $prefix/var): --localstatedir=/var plus explicit
+	# PidFile/ScoreboardFile/DelayTable under /var/run/proftpd
+	# (accounts.d runtime dir). Payload change, revision bumps.
 	# r4: fragment added (payload change, revision bumps).
 	install -D -m 0644 "$RECIPE_DIR/files/accounts.d/proftpd" \
 		"$PKGDEST/usr/share/saphira/accounts.d/proftpd"

@@ -41,6 +41,83 @@ RESERVED_GROUP_NAMES = frozenset({"root", "wheel", "spokes"})
 RESERVED_GIDS = frozenset({0, 1, 2})
 ACCOUNTS_DIR = PurePosixPath("usr/share/saphira/accounts.d")
 IDENTITY_HELPER = "/usr/libexec/saphira/ensure-identity.sh"
+# FHS migration declarations (fhs.d/<output-name>, mirrors accounts.d):
+# makepkg validates the fragment, generates the thin install/upgrade
+# callers that run ensure-fhs AFTER ensure-identity when the package
+# carries both, and adds the helper dependency. One package owns each
+# migrated path (exact-path collisions refuse at publish).
+FHS_DIR = PurePosixPath("usr/share/saphira/fhs.d")
+FHS_HELPER = "/usr/libexec/saphira/ensure-fhs"
+# The generated scripts exec the baselayout helpers, so the same
+# provider triple as IDENTITY_DEPS must be installed first.
+FHS_DEPS = ("saphira-baselayout", "bash", "coreutils")
+# File capability declarations (caps.d/<output-name>, mirrors
+# accounts.d/fhs.d): makepkg validates the fragment, generates the
+# thin install/upgrade callers that run ensure-caps AFTER
+# ensure-identity/ensure-fhs, and adds the helper dependency. APK
+# records no xattr/capability field, so without this fragment the
+# setcap state applied at build time would have no persistent
+# declarative authority anywhere downstream. One package owns each
+# capped path (exact-path collisions refuse at publish); the target
+# must ship in the same payload (regular file, never a symlink).
+CAPS_DIR = PurePosixPath("usr/share/saphira/caps.d")
+CAPS_HELPER = "/usr/libexec/saphira/ensure-caps"
+CAPS_DEPS = ("saphira-permissions", "libcap", "bash", "coreutils")
+# Canonical Linux capability names (must match OVR_CAP_NAMES in
+# saphira-baselayout/files/libexec/permissions-override.sh - the
+# permissions suite asserts the two lists are identical). Unknown
+# names fail the build: a new kernel capability needs a deliberate
+# list update here and there together, never silent acceptance.
+SAPHIRA_CAP_NAMES = frozenset({
+    "cap_chown", "cap_dac_override", "cap_dac_read_search",
+    "cap_fowner", "cap_fsetid", "cap_kill", "cap_setgid",
+    "cap_setuid", "cap_setpcap", "cap_linux_immutable",
+    "cap_net_bind_service", "cap_net_admin", "cap_net_raw",
+    "cap_ipc_lock", "cap_ipc_owner", "cap_sys_module",
+    "cap_sys_rawio", "cap_sys_chroot", "cap_sys_ptrace",
+    "cap_sys_pacct", "cap_sys_admin", "cap_sys_boot",
+    "cap_sys_nice", "cap_sys_resource", "cap_sys_time",
+    "cap_sys_tty_config", "cap_mknod", "cap_lease",
+    "cap_audit_write", "cap_audit_control", "cap_setfcap",
+    "cap_mac_override", "cap_mac_admin", "cap_syslog",
+    "cap_wake_alarm", "cap_block_suspend", "cap_audit_read",
+    "cap_perfmon", "cap_bpf", "cap_checkpoint_restore",
+})
+# Distribution packages must not create files or directories beneath
+# /usr/local (Saphira policy: /usr/local is outside distribution
+# management). Entries here are explicit author-policy authorizations
+# only; the empty set means no exception exists.
+USR_LOCAL_ALLOW: frozenset = frozenset()
+# Accidental prefix-derived roots (proftpd /usr/var incident, lynx
+# /usr/etc incident): autoconf defaults sysconfdir to $prefix/etc and
+# localstatedir to $prefix/var, so a missing flag silently publishes
+# usr/etc or usr/var payload paths. No payload may contain files or
+# directories beneath usr/etc, usr/var or usr/com. Entries here are
+# explicit author-policy authorizations only: exact payload-relative
+# paths bound to the owning producer, plus a reason. Ancestor
+# directories of an allowed path are implicitly covered (they must
+# exist); nothing else is.
+LAYOUT_ALLOW: dict[str, str] = {
+    # emacs-nox game scores predate the rule (published with
+    # usr/var/games/emacs/*); their migration to a FHS-clean location
+    # is tracked future work - this entry keeps rebuilds working
+    # meanwhile without blessing new offenders.
+    "usr/var/games/emacs/snake-scores": "emacs-nox",
+    "usr/var/games/emacs/tetris-scores": "emacs-nox",
+}
+
+
+def layout_allowed(relative_posix: str, producer: str) -> bool:
+    """True when a payload path is covered by an explicit exception."""
+    for allowed_path, owner in LAYOUT_ALLOW.items():
+        if owner != producer:
+            continue
+        if relative_posix == allowed_path:
+            return True
+        if allowed_path.startswith(relative_posix + "/"):
+            return True
+    return False
+FHS_EMPTY: dict[str, list] = {"dirs": [], "replaces": [], "removals": []}
 # Native account mechanism for packages that declare one (systemd):
 # post-install/post-upgrade run this after the reconciler when the
 # fragment carries the sysusers stanza. Absolute path: generated
@@ -171,9 +248,243 @@ def parse_accounts_fragment(path: Path) -> tuple[dict[str, list[dict[str, str]]]
              "sysusers": sysusers}, notices)
 
 
-def identity_scripts(fragment_rel: str, temp_root: Path, name: str,
+def fhs_action_path(path: Path, lineno: int, what: str, label: str = "fhs fragment") -> str:
+    """Validate a path ensure-fhs will act upon: absolute and normalized.
+
+    The declared symlink target of replace-symlink-dir is exempt: it is
+    literal historical link text compared byte-for-byte, never
+    normalized ('../run' is valid there).
+    """
+    text = what
+    if (not text.startswith("/") or posixpath.normpath(text) != text
+            or ".." in PurePosixPath(text).parts):
+        die(f"{label} {path}:{lineno}: {what} must be absolute and normalized")
+    return text
+
+
+def parse_fhs_fragment(path: Path) -> dict[str, list[dict[str, str]]]:
+    """Strictly validate a package FHS migration declaration fragment.
+
+    Recipe authors declare migrations only; makepkg generates the
+    install scripts from this. Anything malformed fails the build.
+    Vocabulary: dir, replace-symlink-dir, rmdir-if-empty,
+    rmtree-if-empty, rmdir-or-fail, rmtree-or-fail. No stanza creates
+    symlinks, copies, or moves: PID/socket migration is
+    inexpressible by construction.
+    """
+    dirs: list[dict[str, str]] = []
+    replaces: list[dict[str, str]] = []
+    removals: list[dict[str, str]] = []
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        die(f"cannot read fhs fragment: {path}")
+        raise AssertionError("unreachable")
+    for lineno, raw in enumerate(text.splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split()
+        kind = parts[0]
+        if kind == "dir" and len(parts) == 5:
+            _, dirpath, mode, owner, group = parts
+            fhs_action_path(path, lineno, dirpath)
+            if not ACCOUNT_MODE_RE.fullmatch(mode):
+                die(f"fhs fragment {path}:{lineno}: invalid mode")
+            for role, ref in (("owner", owner), ("group", group)):
+                if ref in ("root", "0"):
+                    continue
+                if not ACCOUNT_NAME_RE.fullmatch(ref):
+                    die(f"fhs fragment {path}:{lineno}: invalid {role} name")
+            dirs.append({"path": dirpath, "mode": mode, "owner": owner, "group": group})
+        elif kind == "replace-symlink-dir" and len(parts) == 6:
+            _, linkpath, target, mode, owner, group = parts
+            fhs_action_path(path, lineno, linkpath)
+            if not target or "\n" in target:
+                die(f"fhs fragment {path}:{lineno}: declared target must be non-empty link text")
+            if not ACCOUNT_MODE_RE.fullmatch(mode):
+                die(f"fhs fragment {path}:{lineno}: invalid mode")
+            for role, ref in (("owner", owner), ("group", group)):
+                if ref in ("root", "0"):
+                    continue
+                if not ACCOUNT_NAME_RE.fullmatch(ref):
+                    die(f"fhs fragment {path}:{lineno}: invalid {role} name")
+            replaces.append({"linkpath": linkpath, "target": target, "mode": mode,
+                             "owner": owner, "group": group})
+        elif kind in ("rmdir-if-empty", "rmtree-if-empty",
+                      "rmdir-or-fail", "rmtree-or-fail") and len(parts) == 2:
+            fhs_action_path(path, lineno, parts[1])
+            removals.append({"op": kind, "path": parts[1]})
+        else:
+            die(f"fhs fragment {path}:{lineno}: malformed stanza")
+    return {"dirs": dirs, "replaces": replaces, "removals": removals}
+
+
+def parse_caps_fragment(path: Path) -> dict[str, list[dict[str, str]]]:
+    """Strictly validate a package file-capability declaration fragment.
+
+    Recipe authors declare capabilities only; makepkg generates the
+    install scripts from this. Anything malformed fails the build.
+    Vocabulary: cap <abspath> <capspec> (libcap text form, e.g.
+    cap_net_bind_service+ep). No stanza creates, removes, or moves:
+    capabilities attach to shipped files only.
+    """
+    caps: list[dict[str, str]] = []
+    seen: set[str] = set()
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        die(f"cannot read caps fragment: {path}")
+        raise AssertionError("unreachable")
+    for lineno, raw in enumerate(text.splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split()
+        if len(parts) != 3 or parts[0] != "cap":
+            die(f"caps fragment {path}:{lineno}: malformed stanza")
+        _, abspath, spec = parts
+        fhs_action_path(path, lineno, abspath, "caps fragment")
+        match = re.fullmatch(r"([A-Za-z0-9_,]+)([+=])([A-Za-z]+)", spec)
+        if not match:
+            die(f"caps fragment {path}:{lineno}: invalid capability spec: {spec}")
+        names, flags = match.group(1), match.group(3)
+        if not re.fullmatch(r"[epi]{1,3}", flags):
+            die(f"caps fragment {path}:{lineno}: capability flags must be 1-3 of e/p/i: {spec}")
+        for name in names.split(","):
+            if name not in SAPHIRA_CAP_NAMES:
+                die(f"caps fragment {path}:{lineno}: unknown Linux capability '{name}' (pinned list - update deliberately, never silently)")
+        if abspath in seen:
+            die(f"caps fragment {path}:{lineno}: duplicate cap stanza for {abspath}")
+        seen.add(abspath)
+        caps.append({"path": abspath, "spec": spec})
+    return {"caps": caps}
+
+
+def parse_sysusers_confs(payload_sysusers: Path, producer: str) -> tuple[dict[str, list[dict[str, str]]], list[str]]:
+    """Parse shipped sysusers.d confs into census-shaped identity entries.
+
+    Only fixed numeric IDs become ledger identities (users/groups in the
+    exact accounts.d entry shape, with empty home/shell when the conf
+    does not declare them). Everything else never claims:
+    dynamic '-' IDs, 'm' memberships, 'r' ranges, and the upstream
+    basic.conf menagerie (generic distro groups, unpinned values -
+    skipped with a notice, mirroring the tree coverage gate).
+    Non-numeric non-dash IDs (unrendered templates), out-of-range IDs,
+    and reserved identities fail closed. Unknown line types fail
+    closed. 'u' lines synthesize their implicit same-name group (what
+    systemd-sysusers creates at runtime); an explicit 'g' entry for
+    the same name takes precedence. Leading '!' (locked) is ignored:
+    lock state is live data, not ledger identity.
+    Returns the entries plus notices.
+    """
+    users: list[dict[str, str]] = []
+    groups: list[dict[str, str]] = []
+    notices: list[str] = []
+    if not payload_sysusers.is_dir():
+        return ({"users": users, "groups": groups}, notices)
+    seen_users: set[str] = set()
+    seen_groups: set[str] = set()
+    for conf in sorted(payload_sysusers.iterdir()):
+        if not conf.is_file() or conf.suffix != ".conf":
+            continue
+        if conf.name == "basic.conf":
+            notices.append(f"sysusers menagerie {conf.name} skipped (generic distro groups, not Saphira-fixed identities)")
+            continue
+        try:
+            text = conf.read_text(encoding="utf-8")
+        except OSError:
+            die(f"cannot read sysusers conf: {conf}")
+            raise AssertionError("unreachable")
+        for lineno, raw in enumerate(text.splitlines(), 1):
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split()
+            kind = parts[0]
+            # Trailing '!' (locked password) attaches to the type
+            # letter; lock state is live data, not ledger identity.
+            if kind.endswith("!"):
+                kind = kind[:-1]
+            if kind in ("m", "r"):
+                continue
+            if kind not in ("u", "g") or len(parts) < 3:
+                die(f"sysusers conf {conf}:{lineno}: malformed stanza")
+            name, ident = parts[1], parts[2]
+            if not ACCOUNT_NAME_RE.fullmatch(name):
+                die(f"sysusers conf {conf}:{lineno}: invalid name")
+            if ident == "-":
+                continue
+            if not ACCOUNT_ID_RE.fullmatch(ident):
+                die(f"sysusers conf {conf}:{lineno}: ID must be numeric or dynamic '-' (unrendered templates fail closed)")
+            num = int(ident)
+            if num > MAX_PACKAGED_ID:
+                die(f"sysusers conf {conf}:{lineno}: ID {num} is outside the packaged range 0..{MAX_PACKAGED_ID}")
+            if kind == "u":
+                # Mirrors the census refusal exactly (spokes is
+                # group-only: a user merely named spokes is allowed).
+                if name in RESERVED_USER_NAMES or num == 0:
+                    die(f"sysusers conf {conf}:{lineno}: user '{name}' is a reserved system identity (root/UID 0)")
+            else:
+                if name in RESERVED_GROUP_NAMES or num in RESERVED_GIDS:
+                    die(f"sysusers conf {conf}:{lineno}: group '{name}'/{num} is a reserved foundation identity")
+            if num > PREFERRED_MAX_ID:
+                notices.append(f"sysusers conf {conf}:{lineno}: ID {num} is in the 200..887 expansion range (preferred 0..{PREFERRED_MAX_ID})")
+            if kind == "u":
+                if name in seen_users:
+                    die(f"sysusers conf {conf}:{lineno}: duplicate user '{name}'")
+                seen_users.add(name)
+                # Fields after the ID: optional gecos (possibly
+                # quoted with spaces), then optional home and shell.
+                # Scan past a quoted gecos so positions stay exact.
+                rest = parts[3:]
+                if rest and rest[0].startswith('"') and not rest[0].endswith('"'):
+                    while rest and not rest[0].endswith('"'):
+                        rest.pop(0)
+                    if not rest:
+                        die(f"sysusers conf {conf}:{lineno}: unterminated gecos")
+                    rest.pop(0)
+                elif rest:
+                    rest.pop(0)
+                home = rest[0] if len(rest) > 0 else ""
+                shell = rest[1] if len(rest) > 1 else ""
+                users.append({"name": name, "uid": str(num), "primary": name,
+                              "home": home, "shell": shell})
+                if name not in seen_groups:
+                    seen_groups.add(name)
+                    groups.append({"name": name, "gid": str(num)})
+            else:
+                if name in seen_groups:
+                    existing = next(g for g in groups if g["name"] == name)
+                    if int(existing["gid"]) != num:
+                        die(f"sysusers conf {conf}:{lineno}: conflicting GID for group '{name}'")
+                    continue
+                seen_groups.add(name)
+                groups.append({"name": name, "gid": str(num)})
+    return ({"users": users, "groups": groups}, notices)
+
+
+def check_fhs_ownership(producer: str, accounts: dict, fhs: dict) -> None:
+    """Named non-root fhs owners must resolve deterministically.
+
+    The identity must be declared in the same output's accounts.d
+    fragment (owner from its users, group from its groups) or be the
+    root/0 built-in. An fhs fragment must never depend accidentally
+    on an unrelated package having created an account first; fresh
+    installs run ensure-identity immediately before ensure-fhs.
+    """
+    users = {u["name"] for u in accounts.get("users", [])}
+    groups = {g["name"] for g in accounts.get("groups", [])}
+    for entry in fhs.get("dirs", []) + fhs.get("replaces", []):
+        if entry["owner"] not in ("root", "0") and entry["owner"] not in users:
+            die(f"{producer}: fhs owner '{entry['owner']}' is not declared in the same output's accounts.d (deterministic ownership required)")
+        if entry["group"] not in ("root", "0") and entry["group"] not in groups:
+            die(f"{producer}: fhs group '{entry['group']}' is not declared in the same output's accounts.d (deterministic ownership required)")
+def identity_scripts(fragment_rel: str | None, temp_root: Path, name: str,
                        fragment_text: str, *, sysusers: bool = False,
-                       ) -> tuple[list[str], Path, Path, Path]:
+                       fhs_fragment_rel: str | None = None,
+                       caps_fragment_rel: str | None = None,
+                       ) -> tuple[list[str], Path, Path, Path | None]:
     """Generate the thin install/upgrade/deinstall callers for a fragment.
 
     Package scripts may only invoke the platform reconciler, plus the
@@ -182,55 +493,84 @@ def identity_scripts(fragment_rel: str, temp_root: Path, name: str,
     of truth. The post-deinstall caller embeds the validated
     declaration text because apk runs it after the payload (including
     the fragment file itself) has been removed.
+
+    When the package also carries an fhs.d fragment, install/upgrade
+    run ensure-identity first and ensure-fhs second, never the
+    reverse: fresh installs need the identity before fhs chown. A
+    caps.d fragment adds ensure-caps last (capabilities attach to
+    payload files; ordering against fhs is irrelevant but fixed).
+    There is no fhs or caps deinstall operation (layout never
+    reverts; capabilities die with their files), and accounts.d
+    disable behaviour is unchanged.
     """
-    preamble = (f"#!/bin/sh\n"
-                f"# Generated by saphira makepkg from {fragment_rel}.\n"
-                f"# Package scripts may only invoke the platform identity reconciler,\n"
-                f"# plus the package's native account mechanism when declared.\n"
-                f"set -eu\n")
-    if sysusers:
-        # Native creation runs after reconciliation: the reconciler
-        # validates (and converges any dir/file stanzas, of which a
-        # sysusers-native package normally has none), then
-        # systemd-sysusers creates whatever identities that build's
-        # shipped confs declare. Either step failing fails the install.
-        # Deinstall stays reconciler-only: sysusers has no removal
-        # concept (conservative on removal, per policy).
-        body = (preamble +
-                f"{IDENTITY_HELPER} \"/{fragment_rel}\"\n"
-                f"exec {SYSUSERS_BIN}\n")
+    sources = ", ".join(s for s in (fragment_rel, fhs_fragment_rel, caps_fragment_rel) if s is not None)
+    if fhs_fragment_rel is None and caps_fragment_rel is None:
+        # Byte-identical historical body when no fhs/caps fragment exists.
+        preamble = (f"#!/bin/sh\n"
+                    f"# Generated by saphira makepkg from {sources}.\n"
+                    f"# Package scripts may only invoke the platform identity reconciler,\n"
+                    f"# plus the package's native account mechanism when declared.\n"
+                    f"set -eu\n")
     else:
-        body = (preamble +
-                f"exec {IDENTITY_HELPER} \"/{fragment_rel}\"\n")
+        preamble = (f"#!/bin/sh\n"
+                    f"# Generated by saphira makepkg from {sources}.\n"
+                    f"# Package scripts may only invoke the platform identity reconciler,\n"
+                    f"# plus the package's native account mechanism when declared,\n"
+                    f"# then the platform FHS reconciler when the package declares migrations,\n"
+                    f"# then the platform capability reconciler when the package declares file capabilities.\n"
+                    f"set -eu\n")
+    # All but the last command run plain; the last execs (preserves the
+    # exact historical bodies when no fhs/caps fragment is present).
+    cmds: list[str] = []
+    if fragment_rel is not None:
+        cmds.append(f"{IDENTITY_HELPER} \"/{fragment_rel}\"")
+        if sysusers:
+            # Native creation runs after reconciliation: the reconciler
+            # validates (and converges any dir/file stanzas, of which a
+            # sysusers-native package normally has none), then
+            # systemd-sysusers creates whatever identities that build's
+            # shipped confs declare. Either step failing fails the install.
+            cmds.append(SYSUSERS_BIN)
+    if fhs_fragment_rel is not None:
+        cmds.append(f"{FHS_HELPER} \"/{fhs_fragment_rel}\"")
+    if caps_fragment_rel is not None:
+        cmds.append(f"{CAPS_HELPER} \"/{caps_fragment_rel}\"")
+    *plain, last = cmds
+    body = preamble + "".join(f"{cmd}\n" for cmd in plain) + f"exec {last}\n"
     post_install = temp_root / f"post-install-{name}"
     post_upgrade = temp_root / f"post-upgrade-{name}"
     post_install.write_text(body, encoding="utf-8")
     post_upgrade.write_text(body, encoding="utf-8")
     post_install.chmod(0o755)
     post_upgrade.chmod(0o755)
-    marker = "SAPHIRA_IDENTITY_EOF"
-    if marker in fragment_text:
-        die(f"account fragment embeds the reserved marker: {marker}")
-    if not fragment_text.endswith("\n"):
-        fragment_text += "\n"
-    deinstall_body = (f"#!/bin/sh\n"
-                      f"# Generated by saphira makepkg from {fragment_rel}.\n"
-                      f"# Package scripts may only invoke the platform identity reconciler.\n"
-                      f"# The declaration is embedded: apk runs post-deinstall after\n"
-                      f"# the payload fragment file itself has been removed.\n"
-                      f"set -eu\n"
-                      f"fragment=$(mktemp \"${{TMPDIR:-/tmp}}/saphira-identity.XXXXXX\") || exit 1\n"
-                      f"trap 'rm -f -- \"$fragment\"' EXIT HUP INT TERM\n"
-                      f"cat > \"$fragment\" <<'{marker}'\n"
-                      f"{fragment_text}"
-                      f"{marker}\n"
-                      f"exec {IDENTITY_HELPER} --disable \"$fragment\"\n")
-    post_deinstall = temp_root / f"post-deinstall-{name}"
-    post_deinstall.write_text(deinstall_body, encoding="utf-8")
-    post_deinstall.chmod(0o755)
-    return (["-s", f"post-install:{post_install}", "-s", f"post-upgrade:{post_upgrade}",
-             "-s", f"post-deinstall:{post_deinstall}"],
-            post_install, post_upgrade, post_deinstall)
+    script_arguments = ["-s", f"post-install:{post_install}", "-s", f"post-upgrade:{post_upgrade}"]
+    post_deinstall: Path | None = None
+    if fragment_rel is not None:
+        # Deinstall stays reconciler-only and unchanged: sysusers has
+        # no removal concept (conservative on removal, per policy),
+        # and fhs layout never reverts.
+        marker = "SAPHIRA_IDENTITY_EOF"
+        if marker in fragment_text:
+            die(f"account fragment embeds the reserved marker: {marker}")
+        if not fragment_text.endswith("\n"):
+            fragment_text += "\n"
+        deinstall_body = (f"#!/bin/sh\n"
+                          f"# Generated by saphira makepkg from {fragment_rel}.\n"
+                          f"# Package scripts may only invoke the platform identity reconciler.\n"
+                          f"# The declaration is embedded: apk runs post-deinstall after\n"
+                          f"# the payload fragment file itself has been removed.\n"
+                          f"set -eu\n"
+                          f"fragment=$(mktemp \"${{TMPDIR:-/tmp}}/saphira-identity.XXXXXX\") || exit 1\n"
+                          f"trap 'rm -f -- \"$fragment\"' EXIT HUP INT TERM\n"
+                          f"cat > \"$fragment\" <<'{marker}'\n"
+                          f"{fragment_text}"
+                          f"{marker}\n"
+                          f"exec {IDENTITY_HELPER} --disable \"$fragment\"\n")
+        post_deinstall = temp_root / f"post-deinstall-{name}"
+        post_deinstall.write_text(deinstall_body, encoding="utf-8")
+        post_deinstall.chmod(0o755)
+        script_arguments += ["-s", f"post-deinstall:{post_deinstall}"]
+    return (script_arguments, post_install, post_upgrade, post_deinstall)
 
 
 def parse_legacy_sidecar(path: Path) -> dict[str, list[dict[str, str]]]:
@@ -310,27 +650,28 @@ class PackageError(RuntimeError):
     pass
 
 
-def check_fragment_file_target(payload: Path, producer: str, entry: dict[str, str]) -> None:
-    """Fail closed unless a file-stanza target ships in this payload.
+def check_fragment_file_target(payload: Path, producer: str, entry: dict[str, str],
+                               label: str = "file stanza") -> None:
+    """Fail closed unless a stanza target ships in this payload.
 
-    Ownership stanzas may only name files the package itself installs:
-    a missing path is a packaging bug, a symlink would redirect the
-    install-time chown onto another package's target, and a directory
-    belongs to the dir stanza.
+    Ownership and capability stanzas may only name files the package
+    itself installs: a missing path is a packaging bug, a symlink
+    would redirect the install-time operation onto another package's
+    target, and a directory belongs to the dir stanza.
     """
     target = payload / entry["path"].lstrip("/")
     if target.is_symlink():
-        die(f"{producer}: file stanza target is a symlink (refusing to redirect ownership): {entry['path']}")
+        die(f"{producer}: {label} target is a symlink (refusing to redirect ownership): {entry['path']}")
     if target.is_dir():
-        die(f"{producer}: file stanza target is a directory (use the dir stanza): {entry['path']}")
+        die(f"{producer}: {label} target is a directory (use the dir stanza): {entry['path']}")
     if not target.exists():
-        die(f"{producer}: file stanza target is missing from the payload: {entry['path']}")
+        die(f"{producer}: {label} target is missing from the payload: {entry['path']}")
     if not target.is_file():
         # Fifos and other specials cannot ship in APK payloads (the
         # constructor archives regular files only - apk hangs reading
         # a fifo). Runtime specials such as qmail's queue trigger are
         # created with ownership by the service start_pre instead.
-        die(f"{producer}: file stanza target is not a regular file (fifos/specials cannot ship in APKs - create at service start): {entry['path']}")
+        die(f"{producer}: {label} target is not a regular file (fifos/specials cannot ship in APKs - create at service start): {entry['path']}")
 
 
 def die(message: str) -> NoReturn:
@@ -421,6 +762,16 @@ def validate_payload(payload: Path, producer: str) -> None:
             relative = path.relative_to(payload)
             if "lib64" in relative.parts:
                 die(f"payload violates Saphira /lib-only layout: {relative}")
+            if (len(relative.parts) >= 2
+                    and relative.parts[:2] in (("usr", "etc"), ("usr", "var"), ("usr", "com"))
+                    and not layout_allowed(relative.as_posix(), producer)):
+                die(f"payload populates accidental prefix-derived root in {producer}: {relative}"
+                    f" (autoconf defaults sysconfdir to $prefix/etc and localstatedir to $prefix/var;"
+                    f" pass explicit --sysconfdir/--localstatedir, or request a reviewed LAYOUT_ALLOW exception)")
+            if (len(relative.parts) >= 2 and relative.parts[:2] == ("usr", "local")
+                    and producer not in USR_LOCAL_ALLOW):
+                die(f"payload populates /usr/local (distribution packages must not - "
+                    f"explicit author-policy authorization required): {relative}")
             if path.is_symlink():
                 validate_symlink(payload, path, producer)
     if not found:
@@ -592,9 +943,6 @@ def construct(apk: str, payload: Path, arguments: list[str], producer: str) -> s
         unshare, "--user", "--map-root-user", "/bin/sh", "-c", shell_script,
         "makepkg", str(payload), str(modes_file), *command_tail,
     ])
-    import subprocess as sp
-    r = sp.run(["stat","-c","%a",str(payload/"usr/bin/sudo")],capture_output=True,text=True)
-    print(f"DEBUG post-construct sudo mode={r.stdout.strip()}", file=sys.stderr)
     modes_file.unlink(missing_ok=True)
     return "userns-maproot"
 
@@ -669,7 +1017,8 @@ def main() -> int:
                 accounts: dict = {"users": [], "groups": [], "dirs": [], "files": [],
                                   "legacy": {"users": [], "groups": []}}
                 script_arguments: list[str] = []
-                if fragment_path.is_file():
+                has_accounts_fragment = fragment_path.is_file()
+                if has_accounts_fragment:
                     accounts, range_notices = parse_accounts_fragment(fragment_path)
                     accounts["legacy"] = {"users": [], "groups": []}
                     for notice in range_notices:
@@ -680,9 +1029,83 @@ def main() -> int:
                         fragment_text = fragment_path.read_text(encoding="utf-8")
                     except OSError:
                         die(f"cannot read account fragment: {fragment_path}")
+                else:
+                    fragment_text = ""
+                # Native sysusers identities: when the fragment carries
+                # the sysusers stanza, the package's shipped sysusers.d
+                # confs are parsed into census-shaped entries and merged
+                # into the declaration (same package/name/ID continuity
+                # as a census across mechanism switches). Payloads
+                # without the stanza are never scanned: the stanza is
+                # the opt-in. A name declared in both census and native
+                # form fails (ambiguous source).
+                if accounts.get("sysusers", False):
+                    native, sysusers_notices = parse_sysusers_confs(
+                        payload_copy / PurePosixPath("usr/lib/sysusers.d"), name)
+                    for notice in sysusers_notices:
+                        print(f"makepkg: notice: {notice}")
+                    census_users = {u["name"] for u in accounts.get("users", [])}
+                    census_groups = {g["name"] for g in accounts.get("groups", [])}
+                    for entry in native.get("users", []):
+                        if entry["name"] in census_users:
+                            die(f"{name}: user '{entry['name']}' declared in both census and native sysusers form (ambiguous source)")
+                        accounts["users"].append(entry)
+                    for entry in native.get("groups", []):
+                        if entry["name"] in census_groups:
+                            die(f"{name}: group '{entry['name']}' declared in both census and native sysusers form (ambiguous source)")
+                        accounts["groups"].append(entry)
+                # FHS migrations: a fragment fhs.d/<output-name> is the
+                # recipe's whole migration declaration. makepkg validates
+                # it and extends the thin install/upgrade callers to run
+                # ensure-fhs after ensure-identity. Stray fragments fail
+                # the build: one package owns each migrated path.
+                payload_fhs = payload_copy / FHS_DIR
+                fhs_stray = []
+                if payload_fhs.is_dir():
+                    for entry in sorted(payload_fhs.iterdir()):
+                        if entry.is_file() and entry.name != name:
+                            fhs_stray.append(entry.name)
+                if fhs_stray:
+                    die(f"payload carries foreign fhs fragments: {', '.join(fhs_stray)}")
+                fhs_fragment_rel = (FHS_DIR / name).as_posix()
+                fhs_fragment_path = payload_copy / fhs_fragment_rel
+                fhs: dict = {"dirs": [], "replaces": [], "removals": []}
+                has_fhs_fragment = fhs_fragment_path.is_file()
+                if has_fhs_fragment:
+                    fhs = parse_fhs_fragment(fhs_fragment_path)
+                    check_fhs_ownership(name, accounts, fhs)
+                # File capabilities: a fragment caps.d/<output-name>
+                # is the recipe's whole capability declaration.
+                # makepkg validates it, appends ensure-caps to the
+                # thin install/upgrade callers, and adds the helper
+                # dependency. Every target must ship in the same
+                # payload (regular file, never a symlink): the file
+                # gate then guarantees one package per capped path
+                # globally, with no ledger change. Stray fragments
+                # fail the build like accounts.d/fhs.d strays.
+                payload_caps = payload_copy / CAPS_DIR
+                caps_stray = []
+                if payload_caps.is_dir():
+                    for entry in sorted(payload_caps.iterdir()):
+                        if entry.is_file() and entry.name != name:
+                            caps_stray.append(entry.name)
+                if caps_stray:
+                    die(f"payload carries foreign caps fragments: {', '.join(caps_stray)}")
+                caps_fragment_rel = (CAPS_DIR / name).as_posix()
+                caps_fragment_path = payload_copy / caps_fragment_rel
+                caps: dict = {"caps": []}
+                has_caps_fragment = caps_fragment_path.is_file()
+                if has_caps_fragment:
+                    caps = parse_caps_fragment(caps_fragment_path)
+                    for cap_entry in caps.get("caps", []):
+                        check_fragment_file_target(payload_copy, name, cap_entry, "cap stanza")
+                if has_accounts_fragment or has_fhs_fragment or has_caps_fragment:
                     script_arguments, _, _, _ = identity_scripts(
-                        fragment_rel, temp_root, name, fragment_text,
-                        sysusers=accounts.get("sysusers", False))
+                        fragment_rel if has_accounts_fragment else None,
+                        temp_root, name, fragment_text,
+                        sysusers=accounts.get("sysusers", False),
+                        fhs_fragment_rel=fhs_fragment_rel if has_fhs_fragment else None,
+                        caps_fragment_rel=caps_fragment_rel if has_caps_fragment else None)
                 # The legacy sidecar is validated whenever present, even
                 # without a sibling fragment: a lone sidecar then fails
                 # the same-fragment consistency check below (history
@@ -707,12 +1130,28 @@ def main() -> int:
                     "--info", f"build-time:{manifest['build_time']}",
                 ]
                 dependencies = output.get("dependencies", [])
-                if accounts["users"] or accounts["groups"] or accounts["files"]:
+                if (accounts["users"] or accounts["groups"] or accounts["files"]
+                        or accounts.get("sysusers")):
                     # The generated scripts exec the baselayout helper, so
                     # its provider plus a shell and coreutils must be
                     # installed first: apk orders by dependency, and the
-                    # scripts fail closed without them.
+                    # scripts fail closed without them. A sysusers-native
+                    # fragment needs the same edge (its callers run the
+                    # reconciler first, then systemd-sysusers).
                     for requirement in IDENTITY_DEPS:
+                        if name != requirement and requirement not in dependencies:
+                            dependencies = [*dependencies, requirement]
+                if fhs["dirs"] or fhs["replaces"] or fhs["removals"]:
+                    # Same ordering need for the FHS reconciler (identical
+                    # provider triple; the loop dedupes).
+                    for requirement in FHS_DEPS:
+                        if name != requirement and requirement not in dependencies:
+                            dependencies = [*dependencies, requirement]
+                if caps["caps"]:
+                    # The generated callers exec ensure-caps, so its
+                    # provider plus libcap (getcap/setcap) and a shell
+                    # must be installed first (deduped by the loop).
+                    for requirement in CAPS_DEPS:
                         if name != requirement and requirement not in dependencies:
                             dependencies = [*dependencies, requirement]
                 if dependencies:
@@ -730,10 +1169,24 @@ def main() -> int:
                 run([config["SAPHIRA_APK"], "verify", "--allow-untrusted", str(temporary_artifact)])
                 metadata, recorded_dependencies = metadata_from_apk(config["SAPHIRA_APK"], temporary_artifact)
                 dump = run([config["SAPHIRA_APK"], "adbdump", str(temporary_artifact)]).stdout
-                if accounts["users"] or accounts["groups"] or accounts["files"]:
+                if (accounts["users"] or accounts["groups"] or accounts["files"]
+                        or accounts.get("sysusers")):
                     for script in ("post-install", "post-upgrade", "post-deinstall"):
                         if script not in dump:
                             die(f"constructed APK is missing generated identity script {script}: {temporary_artifact}")
+                if fhs["dirs"] or fhs["replaces"] or fhs["removals"]:
+                    # Deinstall never carries fhs (layout never reverts);
+                    # install/upgrade must carry the combined callers.
+                    for script in ("post-install", "post-upgrade"):
+                        if script not in dump:
+                            die(f"constructed APK is missing generated fhs script {script}: {temporary_artifact}")
+                if caps["caps"]:
+                    # Deinstall never carries caps (capabilities die
+                    # with their payload files); install/upgrade must
+                    # carry the combined callers.
+                    for script in ("post-install", "post-upgrade"):
+                        if script not in dump:
+                            die(f"constructed APK is missing generated caps script {script}: {temporary_artifact}")
                 expected = {
                     "name": name,
                     "version": manifest["version"],
@@ -751,7 +1204,8 @@ def main() -> int:
                 os.replace(temporary_artifact, artifact)
                 digest = sha256_file(artifact)
                 receipts.append({"name": name, "artifact": str(artifact), "sha256": digest,
-                                 "backend": backend, "accounts": accounts})
+                                 "backend": backend, "accounts": accounts, "fhs": fhs,
+                                 "caps": caps})
         finally:
             shutil.rmtree(temp_root)
 

@@ -30,7 +30,7 @@ subpackages="libedit-dev"
 
 recipe_build()
 {
-	./configure --prefix=/usr
+	./configure --prefix=/usr --sysconfdir=/etc --localstatedir=/var
 	make -j${JOBS:-$(nproc)}
 }
 

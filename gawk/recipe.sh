@@ -16,7 +16,7 @@ recipe_build() {
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$RECIPE_DIR/files/gawk-5.3.2.tar.xz"
 	cd "$SRC"
 	echo "$gawk_sha256  $RECIPE_DIR/files/gawk-5.3.2.tar.xz" | sha256sum -c -
-	AWK=/usr/bin/mawk ./configure --prefix=/usr --sysconfdir=/etc --disable-nls --without-readline
+	AWK=/usr/bin/mawk ./configure --prefix=/usr --sysconfdir=/etc --disable-nls --without-readline --localstatedir=/var
 	make -j${JOBS:-$(nproc)}
 }
 recipe_install() {

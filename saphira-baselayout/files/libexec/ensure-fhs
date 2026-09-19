@@ -1,0 +1,653 @@
+#!/bin/sh
+# ensure-fhs FRAGMENT — additive, idempotent FHS-layout migration reconciler.
+#
+# Saphira-owned infrastructure (saphira-baselayout). Called from
+# makepkg-generated package install/upgrade callers (after
+# ensure-identity when the package carries both declarations) and
+# from the baselayout boot-convergence service for the global
+# fragment. There is no disable/deinstall operation: layout
+# convergence never reverts.
+#
+# /var/run is persistent by design in Saphira: never a tmpfs, never
+# an alias of /run, never wiped at boot. Services validate/replace
+# their own stale PID/socket/runtime objects at start. This tool
+# performs structural migration only.
+#
+# Fragment grammar (strict; anything malformed fails closed):
+#   dir <abspath> <mode> <owner> <group>
+#   replace-symlink-dir <linkpath> <declared-target> <mode> <owner> <group>
+#   rmdir-if-empty <abspath>
+#   rmtree-if-empty <abspath>
+#   rmdir-or-fail <abspath>
+#   rmtree-or-fail <abspath>
+# Blank lines and '#' comments are ignored.
+#
+# Usage: ensure-fhs [--root PATH] [--check] FRAGMENT
+# Exit codes: 0 converged/clean, 1 drift found (--check) or failure,
+# 2 execution error in --check mode (could not assess: malformed
+# input, safety refusal, unknown identity). Parent orchestrators
+# treat 2 as fatal-to-the-report, never as drift.
+# - Without flags the tool converges the live root (byte-identical
+#   historical behaviour; generated package callers use this form).
+# - --root PATH retargets every filesystem operation beneath PATH
+#   (offline recovery against a mounted Saphira root). --root also
+#   honours $SAPHIRA_ENSURE_ROOT when the flag is absent.
+# - --check reports drift without changing anything: `drift: ...`
+#   lines for every non-converged stanza, exit 1 when drift exists,
+#   exit 0 with `check: FRAGMENT clean` otherwise.
+#
+# Administrator overrides ($ROOT/etc/saphira/permissions/override.d):
+# - `ignore <path>` skips the stanza (reported, never an error).
+# - `pin <path> <owner> <group> <mode>` converges dir stanzas to the
+#   pinned values instead of the fragment's. Removals honour ignore
+#   only. Overrides never add claims: a rule for a path the fragment
+#   does not declare never fires.
+#
+# Safety rules (all enforced, none are intentions):
+# - Literal link text: <declared-target> is compared with readlink
+#   output EXACTLY, never normalized ('../run' is valid and must
+#   match byte-for-byte).
+# - No stanza ever follows a symlink. Every target is lstat'ed;
+#   every parent component is inspected without following. Any
+#   symlink in a parent component refuses loudly.
+# - `dir` on a symlink fails unless pass 1 already replaced that
+#   exact historical link via replace-symlink-dir. `dir` on any
+#   other non-directory fails.
+# - Recursive removals never traverse a symlink: a symlink anywhere
+#   inside the tree makes it unsafe (leave+report for -if-empty,
+#   loud failure for -or-fail).
+# - No stanza creates symlinks, copies, or moves. PID/socket
+#   migration is inexpressible.
+# - Two passes: pass 1 executes all replace-symlink-dir stanzas,
+#   pass 2 executes everything else, both in file order. Repeats
+#   converge with no further changes.
+set -eu
+
+die() { printf 'ensure-fhs: %s\n' "$*" >&2; if [ "${CHECK:-0}" -eq 1 ]; then exit 2; else exit 1; fi; }
+report() { printf 'ensure-fhs: %s\n' "$*" >&2; }
+
+ROOT=
+CHECK=0
+while [ $# -gt 1 ]; do
+	case $1 in
+	--root)
+		# An explicitly empty root is invalid (fail closed: an
+		# unset shell variable must never silently become the
+		# live root). Live operation passes no --root at all.
+		[ -n "${2:-}" ] || die "usage: ensure-fhs [--root PATH] [--check] FRAGMENT"
+		ROOT=$2
+		shift 2
+		;;
+	--check)
+		CHECK=1
+		shift
+		;;
+	-*)
+		die "usage: ensure-fhs [--root PATH] [--check] FRAGMENT"
+		;;
+	*)
+		break
+		;;
+	esac
+done
+[ $# -eq 1 ] || die "usage: ensure-fhs [--root PATH] [--check] FRAGMENT"
+# --root wins over the environment convention shared with
+# ensure-identity.sh. Normalize: empty means the live root, so every
+# filesystem touch below is "$ROOT<abspath>" with no double slash.
+[ -n "$ROOT" ] || ROOT=${SAPHIRA_ENSURE_ROOT:-}
+case $ROOT in
+'' | /) ROOT= ;;
+*/) ROOT=${ROOT%/} ;;
+esac
+case $ROOT in
+*//* | *..*) die "refusing unsafe target root: $ROOT" ;;
+esac
+fragment=$1
+case $fragment in
+-*) die "usage: ensure-fhs [--root PATH] [--check] FRAGMENT" ;;
+esac
+[ -f "$fragment" ] || die "fragment not found: $fragment"
+[ ! -L "$fragment" ] || die "fragment must not be a symlink: $fragment"
+[ -z "$ROOT" ] || [ -d "$ROOT" ] || die "target root is not a directory: $ROOT"
+
+# Administrator overrides (shared helper; absent directory means no
+# overrides and zero behaviour change).
+OVERRIDE_DIR=$ROOT/etc/saphira/permissions/override.d
+# shellcheck disable=SC1091
+helper_dir=$(dirname -- "$0")
+if [ -f "$helper_dir/permissions-override.sh" ]; then
+	. "$helper_dir/permissions-override.sh"
+elif [ -f /usr/libexec/saphira/permissions-override.sh ]; then
+	. /usr/libexec/saphira/permissions-override.sh
+else
+	die "permissions-override.sh is missing (reinstall saphira-baselayout)"
+fi
+ovr_init
+
+DRIFT=0
+drift() { DRIFT=$((DRIFT + 1)); printf 'ensure-fhs: drift: %s\n' "$*" >&2; }
+
+valid_name() {
+	case $1 in
+	root | 0) return 0 ;;
+	*) expr "$1" : '[A-Za-z0-9_.][A-Za-z0-9_.-]*$' >/dev/null ;;
+	esac
+}
+
+valid_mode() {
+	case $1 in
+	'' | *[!0-7]*) return 1 ;;
+	esac
+	# POSIX parameter expansion only: this helper must run in virgin
+	# seed roots where sed is not yet installed (seed order installs
+	# sed after saphira-baselayout; the old `sed 's/^0*//'` died
+	# there and broke canonical base assembly). Identical semantics:
+	# strip every leading zero ("0000" becomes empty, healed below).
+	stripped=$1
+	while [ "${stripped#0}" != "$stripped" ]; do
+		stripped=${stripped#0}
+	done
+	[ -n "$stripped" ] || stripped=0
+	len=${#stripped}
+	[ "$len" -ge 3 ] && [ "$len" -le 4 ] || return 1
+	case $stripped in
+	[1-7]*) return 0 ;;
+	*) return 1 ;;
+	esac
+}
+
+valid_abspath() {
+	case $1 in
+	/ | /*) ;;
+	*) return 1 ;;
+	esac
+	case $1 in
+	*//* | */ | *..*) return 1 ;;
+	esac
+	return 0
+}
+
+# Refuse operations anchored at filesystem roots no migration may own.
+# (/run itself is payload-owned: the APK ships the real directory, so
+# live reconciliation never claims it.)
+guard_roots() {
+	case $1 in
+	/ | /usr | /var | /etc | /bin | /sbin | /lib | /run)
+		die "refusing operation on protected root: $1" ;;
+	esac
+}
+
+# Refuse when any parent component of an absolute path is a symlink.
+# Inspects without following: pure lstat walk, never resolves.
+# Takes the stanza path; the target root is prefixed internally so
+# refusal messages name the real inspected path.
+no_symlink_parents() {
+	p=$ROOT$1
+	while :; do
+		p=${p%/*}
+		[ -n "$p" ] || p=/
+		if [ -L "$p" ]; then
+			die "refusing: parent component is a symlink: $p"
+		fi
+		[ "$p" = "/" ] && break
+	done
+}
+
+# Numeric identity resolution, target-root aware. Live (no --root)
+# resolves through the running system exactly like before; targeted
+# runs read the target's own account database (names are meaningless
+# across the offline boundary, and the host NSS must never decide
+# what a mounted root's identities are).
+uid_of() {
+	case $1 in
+	root | 0) printf '0'; return 0 ;;
+	esac
+	if [ -z "$ROOT" ]; then
+		id -u "$1" 2>/dev/null || return 1
+	else
+		db=$ROOT/etc/passwd
+		[ -f "$db" ] || return 1
+		while IFS=: read -r name _ uid _ _ _ _ || [ -n "$name" ]; do
+			if [ "$name" = "$1" ]; then
+				printf '%s' "$uid"
+				return 0
+			fi
+		done <"$db"
+		return 1
+	fi
+}
+
+gid_of() {
+	case $1 in
+	root | 0) printf '0'; return 0 ;;
+	esac
+	if [ -z "$ROOT" ]; then
+		getent group "$1" 2>/dev/null | cut -d: -f3 || id -g "$1" 2>/dev/null || return 1
+	else
+		db=$ROOT/etc/group
+		[ -f "$db" ] || return 1
+		while IFS=: read -r name _ gid _ || [ -n "$name" ]; do
+			if [ "$name" = "$1" ]; then
+				printf '%s' "$gid"
+				return 0
+			fi
+		done <"$db"
+		return 1
+	fi
+}
+
+resolve_owner() {
+	# $1 owner, $2 group: fail closed on unknown identities.
+	uid_of "$1" >/dev/null || die "unknown owner identity: $1"
+	gid_of "$2" >/dev/null || die "unknown group identity: $2"
+}
+
+norm_mode() {
+	stripped=$1
+	while [ "${stripped#0}" != "$stripped" ]; do
+		stripped=${stripped#0}
+	done
+	[ -n "$stripped" ] || stripped=0
+	printf '%s' "$stripped"
+}
+
+# ovr_apply $1(path): prints the effective stanza values after
+# administrator overrides — `ok <mode> <owner> <group>` (possibly
+# pinned), `ignore`, honouring pin > ignore. Removals pass empty
+# mode/owner/group and only honour ignore.
+ovr_apply() {
+	rule=$(ovr_lookup "$1")
+	case $rule in
+	ignore)
+		printf 'ignore\n'
+		;;
+	pin\|*)
+		printf '%s\n' "$rule"
+		;;
+	*)
+		printf 'ok\n'
+		;;
+	esac
+}
+
+converge_dir() {
+	# $1 path $2 mode $3 owner $4 group: leaf reconciled, parents default.
+	# Always numeric: names resolve through the target root's own
+	# database (offline runs must never consult the host NSS), and
+	# numeric IDs converge identically everywhere.
+	o=$(uid_of "$3") || die "unknown owner identity: $3"
+	g=$(gid_of "$4") || die "unknown group identity: $4"
+	if [ "$CHECK" -eq 1 ]; then
+		dir_meta_ok "$1" "$2" "$o" "$g" || drift "dir $1 metadata differs (want $3:$4 $2)"
+		return 0
+	fi
+	chown "$o:$g" "$ROOT$1" || die "cannot chown $1 to $3:$4"
+	chmod "$2" "$ROOT$1" || die "cannot chmod $1 to $2"
+}
+
+# dir_meta_ok $1(path) $2(mode) $3(uid) $4(gid): silent check used by
+# --check (0 = converged, 1 = drift or unstatted).
+dir_meta_ok() {
+	want_path=$1
+	want_mode=$2
+	want_uid=$3
+	want_gid=$4
+	cur=$(stat -c '%a %u %g' "$ROOT$want_path" 2>/dev/null) || return 1
+	# shellcheck disable=SC2086
+	set -- $cur
+	[ "$1" = "$(norm_mode "$want_mode")" ] && [ "$2" = "$want_uid" ] && [ "$3" = "$want_gid" ]
+}
+
+do_dir() {
+	# $1 lineno $2 path $3 mode $4 owner $5 group
+	valid_abspath "$2" || die "$fragment:$1: dir path must be absolute and normalized"
+	guard_roots "$2"
+	eff=$(ovr_apply "$2")
+	case $eff in
+	ignore)
+		report "dir $2 skipped (administrator override)"
+		return 0
+		;;
+	pin\|*)
+		rest=${eff#pin|}
+		pin_o=${rest%%|*}
+		rest=${rest#*|}
+		pin_g=${rest%%|*}
+		rest=${rest#*|}
+		pin_m=${rest%%|*}
+		report "dir $2 pinned by administrator override ($pin_o:$pin_g $pin_m)"
+		set -- "$1" "$2" "$pin_m" "$pin_o" "$pin_g"
+		;;
+	ok) ;;
+	esac
+	no_symlink_parents "$2"
+	if [ "$CHECK" -eq 1 ]; then
+		if [ -L "$ROOT$2" ]; then
+			drift "dir $2 is a symlink (needs replace-symlink-dir)"
+			return 0
+		fi
+		if [ ! -e "$ROOT$2" ]; then
+			drift "dir $2 is missing (would create)"
+			return 0
+		fi
+		if [ ! -d "$ROOT$2" ]; then
+			drift "dir $2 exists and is not a directory"
+			return 0
+		fi
+		converge_dir "$2" "$3" "$4" "$5"
+		return 0
+	fi
+	if [ -L "$ROOT$2" ]; then
+		die "$fragment:$1: dir target is a symlink (needs replace-symlink-dir): $2"
+	fi
+	if [ -e "$ROOT$2" ]; then
+		[ -d "$ROOT$2" ] || die "$fragment:$1: dir target exists and is not a directory: $2"
+	else
+		mkdir -p "$ROOT$2" || die "$fragment:$1: cannot create directory: $2"
+	fi
+	converge_dir "$2" "$3" "$4" "$5"
+	report "dir $2 ($4:$5 $3)"
+}
+
+do_replace_symlink_dir() {
+	# $1 lineno $2 linkpath $3 declared-target $4 mode $5 owner $6 group
+	valid_abspath "$2" || die "$fragment:$1: link path must be absolute and normalized"
+	guard_roots "$2"
+	eff=$(ovr_apply "$2")
+	case $eff in
+	ignore)
+		report "replace-symlink-dir $2 skipped (administrator override)"
+		return 0
+		;;
+	pin\|*)
+		rest=${eff#pin|}
+		pin_o=${rest%%|*}
+		rest=${rest#*|}
+		pin_g=${rest%%|*}
+		rest=${rest#*|}
+		pin_m=${rest%%|*}
+		report "replace-symlink-dir $2 pinned by administrator override ($pin_o:$pin_g $pin_m)"
+		set -- "$1" "$2" "$3" "$pin_m" "$pin_o" "$pin_g"
+		;;
+	ok) ;;
+	esac
+	[ -n "$3" ] || die "$fragment:$1: declared target must not be empty"
+	case $3 in
+	*'
+'*) die "$fragment:$1: declared target must be a single line" ;;
+	esac
+	no_symlink_parents "$2"
+	if [ "$CHECK" -eq 1 ]; then
+		if [ -L "$ROOT$2" ]; then
+			actual=$(readlink "$ROOT$2") || {
+				drift "replace-symlink-dir $2 link is unreadable"
+				return 0
+			}
+			if [ "$actual" = "$3" ]; then
+				drift "replace-symlink-dir $2 is a symlink (would replace, was '$3')"
+			else
+				drift "replace-symlink-dir $2 has unexpected target '$actual' (declared '$3')"
+			fi
+			return 0
+		fi
+		if [ ! -e "$ROOT$2" ]; then
+			drift "replace-symlink-dir $2 is missing (would create)"
+			return 0
+		fi
+		if [ ! -d "$ROOT$2" ]; then
+			drift "replace-symlink-dir $2 exists and is not a directory"
+			return 0
+		fi
+		converge_dir "$2" "$4" "$5" "$6"
+		return 0
+	fi
+	if [ -L "$ROOT$2" ]; then
+		actual=$(readlink "$ROOT$2") || die "$fragment:$1: cannot read link: $2"
+		[ "$actual" = "$3" ] || die "$fragment:$1: unexpected symlink target at $2: got '$actual', declared '$3'"
+		rm "$ROOT$2" || die "$fragment:$1: cannot remove historical symlink: $2"
+		mkdir "$ROOT$2" || die "$fragment:$1: cannot create directory: $2"
+		converge_dir "$2" "$4" "$5" "$6"
+		report "replace-symlink-dir $2 (was '$3')"
+	elif [ -e "$ROOT$2" ]; then
+		[ -d "$ROOT$2" ] || die "$fragment:$1: path exists and is not a directory: $2"
+		converge_dir "$2" "$4" "$5" "$6"
+		report "replace-symlink-dir $2 already a real directory (converged)"
+	else
+		mkdir -p "$ROOT$2" || die "$fragment:$1: cannot create directory: $2"
+		converge_dir "$2" "$4" "$5" "$6"
+		report "replace-symlink-dir $2 created (fresh install)"
+	fi
+}
+
+# tree_state $1: 0 = only empty dirs, 1 = real content, 2 = symlink inside.
+# Never follows symlinks; a symlink anywhere means unsafe. $1 is the
+# stanza path; the target root is prefixed internally.
+tree_state() {
+	for entry in "$ROOT$1"/* "$ROOT$1"/.*; do
+		# Unexpanded glob literals (empty dir) match nothing: skip.
+		[ -e "$entry" ] || [ -L "$entry" ] || continue
+		case $entry in
+		*/.|*/..) continue ;;
+		esac
+		if [ -L "$entry" ]; then
+			return 2
+		elif [ -d "$entry" ]; then
+			tree_state "$entry" || return $?
+		else
+			return 1
+		fi
+	done
+	return 0
+}
+
+do_rmdir() {
+	# $1 lineno $2 stanza $3 path $4 strict(0 leave+report, 1 fail loud)
+	valid_abspath "$3" || die "$fragment:$1: path must be absolute and normalized"
+	guard_roots "$3"
+	case $(ovr_apply "$3") in
+	ignore)
+		report "$2 $3 skipped (administrator override)"
+		return 0
+		;;
+	esac
+	no_symlink_parents "$3"
+	if [ "$CHECK" -eq 1 ]; then
+		if [ -L "$ROOT$3" ]; then
+			[ "$4" -eq 0 ] && return 0
+			drift "$2 $3 is a symlink"
+			return 0
+		fi
+		if [ ! -e "$ROOT$3" ]; then
+			return 0
+		fi
+		if [ ! -d "$ROOT$3" ]; then
+			[ "$4" -eq 0 ] && return 0
+			drift "$2 $3 exists and is not a directory"
+			return 0
+		fi
+		probe_meta=$(stat -c '%a %u %g' "$ROOT$3") || {
+			drift "$2 $3 metadata is unreadable"
+			return 0
+		}
+		if rmdir "$ROOT$3" 2>/dev/null; then
+			# Check mode must not mutate: recreate what the probe
+			# just removed with identical metadata.
+			stanza=$2
+			mkdir "$ROOT$3" || die "$fragment:$1: check probe failed to restore: $3"
+			# shellcheck disable=SC2086
+			set -- $probe_meta
+			chown "$2:$3" "$ROOT$3" || die "$fragment:$1: check probe failed to restore: $3"
+			chmod "$1" "$ROOT$3" || die "$fragment:$1: check probe failed to restore: $3"
+			drift "$stanza $3 is empty (would remove)"
+			return 0
+		fi
+		[ "$4" -eq 0 ] && return 0
+		drift "$2 $3 is not empty"
+		return 0
+	fi
+	if [ -L "$ROOT$3" ]; then
+		msg="$2 $3 is a symlink; leaving in place"
+		[ "$4" -eq 0 ] && { report "$msg (reported)"; return 0; }
+		die "$msg"
+	fi
+	if [ ! -e "$ROOT$3" ]; then
+		report "$2 $3 absent (no-op)"
+		return 0
+	fi
+	[ -d "$ROOT$3" ] || {
+		msg="$2 $3 exists and is not a directory"
+		[ "$4" -eq 0 ] && { report "$msg; leaving in place (reported)"; return 0; }
+		die "$msg"
+	}
+	if rmdir "$ROOT$3" 2>/dev/null; then
+		report "$2 $3 removed (was empty)"
+		return 0
+	fi
+	msg="$2 $3 is not empty"
+	[ "$4" -eq 0 ] && { report "$msg; leaving in place (reported)"; return 0; }
+	die "$msg (manual intervention required)"
+}
+
+do_rmtree() {
+	# $1 lineno $2 stanza $3 path $4 strict(0 leave+report, 1 fail loud)
+	valid_abspath "$3" || die "$fragment:$1: path must be absolute and normalized"
+	guard_roots "$3"
+	case $(ovr_apply "$3") in
+	ignore)
+		report "$2 $3 skipped (administrator override)"
+		return 0
+		;;
+	esac
+	no_symlink_parents "$3"
+	if [ "$CHECK" -eq 1 ]; then
+		if [ -L "$ROOT$3" ]; then
+			[ "$4" -eq 0 ] && return 0
+			drift "$2 $3 is a symlink"
+			return 0
+		fi
+		if [ ! -e "$ROOT$3" ]; then
+			return 0
+		fi
+		if [ ! -d "$ROOT$3" ]; then
+			[ "$4" -eq 0 ] && return 0
+			drift "$2 $3 exists and is not a directory"
+			return 0
+		fi
+		set +e
+		tree_state "$3"
+		state=$?
+		set -e
+		if [ "$state" -eq 0 ]; then
+			drift "$2 $3 is an empty tree (would remove)"
+			return 0
+		fi
+		[ "$4" -eq 0 ] && return 0
+		if [ "$state" -eq 2 ]; then
+			drift "$2 $3 contains a symlink"
+		else
+			drift "$2 $3 is not empty"
+		fi
+		return 0
+	fi
+	if [ -L "$ROOT$3" ]; then
+		msg="$2 $3 is a symlink; leaving in place"
+		[ "$4" -eq 0 ] && { report "$msg (reported)"; return 0; }
+		die "$msg"
+	fi
+	if [ ! -e "$ROOT$3" ]; then
+		report "$2 $3 absent (no-op)"
+		return 0
+	fi
+	[ -d "$ROOT$3" ] || {
+		msg="$2 $3 exists and is not a directory"
+		[ "$4" -eq 0 ] && { report "$msg; leaving in place (reported)"; return 0; }
+		die "$msg"
+	}
+	set +e
+	tree_state "$3"
+	state=$?
+	set -e
+	if [ "$state" -eq 0 ]; then
+		rm -rf "$ROOT$3" || die "$fragment:$1: cannot remove empty tree: $3"
+		report "$2 $3 removed (was empty)"
+		return 0
+	fi
+	if [ "$state" -eq 2 ]; then
+		msg="$2 $3 contains a symlink; refusing to traverse"
+	else
+		msg="$2 $3 is not empty"
+	fi
+	[ "$4" -eq 0 ] && { report "$msg; leaving in place (reported)"; return 0; }
+	die "$msg (manual intervention required)"
+}
+
+check_common() {
+	# $1 lineno $2 stanza $3 path $4 mode $5 owner $6 group
+	valid_abspath "$3" || die "$fragment:$1: path must be absolute and normalized"
+	valid_mode "$4" || die "$fragment:$1: invalid mode: $4"
+	valid_name "$5" || die "$fragment:$1: invalid owner name: $5"
+	valid_name "$6" || die "$fragment:$1: invalid group name: $6"
+	resolve_owner "$5" "$6"
+}
+
+run_pass() {
+	# $1 pass (1 = replace-symlink-dir only, 2 = everything else)
+	pass=$1
+	lineno=0
+	while IFS= read -r raw || [ -n "$raw" ]; do
+		lineno=$((lineno + 1))
+		# shellcheck disable=SC2086
+		set -- $raw
+		[ $# -eq 0 ] && continue
+		case $1 in
+		\#*) continue ;;
+		esac
+		kind=$1
+		if [ "$1" = "replace-symlink-dir" ]; then
+			[ "$pass" -eq 1 ] || continue
+			[ $# -eq 6 ] || die "$fragment:$lineno: malformed replace-symlink-dir stanza"
+			check_common "$lineno" "$kind" "$2" "$4" "$5" "$6"
+			do_replace_symlink_dir "$lineno" "$2" "$3" "$4" "$5" "$6"
+		else
+			[ "$pass" -eq 2 ] || continue
+			case $kind in
+			dir)
+				[ $# -eq 5 ] || die "$fragment:$lineno: malformed dir stanza"
+				check_common "$lineno" "$kind" "$2" "$3" "$4" "$5"
+				do_dir "$lineno" "$2" "$3" "$4" "$5"
+				;;
+			rmdir-if-empty)
+				[ $# -eq 2 ] || die "$fragment:$lineno: malformed rmdir-if-empty stanza"
+				do_rmdir "$lineno" "$kind" "$2" 0
+				;;
+			rmtree-if-empty)
+				[ $# -eq 2 ] || die "$fragment:$lineno: malformed rmtree-if-empty stanza"
+				do_rmtree "$lineno" "$kind" "$2" 0
+				;;
+			rmdir-or-fail)
+				[ $# -eq 2 ] || die "$fragment:$lineno: malformed rmdir-or-fail stanza"
+				do_rmdir "$lineno" "$kind" "$2" 1
+				;;
+			rmtree-or-fail)
+				[ $# -eq 2 ] || die "$fragment:$lineno: malformed rmtree-or-fail stanza"
+				do_rmtree "$lineno" "$kind" "$2" 1
+				;;
+			*)
+				die "$fragment:$lineno: malformed stanza"
+				;;
+			esac
+		fi
+	done <"$fragment"
+}
+
+run_pass 1
+run_pass 2
+if [ "$CHECK" -eq 1 ]; then
+	if [ "$DRIFT" -eq 0 ]; then
+		report "check: $fragment clean"
+		exit 0
+	fi
+	report "check: $fragment: $DRIFT drift(s)"
+	exit 1
+fi
+report "converged: $fragment"

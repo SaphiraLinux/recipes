@@ -1,0 +1,16 @@
+# gpsd FHS migration: control socket /run/gpsd.sock -> /var/run/gpsd/gpsd.sock.
+#
+# The socket path is compiled as RUNDIR + "/gpsd.sock" (gpsd.h), so
+# scons rundir=/var/run/gpsd moves it (per the census veto: gpsd is
+# a normal service, not base runtime; flat socket paths need a
+# concrete reason, and none exists).
+#
+# Stale-state policy (/var/run is persistent by design, never wiped):
+# the stale socket is cleared in start_pre (tracked-start only);
+# the daemon recreates it on start for gpsdctl/hotplug clients.
+# The old flat /run/gpsd.sock was a tmpfs orphan needing no
+# migration (reboot-cleared, unread post-move).
+# NOTE (out of scope): no systemd unit ships in-tree (scons
+# systemd=false); if added later it must use the same socket path.
+
+dir /var/run/gpsd 0755 root root

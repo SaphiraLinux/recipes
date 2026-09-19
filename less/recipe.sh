@@ -20,7 +20,7 @@ subpackages="$pkgname-doc"
 recipe_build()
 {
 	cd "$SRC"
-	./configure --prefix=/usr --with-regex=posix
+	./configure --prefix=/usr --sysconfdir=/etc --with-regex=posix --localstatedir=/var
 	make -j${JOBS:-$(nproc)}
 }
 

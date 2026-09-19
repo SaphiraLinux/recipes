@@ -1,0 +1,17 @@
+# OpenLDAP service identity (canonical, fixed): user ldap UID 146,
+# primary group ldap GID 146. Required by slapd -u/-g in both inits
+# and by the shipped directory layout.
+#
+# UID/GID 146 is the next free ID in the preferred 0..199 packaged
+# range: 124/125/126 belong to hostapd/frr/breathgslb, 127..131 and
+# 144/145 are sysusers reservations, 132..143 are claimed in recipe
+# fragments (verified across accounts.tsv and all accounts.d
+# fragments; migration matrix tops out at 123 plus these fragment
+# rows). Cross-check against the active migration before renumbering -
+# never reuse this ID for another identity. This fragment ships in the
+# openldap main output (slapd lives there); the filename must match
+# the output.
+user ldap 146 ldap /var/lib/openldap /sbin/nologin
+group ldap 146
+dir /var/lib/openldap 0700 ldap ldap
+dir /var/log/openldap 0755 ldap ldap

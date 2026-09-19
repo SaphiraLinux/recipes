@@ -119,6 +119,44 @@ fi
 grep 'points into constructor workspace /build in workspace-leak' "$test_root/workspace-leak.log" >/dev/null
 grep 'lib/modules/7.2.2/build -> /build/saphira-kernel/source/linux-7.2.2' "$test_root/workspace-leak.log" >/dev/null
 
+# Accidental prefix-derived roots (proftpd /usr/var, lynx /usr/etc):
+# autoconf defaults sysconfdir/localstatedir under the prefix, so a
+# payload path beneath usr/etc, usr/var or usr/com fails closed unless
+# covered by an explicit reviewed LAYOUT_ALLOW exception.
+mkdir -p "$stage/usrvar-leak/pkg/usr/var"
+printf '%s\n' stray > "$stage/usrvar-leak/pkg/usr/var/stray.pid"
+write_manifest usrvar-leak '{"arch":"x86_64","build_time":25,"license":"MIT","name":"usrvar-leak","origin":"usrvar-leak","outputs":[{"dependencies":[],"description":"usrvar leak","name":"usrvar-leak","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r0"}'
+if run_makepkg usrvar-leak > "$test_root/usrvar.log" 2>&1; then
+	printf '%s\n' 'usr/var payload unexpectedly packaged' >&2
+	exit 1
+fi
+grep 'accidental prefix-derived root in usrvar-leak: usr/var (' "$test_root/usrvar.log" >/dev/null
+mkdir -p "$stage/usretc-leak/pkg/usr/etc"
+printf '%s\n' stray > "$stage/usretc-leak/pkg/usr/etc/stray.conf"
+write_manifest usretc-leak '{"arch":"x86_64","build_time":26,"license":"MIT","name":"usretc-leak","origin":"usretc-leak","outputs":[{"dependencies":[],"description":"usretc-leak","name":"usretc-leak","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r0"}'
+if run_makepkg usretc-leak > "$test_root/usretc.log" 2>&1; then
+	printf '%s\n' 'usr/etc payload unexpectedly packaged' >&2
+	exit 1
+fi
+grep 'accidental prefix-derived root in usretc-leak: usr/etc (' "$test_root/usretc.log" >/dev/null
+# The reviewed exception path works: producer emacs-nox may own exactly
+# its two documented score files (ancestor dirs implicitly covered).
+# Note: the exception binds the producer (stage) name, matching the
+# USR_LOCAL_ALLOW precedent - subpackage payloads validate under it too.
+mkdir -p "$stage/emacs-nox/pkg/usr/var/games/emacs"
+printf '%s\n' scores > "$stage/emacs-nox/pkg/usr/var/games/emacs/snake-scores"
+printf '%s\n' scores > "$stage/emacs-nox/pkg/usr/var/games/emacs/tetris-scores"
+printf '%s\n' other > "$stage/emacs-nox/pkg/usr/var/games/emacs/other-scores"
+write_manifest emacs-nox '{"arch":"x86_64","build_time":27,"license":"MIT","name":"emacs-nox","origin":"emacs-nox","outputs":[{"dependencies":[],"description":"emacs scores","name":"emacs-nox","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"99-r0"}'
+if run_makepkg emacs-nox > "$test_root/emacs-allow.log" 2>&1; then
+	printf '%s\n' 'unlisted usr/var file unexpectedly packaged' >&2
+	exit 1
+fi
+grep 'accidental prefix-derived root in emacs-nox: usr/var/games/emacs/other-scores' "$test_root/emacs-allow.log" >/dev/null
+rm "$stage/emacs-nox/pkg/usr/var/games/emacs/other-scores"
+run_makepkg emacs-nox >/dev/null 2>&1
+printf '%s\n' 'accidental prefix-derived root refusal: ok (usr/var, usr/etc refused; reviewed exception allowed)'
+
 host_after=$(sha256sum /lib/apk/db/installed /etc/apk/world)
 [ "$host_before" = "$host_after" ]
 [ "$repo_before" = "$(find /out/stage4/packages/x86_64 -maxdepth 1 -type f -printf '%f\n' 2>/dev/null | sort | sha256sum)" ]
@@ -211,6 +249,122 @@ if run_makepkg dupsy > "$test_root/dupsy.log" 2>&1; then
 fi
 grep 'duplicate sysusers stanza' "$test_root/dupsy.log" >/dev/null
 printf '%s\n' 'account sysusers stanza: ok (install callers, deinstall clean, duplicate refused)'
+
+# Native sysusers identities: a fragment carrying the sysusers stanza
+# merges the payload's shipped sysusers.d confs into census-shaped
+# receipt entries (fixed numeric IDs only). Dynamic IDs, memberships,
+# ranges and the basic.conf menagerie never claim; malformed lines
+# fail the build; a name in both census and native form fails.
+mkdir -p "$stage/natsvc/pkg/usr/bin" "$stage/natsvc/pkg/usr/share/saphira/accounts.d" "$stage/natsvc/pkg/usr/lib/sysusers.d"
+printf '%s\n' natsvc > "$stage/natsvc/pkg/usr/bin/natsvc"
+printf '%s\n' '# native accounts live in sysusers.d' 'sysusers' > "$stage/natsvc/pkg/usr/share/saphira/accounts.d/natsvc"
+printf '%s\n' 'u! natuser 671 "Nat User"' 'g natgroup 672 -' 'm natuser natgroup' 'u dynuser - "Dyn"' > "$stage/natsvc/pkg/usr/lib/sysusers.d/natsvc.conf"
+printf '%s\n' 'g adm 4 - -' > "$stage/natsvc/pkg/usr/lib/sysusers.d/basic.conf"
+write_manifest natsvc '{"arch":"x86_64","build_time":22,"license":"MIT","name":"natsvc","origin":"natsvc","outputs":[{"dependencies":[],"description":"natsvc","name":"natsvc","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r0"}'
+run_makepkg natsvc
+python3 - "$stage/natsvc/artifact-manifest.json" <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as stream:
+    receipt = json.load(stream)
+accounts = receipt["artifacts"][0]["accounts"]
+assert accounts["users"] == [{"name": "natuser", "uid": "671", "primary": "natuser", "home": "", "shell": ""}], accounts
+assert {"name": "natuser", "gid": "671"} in accounts["groups"], accounts
+assert {"name": "natgroup", "gid": "672"} in accounts["groups"], accounts
+assert all(u["name"] != "dynuser" for u in accounts["users"]), accounts
+assert all(g["name"] != "adm" for g in accounts["groups"]), accounts
+PY
+# Payload confs without the stanza are never scanned (opt-in).
+mkdir -p "$stage/natplain/pkg/usr/bin" "$stage/natplain/pkg/usr/lib/sysusers.d"
+printf '%s\n' natplain > "$stage/natplain/pkg/usr/bin/natplain"
+printf '%s\n' 'u! ghostuser 673 "Ghost"' > "$stage/natplain/pkg/usr/lib/sysusers.d/natplain.conf"
+write_manifest natplain '{"arch":"x86_64","build_time":23,"license":"MIT","name":"natplain","origin":"natplain","outputs":[{"dependencies":[],"description":"natplain","name":"natplain","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r0"}'
+run_makepkg natplain
+python3 - "$stage/natplain/artifact-manifest.json" <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as stream:
+    receipt = json.load(stream)
+accounts = receipt["artifacts"][0]["accounts"]
+assert accounts["users"] == [] and accounts["groups"] == [], accounts
+PY
+# Census+native duplicate names fail (ambiguous source).
+mkdir -p "$stage/natdup/pkg/usr/bin" "$stage/natdup/pkg/usr/share/saphira/accounts.d" "$stage/natdup/pkg/usr/lib/sysusers.d"
+printf '%s\n' natdup > "$stage/natdup/pkg/usr/bin/natdup"
+printf '%s\n' 'user dupuser 674 dupgroup /var/lib/natdup /sbin/nologin' 'group dupgroup 674' 'sysusers' > "$stage/natdup/pkg/usr/share/saphira/accounts.d/natdup"
+printf '%s\n' 'u! dupuser 674 "Dup"' > "$stage/natdup/pkg/usr/lib/sysusers.d/natdup.conf"
+write_manifest natdup '{"arch":"x86_64","build_time":24,"license":"MIT","name":"natdup","origin":"natdup","outputs":[{"dependencies":[],"description":"natdup","name":"natdup","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r0"}'
+if run_makepkg natdup > "$test_root/natdup.log" 2>&1; then
+	printf '%s\n' 'census+native duplicate unexpectedly packaged' >&2
+	exit 1
+fi
+grep 'ambiguous source' "$test_root/natdup.log" >/dev/null
+printf '%s\n' 'native sysusers identities: ok (merged receipt, opt-in, duplicate refused)'
+
+# FHS fragments generate combined install callers: a fragment
+# fhs.d/<name> is validated, recorded in the receipt, and the
+# install/upgrade callers run ensure-identity first then ensure-fhs
+# (never the reverse). Deinstall stays identity-only: layout never
+# reverts, so no fhs content may leak into post-deinstall.
+mkdir -p "$stage/fhssvc/pkg/usr/bin" "$stage/fhssvc/pkg/usr/share/saphira/accounts.d" "$stage/fhssvc/pkg/usr/share/saphira/fhs.d"
+printf '%s\n' fhssvc > "$stage/fhssvc/pkg/usr/bin/fhssvc"
+printf '%s\n' 'user fhsuser 661 fhsgroup /var/lib/fhssvc /sbin/nologin' 'group fhsgroup 661' > "$stage/fhssvc/pkg/usr/share/saphira/accounts.d/fhssvc"
+printf '%s\n' 'dir /var/run/fhssvc 0755 fhsuser fhsgroup' 'rmdir-if-empty /run/fhssvc' > "$stage/fhssvc/pkg/usr/share/saphira/fhs.d/fhssvc"
+write_manifest fhssvc '{"arch":"x86_64","build_time":8,"license":"MIT","name":"fhssvc","origin":"fhssvc","outputs":[{"dependencies":[],"description":"fhssvc","name":"fhssvc","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r0"}'
+run_makepkg fhssvc
+apk adbdump "$artifacts/x86_64/fhssvc-1-r0.apk" | grep -A10 'post-install:' | grep 'ensure-fhs "/usr/share/saphira/fhs.d/fhssvc"' >/dev/null
+apk adbdump "$artifacts/x86_64/fhssvc-1-r0.apk" | grep -A10 'post-upgrade:' | grep 'ensure-fhs "/usr/share/saphira/fhs.d/fhssvc"' >/dev/null
+# Ordering: identity caller must precede the fhs exec tail.
+apk adbdump "$artifacts/x86_64/fhssvc-1-r0.apk" | grep -A10 'post-install:' | grep 'ensure-identity.sh "/usr/share/saphira/accounts.d/fhssvc"' >/dev/null
+if apk adbdump "$artifacts/x86_64/fhssvc-1-r0.apk" | grep -A20 'post-deinstall:' | grep -q 'ensure-fhs'; then
+	printf '%s\n' 'fhs leaked into post-deinstall caller' >&2
+	exit 1
+fi
+python3 - "$stage/fhssvc/artifact-manifest.json" <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as stream:
+    receipt = json.load(stream)
+fhs = receipt["artifacts"][0]["fhs"]
+assert fhs["dirs"] == [{"path": "/var/run/fhssvc", "mode": "0755", "owner": "fhsuser", "group": "fhsgroup"}], fhs
+assert fhs["removals"] == [{"op": "rmdir-if-empty", "path": "/run/fhssvc"}], fhs
+PY
+# Named owners must resolve in the same output's accounts.d: a ghost
+# owner fails the build (no accidental cross-package dependence).
+mkdir -p "$stage/fhsghost/pkg/usr/bin" "$stage/fhsghost/pkg/usr/share/saphira/fhs.d"
+printf '%s\n' fhsghost > "$stage/fhsghost/pkg/usr/bin/fhsghost"
+printf '%s\n' 'dir /var/run/fhsghost 0755 ghost ghost' > "$stage/fhsghost/pkg/usr/share/saphira/fhs.d/fhsghost"
+write_manifest fhsghost '{"arch":"x86_64","build_time":8,"license":"MIT","name":"fhsghost","origin":"fhsghost","outputs":[{"dependencies":[],"description":"fhsghost","name":"fhsghost","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r0"}'
+if run_makepkg fhsghost > "$test_root/fhsghost.log" 2>&1; then
+	printf '%s\n' 'ghost fhs owner unexpectedly packaged' >&2
+	exit 1
+fi
+grep 'deterministic ownership required' "$test_root/fhsghost.log" >/dev/null
+# Malformed fhs stanzas fail the build.
+mkdir -p "$stage/fhsbad/pkg/usr/bin" "$stage/fhsbad/pkg/usr/share/saphira/fhs.d"
+printf '%s\n' fhsbad > "$stage/fhsbad/pkg/usr/bin/fhsbad"
+printf '%s\n' 'symlink /var/run /run' > "$stage/fhsbad/pkg/usr/share/saphira/fhs.d/fhsbad"
+write_manifest fhsbad '{"arch":"x86_64","build_time":8,"license":"MIT","name":"fhsbad","origin":"fhsbad","outputs":[{"dependencies":[],"description":"fhsbad","name":"fhsbad","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r0"}'
+if run_makepkg fhsbad > "$test_root/fhsbad.log" 2>&1; then
+	printf '%s\n' 'malformed fhs stanza unexpectedly packaged' >&2
+	exit 1
+fi
+grep 'malformed stanza' "$test_root/fhsbad.log" >/dev/null
+printf '%s\n' 'fhs fragment round-trip: ok (combined callers, receipt, ghost-owner + malformed refused)'
+
+# Payloads beneath /usr/local fail the build (Saphira policy:
+# distribution packages must not populate /usr/local; explicit
+# author-policy authorization is the only exception).
+mkdir -p "$stage/localsvc/pkg/usr/bin" "$stage/localsvc/pkg/usr/local/share/localsvc"
+printf '%s\n' localsvc > "$stage/localsvc/pkg/usr/bin/localsvc"
+printf '%s\n' localsvc > "$stage/localsvc/pkg/usr/local/share/localsvc/localsvc"
+write_manifest localsvc '{"arch":"x86_64","build_time":21,"license":"MIT","name":"localsvc","origin":"localsvc","outputs":[{"dependencies":[],"description":"localsvc","name":"localsvc","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r0"}'
+if run_makepkg localsvc > "$test_root/localsvc.log" 2>&1; then
+	printf '%s\n' '/usr/local payload unexpectedly packaged' >&2
+	exit 1
+fi
+grep 'must not' "$test_root/localsvc.log" >/dev/null
+printf '%s\n' 'usr-local payload refusal: ok'
 
 # Malformed fragments and foreign fragments fail the build.
 mkdir -p "$stage/badfrag/pkg/usr/bin" "$stage/badfrag/pkg/usr/share/saphira/accounts.d"
@@ -450,3 +604,108 @@ if run_makepkg legacystray > "$test_root/legacystray.log" 2>&1; then
 fi
 grep 'foreign account fragments' "$test_root/legacystray.log" >/dev/null
 printf '%s\n' 'account legacy sidecar refusal: ok (malformed, undeclared, identical, reserved, lone, stray)'
+
+# File capability declarations: a fragment caps.d/<name> is
+# validated, recorded in the receipt, shipped in the payload, and the
+# install/upgrade callers run ensure-caps after ensure-identity and
+# ensure-fhs (fixed order). Deinstall stays caps-free: capabilities
+# die with their payload files.
+mkdir -p "$stage/capsvc/pkg/usr/bin" "$stage/capsvc/pkg/usr/share/saphira/accounts.d" "$stage/capsvc/pkg/usr/share/saphira/fhs.d" "$stage/capsvc/pkg/usr/share/saphira/caps.d"
+printf '%s\n' capsvc > "$stage/capsvc/pkg/usr/bin/capsvc"
+printf '%s\n' 'user capsuser 662 capsgroup /var/lib/capsvc /sbin/nologin' 'group capsgroup 662' > "$stage/capsvc/pkg/usr/share/saphira/accounts.d/capsvc"
+printf '%s\n' 'dir /var/run/capsvc 0755 capsuser capsgroup' > "$stage/capsvc/pkg/usr/share/saphira/fhs.d/capsvc"
+printf '%s\n' 'cap /usr/bin/capsvc cap_net_bind_service+ep' > "$stage/capsvc/pkg/usr/share/saphira/caps.d/capsvc"
+write_manifest capsvc '{"arch":"x86_64","build_time":30,"license":"MIT","name":"capsvc","origin":"capsvc","outputs":[{"dependencies":[],"description":"capsvc","name":"capsvc","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r0"}'
+run_makepkg capsvc
+apk adbdump "$artifacts/x86_64/capsvc-1-r0.apk" | grep -A12 'post-install:' | grep 'ensure-caps "/usr/share/saphira/caps.d/capsvc"' >/dev/null
+apk adbdump "$artifacts/x86_64/capsvc-1-r0.apk" | grep -A12 'post-upgrade:' | grep 'ensure-caps "/usr/share/saphira/caps.d/capsvc"' >/dev/null
+# Ordering: identity, then fhs, then caps (caps execs last).
+apk adbdump "$artifacts/x86_64/capsvc-1-r0.apk" | grep -A12 'post-install:' | grep 'ensure-identity.sh "/usr/share/saphira/accounts.d/capsvc"' >/dev/null
+apk adbdump "$artifacts/x86_64/capsvc-1-r0.apk" | grep -A12 'post-install:' | grep 'ensure-fhs "/usr/share/saphira/fhs.d/capsvc"' >/dev/null
+if apk adbdump "$artifacts/x86_64/capsvc-1-r0.apk" | grep -A20 'post-deinstall:' | grep -q 'ensure-caps'; then
+	printf '%s\n' 'caps leaked into post-deinstall caller' >&2
+	exit 1
+fi
+# Capability dependencies ride the package (ordering before scripts).
+apk adbdump "$artifacts/x86_64/capsvc-1-r0.apk" | grep 'saphira-permissions' >/dev/null
+apk adbdump "$artifacts/x86_64/capsvc-1-r0.apk" | grep 'libcap' >/dev/null
+# Physical presence: the fragment ships in the payload, not merely
+# the receipt (same rule as the accounts.d sidecar precedent).
+apk adbdump "$artifacts/x86_64/capsvc-1-r0.apk" | grep -q 'name: capsvc$' >/dev/null || {
+	printf '%s\n' 'caps fragment missing from APK payload' >&2
+	exit 1
+}
+python3 - "$stage/capsvc/artifact-manifest.json" <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as stream:
+    receipt = json.load(stream)
+caps = receipt["artifacts"][0]["caps"]
+assert caps == {"caps": [{"path": "/usr/bin/capsvc", "spec": "cap_net_bind_service+ep"}]}, caps
+PY
+printf '%s\n' 'caps fragment generation: ok (caller order, deps, payload, receipt, no deinstall leak)'
+capsbad()
+{
+	name=$1
+	fragment=$2
+	message=$3
+	mkdir -p "$stage/$name/pkg/usr/bin" "$stage/$name/pkg/usr/share/saphira/caps.d"
+	printf '%s\n' "$name" > "$stage/$name/pkg/usr/bin/$name"
+	printf '%s\n' "$fragment" > "$stage/$name/pkg/usr/share/saphira/caps.d/$name"
+	write_manifest "$name" '{"arch":"x86_64","build_time":31,"license":"MIT","name":"'"$name"'","origin":"'"$name"'","outputs":[{"dependencies":[],"description":"'"$name"'","name":"'"$name"'","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r0"}'
+	if run_makepkg "$name" > "$test_root/$name.log" 2>&1; then
+		printf '%s\n' "caps fragment $name unexpectedly packaged" >&2
+		exit 1
+	fi
+	grep "$message" "$test_root/$name.log" >/dev/null
+}
+capsbad capsbadname 'cap usr/bin/capsbadname cap_net_bind_service+ep' 'must be absolute and normalized'
+capsbad capsbadspec 'cap /usr/bin/capsbadspec cap_bogus+ep' "unknown Linux capability 'cap_bogus'"
+capsbad capsbadflags 'cap /usr/bin/capsbadflags cap_net_bind_service+xyz' 'capability flags must be 1-3 of e/p/i'
+capsbad capsbadmalformed 'capability /usr/bin/capsbadmalformed cap_net_bind_service+ep' 'malformed stanza'
+capsbad capsbadmissing 'cap /usr/bin/nonexistent cap_net_bind_service+ep' 'target is missing from the payload'
+# Symlink targets would redirect the install-time setcap onto another
+# package's file: refused like file-stanza symlinks.
+mkdir -p "$stage/capsbadlink/pkg/usr/bin" "$stage/capsbadlink/pkg/usr/share/saphira/caps.d"
+printf '%s\n' capsbadlink > "$stage/capsbadlink/pkg/usr/bin/capsbadlink-real"
+ln -s capsbadlink-real "$stage/capsbadlink/pkg/usr/bin/capsbadlink"
+printf '%s\n' 'cap /usr/bin/capsbadlink cap_net_bind_service+ep' > "$stage/capsbadlink/pkg/usr/share/saphira/caps.d/capsbadlink"
+write_manifest capsbadlink '{"arch":"x86_64","build_time":31,"license":"MIT","name":"capsbadlink","origin":"capsbadlink","outputs":[{"dependencies":[],"description":"capsbadlink","name":"capsbadlink","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r0"}'
+if run_makepkg capsbadlink > "$test_root/capsbadlink.log" 2>&1; then
+	printf '%s\n' 'caps symlink target unexpectedly packaged' >&2
+	exit 1
+fi
+grep 'target is a symlink' "$test_root/capsbadlink.log" >/dev/null
+# A caps target must ship in the same payload (the file gate then
+# guarantees one package per capped path globally, no ledger).
+mkdir -p "$stage/capsbadforeign/pkg/usr/bin" "$stage/capsbadforeign/pkg/usr/share/saphira/caps.d"
+printf '%s\n' capsbadforeign > "$stage/capsbadforeign/pkg/usr/bin/capsbadforeign"
+printf '%s\n' 'cap /usr/bin/capsvc cap_net_bind_service+ep' > "$stage/capsbadforeign/pkg/usr/share/saphira/caps.d/capsbadforeign"
+write_manifest capsbadforeign '{"arch":"x86_64","build_time":31,"license":"MIT","name":"capsbadforeign","origin":"capsbadforeign","outputs":[{"dependencies":[],"description":"capsbadforeign","name":"capsbadforeign","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r0"}'
+if run_makepkg capsbadforeign > "$test_root/capsbadforeign.log" 2>&1; then
+	printf '%s\n' 'foreign caps target unexpectedly packaged' >&2
+	exit 1
+fi
+grep 'target is missing from the payload' "$test_root/capsbadforeign.log" >/dev/null
+# Stray caps fragments (owned by nobody or another output) fail like
+# the accounts.d/fhs.d strays.
+mkdir -p "$stage/capsbadstray/pkg/usr/bin" "$stage/capsbadstray/pkg/usr/share/saphira/caps.d"
+printf '%s\n' capsbadstray > "$stage/capsbadstray/pkg/usr/bin/capsbadstray"
+printf '%s\n' 'cap /usr/bin/capsbadstray cap_net_bind_service+ep' > "$stage/capsbadstray/pkg/usr/share/saphira/caps.d/someoneelse"
+write_manifest capsbadstray '{"arch":"x86_64","build_time":31,"license":"MIT","name":"capsbadstray","origin":"capsbadstray","outputs":[{"dependencies":[],"description":"capsbadstray","name":"capsbadstray","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r0"}'
+if run_makepkg capsbadstray > "$test_root/capsbadstray.log" 2>&1; then
+	printf '%s\n' 'stray caps fragment unexpectedly packaged' >&2
+	exit 1
+fi
+grep 'foreign caps fragments' "$test_root/capsbadstray.log" >/dev/null
+printf '%s\n' 'caps fragment refusal: ok (path, spec, flags, malformed, missing, symlink, foreign target, stray)'
+mkdir -p "$stage/capsbaddup/pkg/usr/bin" "$stage/capsbaddup/pkg/usr/share/saphira/caps.d"
+printf '%s\n' capsbaddup > "$stage/capsbaddup/pkg/usr/bin/capsbaddup"
+printf '%s\n' 'cap /usr/bin/capsbaddup cap_net_bind_service+ep' 'cap /usr/bin/capsbaddup cap_net_raw+ep' > "$stage/capsbaddup/pkg/usr/share/saphira/caps.d/capsbaddup"
+write_manifest capsbaddup '{"arch":"x86_64","build_time":31,"license":"MIT","name":"capsbaddup","origin":"capsbaddup","outputs":[{"dependencies":[],"description":"capsbaddup","name":"capsbaddup","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r0"}'
+if run_makepkg capsbaddup > "$test_root/capsbaddup.log" 2>&1; then
+	printf '%s\n' 'duplicate caps stanza unexpectedly packaged' >&2
+	exit 1
+fi
+grep 'duplicate cap stanza' "$test_root/capsbaddup.log" >/dev/null
+printf '%s\n' 'caps duplicate refusal: ok'

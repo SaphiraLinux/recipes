@@ -1,0 +1,21 @@
+# dovecot FHS migration: base runtime dir /run/dovecot -> /var/run/dovecot.
+#
+# --with-rundir moves the whole state tree (master pid, anvil/auth/
+# dict/lmtp sockets), not just one file. The master starts as root
+# and owns the directory lifecycle, so the dir stays root-owned
+# 0755 (unchanged semantics, new namespace).
+#
+# Stale-state policy (/var/run is persistent by design, never wiped):
+# - master.pid: tracked by supervise-daemon (OpenRC pidfile) and
+#   systemd (PIDFile); a live second master is refused by the
+#   daemon itself (anvil handshake), never by pidfile deletion.
+# - State sockets: recreated by the master on start; stale files
+#   from an unclean shutdown are reclaimed by the daemon.
+#   No pid/socket cleanup in service logic.
+# - New /var/run/dovecot: converged here on upgrade; created by
+#   checkpath (OpenRC) and ExecStartPre (systemd).
+# - Old /run/dovecot: volatile residue on tmpfs. Removed once
+#   empty; left in place and reported while the old master runs.
+
+dir /var/run/dovecot 0755 root root
+rmdir-if-empty /run/dovecot

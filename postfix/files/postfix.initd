@@ -3,7 +3,7 @@
 description="Postfix Mail Transport Agent"
 
 command="/usr/libexec/postfix/master"
-pidfile="/run/postfix-master.pid"
+pidfile="/var/spool/postfix/pid/master.pid"
 
 depend()
 {
@@ -12,7 +12,10 @@ depend()
 
 start_pre()
 {
-	checkpath -d -m 0755 /run/postfix
+	# No runtime-dir creation here: the queue directory (including
+	# pid/) ships in the payload and converges via the accounts.d
+	# dir stanza; `postfix check` validates the rest. The old
+	# /run/postfix path was consumed by nothing and is gone.
 	ebegin "Checking postfix configuration"
 	/usr/sbin/postfix check
 }

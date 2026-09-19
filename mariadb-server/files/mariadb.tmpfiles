@@ -1,0 +1,7 @@
+# tmpfiles.d entries for mariadb-server. /var/run is persistent by
+# design (never wiped at boot); these create the runtime and log
+# dirs with the service identity. Both dirs ship in the package
+# payload and nothing else writes there, so package policy owns them.
+# /var/lib/mysql is persistent state and converges via ensure-identity.
+d /var/run/mysqld 0750 mysql mysql -
+d /var/log/mysql 0750 mysql mysql -

@@ -3,7 +3,7 @@
 description="ISC BIND nameserver"
 command=/usr/sbin/named
 command_args="-u named -c /etc/bind/named.conf"
-pidfile=/run/named/named.pid
+pidfile=/var/run/named/named.pid
 
 depend()
 {
@@ -14,5 +14,9 @@ depend()
 
 start_pre()
 {
-	checkpath -d -m 0755 -o named:named /run/named
+	checkpath -d -m 0755 -o named:named /var/run/named
+	# Stale pid from an unclean shutdown blocks restart; start_pre
+	# runs only when OpenRC is about to start the daemon. Session
+	# keys and control state are recreated by named itself.
+	rm -f /var/run/named/named.pid
 }

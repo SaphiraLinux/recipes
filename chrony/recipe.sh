@@ -2,7 +2,7 @@
 
 pkgname=chrony
 pkgver=4.8
-pkgrel=4
+pkgrel=5
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="NTP client and server"
 license="GPL-2.0-or-later"
@@ -36,11 +36,17 @@ recipe_build()
 		--prefix=/usr \
 		--sysconfdir=/etc \
 		--localstatedir=/var \
-		--runstatedir=/run \
+		--chronyrundir=/var/run/chrony \
 		--enable-scfilter \
 		--without-nss \
 		--without-tomcrypt \
 		--disable-readline
+	# r5: --runstatedir=/run is NOT a chrony configure option (custom
+	# configure parses --chronyrundir/--chronysockdir only) - the old
+	# flag was silently ignored, so published builds always used the
+	# upstream default /var/run/chrony. Now explicit and intentional:
+	# pid /var/run/chrony/chronyd.pid, socket
+	# /var/run/chrony/chronyd.sock. Payload change, revision bumps.
 	make
 	# Man pages need asciidoctor (ruby), not yet packaged; defer them
 	# alongside the other documentation work rather than fail install.
@@ -57,4 +63,9 @@ recipe_install()
 	install -D -m 0755 "$RECIPE_DIR/files/chronyd.initd" \
 		"$PKGDEST/etc/init.d/chronyd"
 	install -d -m 0750 "$PKGDEST/var/lib/chrony"
+	# FHS migration declaration (hotfix/var-packaging-bug-var-run-isnot-run):
+	# the daemon runs as root, so the runtime dir is root-owned.
+	# r5: see --chronyrundir note above (payload change, revision bumps).
+	install -D -m 0644 "$RECIPE_DIR/files/fhs.d/chrony" \
+		"$PKGDEST/usr/share/saphira/fhs.d/chrony"
 }

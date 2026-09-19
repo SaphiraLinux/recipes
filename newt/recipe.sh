@@ -19,6 +19,8 @@ recipe_build() {
 	# --enable-nls is a no-op stub on musl (no gettext) but keeps the
 	# upstream flags close to the proven akadata build.
 	./configure --prefix=/usr --libdir=/usr/lib \
+		--sysconfdir=/etc \
+		--localstatedir=/var \
 		--without-python --without-tcl --enable-nls
 	make -j${JOBS:-$(nproc)}
 }

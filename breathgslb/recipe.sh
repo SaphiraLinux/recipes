@@ -2,7 +2,15 @@
 
 pkgname=breathgslb
 pkgver=0.0.1
-pkgrel=1
+pkgrel=3
+# r3: capabilities declared (saphira-permissions V1): the
+# cap_net_bind_service file capability moves from a build-time
+# setcap into files/caps.d/breathgslb, converged at install/upgrade
+# by the generated ensure-caps caller. Payload change, bumps.
+# r2: OpenRC-tracked pidfile /run/breathgslb.pid -> /var/run/breathgslb.pid
+# (flat, no subdir). No fhs.d fragment by rule: flat tmpfs pidfile
+# needs no migration (document-and-leave, unbound precedent).
+# Payload change, revision bumps.
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="BreathGSLB health-checked authoritative DNS with global load balancing"
 license=MIT
@@ -30,7 +38,6 @@ depends="
 # Makefile's git rev-parse cannot run on a vendor tarball).
 makedepends="
     go
-    libcap
 "
 
 # v1 scope: daemon + license tools + man + units + identity. The admin
@@ -63,8 +70,12 @@ recipe_install()
 	install -D -m 0755 "$BUILDDIR/licensectl" "$PKGDEST/usr/bin/breathgslb-licensectl"
 	install -D -m 0755 "$BUILDDIR/licensegen" "$PKGDEST/usr/bin/breathgslb-licensegen"
 	# Privileged port 53 as an unprivileged service (net-snmp pattern):
-	# file caps for the OpenRC path (systemd uses ambient caps).
-	setcap cap_net_bind_service+ep "$PKGDEST/usr/sbin/breathgslb"
+	# the file capability is declared in files/caps.d/breathgslb and
+	# converged at install/upgrade by the generated ensure-caps
+	# caller (saphira-permissions V1) — no build-time setcap.
+	# (systemd additionally grants it ambiently via the unit.)
+	install -D -m 0644 "$RECIPE_DIR/files/caps.d/breathgslb" \
+		"$PKGDEST/usr/share/saphira/caps.d/breathgslb"
 	install -D -m 0644 "$SRC/man/breathgslb.8" \
 		"$PKGDEST/usr/share/man/man8/breathgslb.8"
 	install -D -m 0644 "$SRC/man/breathgslb.conf.5" \

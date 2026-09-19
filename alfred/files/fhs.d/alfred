@@ -1,0 +1,14 @@
+# alfred FHS migration: unix socket dir /run/alfred -> /var/run/alfred.
+#
+# The socket path is configured (not compiled): both inits pass -u
+# explicitly, so the move is config-only. Stale-state policy
+# (/var/run is persistent by design, never wiped): the stale socket
+# is cleared at (re)start in both inits (tracked-start only, never
+# against a live daemon); the daemon recreates it on start.
+# New /var/run/alfred converges here on upgrade (alfred:alfred
+# 0755); created by tmpfiles.d (systemd) and checkpath (OpenRC).
+# Old /run/alfred: volatile residue on tmpfs. Removed once empty;
+# left in place and reported while the old daemon runs.
+
+dir /var/run/alfred 0755 alfred alfred
+rmdir-if-empty /run/alfred

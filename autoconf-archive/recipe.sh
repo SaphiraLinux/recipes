@@ -25,7 +25,7 @@ recipe_build()
 	echo "$autoconf_archive_sha256  $AABALL" | sha256sum -c -
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$AABALL"
 	cd "$SRC"
-	./configure --prefix=/usr
+	./configure --prefix=/usr --sysconfdir=/etc --localstatedir=/var
 	make
 }
 

@@ -18,7 +18,7 @@ makedepends="
 
 recipe_build()
 {
-	./configure --prefix=/usr --sysconfdir=/etc --dbdir=/var/lib/dhcpcd
+	./configure --prefix=/usr --sysconfdir=/etc --dbdir=/var/lib/dhcpcd --localstatedir=/var
 	make -j${JOBS:-$(nproc)}
 }
 

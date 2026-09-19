@@ -16,6 +16,8 @@ recipe_build() {
 	cd "$SRC"
 	echo "$bash_sha256  $RECIPE_DIR/files/bash-5.3.tar.gz" | sha256sum -c -
 	./configure --prefix=/usr \
+		--sysconfdir=/etc \
+		--localstatedir=/var \
 		--bindir=/bin \
 		--without-bash-malloc \
 		--disable-nls \

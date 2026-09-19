@@ -6,7 +6,7 @@ cfgfile="${cfgfile:-/etc/coraza-spoa/config.yaml}"
 command_args="-config $cfgfile"
 command_user="coraza-spoa:coraza-spoa"
 command_background="yes"
-pidfile="/run/coraza-spoa.pid"
+pidfile="/var/run/coraza-spoa.pid"
 output_log="/var/log/coraza-spoa/stdout.log"
 error_log="/var/log/coraza-spoa/stderr.log"
 

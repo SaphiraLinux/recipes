@@ -1,0 +1,16 @@
+# rspamd FHS migration: runtime dir /run/rspamd -> /var/run/rspamd.
+#
+# Stale-state policy (/var/run is persistent by design, never wiped):
+# - PID file: cleared at (re)start in both inits (tracked-start
+#   only, never against a live daemon); the daemon rewrites it.
+# - Worker/control state: recreated by the daemon on start.
+# - New /var/run/rspamd: converged here on upgrade
+#   (rspamd:rspamd 0755); created by tmpfiles.d (systemd) and
+#   checkpath (OpenRC). The unit's old RuntimeDirectory= could only
+#   create under /run and ran as the wrong owner for a persistent
+#   dir, so tmpfiles.d replaces it (mariadb precedent).
+# - Old /run/rspamd: volatile residue on tmpfs. Removed once empty;
+#   left in place and reported while the old daemon runs.
+
+dir /var/run/rspamd 0755 rspamd rspamd
+rmdir-if-empty /run/rspamd

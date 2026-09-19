@@ -1,7 +1,10 @@
 #!/bin/sh
 pkgname=apk-tools
 pkgver=3.0.5
-pkgrel=2
+# r3: own the apk logrotate fragment (migrated out of the logrotate
+# package per the logrotate.d convention; plain rename is correct,
+# apk never holds the log open across invocations).
+pkgrel=3
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='Alpine/saphira package manager (apk-tools 3) - Genesis base'
 license='GPL-2.0-or-later'
@@ -36,4 +39,6 @@ recipe_build() {
 }
 recipe_install() {
 	DESTDIR="$PKGDEST" meson install -C build
+	install -D -m 0644 "$RECIPE_DIR/files/logrotate.d/apk" \
+		"$PKGDEST/etc/logrotate.d/apk"
 }

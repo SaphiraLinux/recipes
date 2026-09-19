@@ -65,7 +65,11 @@ from typing import NoReturn
 
 SCHEMA_VERSION = "saphira-repository.db/v1"
 FRAGMENT_PREFIX = "usr/share/saphira/accounts.d/"
+FHS_FRAGMENT_PREFIX = "usr/share/saphira/fhs.d/"
+CAPS_FRAGMENT_PREFIX = "usr/share/saphira/caps.d/"
 EMPTY_DECL = {"users": [], "groups": [], "dirs": [], "files": []}
+EMPTY_FHS = {"dirs": [], "replaces": [], "removals": []}
+EMPTY_CAPS = {"caps": []}
 
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
 VERSION_BASE_RE = re.compile(r"^(?P<base>.+)-r(?P<rel>\d+)$")
@@ -128,7 +132,31 @@ def connect(db_path: str | Path, readonly: bool = False) -> sqlite3.Connection:
         conn.execute("PRAGMA foreign_keys=ON")
         conn.execute("PRAGMA busy_timeout=30000")
     conn.row_factory = sqlite3.Row
+    if not readonly:
+        ensure_additive_schema(conn)
     return conn
+
+
+def ensure_additive_schema(conn: sqlite3.Connection) -> None:
+    """Converge purely-additive schema objects on older databases.
+
+    The DDL is written idempotently (CREATE TABLE/INDEX IF NOT
+    EXISTS) precisely so a live database created before a new
+    additive table existed can gain it without a version migration:
+    additive tables are invisible to old code (backward compatible)
+    and empty until new publishes fill them. Never invents schema
+    on files that are not current repository databases (the metadata
+    version check gates that; check_schema still reports those).
+    Readonly connections never heal (viewers must not write).
+    """
+    try:
+        row = conn.execute(
+            "SELECT value FROM metadata WHERE key='schema_version'").fetchone()
+    except sqlite3.OperationalError:
+        return
+    if row is None or row["value"] != SCHEMA_VERSION:
+        return
+    conn.executescript(DDL)
 
 
 def connect_readonly(db_path: str | Path) -> sqlite3.Connection:
@@ -199,6 +227,13 @@ CREATE TABLE IF NOT EXISTS reservations(
     PRIMARY KEY(kind, name),
     UNIQUE(kind, numeric_id)
 );
+CREATE TABLE IF NOT EXISTS fhs_paths(
+    package_id INTEGER NOT NULL REFERENCES packages(package_id) ON DELETE CASCADE,
+    path TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK(kind IN ('dir', 'replace', 'remove')),
+    PRIMARY KEY(package_id, path)
+);
+CREATE INDEX IF NOT EXISTS idx_fhs_paths_path ON fhs_paths(path);
 """
 
 
@@ -451,42 +486,61 @@ def extract_declarations(apk_bin: str, repo_dir: str | Path, filenames: list[str
                 best = candidate
         return best
 
-    closure = set(filenames)
-    queue = list(filenames)
-    while queue:
-        current = queue.pop()
-        for atom in cached_dump(current)["depends"]:
-            bare = atom.split("<")[0].split(">")[0].split("=")[0].split("~")[0]
-            if atom.startswith("so:") or atom.startswith("cmd:") or not DEP_ATOM_RE.match(bare):
-                raise RepoDbError(
-                    f"cannot resolve dependency {atom} of {current} "
-                    "for declaration extraction (rebuild and re-publish the package)"
-                )
-            provider = newest_provider(bare)
-            if provider not in closure:
-                closure.add(provider)
-                queue.append(provider)
-    root = work_tmp / "extract-root"
-    if root.exists():
-        shutil.rmtree(root)
-    root.mkdir(parents=True)
+    def carrier_closure(filename: str) -> set[str]:
+        """Dependency closure of one carrier, resolved to newest providers.
+
+        Computed per carrier (not unioned across carriers): the archive
+        permanently retains retired generations whose exact pins are
+        mutually exclusive (systemd-261.2-r8 beside systemd-261.2-r11,
+        each pinned by its split siblings), so no single root can ever
+        install every carrier at once. One carrier plus its own closure
+        is always a shippable set: it published together.
+        """
+        closure = {filename}
+        queue = [filename]
+        while queue:
+            current = queue.pop()
+            for atom in cached_dump(current)["depends"]:
+                bare = atom.split("<")[0].split(">")[0].split("=")[0].split("~")[0]
+                if atom.startswith("so:") or atom.startswith("cmd:") or not DEP_ATOM_RE.match(bare):
+                    raise RepoDbError(
+                        f"cannot resolve dependency {atom} of {current} "
+                        "for declaration extraction (rebuild and re-publish the package)"
+                    )
+                provider = newest_provider(bare)
+                if provider not in closure:
+                    closure.add(provider)
+                    queue.append(provider)
+        return closure
+
+    closures = {filename: carrier_closure(filename) for filename in filenames}
     copies = work_tmp / "extract-apks"
     copies.mkdir(parents=True, exist_ok=True)
-    for filename in sorted(closure):
+    for filename in sorted(set().union(*closures.values())):
         shutil.copy2(repo_dir / filename, copies / filename)
-    cmd = [apk_bin, "--root", str(root), "--initdb", "--allow-untrusted",
-           "--no-scripts", "--no-cache", "--force-non-repository",
-           "add", *[str(copies / f) for f in sorted(closure)]]
-    proc = subprocess.run(cmd, text=True, capture_output=True)
-    if proc.returncode != 0:
-        raise RepoDbError(
-            "isolated declaration-extraction install failed: "
-            + (proc.stderr.strip() or proc.stdout.strip() or str(proc.returncode))
-        )
+
+    def install_closure(filename: str) -> Path:
+        """Install one carrier closure into its own isolated root."""
+        root = work_tmp / ("extract-root-" + filename)
+        if root.exists():
+            shutil.rmtree(root)
+        root.mkdir(parents=True)
+        cmd = [apk_bin, "--root", str(root), "--initdb", "--allow-untrusted",
+               "--no-scripts", "--no-cache", "--force-non-repository",
+               "add", *[str(copies / f) for f in sorted(closures[filename])]]
+        proc = subprocess.run(cmd, text=True, capture_output=True)
+        if proc.returncode != 0:
+            raise RepoDbError(
+                f"isolated declaration-extraction install failed for {filename}: "
+                + (proc.stderr.strip() or proc.stdout.strip() or str(proc.returncode))
+            )
+        return root
+
     mk = makepkg()
     decls: dict[str, dict] = {}
-    frag_dir = root / FRAGMENT_PREFIX
     for filename in filenames:
+        root = install_closure(filename)
+        frag_dir = root / FRAGMENT_PREFIX
         info = cached_dump(filename)
         # Attribute the declaration to the NVR whose file list carries
         # the fragment path (today: the main package). Legacy sidecars
@@ -495,7 +549,8 @@ def extract_declarations(apk_bin: str, repo_dir: str | Path, filenames: list[str
         # receipts, and migration preconditions fail closed live).
         frag_files = sorted({f[len(FRAGMENT_PREFIX):] for f in info["files"]
                              if f.startswith(FRAGMENT_PREFIX) and not f.endswith(".legacy")})
-        merged = {"users": [], "groups": [], "dirs": [], "files": []}
+        merged: dict = {"users": [], "groups": [], "dirs": [], "files": []}
+        native_parsed = False
         for frag in frag_files:
             path = frag_dir / frag
             if not path.is_file():
@@ -506,6 +561,36 @@ def extract_declarations(apk_bin: str, repo_dir: str | Path, filenames: list[str
             decl, _notices = mk.parse_accounts_fragment(path)
             for key in ("users", "groups", "dirs", "files"):
                 merged[key].extend(decl[key])
+            # Native sysusers identities ride the same isolated install,
+            # gated on the installed fragment's sysusers stanza (the
+            # same opt-in as build time): the shipped confs are parsed
+            # into census-shaped entries, so mechanism switches keep
+            # continuous ownership through the normal union/ledger path.
+            # Parsed once per package (duplicate conf reads would
+            # double-count identities).
+            if decl.get("sysusers", False) and not native_parsed:
+                native_parsed = True
+                native, _sys_notices = mk.parse_sysusers_confs(
+                    root / "usr/lib/sysusers.d", filename)
+                merged["users"].extend(native.get("users", []))
+                merged["groups"].extend(native.get("groups", []))
+        # FHS migration declarations ride the same isolated install:
+        # attribute to the NVR whose file list carries the fragment.
+        fhs_frag_dir = root / FHS_FRAGMENT_PREFIX
+        fhs_files = sorted({f[len(FHS_FRAGMENT_PREFIX):] for f in info["files"]
+                            if f.startswith(FHS_FRAGMENT_PREFIX)})
+        merged_fhs: dict[str, list] = {"dirs": [], "replaces": [], "removals": []}
+        for frag in fhs_files:
+            path = fhs_frag_dir / frag
+            if not path.is_file():
+                raise RepoDbError(
+                    f"{filename} lists fhs fragment {frag} but it did not install "
+                    "(rebuild and re-publish the package)"
+                )
+            fhs_decl = mk.parse_fhs_fragment(path)
+            for key in ("dirs", "replaces", "removals"):
+                merged_fhs[key].extend(fhs_decl[key])
+        merged["fhs"] = merged_fhs
         decls[filename] = merged
     return decls
 
@@ -517,12 +602,21 @@ def extract_declarations(apk_bin: str, repo_dir: str | Path, filenames: list[str
 def sync_packages(conn: sqlite3.Connection, census_data: dict[str, dict],
                   declarations: dict[str, dict], apk_bin: str,
                   published_at: str) -> None:
-    """Rebuild packages/files/users/groups/state_dirs from a census.
+    """Rebuild packages/files/users/groups/state_dirs/fhs_paths from a census.
     Reservations are NOT touched here (see advance_reservations).
     Atomic: one explicit transaction (this connection runs in autocommit
     mode, so without this a kill mid-sync would commit the DELETEs and
     strand a partial INSERT set - exactly the corruption a full audit
     once left behind)."""
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        _sync_packages_inner(conn, census_data, declarations, apk_bin,
+                             published_at)
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    else:
+        conn.execute("COMMIT")
     conn.execute("BEGIN IMMEDIATE")
     try:
         _sync_packages_inner(conn, census_data, declarations, apk_bin,
@@ -539,6 +633,7 @@ def _sync_packages_inner(conn: sqlite3.Connection, census_data: dict[str, dict],
                          published_at: str) -> None:
     """Sync body: caller holds the transaction (see sync_packages)."""
     conn.execute("DELETE FROM state_dirs")
+    conn.execute("DELETE FROM fhs_paths")
     conn.execute("DELETE FROM users")
     conn.execute("DELETE FROM groups")
     conn.execute("DELETE FROM files")
@@ -580,6 +675,11 @@ def _sync_packages_inner(conn: sqlite3.Connection, census_data: dict[str, dict],
                 'INSERT INTO state_dirs(package_id, path, mode, owner, "group")'
                 " VALUES (?, ?, ?, ?, ?)",
                 (package_id, d["path"], d["mode"], d["owner"], d["group"]),
+            )
+        for fhs_path, fhs_kind in fhs_claims(decl.get("fhs", {"dirs": [], "replaces": [], "removals": []})):
+            conn.execute(
+                "INSERT INTO fhs_paths(package_id, path, kind) VALUES (?, ?, ?)",
+                (package_id, fhs_path, fhs_kind),
             )
 
 
@@ -1056,6 +1156,7 @@ def apply_retire(conn, apk_bin: str, filenames, touched=frozenset(),
             raise RepoDbError(f"refusing to retire newest package: {filename}")
         package_id = row["package_id"]
         conn.execute("DELETE FROM state_dirs WHERE package_id=?", (package_id,))
+        conn.execute("DELETE FROM fhs_paths WHERE package_id=?", (package_id,))
         conn.execute("DELETE FROM users WHERE package_id=?", (package_id,))
         conn.execute("DELETE FROM groups WHERE package_id=?", (package_id,))
         conn.execute("DELETE FROM files WHERE package_id=?", (package_id,))
@@ -1197,6 +1298,69 @@ def check_union(tsv_users: dict[str, int], tsv_groups: dict[str, int],
             "account identity collision - one package owns each declared Unix identity:\n  "
             + "\n  ".join(sorted(errors))
         )
+
+def check_fhs_union(staged_fhs: list[tuple[str, str, dict]]) -> None:
+    """Exactly one package owns each migrated FHS path (exact paths only).
+
+    Two declarations collide only on the identical path: parent/child
+    pairs (baselayout '/var/run', mariadb '/var/run/mysqld') coexist.
+    Staged-vs-staged only: the fragment payload files themselves are
+    covered by the file-ownership gate, and the tree gate asserts
+    whole-collection uniqueness statically (published recipes included).
+    """
+    seen: dict[str, str] = {}
+    errors: list[str] = []
+    for label, owner, decl in staged_fhs:
+        paths: list[str] = []
+        paths += [e["path"] for e in decl.get("dirs", [])]
+        paths += [e["linkpath"] for e in decl.get("replaces", [])]
+        paths += [e["path"] for e in decl.get("removals", [])]
+        for path in paths:
+            if path in seen and seen[path] != owner:
+                errors.append(f"FHS path {path}: claimed by {seen[path]} and {owner}")
+            else:
+                seen.setdefault(path, owner)
+    if errors:
+        raise RepoDbError(
+            "fhs migration collision - one package owns each migrated path:\n  "
+            + "\n  ".join(sorted(errors))
+        )
+
+
+def fhs_claims(fhs: dict) -> list[tuple[str, str]]:
+    """Flatten an fhs declaration to owned migration paths.
+
+    Exact paths only: parent/child pairs never collide, so no
+    normalization beyond the makepkg-time grammar check.
+
+    One row per path: a single fragment legitimately describes the
+    same path twice (baselayout declares /var/run as both the dir to
+    ensure and the historical symlink to replace), while the ledger
+    tracks ownership per exact path (PRIMARY KEY(package_id, path)).
+    First claim wins; kind is informational (no reader consumes it).
+    """
+    claims: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    raw = ([(e["path"], "dir") for e in fhs.get("dirs", [])] +
+           [(e["linkpath"], "replace") for e in fhs.get("replaces", [])] +
+           [(e["path"], "remove") for e in fhs.get("removals", [])])
+    for path, kind in raw:
+        if path in seen:
+            continue
+        seen.add(path)
+        claims.append((path, kind))
+    return claims
+
+
+def active_fhs_paths(conn: sqlite3.Connection) -> dict[str, str]:
+    """Newest-per-package FHS migration claims: {path: owner_name}."""
+    rows = conn.execute(
+        "SELECT p.name, f.path FROM fhs_paths f"
+        " JOIN packages p ON p.package_id = f.package_id"
+        " WHERE p.is_newest = 1"
+    ).fetchall()
+    return {r["path"]: r["name"] for r in rows}
+
 
 def check_legacy_union(staged_info: dict, combined_decls: list[tuple[str, dict]]) -> None:
     """Legacy history must never collide with any present identity.
@@ -1435,6 +1599,7 @@ def gate_staged(conn: sqlite3.Connection, apk_bin: str, staged_accounts_path: st
     staged_replaces: dict[tuple[str, str], set[str]] = {}
     staged_depends: dict[tuple[str, str], list[str]] = {}
     staged_decl_list: list[tuple[str, str, dict]] = []
+    staged_fhs_list: list[tuple[str, str, dict]] = []
     from collections import defaultdict
 
     staged_paths_dd: dict[tuple[str, str], set[str]] = defaultdict(set)
@@ -1453,9 +1618,18 @@ def gate_staged(conn: sqlite3.Connection, apk_bin: str, staged_accounts_path: st
             staged_depends[identity] = list(dumped["depends"])
             staged_paths_dd[identity].update(dumped["files"])
             item = staged_receipts.get(package.name,
-                                       {"accounts": {"users": [], "groups": [], "dirs": [], "files": []}})
+                                       {"accounts": {"users": [], "groups": [], "dirs": [], "files": []},
+                                        "fhs": {"dirs": [], "replaces": [], "removals": []},
+                                        "caps": {"caps": []}})
             accounts = item["accounts"]
-            declared = bool(accounts.get("users") or accounts.get("groups") or accounts.get("files"))
+            fhs = item.get("fhs", {"dirs": [], "replaces": [], "removals": []})
+            caps = item.get("caps", {"caps": []})
+            # A sysusers-native fragment declares its mechanism, not a
+            # census: sysusers:true counts as declared (the shipped
+            # sysusers.d confs are the declaration; the tree gate pins
+            # their coverage).
+            declared = bool(accounts.get("users") or accounts.get("groups")
+                            or accounts.get("files") or accounts.get("sysusers"))
             fragment_here = any(f.startswith(FRAGMENT_PREFIX) for f in dumped["files"])
             if fragment_here and not declared:
                 raise RepoDbError(
@@ -1465,12 +1639,43 @@ def gate_staged(conn: sqlite3.Connection, apk_bin: str, staged_accounts_path: st
                 raise RepoDbError(
                     f"{package.name} receipt declares Unix identities but ships no "
                     "accounts.d fragment (build chain integrity failure)")
+            fhs_declared = bool(fhs.get("dirs") or fhs.get("replaces") or fhs.get("removals"))
+            fhs_here = any(f.startswith(FHS_FRAGMENT_PREFIX) for f in dumped["files"])
+            if fhs_here and not fhs_declared:
+                raise RepoDbError(
+                    f"{package.name} ships an fhs.d fragment but its build "
+                    "receipt declares nothing (build chain integrity failure)")
+            if fhs_declared and not fhs_here:
+                raise RepoDbError(
+                    f"{package.name} receipt declares FHS migrations but ships no "
+                    "fhs.d fragment (build chain integrity failure)")
+            # Capability coherence: the selective invariant extended
+            # to caps.d (a manifest lacking a caps field is not
+            # deficient - only shipped-fragment-without-declaration
+            # or declaration-without-fragment fails). Global
+            # uniqueness needs no ledger: makepkg requires every
+            # caps target to ship in the same payload, and the file
+            # gate already refuses two packages shipping one path.
+            caps_declared = bool(caps.get("caps"))
+            caps_here = any(f.startswith(CAPS_FRAGMENT_PREFIX) for f in dumped["files"])
+            if caps_here and not caps_declared:
+                raise RepoDbError(
+                    f"{package.name} ships a caps.d fragment but its build "
+                    "receipt declares nothing (build chain integrity failure)")
+            if caps_declared and not caps_here:
+                raise RepoDbError(
+                    f"{package.name} receipt declares file capabilities but ships no "
+                    "caps.d fragment (build chain integrity failure)")
             staged_decl_list.append((f"staged:{identity[0]}-{identity[1]}",
                                        identity[0], accounts))
+            if fhs_declared:
+                staged_fhs_list.append((f"staged:{identity[0]}-{identity[1]}",
+                                        identity[0], fhs))
             info[package.name] = {"name": identity[0], "version": identity[1],
                                   "files": sorted(dumped["files"]),
                                   "replaces": sorted(dumped["replaces"]),
-                                  "accounts": accounts}
+                                  "accounts": accounts, "fhs": fhs, "caps": caps}
+    check_fhs_union(staged_fhs_list)
     staged_paths = dict(staged_paths_dd)
     # Merge staged files into the working owners map (newer-or-novel
     # only, mirroring newest collapse): without this, two NEW packages
@@ -1577,6 +1782,27 @@ def gate_staged(conn: sqlite3.Connection, apk_bin: str, staged_accounts_path: st
                     " satisfiable only by r0 (broken live dependency: r0 is"
                     " inadmissible in the live view and is never retained to"
                     " satisfy it - fix the consumer recipe at r1+)")
+    # FHS migration union: staged claims against active published
+    # claims. A staged successor supersedes its own newest claims
+    # (same-name upgrades re-declare their own paths); published r0
+    # claims are history, never active claims. Exact paths only:
+    # parent/child pairs coexist. (Staged-vs-staged collisions were
+    # already refused at receipt intake by check_fhs_union.)
+    fhs_newer = {name for (name, version) in staged_identities
+                 if name in newest and apk_newer(apk_bin, version, newest[name])}
+    published_fhs = {path: owner for path, owner in active_fhs_paths(conn).items()
+                     if owner not in fhs_newer and owner not in r0_names}
+    fhs_errors: list[str] = []
+    for label, owner, decl in staged_fhs_list:
+        for claim_path, _kind in fhs_claims(decl):
+            claimant = published_fhs.get(claim_path)
+            if claimant is not None and claimant != owner:
+                fhs_errors.append(f"FHS path {claim_path}: claimed by published {claimant} and staged {owner}")
+    if fhs_errors:
+        raise RepoDbError(
+            "fhs migration collision - one package owns each migrated path:\n  "
+            + "\n  ".join(sorted(fhs_errors))
+        )
     tsv_parsed = parse_tsv(tsv_path)
     notices: list[str] = []
     for path, claimants in shared_init.items():
@@ -1668,6 +1894,7 @@ def apply_staged(conn: sqlite3.Connection, apk_bin: str, repo_dir: str | Path,
                             (package_id,)).fetchone()["apk_sha256"] != digest:
                 raise RepoDbError(f"content changed under immutable NVR: {filename}")
             conn.execute("DELETE FROM state_dirs WHERE package_id=?", (package_id,))
+            conn.execute("DELETE FROM fhs_paths WHERE package_id=?", (package_id,))
             conn.execute("DELETE FROM users WHERE package_id=?", (package_id,))
             conn.execute("DELETE FROM groups WHERE package_id=?", (package_id,))
             conn.execute("DELETE FROM files WHERE package_id=?", (package_id,))
@@ -1689,6 +1916,10 @@ def apply_staged(conn: sqlite3.Connection, apk_bin: str, repo_dir: str | Path,
                 'INSERT INTO state_dirs(package_id, path, mode, owner, "group")'
                 " VALUES (?, ?, ?, ?, ?)",
                 (package_id, d["path"], d["mode"], d["owner"], d["group"]))
+        for fhs_path, fhs_kind in fhs_claims(item.get("fhs", {"dirs": [], "replaces": [], "removals": []})):
+            conn.execute(
+                "INSERT INTO fhs_paths(package_id, path, kind) VALUES (?, ?, ?)",
+                (package_id, fhs_path, fhs_kind))
     # Newest flags + reservation advances for every touched package name.
     for name in sorted({item["name"] for item in staged.values()}):
         versions = [r["version"] for r in conn.execute(

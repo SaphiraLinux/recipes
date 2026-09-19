@@ -16,7 +16,7 @@ recipe_build() {
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$RECIPE_DIR/files/patch-2.7.6.tar.xz"
 	cd "$SRC"
 	echo "$patch_sha256  $RECIPE_DIR/files/patch-2.7.6.tar.xz" | sha256sum -c -
-	./configure --prefix=/usr --disable-xattr
+	./configure --prefix=/usr --sysconfdir=/etc --disable-xattr --localstatedir=/var
 	make -j${JOBS:-$(nproc)}
 }
 recipe_install() {

@@ -2,7 +2,10 @@
 
 pkgname=bind
 pkgver=9.20.15
-pkgrel=2
+pkgrel=3
+# r3: named runtime /run/named -> /var/run/named via tmpfiles.d (unit
+# runs unprivileged; RuntimeDirectory= cannot cover /var/run).
+# Payload change, revision bumps.
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='ISC BIND 9 nameserver (Saphira chosen DNS server: authoritative + recursive)'
 license='MPL-2.0'
@@ -64,6 +67,13 @@ recipe_install()
 		"$PKGDEST/etc/init.d/named"
 	install -D -m 0644 "$RECIPE_DIR/files/named.service" \
 		"$PKGDEST/usr/lib/systemd/system/named.service"
+	install -D -m 0644 "$RECIPE_DIR/files/named.tmpfiles" \
+		"$PKGDEST/usr/lib/tmpfiles.d/named.conf"
 	install -D -m 0644 "$RECIPE_DIR/files/accounts.d/bind" \
 		"$PKGDEST/usr/share/saphira/accounts.d/bind"
+	# FHS migration declaration (hotfix/var-packaging-bug-var-run-isnot-run):
+	# named:named (TSV-reserved base identity) owns the corrected
+	# runtime dir; makepkg runs ensure-fhs on install/upgrade.
+	install -D -m 0644 "$RECIPE_DIR/files/fhs.d/bind" \
+		"$PKGDEST/usr/share/saphira/fhs.d/bind"
 }

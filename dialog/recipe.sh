@@ -23,7 +23,7 @@ makedepends="
 recipe_build()
 {
 	mkdir -p "$BUILDDIR" && cd "$BUILDDIR"
-	"$SRC/configure" --prefix=/usr --with-ncursesw --enable-nls
+	"$SRC/configure" --prefix=/usr --sysconfdir=/etc --with-ncursesw --enable-nls --localstatedir=/var
 	make
 }
 

@@ -5,7 +5,7 @@ description="Rapid spam filtering system"
 command="/usr/sbin/rspamd"
 command_args="-c /etc/rspamd/rspamd.conf -f"
 command_background="yes"
-pidfile="/run/rspamd/rspamd.pid"
+pidfile="/var/run/rspamd/rspamd.pid"
 
 depend()
 {
@@ -14,7 +14,11 @@ depend()
 
 start_pre()
 {
-	checkpath -d -o rspamd:rspamd -m 0755 /run/rspamd /var/log/rspamd
+	checkpath -d -o rspamd:rspamd -m 0755 /var/run/rspamd /var/log/rspamd
+	# Stale pid from an unclean shutdown blocks restart; start_pre
+	# runs only when OpenRC is about to start the daemon. Worker
+	# control state is recreated by the daemon itself.
+	rm -f /var/run/rspamd/rspamd.pid
 	ebegin "Checking rspamd configuration"
 	/usr/sbin/rspamd -c /etc/rspamd/rspamd.conf -t
 }

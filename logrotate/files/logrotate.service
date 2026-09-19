@@ -1,0 +1,12 @@
+[Unit]
+Description=Rotate log files
+Documentation=man:logrotate(8) man:logrotate.conf(5)
+RequiresMountsFor=/var/log
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/logrotate /etc/logrotate.conf
+Nice=19
+
+[Install]
+WantedBy=multi-user.target

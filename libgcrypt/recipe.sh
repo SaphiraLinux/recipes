@@ -15,7 +15,7 @@ subpackages="$pkgname-dev $pkgname-doc"
 makedepends="gcc make pkgconf gawk libgpg-error-dev"
 
 recipe_build() {
-	./configure --prefix=/usr --disable-rpath --disable-asm
+	./configure --prefix=/usr --sysconfdir=/etc --disable-rpath --disable-asm --localstatedir=/var
 	make -j${JOBS:-$(nproc)}
 }
 

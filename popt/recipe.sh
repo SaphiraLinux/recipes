@@ -17,7 +17,7 @@ recipe_build() {
 	cd "$SRC"
 	echo "$popt_sha256  $RECIPE_DIR/files/popt-1.19.tar.gz" | sha256sum -c -
 	autoreconf -i
-	./configure --prefix=/usr --libdir=/usr/lib --disable-static --disable-nls
+	./configure --prefix=/usr --sysconfdir=/etc --libdir=/usr/lib --disable-static --disable-nls --localstatedir=/var
 	make -j${JOBS:-$(nproc)}
 }
 recipe_install() {

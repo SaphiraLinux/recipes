@@ -22,7 +22,7 @@ subpackages=""
 recipe_build()
 {
 	cd "$SRC"
-	./configure --prefix=/usr --mandir=/usr/share/man
+	./configure --prefix=/usr --sysconfdir=/etc --mandir=/usr/share/man --localstatedir=/var
 	make
 }
 

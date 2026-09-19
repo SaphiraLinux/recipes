@@ -24,6 +24,8 @@ recipe_build() {
 	# gcc16/C23 makes incompatible-pointer-types an error; cronie 1.7.2
 	# passes mismatched fn pointers to load_entry
 	CFLAGS="${CFLAGS-} -Wno-incompatible-pointer-types -Wno-error=incompatible-pointer-types -Wno-error=declaration-missing-parameter-type" ./configure --prefix=/usr \
+		--sysconfdir=/etc \
+		--localstatedir=/var \
 		--without-pam --without-selinux --without-audit \
 		--with-inotify --enable-anacron \
 		--without-systemd

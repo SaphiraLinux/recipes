@@ -32,7 +32,7 @@ makedepends="
 recipe_build()
 {
 	./autogen.sh
-	./configure --prefix=/usr --sysconfdir=/etc
+	./configure --prefix=/usr --sysconfdir=/etc --localstatedir=/var
 	make -j${JOBS:-$(nproc)}
 }
 

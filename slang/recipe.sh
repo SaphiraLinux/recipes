@@ -18,6 +18,7 @@ subpackages="$pkgname-dev $pkgname-doc"
 
 recipe_build() {
 	./configure --prefix=/usr --libdir=/usr/lib --sysconfdir=/etc \
+		--localstatedir=/var \
 		--with-pkgconfigdir=/usr/lib/pkgconfig \
 		--with-terminfo=default --without-pcre --without-onig \
 		--without-png --without-readline

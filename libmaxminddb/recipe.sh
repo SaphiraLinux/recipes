@@ -20,7 +20,7 @@ subpackages="$pkgname-dev $pkgname-doc"
 recipe_build()
 {
 	mkdir -p "$BUILDDIR" && cd "$BUILDDIR"
-	../source/configure --prefix=/usr --disable-static --disable-tests
+	../source/configure --prefix=/usr --sysconfdir=/etc --disable-static --disable-tests --localstatedir=/var
 	make -j${JOBS:-$(nproc)}
 }
 

@@ -2,7 +2,18 @@
 
 pkgname=alfred
 pkgver=2026.3
-pkgrel=1
+pkgrel=3
+# r3: capabilities declared (saphira-permissions V1): the
+# cap_net_admin,cap_net_raw file capabilities move from a build-time
+# setcap into files/caps.d/alfred, converged at install/upgrade by
+# the generated ensure-caps caller (after ensure-identity and
+# ensure-fhs: all three fragments now ride one package). Identity
+# renumbered 104 -> 107 pre-publication: 104 belongs to the dhcpcd
+# base seed (publish gate refused the collision), 107 verified free
+# in TSV, tree, and ledger. Payload change, revision bumps.
+# r2: unix socket /run/alfred -> /var/run/alfred via tmpfiles.d (unit
+# runs unprivileged; RuntimeDirectory= cannot cover /var/run).
+# Payload change, revision bumps.
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='Almighty Lightweight Fact Remote Exchange Daemon (batman-adv mesh information distribution)'
 license='GPL-2.0-only'
@@ -39,20 +50,30 @@ recipe_build()
 
 recipe_install()
 {
-	make -C "$SRC" PREFIX=/usr DESTDIR="$PKGDEST" install
-	# Least privilege by construction: the binary carries only the two
-	# capabilities alfred retains across its setuid drop (netlink query
-	# + raw multicast sockets). Both service units start it as alfred.
-	setcap cap_net_admin,cap_net_raw+ep "$PKGDEST/usr/sbin/alfred"
+	make -C "$SRC" PREFIX=/usr DESTDIR="$PKGDEST" CONFIG_ALFRED_GPSD=n install
+	# Least privilege by construction (saphira-permissions V1): the
+	# binary's two capabilities (netlink query + raw multicast
+	# sockets, retained across the setuid drop) are declared in
+	# files/caps.d/alfred and converged at install/upgrade by the
+	# generated ensure-caps caller — no build-time setcap.
+	install -D -m 0644 "$RECIPE_DIR/files/caps.d/alfred" \
+		"$PKGDEST/usr/share/saphira/caps.d/alfred"
 	install -D -m 0644 "$SRC/README.rst" \
 		"$PKGDEST/usr/share/doc/alfred/README.rst"
 	install -D -m 0755 "$RECIPE_DIR/files/alfred.initd" \
 		"$PKGDEST/etc/init.d/alfred"
 	install -D -m 0644 "$RECIPE_DIR/files/alfred.service" \
 		"$PKGDEST/usr/lib/systemd/system/alfred.service"
-	# Runtime identity declaration: alfred:104 required by the shipped
+	install -D -m 0644 "$RECIPE_DIR/files/alfred.tmpfiles" \
+		"$PKGDEST/usr/lib/tmpfiles.d/alfred.conf"
+	# Runtime identity declaration: alfred:107 required by the shipped
 	# service units. makepkg generates the install scripts from this
 	# fragment; the package creates its identity at install time.
 	install -D -m 0644 "$RECIPE_DIR/files/accounts.d/alfred" \
 		"$PKGDEST/usr/share/saphira/accounts.d/alfred"
+	# FHS migration declaration (hotfix/var-packaging-bug-var-run-isnot-run):
+	# alfred:107 owns the corrected socket dir; makepkg runs
+	# ensure-fhs after ensure-identity on install/upgrade.
+	install -D -m 0644 "$RECIPE_DIR/files/fhs.d/alfred" \
+		"$PKGDEST/usr/share/saphira/fhs.d/alfred"
 }

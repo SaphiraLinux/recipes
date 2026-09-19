@@ -7,7 +7,7 @@ description="RPC port mapper (required for NFSv3 and other ONC RPC services)"
 command="/usr/sbin/rpcbind"
 command_args="-f -w"
 supervisor="supervise-daemon"
-pidfile="/run/rpcbind.pid"
+pidfile="/var/run/rpcbind.pid"
 
 depend()
 {
@@ -17,5 +17,5 @@ depend()
 
 start_pre()
 {
-	checkpath -d -m 0755 /run/rpcbind
+	checkpath -d -m 0755 /var/run/rpcbind
 }

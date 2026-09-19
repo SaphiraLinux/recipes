@@ -39,6 +39,7 @@ recipe_build()
 	# upstream default is off because glibc libc has the functions
 	# built in; musl needs the libtirpc implementation.
 	./configure --prefix=/usr --sysconfdir=/etc --disable-gssapi --disable-static \
+		--localstatedir=/var \
 		--disable-dependency-tracking --enable-rpcdb
 	make -j${JOBS:-$(nproc)} CPPFLAGS="-I$SRC/compat"
 }

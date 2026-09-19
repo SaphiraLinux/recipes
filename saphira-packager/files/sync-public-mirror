@@ -1,0 +1,498 @@
+#!/usr/bin/env python3
+
+"""Deterministic export of the private recipe tree to the public mirror.
+
+Reads ONLY a committed git HEAD (never the working tree, never /out,
+never the builder, and no other recipe source): uncommitted drafts
+cannot leak by construction. The public tree stays pure-text: upstream
+archives, wheels, firmware blobs and other binary payloads are excluded
+by extension AND rejected by a content sniff. Named recipes can be
+excluded explicitly (--exclude-recipe), and the leakage gate greps the
+entire export for those names and fails closed. The generated
+recipes.json covers the exported tree only; it never resolves names
+outside it.
+
+Usage:
+    sync-public-mirror SOURCE_DIR PUBLIC_CLONE [--live-repo DIR]
+        [--arch ARCH] [--exclude-recipe NAME]... [--public-branch BRANCH]
+        [--sign-key KEYID] [--message MSG] [--push] [--yes]
+
+Without --push the public clone is left with the sync committed locally
+for inspection. Without --sign-key, existing .sig sidecars for still-
+vendored archives are preserved untouched; with it, missing ones are
+created (existing valid ones are never rewritten, keeping diffs quiet).
+"""
+
+from __future__ import annotations
+
+import datetime
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tarfile
+from pathlib import Path
+from typing import NoReturn
+
+
+# Binary payload extensions excluded from the public tree. .asc (upstream
+# ASCII-armoured signatures) and .sha256/.sig sidecars are text and ship.
+ARCHIVE_SUFFIXES = (
+    ".tar.gz", ".tgz", ".tar.xz", ".tar.bz2", ".tar.zst", ".tar",
+    ".whl", ".gem", ".crate", ".zip", ".bin",
+)
+BARE_COMPRESSED = (".gz", ".xz", ".bz2", ".zst")
+
+NVR_RE = re.compile(r"^(.*)-([0-9][^-]*)-r([0-9]+)\.apk$")
+
+# recipes.json schema (matches the established public index).
+PACKAGE_FIELDS = (
+    "name", "description", "recipe_version", "recipe_revision",
+    "license", "homepage", "origin", "repo", "source", "sha256",
+    "vendor", "disabled", "in_hatched", "hatched_nvr",
+    "hatched_version", "hatched_revision", "recipe_ahead_of_hatched",
+)
+
+
+def die(message: str) -> NoReturn:
+    print(f"sync-public-mirror: {message}", file=sys.stderr)
+    raise SystemExit(1)
+
+
+def run(command: list[str], **kwargs) -> subprocess.CompletedProcess:
+    try:
+        return subprocess.run(command, check=True, text=True,
+                              stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, **kwargs)
+    except FileNotFoundError:
+        die(f"required tool is missing: {command[0]}")
+    except subprocess.CalledProcessError as exc:
+        die(f"command failed ({exc.returncode}): {command[0]}: "
+            f"{(exc.stderr or '').strip().splitlines()[:1]}")
+
+
+def is_archive(name: str) -> bool:
+    lower = name.lower()
+    if lower.endswith(ARCHIVE_SUFFIXES):
+        return True
+    stem, dot, suffix = lower.rpartition(".")
+    return bool(dot) and f".{suffix}" in BARE_COMPRESSED and "/" not in suffix
+
+
+def git_head(tree: Path) -> str:
+    return run(["git", "-C", str(tree), "rev-parse", "HEAD"]).stdout.strip()
+
+
+def public_clean(clone: Path) -> bool:
+    status = run(["git", "-C", str(clone), "status", "--porcelain=v1",
+                  "--untracked-files=all"]).stdout.strip()
+    return not status
+
+
+def expand_vars(value: str, env: dict[str, str]) -> str:
+    """Minimal shell expansion for recipe metadata: $V, ${V},
+    ${V:-default}, ${V-default} (environment wins, then default)."""
+    if "$" not in value:
+        return value
+    pattern = re.compile(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}|"
+                         r"([A-Za-z_][A-Za-z0-9_]*))")
+
+    def substitute(match: re.Match) -> str:
+        name = match.group(1) or match.group(3)
+        default = match.group(2)
+        if name in env:
+            return env[name]
+        return default if default is not None else ""
+
+    previous = None
+    while previous != value:
+        previous = value
+        value = pattern.sub(substitute, value)
+    return value
+
+
+def parse_recipe(path: Path) -> dict[str, str]:
+    """Top-level VAR=value assignments outside recipe_build/install
+    bodies (same discipline as fetch-vendor-sources)."""
+    text = path.read_text(encoding="utf-8", errors="replace")
+    body_start = re.compile(r"^recipe_(build|install)\(\)")
+    in_body, brace_depth = False, 0
+    meta: dict[str, str] = {}
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not in_body and body_start.match(stripped):
+            in_body, brace_depth = True, 0
+        if in_body:
+            brace_depth += line.count("{") - line.count("}")
+            if brace_depth <= 0 and "}" in line:
+                in_body, brace_depth = False, 0
+            continue
+        match = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$", stripped)
+        if match and "`" not in match.group(2) and "$(" not in match.group(2):
+            value = match.group(2).strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                value = value[1:-1]
+            meta[match.group(1)] = value
+    return meta
+
+
+def recipe_disabled(recipe_path: Path) -> bool:
+    """Same probe discipline as buildpkg's check_disabled_recipe."""
+    probe = subprocess.run(
+        ["/bin/bash", "--noprofile", "--norc", "-c",
+         '. "$1" >/dev/null 2>&1\nprintf "%s" "${disabled-}"\n',
+         "sync-public-mirror-probe", str(recipe_path)],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    return probe.stdout.strip() == "yes"
+
+
+def split_nvr(filename: str) -> tuple[str, str, int] | None:
+    match = NVR_RE.match(filename)
+    if match is None:
+        return None
+    return match.group(1), match.group(2), int(match.group(3))
+
+
+def live_by_name(live_repo: Path) -> dict[str, list[tuple[str, int]]]:
+    """Published (upstream, rel) pairs per package name."""
+    by_name: dict[str, list[tuple[str, int]]] = {}
+    if not live_repo.is_dir():
+        return by_name
+    for entry in sorted(live_repo.iterdir()):
+        if not entry.is_file():
+            continue
+        parts = split_nvr(entry.name)
+        if parts is None:
+            continue
+        by_name.setdefault(parts[0], []).append((parts[1], parts[2]))
+    return by_name
+
+
+def pick_hatched(candidates: list[tuple[str, int]],
+                 recipe_version: str) -> tuple[str, int] | None:
+    """The published line tracking the recipe's own upstream version;
+    newest rel on that line. Coexisting upstream lines (kernel per
+    kernel, kmods per kver) never resolve across lines - same
+    discipline as the builder."""
+    on_line = [(up, rel) for up, rel in candidates if up == recipe_version]
+    pool = on_line or sorted(candidates)
+    if not pool:
+        return None
+    return max(pool, key=lambda item: item[1])
+
+
+def build_index(source: Path, live_repo: Path, arch: str,
+                excluded: set[str]) -> dict:
+    recipes = sorted(p for p in source.iterdir()
+                     if p.is_dir() and (p / "recipe.sh").is_file())
+    live = live_by_name(live_repo)
+    packages = []
+    for recipe_dir in recipes:
+        name = recipe_dir.name
+        if name in excluded:
+            continue
+        meta = parse_recipe(recipe_dir / "recipe.sh")
+        # Recipe's own assignments provide defaults (pkgver for source
+        # URLs); the process environment overrides (kernel-version
+        # style parameterisation matches the build).
+        env = dict(meta)
+        env.update(os.environ)
+        version = expand_vars(meta.get("pkgver", ""), env)
+        try:
+            revision = int(meta.get("pkgrel", "0"))
+        except ValueError:
+            revision = 0
+        source_url = expand_vars(meta.get("source", ""), env) or None
+        vendor_url = expand_vars(meta.get("vendor", ""), env) or None
+        if source_url and "://" not in source_url:
+            source_url = None
+        if vendor_url and "://" not in vendor_url:
+            vendor_url = None
+        hatched = pick_hatched(live.get(name, []), version)
+        in_hatched = hatched is not None
+        hatched_nvr = (f"{name}-{hatched[0]}-r{hatched[1]}"
+                       if hatched else None)
+        packages.append({
+            "name": name,
+            "description": meta.get("pkgdesc", ""),
+            "recipe_version": version,
+            "recipe_revision": revision,
+            "license": meta.get("license", ""),
+            "homepage": meta.get("url", ""),
+            "origin": meta.get("origin", ""),
+            "repo": meta.get("repo", ""),
+            "source": source_url,
+            "sha256": meta.get("sha256", "") or None,
+            "vendor": vendor_url,
+            "disabled": recipe_disabled(recipe_dir / "recipe.sh"),
+            "in_hatched": in_hatched,
+            "hatched_nvr": hatched_nvr,
+            "hatched_version": hatched[0] if hatched else None,
+            "hatched_revision": hatched[1] if hatched else None,
+            "recipe_ahead_of_hatched": bool(
+                hatched and (version, revision) != (hatched[0], hatched[1])),
+        })
+    return {
+        "generated": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "source_tree": str(source),
+        "repository": live_repo.parent.name if live_repo != Path("/dev/null") else "hatched",
+        "arch": arch,
+        "recipe_count": len(packages),
+        "hatched_main_packages": sum(1 for p in packages if p["in_hatched"]),
+        "packages": packages,
+    }
+
+
+def export_tree(source: Path, head: str, dest: Path,
+                excluded_recipes: set[str]) -> tuple[int, int]:
+    """Stream `git archive HEAD` through tar exclusion into dest.
+    Returns (files_written, archives_skipped)."""
+    archive = subprocess.Popen(
+        ["git", "-C", str(source), "archive", head],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    assert archive.stdout is not None
+    written, skipped = 0, 0
+    with tarfile.open(fileobj=archive.stdout, mode="r|") as stream:
+        for member in stream:
+            assert member.name is not None
+            if not member.isfile():
+                continue
+            top = member.name.split("/", 1)[0]
+            if top in excluded_recipes:
+                skipped += 1
+                continue
+            if is_archive(member.name):
+                skipped += 1
+                continue
+            target = dest / member.name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            extracted = stream.extractfile(member)
+            assert extracted is not None
+            with target.open("wb") as out:
+                shutil.copyfileobj(extracted, out)
+            try:
+                os.chmod(target, member.mode)
+            except OSError:
+                pass
+            written += 1
+    archive.wait()
+    if archive.returncode != 0:
+        die("git archive failed")
+    return written, skipped
+
+
+def clear_public(clone: Path) -> None:
+    """Remove every tracked file except .git internals; public-only
+    community files are restored by the caller from a snapshot."""
+    for entry in sorted(clone.iterdir()):
+        if entry.name == ".git":
+            continue
+        if entry.is_symlink() or entry.is_file():
+            entry.unlink()
+        elif entry.is_dir():
+            shutil.rmtree(entry)
+
+
+def snapshot_public_only(clone: Path, source_names: set[str]) -> dict[str, bytes]:
+    """Bytes of public-clone files that have no source-tree counterpart
+    (community docs, existing .sig sidecars): restored after clearing."""
+    snapshot: dict[str, bytes] = {}
+    tracked = run(["git", "-C", str(clone), "ls-files", "-z"]).stdout.split("\0")
+    for rel in tracked:
+        if not rel:
+            continue
+        if rel.split("/", 1)[0] in source_names:
+            continue
+        path = clone / rel
+        if path.is_file() and not path.is_symlink():
+            snapshot[rel] = path.read_bytes()
+    return snapshot
+
+
+def leakage_gate(clone: Path, excluded: set[str]) -> None:
+    """Fail closed: excluded names must appear nowhere (any case), no
+    binary payload may remain, recipes.json must be clean."""
+    failures = []
+    for root, dirs, files in os.walk(clone):
+        if ".git" in dirs:
+            dirs.remove(".git")
+        for filename in files:
+            path = Path(root) / filename
+            try:
+                content = path.read_bytes()
+            except OSError:
+                continue
+            if is_archive(filename):
+                failures.append(f"archive present: {path.relative_to(clone)}")
+            if b"\x00" in content[:65536]:
+                failures.append(f"binary content: {path.relative_to(clone)}")
+            try:
+                text = content.decode("utf-8", errors="strict")
+            except UnicodeDecodeError:
+                failures.append(f"non-text content: {path.relative_to(clone)}")
+                continue
+            lowered = text.lower()
+            for name in excluded:
+                if name.lower() in lowered:
+                    failures.append(
+                        f"excluded name {name!r} in {path.relative_to(clone)}")
+    index = clone / "recipes.json"
+    if index.is_file():
+        try:
+            data = json.loads(index.read_text(encoding="utf-8"))
+            names = {p.get("name", "") for p in data.get("packages", [])}
+            for name in excluded:
+                if name in names:
+                    failures.append(f"excluded name {name!r} in recipes.json")
+        except (OSError, ValueError) as exc:
+            failures.append(f"recipes.json unreadable: {exc}")
+    else:
+        failures.append("recipes.json missing from export")
+    if failures:
+        for failure in failures:
+            print(f"sync-public-mirror: LEAK: {failure}", file=sys.stderr)
+        die(f"leakage gate failed with {len(failures)} finding(s)")
+
+
+def sign_missing(source: Path, clone: Path, keyid: str) -> int:
+    """Create absent <basename>.sig sidecars for still-vendored archives
+    (gpg --armor --detach-sign). Existing ones are never rewritten."""
+    created = 0
+    for recipe_dir in sorted(source.iterdir()):
+        files_dir = recipe_dir / "files"
+        if not files_dir.is_dir():
+            continue
+        for archive in sorted(files_dir.iterdir()):
+            if not archive.is_file() or not is_archive(archive.name):
+                continue
+            sidecar = clone / recipe_dir.name / "files" / (archive.name + ".sig")
+            if sidecar.is_file():
+                continue
+            result = subprocess.run(
+                ["gpg", "--batch", "--yes", "--armor", "--detach-sign",
+                 "--local-user", keyid, "--output", str(sidecar),
+                 str(archive)],
+                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+            if result.returncode != 0:
+                die(f"gpg signing failed for {archive.name}: "
+                    f"{result.stderr.strip().splitlines()[:1]}")
+            created += 1
+    return created
+
+
+def main(argv: list[str]) -> int:
+    args = {
+        "live_repo": None, "arch": "x86_64", "excludes": [],
+        "branch": "Master", "sign_key": None, "message": None,
+        "push": False, "yes": False,
+    }
+    positional: list[str] = []
+    iterator = iter(argv)
+    for token in iterator:
+        if token == "--live-repo":
+            args["live_repo"] = next(iterator)
+        elif token == "--arch":
+            args["arch"] = next(iterator)
+        elif token == "--exclude-recipe":
+            args["excludes"].append(next(iterator))
+        elif token == "--public-branch":
+            args["branch"] = next(iterator)
+        elif token == "--sign-key":
+            args["sign_key"] = next(iterator)
+        elif token == "--message":
+            args["message"] = next(iterator)
+        elif token == "--push":
+            args["push"] = True
+        elif token == "--yes":
+            args["yes"] = True
+        elif token.startswith("-"):
+            die(f"unknown option: {token}")
+        else:
+            positional.append(token)
+    if len(positional) != 2:
+        print(__doc__, file=sys.stderr)
+        return 2
+    source = Path(positional[0]).resolve()
+    clone = Path(positional[1]).resolve()
+    if not (source / ".git").is_dir():
+        die(f"source is not a git checkout: {source}")
+    if not (clone / ".git").is_dir():
+        die(f"public clone is not a git checkout: {clone}")
+    if not public_clean(clone):
+        die(f"public clone has uncommitted state; commit or revert first: {clone}")
+    live_repo = Path(args["live_repo"]).resolve() if args["live_repo"] else None
+    excluded = set(args["excludes"])
+    head = git_head(source)
+    source_names = {p.name for p in source.iterdir() if p.is_dir()}
+
+    snapshot = snapshot_public_only(clone, source_names | excluded)
+    clear_public(clone)
+    for rel, content in snapshot.items():
+        target = clone / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+    written, skipped = export_tree(source, head, clone, excluded)
+
+    index = build_index(source, live_repo or Path("/dev/null"),
+                        str(args["arch"]), excluded)
+    index_path = clone / "recipes.json"
+    if index_path.is_file():
+        try:
+            previous = json.loads(index_path.read_text(encoding="utf-8"))
+            same = all(index.get(key) == previous.get(key)
+                       for key in index if key != "generated")
+            same = same and all(previous.get(key) == index.get(key)
+                                for key in previous if key != "generated")
+        except (OSError, ValueError):
+            same = False
+        if same:
+            print("sync-public-mirror: recipes.json unchanged; "
+                  "keeping previous timestamp")
+        else:
+            index_path.write_text(
+                json.dumps(index, indent=2, sort_keys=False) + "\n",
+                encoding="utf-8")
+    else:
+        index_path.write_text(
+            json.dumps(index, indent=2, sort_keys=False) + "\n",
+            encoding="utf-8")
+
+    if args["sign_key"]:
+        created = sign_missing(source, clone, str(args["sign_key"]))
+        print(f"sync-public-mirror: signatures created: {created}")
+    else:
+        print("sync-public-mirror: no --sign-key; existing .sig sidecars "
+              "preserved, missing ones NOT created")
+
+    leakage_gate(clone, excluded)
+
+    run(["git", "-C", str(clone), "add", "-A"])
+    status = run(["git", "-C", str(clone), "status", "--porcelain=v1"]).stdout
+    if not status.strip():
+        print("sync-public-mirror: no changes; nothing to commit")
+        return 0
+    message = (args["message"] or f"sync recipes {head[:12]}") + \
+        f"\n\nSource: {source}@{head}\nExcluded recipes: " + \
+        (", ".join(sorted(excluded)) if excluded else "none") + "\n"
+    run(["git", "-C", str(clone), "-c", "user.name=saphira-sync",
+         "-c", "user.email=saphira-sync@saphira",
+         "commit", "-q", "-m", message])
+    new_head = git_head(clone)
+    print(f"sync-public-mirror: wrote {written} files "
+          f"(skipped {skipped} archives/exclusions) -> {new_head[:12]}")
+    if args["push"]:
+        if not args["yes"]:
+            die("refusing --push without --yes")
+        run(["git", "-C", str(clone), "push", "origin",
+             f"HEAD:{args['branch']}"])
+        print(f"sync-public-mirror: pushed to origin {args['branch']}")
+    else:
+        print("sync-public-mirror: not pushed (--push not given); "
+              "inspect and push manually")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

@@ -1,0 +1,28 @@
+#!/sbin/openrc-run
+# saphira-fhs-converge: structural FHS convergence at early boot.
+#
+# Runs ensure-fhs over the baselayout global fragment BEFORE ordinary
+# services start (boot runlevel completes before default). This is the
+# only safe point for the historical /var/run -> /run alias swap: a
+# live post-upgrade swap would sever pathname access to running
+# daemons' sockets/PIDs. Package-specific fragments converge in
+# their own packages' install/upgrade callers, not here.
+#
+# A non-zero exit marks this service failed (loud, visible in
+# rc-status) without halting the boot: populated /usr/var and other
+# unsafe states need manual intervention, never silent repair.
+
+description="Saphira FHS layout convergence (early boot)"
+
+command="/usr/libexec/saphira/ensure-fhs"
+command_args="/usr/share/saphira/fhs.d/saphira-baselayout"
+
+depend() {
+	before *
+}
+
+start() {
+	ebegin "Converging Saphira filesystem layout"
+	"$command" $command_args
+	eend $?
+}

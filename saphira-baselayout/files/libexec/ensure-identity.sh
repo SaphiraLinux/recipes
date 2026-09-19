@@ -1,6 +1,11 @@
 #!/bin/sh
-# ensure-identity.sh [--disable] FRAGMENT — additive, idempotent
+# ensure-identity.sh [--disable|--check] FRAGMENT — additive, idempotent
 # system-identity reconciler, plus its removal counterpart.
+#
+# --check reports drift without changing anything (exit 1 on drift,
+# exit 2 when the fragment could not be assessed at all).
+# Both ensure and check honour administrator overrides from
+# /etc/saphira/permissions/override.d for dir/file stanzas.
 #
 # Called ONLY from makepkg-generated package scripts, with the
 # package's own accounts.d fragment. Ensure mode (post-install,
@@ -126,20 +131,49 @@ log()
 die()
 {
 	printf 'ensure-identity: ERROR: %s\n' "$*" >&2
-	exit 1
+	if [ "${CHECK:-0}" -eq 1 ]; then exit 2; else exit 1; fi
 }
 
 MODE=ensure
+CHECK=0
 case ${1:-} in
 	--disable) MODE=disable; shift ;;
-	-*) die "usage: ensure-identity.sh [--disable] FRAGMENT" ;;
+	--check) MODE=ensure; CHECK=1; shift ;;
+	-*) die "usage: ensure-identity.sh [--disable|--check] FRAGMENT" ;;
 esac
-FRAGMENT=${1:?usage: ensure-identity.sh [--disable] FRAGMENT}
+FRAGMENT=${1:?usage: ensure-identity.sh [--disable|--check] FRAGMENT}
+
+DRIFT=0
+CHECK_DONE=
+drift()
+{
+	DRIFT=$((DRIFT + 1))
+	printf 'ensure-identity: drift: %s\n' "$*"
+}
 
 test -f "$FRAGMENT" || die "fragment is missing: $FRAGMENT"
 for f in "$PASSWD" "$GROUPF" "$SHADOW"; do
 	test -f "$f" || die "account database is missing: $f"
 done
+
+# Administrator overrides (shared helper with ensure-fhs/ensure-caps/
+# ensure-permissions). Validated on converge paths only (ensure and
+# check): removal sanitizes identities and never converges paths, so
+# --disable stays override-free and unsurprising.
+if [ "$MODE" = ensure ]; then
+	OVERRIDE_DIR=$ROOT/etc/saphira/permissions/override.d
+	helper_dir=$(dirname -- "$0")
+	if [ -f "$helper_dir/permissions-override.sh" ]; then
+		# shellcheck disable=SC1091
+		. "$helper_dir/permissions-override.sh"
+	elif [ -f /usr/libexec/saphira/permissions-override.sh ]; then
+		# shellcheck disable=SC1091
+		. /usr/libexec/saphira/permissions-override.sh
+	else
+		die "permissions-override.sh is missing (reinstall saphira-baselayout)"
+	fi
+	ovr_init
+fi
 
 # Mode hygiene: the databases must be world-readable except shadow,
 # regardless of the umask that created them (Hatched 2026-09 arrived
@@ -147,9 +181,16 @@ done
 # breaking every non-root group lookup). Normalize on every run - this
 # heals existing systems the next time any fragment installs, and makes
 # fresh creation umask-independent. Content promises below are
-# unaffected: modes are not entries.
-chmod 0644 "$PASSWD" "$GROUPF" || die "cannot set database modes"
-chmod 0600 "$SHADOW" || die "cannot set shadow mode"
+# unaffected: modes are not entries. Check mode reports instead of
+# healing: auditing must never mutate.
+if [ "$CHECK" -eq 1 ]; then
+	[ "$(stat -c '%a' "$PASSWD")" = 644 ] || drift "database $PASSWD mode is $(stat -c '%a' "$PASSWD") (want 644)"
+	[ "$(stat -c '%a' "$GROUPF")" = 644 ] || drift "database $GROUPF mode is $(stat -c '%a' "$GROUPF") (want 644)"
+	[ "$(stat -c '%a' "$SHADOW")" = 600 ] || drift "database $SHADOW mode is $(stat -c '%a' "$SHADOW") (want 600)"
+else
+	chmod 0644 "$PASSWD" "$GROUPF" || die "cannot set database modes"
+	chmod 0600 "$SHADOW" || die "cannot set shadow mode"
+fi
 
 # --- exclusive lock (flock when available, atomic mkdir fallback) ---
 lockdir=
@@ -294,8 +335,15 @@ ensure_group()
 	if [ -n "$existing" ]; then
 		if [ "$(field 3 "$existing")" != "$gid" ]; then
 			if legacy_group_match "$name" "$(field 3 "$existing")"; then
+				if [ "$CHECK" -eq 1 ]; then
+					drift "group $name would migrate to GID $gid (legacy $(field 3 "$existing"))"
+					return 0
+				fi
 				repair_group_legacy "$name" "$gid"
 				existing=$(group_entry "$name")
+			elif [ "$CHECK" -eq 1 ]; then
+				drift "group conflict: $name exists with GID $(field 3 "$existing") (want $gid)"
+				return 0
 			fi
 			[ "$(field 3 "$existing")" = "$gid" ] ||
 				die "group conflict: $name exists with different GID"
@@ -309,9 +357,30 @@ ensure_group()
 	# handled by the early return). A hand-provisioned local account
 	# (e.g. qmail's fixed IDs) with matching attributes converges
 	# silently instead of blocking the install.
-	[ "$gid" -ge 0 ] && [ "$gid" -le 887 ] || die "GID outside packaged range 0..887: $gid"
+	if [ "$gid" -ge 0 ] && [ "$gid" -le 887 ]; then
+		:
+	elif [ "$CHECK" -eq 1 ]; then
+		drift "group $name ($gid) is outside the packaged range 0..887"
+		return 0
+	else
+		die "GID outside packaged range 0..887: $gid"
+	fi
 	owner=$(gid_taken "$gid")
-	[ -z "$owner" ] || die "GID conflict: $gid already owned by group $owner"
+	if [ -n "$owner" ]; then
+		if [ "$CHECK" -eq 1 ]; then
+			drift "GID conflict: $gid already owned by group $owner (want $name)"
+			return 0
+		fi
+		die "GID conflict: $gid already owned by group $owner"
+	fi
+	if [ "$CHECK" -eq 1 ]; then
+		case $CHECK_DONE in
+		*" g:$name "*) return 0 ;;
+		esac
+		CHECK_DONE="$CHECK_DONE g:$name "
+		drift "group $name ($gid) would be created"
+		return 0
+	fi
 	printf '%s:x:%s:\n' "$name" "$gid" >> "$GROUPF" ||
 		die "cannot append group $name"
 	log "group $name ($gid) created"
@@ -350,8 +419,15 @@ ensure_user()
 		if [ "$(field 3 "$existing")" != "$uid" ] ||
 			[ "$(field 4 "$existing")" != "$primary_gid" ]; then
 			if legacy_user_match "$name" "$(field 3 "$existing")" "$(field 4 "$existing")"; then
+				if [ "$CHECK" -eq 1 ]; then
+					drift "user $name would migrate to UID $uid (legacy $(field 3 "$existing"))"
+					return 0
+				fi
 				repair_user_legacy "$name" "$uid" "$primary_gid" "$primary"
 				existing=$(passwd_entry "$name")
+			elif [ "$CHECK" -eq 1 ]; then
+				drift "user conflict: $name exists with UID $(field 3 "$existing") (want $uid)"
+				return 0
 			fi
 			[ "$(field 3 "$existing")" = "$uid" ] ||
 				die "user conflict: $name exists with different UID"
@@ -366,17 +442,47 @@ ensure_user()
 	# Packaged range only on creation (see ensure_group): a locally
 	# hand-provisioned account with matching attributes converges
 	# above via the early return and never reaches this refusal.
-	[ "$uid" -ge 0 ] && [ "$uid" -le 887 ] || die "UID outside packaged range 0..887: $uid"
+	if [ "$uid" -ge 0 ] && [ "$uid" -le 887 ]; then
+		:
+	elif [ "$CHECK" -eq 1 ]; then
+		drift "user $name ($uid) is outside the packaged range 0..887"
+		return 0
+	else
+		die "UID outside packaged range 0..887: $uid"
+	fi
 	owner=$(uid_taken "$uid")
-	[ -z "$owner" ] || die "UID conflict: $uid already owned by user $owner"
+	if [ -n "$owner" ]; then
+		if [ "$CHECK" -eq 1 ]; then
+			drift "UID conflict: $uid already owned by user $owner (want $name)"
+			return 0
+		fi
+		die "UID conflict: $uid already owned by user $owner"
+	fi
 	# primary group: fragment-declared, already present, or base-seeded.
 	if [ -z "$(group_entry "$primary")" ]; then
 		tsv_gid=$(tsv_group_gid "$primary") || tsv_gid=
 		if [ -n "$tsv_gid" ]; then
 			ensure_group "$primary" "$tsv_gid"
+		elif [ "$CHECK" -eq 1 ]; then
+			# Check mode only: a primary the pre-pass already
+			# reported as would-be-created satisfies resolution
+			# for reporting (the user drift is recorded below).
+			# A primary nobody declares is still a hard error.
+			case $CHECK_DONE in
+			*" g:$primary "*) ;;
+			*) die "primary group is not declared, present, or base-seeded: $primary" ;;
+			esac
 		else
 			die "primary group is not declared, present, or base-seeded: $primary"
 		fi
+	fi
+	if [ "$CHECK" -eq 1 ]; then
+		case $CHECK_DONE in
+		*" u:$name "*) return 0 ;;
+		esac
+		CHECK_DONE="$CHECK_DONE u:$name "
+		drift "user $name ($uid) would be created (shadow locked, home $home)"
+		return 0
 	fi
 	gid=$(group_gid "$primary")
 	printf '%s:x:%s:%s:%s:%s:%s\n' \
@@ -400,8 +506,18 @@ ensure_shadow()
 		hash=$(field 2 "$existing")
 		case $hash in
 			''|'!'|'!'*|'*') log "shadow $name already locked" ;;
-			*) die "shadow $name has a usable password hash; refusing to touch credentials" ;;
+			*)
+				if [ "$CHECK" -eq 1 ]; then
+					drift "shadow $name has a usable password hash"
+				else
+					die "shadow $name has a usable password hash; refusing to touch credentials"
+				fi
+				;;
 		esac
+		return 0
+	fi
+	if [ "$CHECK" -eq 1 ]; then
+		drift "shadow $name would be created locked"
 		return 0
 	fi
 	printf '%s:%s:0:0:99999:7:::\n' "$name" '!' >> "$SHADOW" ||
@@ -415,26 +531,63 @@ ensure_leaf()
 	mode=$2
 	owner=$3
 	group=$4
+	# Administrator override: ignore skips the leaf, pin
+	# substitutes its declared values (same helper as
+	# ensure-fhs/ensure-caps/ensure-permissions).
+	eff=$(ovr_lookup "$path")
+	case $eff in
+	ignore)
+		log "directory $path skipped (administrator override)"
+		return 0
+		;;
+	pin\|*)
+		rest=${eff#pin|}
+		owner=${rest%%|*}
+		rest=${rest#*|}
+		group=${rest%%|*}
+		rest=${rest#*|}
+		mode=${rest%%|*}
+		log "directory $path pinned by administrator override ($owner:$group $mode)"
+		;;
+	esac
 	# create missing leading components with default modes; only the
 	# leaf receives declared mode/ownership, and only when different.
 	parent=$(dirname -- "$path")
 	if [ ! -d "$ROOT$parent" ]; then
-		mkdir -p "$ROOT$parent" || die "cannot create $parent"
+		if [ "$CHECK" -eq 1 ]; then
+			drift "directory parents of $path would be created"
+		else
+			mkdir -p "$ROOT$parent" || die "cannot create $parent"
+		fi
 	fi
 	if [ ! -e "$ROOT$path" ] && [ ! -L "$ROOT$path" ]; then
+		if [ "$CHECK" -eq 1 ]; then
+			drift "directory $path would be created ($owner:$group $mode)"
+			return 0
+		fi
 		mkdir "$ROOT$path" || die "cannot create $path"
 		log "directory $path created"
 	fi
-	[ -d "$ROOT$path" ] || die "not a directory: $path"
+	[ -d "$ROOT$path" ] || {
+		if [ "$CHECK" -eq 1 ]; then
+			drift "not a directory: $path"
+			return 0
+		fi
+		die "not a directory: $path"
+	}
 	current_mode=$(stat -c '%a' "$ROOT$path") || die "cannot stat $path"
 	current_owner=$(stat -c '%u:%g' "$ROOT$path") || die "cannot stat $path"
 	want_owner=$(id_numeric "$owner"); want_group=$(id_numeric_group "$group")
 	[ -n "$want_owner" ] || die "unknown owner: $owner"
 	[ -n "$want_group" ] || die "unknown group: $group"
 	if [ "$current_owner" != "$want_owner:$want_group" ]; then
-		chown "$want_owner:$want_group" "$ROOT$path" ||
-			die "cannot set ownership on $path"
-		log "directory $path ownership set to $want_owner:$want_group"
+		if [ "$CHECK" -eq 1 ]; then
+			drift "directory $path ownership is $current_owner (want $want_owner:$want_group)"
+		else
+			chown "$want_owner:$want_group" "$ROOT$path" ||
+				die "cannot set ownership on $path"
+			log "directory $path ownership set to $want_owner:$want_group"
+		fi
 	fi
 	# normalize declared mode (accept 755 or 0755) for comparison
 	want_mode=$mode
@@ -443,15 +596,28 @@ ensure_leaf()
 	done
 	[ -n "$want_mode" ] || want_mode=0
 	if [ "$current_mode" != "$want_mode" ]; then
-		chmod "$mode" "$ROOT$path" || die "cannot set mode on $path"
-		log "directory $path mode set to $mode"
+		if [ "$CHECK" -eq 1 ]; then
+			drift "directory $path mode is $current_mode (want $mode)"
+		else
+			chmod "$mode" "$ROOT$path" || die "cannot set mode on $path"
+			log "directory $path mode set to $mode"
+		fi
 	fi
 }
 
 id_numeric()
 {
+	# Prints the numeric UID (possibly empty when unknown; the
+	# caller fails closed on empty). Always exits 0: a nonzero
+	# return inside $() under set -eu would kill the helper before
+	# the caller can report WHICH reference is unknown.
 	case $1 in
-		''|*[!0-9]*) field 3 "$(passwd_entry "$1")" ;;
+		''|*[!0-9]*)
+			found=$(field 3 "$(passwd_entry "$1")")
+			if [ -n "$found" ]; then printf '%s' "$found"; return 0; fi
+			if [ "$CHECK" -eq 1 ]; then check_declared_id u "$1"; return 0; fi
+			return 0
+			;;
 		*) printf '%s' "$1" ;;
 	esac
 }
@@ -459,8 +625,70 @@ id_numeric()
 id_numeric_group()
 {
 	case $1 in
-		''|*[!0-9]*) group_gid "$1" ;;
+		''|*[!0-9]*)
+			found=$(group_gid "$1")
+			if [ -n "$found" ]; then printf '%s' "$found"; return 0; fi
+			if [ "$CHECK" -eq 1 ]; then check_declared_id g "$1"; return 0; fi
+			return 0
+			;;
 		*) printf '%s' "$1" ;;
+	esac
+}
+
+# --- check-mode fragment identity index ---
+#
+# In --check mode, declared-but-absent identities must still resolve
+# for drift reporting: nothing is created, so the live databases
+# cannot answer for them. The fragment is indexed once (well-formed
+# user/group stanzas only; malformed lines still die in the main
+# passes) and consulted as a fallback. Apply mode never consults
+# it (creation order guarantees live resolution there).
+CHECK_INDEX=
+CHECK_INDEXED=
+check_index_fragment() {
+	[ "$CHECK" -eq 1 ] || return 0
+	[ -n "$CHECK_INDEXED" ] && return 0
+	CHECK_INDEXED=1
+	while IFS= read -r line || [ -n "$line" ]; do
+		# shellcheck disable=SC2086
+		set -- $line
+		[ $# -eq 0 ] && continue
+		case $1 in
+		\#*) continue ;;
+		esac
+		case $1 in
+		user)
+			[ $# -eq 6 ] || continue
+			valid_name "$2" || continue
+			case $3 in
+			''|*[!0-9]*) continue ;;
+			esac
+			CHECK_INDEX="$CHECK_INDEX u:$2:$3"
+			;;
+		group)
+			[ $# -eq 3 ] || continue
+			valid_name "$2" || continue
+			case $3 in
+			''|*[!0-9]*) continue ;;
+			esac
+			CHECK_INDEX="$CHECK_INDEX g:$2:$3"
+			;;
+		esac
+	done <"$FRAGMENT"
+}
+
+check_declared_id() {
+	# $1(u|g) $2(name): print the fragment-declared ID, or nothing.
+	# Indexed names passed valid_name (plain identifiers, no glob
+	# characters), so the expansion match is exact. The query name
+	# is validated too: a malformed reference resolves to nothing
+	# (the caller then fails closed, exactly like apply mode).
+	valid_name "$2" || return 0
+	case $CHECK_INDEX in
+	*" $1:$2:"*)
+		rest=${CHECK_INDEX##*" $1:$2:"}
+		printf '%s' "${rest%% *}"
+		;;
 	esac
 }
 
@@ -710,10 +938,17 @@ file_owner_numeric()
 	# reference must resolve to a passwd entry, which exists by the
 	# time the file pass runs for declared identities. Bare numbers
 	# besides 0 are refused so references stay converge-checkable
-	# names (an empty print means unknown; the caller dies).
+	# names (an empty print means unknown; the caller dies). In
+	# check mode the fragment index answers for declared-but-absent
+	# identities (nothing is created to resolve live).
 	case $1 in
 		0) printf '0' ;;
-		''|*[!0-9]*) field 3 "$(passwd_entry "$1")" ;;
+		''|*[!0-9]*)
+			found=$(field 3 "$(passwd_entry "$1")")
+			if [ -n "$found" ]; then printf '%s' "$found"; return 0; fi
+			if [ "$CHECK" -eq 1 ]; then check_declared_id u "$1"; return 0; fi
+			return 0
+			;;
 		*) die "numeric file owner refs forbidden except 0: $1 (use the identity name)" ;;
 	esac
 }
@@ -722,7 +957,12 @@ file_group_numeric()
 {
 	case $1 in
 		0) printf '0' ;;
-		''|*[!0-9]*) group_gid "$1" ;;
+		''|*[!0-9]*)
+			found=$(group_gid "$1")
+			if [ -n "$found" ]; then printf '%s' "$found"; return 0; fi
+			if [ "$CHECK" -eq 1 ]; then check_declared_id g "$1"; return 0; fi
+			return 0
+			;;
 		*) die "numeric file group refs forbidden except 0: $1 (use the identity name)" ;;
 	esac
 }
@@ -733,23 +973,49 @@ ensure_file()
 	mode=$2
 	owner=$3
 	group=$4
+	# Administrator override (same helper as the leaf above).
+	eff=$(ovr_lookup "$path")
+	case $eff in
+	ignore)
+		log "file $path skipped (administrator override)"
+		return 0
+		;;
+	pin\|*)
+		rest=${eff#pin|}
+		owner=${rest%%|*}
+		rest=${rest#*|}
+		group=${rest%%|*}
+		rest=${rest#*|}
+		mode=${rest%%|*}
+		log "file $path pinned by administrator override ($owner:$group $mode)"
+		;;
+	esac
 	[ -L "$ROOT$path" ] &&
 		die "not a regular file: $path (refusing to follow symlinks)"
 	[ -d "$ROOT$path" ] &&
 		die "not a file: $path (directories use the dir stanza)"
 	# Regular files and fifos (qmail's queue trigger) take ownership;
 	# anything else special is refused.
-	[ -f "$ROOT$path" ] || [ -p "$ROOT$path" ] ||
+	if [ ! -f "$ROOT$path" ] && [ ! -p "$ROOT$path" ]; then
+		if [ "$CHECK" -eq 1 ]; then
+			drift "file stanza target is missing: $path"
+			return 0
+		fi
 		die "file stanza target is missing: $path (files must ship in the package payload)"
+	fi
 	want_owner=$(file_owner_numeric "$owner")
 	want_group=$(file_group_numeric "$group")
 	[ -n "$want_owner" ] || die "unknown owner: $owner"
 	[ -n "$want_group" ] || die "unknown group: $group"
 	current_owner=$(stat -c '%u:%g' "$ROOT$path") || die "cannot stat $path"
 	if [ "$current_owner" != "$want_owner:$want_group" ]; then
-		chown "$want_owner:$want_group" "$ROOT$path" ||
-			die "cannot set ownership on $path"
-		log "file $path ownership set to $want_owner:$want_group"
+		if [ "$CHECK" -eq 1 ]; then
+			drift "file $path ownership is $current_owner (want $want_owner:$want_group)"
+		else
+			chown "$want_owner:$want_group" "$ROOT$path" ||
+				die "cannot set ownership on $path"
+			log "file $path ownership set to $want_owner:$want_group"
+		fi
 	fi
 	# normalize declared mode (accept 755 or 0755, keep setuid bits)
 	# for comparison
@@ -760,8 +1026,12 @@ ensure_file()
 	[ -n "$want_mode" ] || want_mode=0
 	current_mode=$(stat -c '%a' "$ROOT$path") || die "cannot stat $path"
 	if [ "$current_mode" != "$want_mode" ]; then
-		chmod "$mode" "$ROOT$path" || die "cannot set mode on $path"
-		log "file $path mode set to $mode"
+		if [ "$CHECK" -eq 1 ]; then
+			drift "file $path mode is $current_mode (want $mode)"
+		else
+			chmod "$mode" "$ROOT$path" || die "cannot set mode on $path"
+			log "file $path mode set to $mode"
+		fi
 	fi
 }
 
@@ -892,9 +1162,17 @@ disable_validate()
 			file)
 				[ $# -eq 5 ] || die "fragment line $lineno: file needs 4 fields"
 				;;
-			dir) continue ;;
-			*) die "fragment line $lineno: unknown stanza: $1" ;;
-		esac
+		# The sysusers stanza selects the caller's native mechanism
+		# (the generated caller runs systemd-sysusers after the
+		# reconciler): it declares no user/group/dir/file, so the
+		# helper skips it in every pass. Arity enforced so malformed
+		# fragments still fail closed.
+		sysusers)
+			[ $# -eq 1 ] || die "fragment line $lineno: sysusers takes no fields"
+			;;
+		dir) continue ;;
+		*) die "fragment line $lineno: unknown stanza: $1" ;;
+	esac
 	done < "$FRAGMENT"
 	lineno=0
 	while IFS= read -r line || [ -n "$line" ]; do
@@ -1050,6 +1328,7 @@ reject_reserved()
 }
 reject_reserved
 load_legacy
+check_index_fragment
 
 lineno=0
 # Pre-pass: groups first, so user stanzas may reference a primary group
@@ -1103,6 +1382,14 @@ while IFS= read -r line || [ -n "$line" ]; do
 		file)
 			continue
 			;;
+		# The sysusers stanza selects the caller's native mechanism
+		# (the generated caller runs systemd-sysusers after the
+		# reconciler): it declares no user/group/dir/file, so the
+		# helper skips it in every pass. Arity enforced so malformed
+		# fragments still fail closed.
+		sysusers)
+			[ $# -eq 1 ] || die "fragment line $lineno: sysusers takes no fields"
+			;;
 		*)
 			die "fragment line $lineno: unknown stanza: $1"
 			;;
@@ -1135,5 +1422,13 @@ while IFS= read -r line || [ -n "$line" ]; do
 			ensure_file "$2" "$3" "$4" "$5"
 			;;
 	esac
-done < "$FRAGMENT"
+	done < "$FRAGMENT"
+if [ "$CHECK" -eq 1 ]; then
+	if [ "$DRIFT" -eq 0 ]; then
+		log "check: $FRAGMENT clean"
+		exit 0
+	fi
+	log "check: $FRAGMENT: $DRIFT drift(s)"
+	exit 1
+fi
 log "reconciliation complete: $FRAGMENT"

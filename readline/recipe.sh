@@ -18,6 +18,8 @@ recipe_build() {
 	echo "$readline_sha256  $RECIPE_DIR/files/readline-8.3.tar.gz" | sha256sum -c -
 	LIBS="-lncursesw" AWK=/usr/bin/mawk \
 		./configure --prefix=/usr --libdir=/usr/lib \
+		--sysconfdir=/etc \
+		--localstatedir=/var \
 		--with-curses --disable-static
 	# The shared lib must carry its curses dependency: readline's
 	# SHLIB link line ignores configure's LIBS, so pass it at make level.

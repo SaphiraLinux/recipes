@@ -14,3 +14,11 @@ depend()
 	use net
 	need localmount
 }
+
+start_pre()
+{
+	# /var/run is persistent by design; the daemon recreates its own
+	# pid/socket (pid liveness-checked, socket unlinked before bind),
+	# so only the directory is ensured here.
+	checkpath -d -m 0755 /var/run/chrony
+}

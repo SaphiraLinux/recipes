@@ -38,7 +38,7 @@ recipe_build()
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$TRBALL"
 	cd "$SRC"
 	export FORCE_UNSAFE_CONFIGURE=1
-	./configure --prefix=/usr --disable-nls --with-rmt=/usr/libexec/rmt
+	./configure --prefix=/usr --sysconfdir=/etc --disable-nls --with-rmt=/usr/libexec/rmt --localstatedir=/var
 	make -j${JOBS:-$(nproc)}
 }
 

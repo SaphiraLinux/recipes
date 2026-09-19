@@ -17,6 +17,8 @@ recipe_build() {
 	cd "$SRC"
 	echo "$ncurses_sha256  $RECIPE_DIR/files/ncurses-6.5.tar.gz" | sha256sum -c -
 	AWK=/usr/bin/mawk ./configure --prefix=/usr \
+		--sysconfdir=/etc \
+		--localstatedir=/var \
 		--libdir=/usr/lib \
 		--with-shared \
 		--without-termlib \

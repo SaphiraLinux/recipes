@@ -5,4 +5,4 @@
 # for another identity. Data-directory mode 0750 mirrors recipe staging.
 user valkey 116 valkey /var/lib/valkey /sbin/nologin
 group valkey 116
-dir /var/lib/valkey 0750 valkey valkey
+dir /var/lib/valkey 0700 valkey valkey

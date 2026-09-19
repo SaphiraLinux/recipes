@@ -17,6 +17,8 @@ recipe_build() {
 	cd "$SRC"
 	echo "$sqlite_sha256  $RECIPE_DIR/files/sqlite-autoconf-3530300.tar.gz" | sha256sum -c -
 	./configure --prefix=/usr --disable-static \
+		--sysconfdir=/etc \
+		--localstatedir=/var \
 		--enable-fts3 --enable-fts4 --enable-fts5 \
 		--enable-rtree --enable-geopoly \
 		LDFLAGS="${LDFLAGS-} -Wl,-soname,libsqlite3.so.0" \

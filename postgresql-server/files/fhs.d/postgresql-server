@@ -1,0 +1,20 @@
+# postgresql-server FHS migration: socket dir /run/postgresql -> /var/run/postgresql.
+#
+# Stale-state policy (/var/run is persistent by design, never wiped):
+# - unix sockets: the postmaster unlinks stale socket files at
+#   start and validates postmaster.pid liveness itself (live
+#   duplicate refused, stale reclaimed). No pid/socket cleanup in
+#   service logic. postmaster.pid lives in the data directory
+#   (persistent state), not the runtime dir.
+# - New /var/run/postgresql: converged here on upgrade
+#   (postgres:postgres 0755); created by tmpfiles.d (systemd) and
+#   checkpath (OpenRC). The unit's old socket-dir ExecStartPre is
+#   removed: unprivileged units cannot create under /var/run
+#   (rspamd precedent).
+# - /var/lib/postgresql: persistent state, converges via
+#   ensure-identity (accounts.d dir stanza) - untouched here.
+# - Old /run/postgresql: volatile residue on tmpfs. Removed once
+#   empty; left in place and reported while the old postmaster runs.
+
+dir /var/run/postgresql 0755 postgres postgres
+rmdir-if-empty /run/postgresql

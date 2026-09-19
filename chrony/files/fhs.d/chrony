@@ -1,0 +1,19 @@
+# chrony FHS migration: runtime dir pinned to /var/run/chrony.
+#
+# History that matters: the recipe previously passed
+# --runstatedir=/run, which chrony's custom configure does not
+# recognise (it parses --chronyrundir/--chronysockdir only), so the
+# flag was silently ignored and every published build used the
+# upstream default /var/run/chrony. Live /var/run/chrony paths were
+# therefore always genuine - never symlink artifacts. The recipe now
+# passes --chronyrundir=/var/run/chrony explicitly, so the path is
+# intentional rather than accidental. No old residue exists to
+# migrate; this fragment converges ownership and guards the path.
+#
+# Stale-state policy (/var/run is persistent by design, never wiped):
+# fully daemon-side, verified in chrony-4.8 source (main.c
+# check_pidfile: live pid refuses start, dead pid overwritten;
+# socket.c bind_unix_address: unlinks before bind). Service files
+# only ensure the directory - no pid/socket cleanup anywhere.
+
+dir /var/run/chrony 0755 root root

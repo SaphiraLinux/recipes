@@ -2,7 +2,9 @@
 
 pkgname=postgresql-server
 pkgver=18.4
-pkgrel=2
+pkgrel=3
+# r3: socket dir /run/postgresql -> /var/run/postgresql via tmpfiles.d
+# (unit runs unprivileged). Payload change, revision bumps.
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="PostgreSQL database server"
 license="PostgreSQL"
@@ -43,6 +45,8 @@ recipe_build()
 {
 	mkdir -p "$BUILDDIR" && cd "$BUILDDIR"
 	"$SRC/configure" --prefix=/usr \
+		--sysconfdir=/etc \
+		--localstatedir=/var \
 		--with-openssl --with-libxml --with-readline --with-zlib \
 		--with-lz4 --with-icu \
 		--without-ldap --without-pam --without-systemd --without-selinux \
@@ -70,6 +74,8 @@ recipe_install()
 		"$PKGDEST/etc/init.d/postgresql"
 	install -D -m 0644 "$RECIPE_DIR/files/postgresql.service" \
 		"$PKGDEST/usr/lib/systemd/system/postgresql.service"
+	install -D -m 0644 "$RECIPE_DIR/files/postgresql.tmpfiles" \
+		"$PKGDEST/usr/lib/tmpfiles.d/postgresql.conf"
 	install -D -m 0644 "$RECIPE_DIR/files/postgresql.confd" \
 		"$PKGDEST/etc/conf.d/postgresql"
 	install -D -m 0644 "$RECIPE_DIR/files/AKADATA.md" \
@@ -82,6 +88,11 @@ recipe_install()
 	# r2: fragment added (payload change, revision bumps).
 	install -D -m 0644 "$RECIPE_DIR/files/accounts.d/postgresql-server" \
 		"$PKGDEST/usr/share/saphira/accounts.d/postgresql-server"
+	# FHS migration declaration (hotfix/var-packaging-bug-var-run-isnot-run):
+	# postgres:122 owns the corrected socket dir; makepkg runs
+	# ensure-fhs after ensure-identity on install/upgrade.
+	install -D -m 0644 "$RECIPE_DIR/files/fhs.d/postgresql-server" \
+		"$PKGDEST/usr/share/saphira/fhs.d/postgresql-server"
 	install -D -m 0644 "$SRC/COPYRIGHT" \
 		"$PKGDEST/usr/share/licenses/postgresql-server/COPYRIGHT"
 }

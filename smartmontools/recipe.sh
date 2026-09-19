@@ -15,7 +15,7 @@ recipe_build() {
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$RECIPE_DIR/files/smartmontools-7.5.tar.gz"
 	cd "$SRC"
 	echo "$smartmontools_sha256  $RECIPE_DIR/files/smartmontools-7.5.tar.gz" | sha256sum -c -
-	./configure --prefix=/usr --sysconfdir=/etc --with-systemdsystemdir=/no/systemd
+	./configure --prefix=/usr --sysconfdir=/etc --with-systemdsystemdir=/no/systemd --localstatedir=/var
 	make -j${JOBS:-$(nproc)}
 }
 recipe_install() {

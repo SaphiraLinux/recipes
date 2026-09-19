@@ -25,6 +25,9 @@ makedepends="
 
 recipe_build()
 {
+	# layout-exception: hand-rolled configure without statedir options
+	# (unknown --options only warn); lzip installs no state. GNU dir
+	# flags must stay off this line.
 	./configure --prefix=/usr CXX="${CXX:-g++}" \
 		CXXFLAGS="${CXXFLAGS:--O2} ${LDFLAGS-}"
 	make

@@ -16,7 +16,7 @@ recipe_build() {
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$RECIPE_DIR/files/libnetfilter_cthelper-1.0.1.tar.bz2"
 	cd "$SRC"
 	echo "$libnetfilter_cthelper_sha256  $RECIPE_DIR/files/libnetfilter_cthelper-1.0.1.tar.bz2" | sha256sum -c -
-	./configure --prefix=/usr --disable-static 
+	./configure --prefix=/usr --sysconfdir=/etc --disable-static  --localstatedir=/var
 	make -j${JOBS:-$(nproc)}
 }
 recipe_install() {

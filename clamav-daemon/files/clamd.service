@@ -6,7 +6,7 @@ After=network.target
 Type=simple
 User=clamav
 Group=clamav
-ExecStartPre=/usr/bin/mkdir -p /var/run/clamav
+ExecStartPre=/bin/rm -f /var/run/clamav/clamd.sock
 ExecStart=/usr/sbin/clamd --foreground=true
 ExecReload=/bin/kill -USR2 $MAINPID
 Restart=on-failure

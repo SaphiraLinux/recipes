@@ -15,7 +15,7 @@ recipe_build() {
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$RECIPE_DIR/files/tcpdump-4.99.6.tar.gz"
 	cd "$SRC"
 	echo "$tcpdump_sha256  $RECIPE_DIR/files/tcpdump-4.99.6.tar.gz" | sha256sum -c -
-	./configure --prefix=/usr --without-smi
+	./configure --prefix=/usr --sysconfdir=/etc --without-smi --localstatedir=/var
 	make -j${JOBS:-$(nproc)}
 }
 recipe_install() {

@@ -29,7 +29,51 @@ pkgver=1.0
 # identity-less fragments) plus the legacy-gate namespace fix: a
 # legacy user's primary GID is a reference, not a group-namespace
 # history claim, so paired user+group sidecars publish.
-pkgrel=61
+pkgrel=66
+# r66: caps.d file-capability declarations (saphira-permissions V1):
+# makepkg validates the fragment (known capability names, same
+# payload target, no strays/duplicates), generates
+# ensure-identity -> ensure-fhs -> ensure-caps callers, adds the
+# saphira-permissions+libcap ordering deps, and records the receipt
+# caps key; the publish gate enforces the selective
+# ships-fragment<->declares coherence (no ledger change: the
+# same-payload-target rule plus the file gate guarantee one package
+# per capped path). Must be installed before alfred r3 /
+# breathgslb r3 build, so the new gate actually guards those
+# builds. Payload change, revision bumps.
+# r65: makepkg refuses payload files/dirs beneath usr/etc, usr/var,
+# usr/com (autoconf prefix-default leaks: proftpd /usr/var, lynx
+# /usr/etc incidents) unless covered by an explicit reviewed
+# LAYOUT_ALLOW entry (owner-bound, exact paths). Must be installed
+# before proftpd r5 / lynx r2 build, so the new gate actually guards
+# those builds. + seed assembly runs --no-scripts with explicit fhs.d
+# convergence and a fail-closed guard (virgin roots cannot satisfy
+# script interpreters/helpers mid-order; first proven by baselayout
+# r17 breaking canonical base assembly). Payload change,
+# revision bumps.
+# Provenance (configure-layout sweep, 6e2f9ef): the ~170 recipe
+# hygiene edits (explicit --prefix/--sysconfdir/--localstatedir) are
+# NEXT-build policy only. No mass rebuild at existing NVRs: those
+# published NVRs were NOT built from the new recipe text, and the
+# immutable-NVR gate will force the normal pkgrel bump if any such
+# package is ever rebuilt with changed bytes. No mass pkgrel bump.
+# r64: repo_db.py fhs_claims keeps one row per exact path (a fragment
+# legitimately describes the same path as both dir and
+# replace-symlink-dir; the ledger tracks ownership per path, so the
+# second claim violated the fhs_paths PRIMARY KEY and failed
+# baselayout r17 publication) + extract_declarations installs each
+# carrier closure in its own isolated root (the archive keeps retired
+# generations with mutually exclusive pins; one shared root either
+# refuses or silently attributes the newest payload's census to older
+# NVRs, which broke full-audit reconciliation). Payload change,
+# revision bumps.
+# r62: saphira-build OpenRC pidfile /run/saphira-build.pid ->
+# /var/run/saphira-build.pid (flat, tracked-only payload file;
+# no builder/controller logic touched).
+# r63: repo_db.py additive-schema self-heal (live DBs predate
+# fhs_paths) + sysusers-native declared counting (guarantees both
+# in the published controller library regardless of what r62
+# captured). Payload change, revision bumps.
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='Native Saphira package builder tools'
 license=BUSL-1.1

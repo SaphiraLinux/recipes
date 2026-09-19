@@ -262,24 +262,19 @@ holder_pid_2=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))[
 assert_holder_released "$failed"
 [ "$(stat -c %i "$build_root/rootfs_overlay/base")" = "$base_inode" ]
 
-# A resolve-time failure (unknown producer: resolvepkg refuses before any
-# worker runs) retains the workspace evidence yet releases the holder too -
-# the release lives in fail(), not in any build-stage cleanup.
+# A resolve-time refusal (unknown producer: resolvepkg refuses before any
+# build step begins) is not a failed build: no workspace is retained, but
+# the actual refusal is printed and the overlay holder is released.
 if run_buildpkg definitely-not-a-recipe > "$test_root/early-fail.out" 2> "$test_root/early-fail.err"; then
 	printf '%s\n' 'resolve-time failure unexpectedly succeeded' >&2
 	exit 1
 fi
 early=$build_root/definitely-not-a-recipe.buildpkg
-test -f "$early/FAILED"
-grep 'saphira-buildpkg-failed/v1' "$early/FAILED" >/dev/null
-test -f "$early/logs/buildpkg.log"
-test -f "$early/overlay-holder.json"
-test -f "$early/OVERLAY-RECOVER.txt"
-assert_holder_released "$early"
-SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
-SAPHIRA_BUILD_ROOT=$build_root \
-	"$source_root/saphira-packager/files/cleanpkg" definitely-not-a-recipe >/dev/null
+grep 'resolver refused definitely-not-a-recipe' "$test_root/early-fail.err" >/dev/null
+grep 'pre-build refusal; workspace removed, no diagnostic retained' "$test_root/early-fail.err" >/dev/null
 test ! -e "$early"
+test -z "$(find "$build_root" -maxdepth 1 -name 'definitely-not-a-recipe.buildpkg*' -print -quit)"
+test -z "$(grep -rls "upperdir=$early/upper" /proc/[0-9]*/mountinfo 2>/dev/null)"
 
 # Unmarked workspaces are never removed as a retry convenience.
 mkdir "$build_root/collision.buildpkg"

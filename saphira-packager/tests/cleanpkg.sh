@@ -71,4 +71,43 @@ fi
 grep 'refusing unmarked workspace' "$test_root/unmarked.err" >/dev/null
 test -d "$build_root/unmarked.buildpkg"
 
+# --unmarked refuses a marked FAILED workspace (default path owns those).
+mkWorkspace marked
+if run_cleanpkg --unmarked marked > "$test_root/marked.out" 2> "$test_root/marked.err"; then
+	printf '%s\n' '--unmarked unexpectedly took a marked workspace' >&2
+	exit 1
+fi
+grep 'use plain cleanpkg without --unmarked' "$test_root/marked.err" >/dev/null
+test -d "$build_root/marked.buildpkg"
+
+# --unmarked removes a dead unmarked workspace, fixing workdir-style
+# owner-only permissions on the way (mode 000 subdir stands in for the
+# overlay workdir's internal directory).
+mkdir -p "$build_root/deadunmarked.buildpkg/work/work"
+chmod 000 "$build_root/deadunmarked.buildpkg/work/work"
+printf '{"pid":%s}\n' "$deadpid" > "$build_root/deadunmarked.buildpkg/overlay-holder.json"
+run_cleanpkg --unmarked deadunmarked > "$test_root/deadunmarked.out" 2> "$test_root/deadunmarked.err"
+grep 'removed unmarked workspace' "$test_root/deadunmarked.out" >/dev/null
+test ! -e "$build_root/deadunmarked.buildpkg"
+
+# --unmarked refuses a live workspace: a recorded holder whose cmdline
+# still carries the holder marker for exactly this workspace. The fake
+# holder is a sleeper whose argv[0] is the marker (never a real mount).
+mkdir -p "$build_root/liveunmarked.buildpkg"
+bash -c 'exec -a "$0" sleep 60' \
+	"saphira-overlay-holder $build_root/liveunmarked.buildpkg" &
+liveholder=$!
+printf '{"pid":%s}\n' "$liveholder" > "$build_root/liveunmarked.buildpkg/overlay-holder.json"
+sleep 0.5
+if run_cleanpkg --unmarked liveunmarked > "$test_root/liveunmarked.out" 2> "$test_root/liveunmarked.err"; then
+	kill "$liveholder" 2>/dev/null || true
+	printf '%s\n' '--unmarked unexpectedly removed a live workspace' >&2
+	exit 1
+fi
+grep 'appears live' "$test_root/liveunmarked.err" >/dev/null
+test -d "$build_root/liveunmarked.buildpkg"
+kill "$liveholder" 2>/dev/null || true
+wait "$liveholder" 2>/dev/null || true
+rm -rf "$build_root/liveunmarked.buildpkg"
+
 printf '%s\n' 'cleanpkg removal, holder-race silence, and refusal tests: OK'

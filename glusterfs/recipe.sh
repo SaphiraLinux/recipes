@@ -2,7 +2,13 @@
 
 pkgname=glusterfs
 pkgver=11.2
-pkgrel=1
+pkgrel=2
+# r2: daemon pidfiles /run/*.pid -> /var/run/*.pid (flat, root-run
+# daemons, no subdir). No fhs.d fragment by rule: flat tmpfs
+# pidfiles need no migration (document-and-leave, unbound
+# precedent). NOTE (out of scope): no systemd units ship in-tree;
+# if added later they must use the same /var/run pid paths.
+# Payload change, revision bumps.
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="GlusterFS distributed filesystem (glusterd, bricks, FUSE client, CLI)"
 license="GPL-2.0-only OR LGPL-3.0-or-later"

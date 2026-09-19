@@ -64,6 +64,10 @@ install_bootstrap_ghc()
 		awk -F/ 'NF { print $1; exit }')
 	test -n "$boot_top" || fatal "bootstrap archive has no top-level directory"
 	cd "$BUILDDIR/boot-src/$boot_top"
+	# layout-exception: bootstrap GHC configures into a disposable
+	# scratch prefix (never installed); GNU dir flags are noise here.
+	# The real build below uses cabal Setup.hs configure with Haskell
+	# path flags (--datadir/--docdir), not GNU dir flags.
 	./configure --prefix="$BUILDDIR/bootstrap" >/dev/null ||
 		fatal "bootstrap GHC configure failed"
 	make install >/dev/null ||

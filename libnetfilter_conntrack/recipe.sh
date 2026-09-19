@@ -18,7 +18,7 @@ recipe_build() {
 	echo "$libnetfilter_conntrack_sha256  $RECIPE_DIR/files/libnetfilter_conntrack-1.1.1.tar.xz" | sha256sum -c -
 	# kernel UAPI coordination is handled by header patches:
 	# saphira-kernel-headers=7.1.5 0003-libc-compat-musl + musl 0002-netinet-in6
-	./configure --prefix=/usr --disable-static 
+	./configure --prefix=/usr --sysconfdir=/etc --disable-static  --localstatedir=/var
 	make -j${JOBS:-$(nproc)}
 }
 recipe_install() {

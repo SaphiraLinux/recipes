@@ -16,7 +16,7 @@ recipe_build() {
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$RECIPE_DIR/files/conntrack-tools-1.4.9.tar.xz"
 	cd "$SRC"
 	echo "$conntrack_tools_sha256  $RECIPE_DIR/files/conntrack-tools-1.4.9.tar.xz" | sha256sum -c -
-	./configure --prefix=/usr --disable-static
+	./configure --prefix=/usr --sysconfdir=/etc --disable-static --localstatedir=/var
 	make -j${JOBS:-$(nproc)}
 }
 recipe_install() {

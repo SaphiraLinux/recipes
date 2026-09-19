@@ -2,10 +2,10 @@
 
 description="MariaDB database server"
 command=/usr/sbin/mariadbd
-command_args="--defaults-file=/etc/my.cnf --datadir=/var/lib/mysql --pid-file=/run/mysqld/mariadbd.pid"
+command_args="--defaults-file=/etc/my.cnf --datadir=/var/lib/mysql --pid-file=/var/run/mysqld/mariadbd.pid"
 command_user="mysql:mysql"
 command_background=true
-pidfile=/run/mysqld/openrc-mariadb.pid
+pidfile=/var/run/mysqld/openrc-mariadb.pid
 rc_ulimit="-n 65536"
 
 depend()
@@ -16,10 +16,13 @@ depend()
 
 start_pre()
 {
-	checkpath -d -m 0750 -o mysql:mysql /run/mysqld
+	checkpath -d -m 0750 -o mysql:mysql /var/run/mysqld
 	checkpath -d -m 0750 -o mysql:mysql /var/lib/mysql
 	checkpath -d -m 0750 -o mysql:mysql /var/log/mysql
-	rm -f /run/mysqld/mariadbd.pid /run/mysqld/openrc-mariadb.pid
+	# Stale pid/socket from an unclean shutdown block restart
+	# (pid confusion, socket bind fails on an existing path).
+	# start_pre runs only when OpenRC is about to start the server.
+	rm -f /var/run/mysqld/mariadbd.pid /var/run/mysqld/openrc-mariadb.pid /var/run/mysqld/mysqld.sock
 	if test ! -d /var/lib/mysql/mysql; then
 		/usr/bin/mariadb-install-db --user=mysql \
 			--basedir=/usr --datadir=/var/lib/mysql

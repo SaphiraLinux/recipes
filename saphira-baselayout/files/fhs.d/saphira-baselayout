@@ -1,0 +1,31 @@
+# Saphira global filesystem corrections (generation-zero residue + invariant).
+#
+# Owned by saphira-baselayout: these are corrections no single service
+# package owns. Package-specific historical paths live in each
+# package's own fhs.d fragment, never here.
+#
+# Executed by ensure-fhs from the saphira-fhs-converge boot service
+# (before ordinary services start) and from baselayout's own
+# install/upgrade callers. Pass 1 replaces the historical alias;
+# pass 2 converges the rest. Repeats are no-ops.
+#
+# /var/run is persistent by design: a real directory, never a tmpfs,
+# never wiped at boot. Stale service PID/socket cleanup is each
+# service's own start-time responsibility, not boot erasure.
+#
+# /var/lock -> ../run/lock violates the same invariant (no FHS
+# aliases). Converted to a real directory like /var/run. Tree census
+# finds zero /run/lock or /var/lock consumers and live /run/lock is
+# empty, so nothing depends on either path today. Persistence
+# semantics (tmpfs-backed or rootfs-persistent like /var/run) stay
+# an explicit later decision, not an upstream inheritance.
+
+# /run itself is payload-owned (the APK ships the real directory);
+# live reconciliation of /run is refused by ensure-fhs guards, so no
+# dir stanza claims it here.
+
+replace-symlink-dir /var/run ../run 0755 root root
+replace-symlink-dir /var/lock ../run/lock 0755 root root
+dir /var/run 0755 root root
+dir /var/lock 0755 root root
+rmtree-or-fail /usr/var

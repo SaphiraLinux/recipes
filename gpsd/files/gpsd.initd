@@ -18,3 +18,12 @@ depend()
 	need localmount
 	after udev
 }
+
+start_pre()
+{
+	# /var/run is persistent by design. Stale socket from an unclean
+	# shutdown blocks bind; start_pre runs only when OpenRC is about
+	# to start the daemon.
+	checkpath -d -m 0755 /var/run/gpsd
+	rm -f /var/run/gpsd/gpsd.sock
+}

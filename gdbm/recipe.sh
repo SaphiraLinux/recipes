@@ -16,7 +16,7 @@ recipe_build() {
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$RECIPE_DIR/files/gdbm-1.26.tar.gz"
 	cd "$SRC"
 	echo "$gdbm_sha256  $RECIPE_DIR/files/gdbm-1.26.tar.gz" | sha256sum -c -
-	./configure --prefix=/usr --libdir=/usr/lib --disable-static --disable-nls --without-readline
+	./configure --prefix=/usr --sysconfdir=/etc --libdir=/usr/lib --disable-static --disable-nls --without-readline --localstatedir=/var
 	make -j${JOBS:-$(nproc)}
 }
 recipe_install() {

@@ -3,7 +3,11 @@
 pkgname=clamav-freshclam
 pkgver=1.5.3
 # r2: rebuild against the branded rustc (x86_64-akadata-linux-musl).
-pkgrel=2
+pkgrel=3
+# r3: pid paths /run/clamav -> /var/run/clamav (shared dir lifecycle
+# in base clamav; old-dir removal declared once by clamav-daemon's
+# fhs.d - exact-path union refuses duplicates, so no fragment here).
+# Payload change, revision bumps.
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="ClamAV virus signature updater (freshclam)"
 license="GPL-2.0-or-later"

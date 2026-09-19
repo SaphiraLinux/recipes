@@ -3,7 +3,10 @@
 pkgname=clamav-daemon
 pkgver=1.5.3
 # r2: rebuild against the branded rustc (x86_64-akadata-linux-musl).
-pkgrel=2
+pkgrel=3
+# r3: LocalSocket unified on /var/run/clamav (was split-brain);
+# stale socket cleared at start; shared dir lifecycle in base.
+# Payload change, revision bumps.
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="ClamAV scanner daemon (clamd)"
 license="GPL-2.0-or-later"
@@ -83,7 +86,7 @@ recipe_install()
 LogFile /var/log/clamav/clamd.log
 LogTime yes
 DatabaseDirectory /var/lib/clamav
-LocalSocket /run/clamav/clamd.sock
+LocalSocket /var/run/clamav/clamd.sock
 TCPAddr 127.0.0.1
 TCPSocket 3310
 User clamav
@@ -96,4 +99,8 @@ EOF
 		"$PKGDEST/usr/lib/systemd/system/clamd.service"
 	install -m 0755 "$RECIPE_DIR/files/clamd.initd" \
 		"$PKGDEST/etc/init.d/clamd"
+	# FHS migration declaration (hotfix/var-packaging-bug-var-run-isnot-run):
+	# removal-only (shared dir owned with the base identity).
+	install -D -m 0644 "$RECIPE_DIR/files/fhs.d/clamav-daemon" \
+		"$PKGDEST/usr/share/saphira/fhs.d/clamav-daemon"
 }

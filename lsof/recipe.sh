@@ -19,7 +19,7 @@ subpackages="$pkgname-doc"
 recipe_build()
 {
 	cd "$SRC"
-	./configure --prefix=/usr
+	./configure --prefix=/usr --sysconfdir=/etc --localstatedir=/var
 	touch lsof.man
 	make -j${JOBS:-$(nproc)}
 }

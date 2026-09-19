@@ -1,0 +1,14 @@
+# openvswitch FHS migration: rundir /run/openvswitch -> /var/run/openvswitch.
+#
+# The suite runs as root via ovs-ctl (no accounts.d identity), which
+# owns the full daemon lifecycle: it creates the rundir, validates
+# pid liveness, and reclaims ovsdb/ovs-vswitchd pidfiles and control
+# sockets on start/stop. Service files delegate to ovs-ctl and carry
+# no paths themselves.
+#
+# Stale-state policy (/var/run is persistent by design, never wiped):
+# fully ovs-ctl-side. This fragment only converges the directory on
+# upgrade and removes the old volatile residue once empty.
+
+dir /var/run/openvswitch 0755 root root
+rmdir-if-empty /run/openvswitch

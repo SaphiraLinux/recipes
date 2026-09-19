@@ -43,7 +43,7 @@
 
 #define PROG "gredist"
 #define DEFAULT_CONF_DIR "/etc/saphira/gredist"
-#define DEFAULT_STATS_PATH "/run/saphira/gredist"
+#define DEFAULT_STATS_PATH "/var/run/saphira/gredist"
 
 static int opt_syslog = 0;
 static volatile sig_atomic_t do_quit = 0;

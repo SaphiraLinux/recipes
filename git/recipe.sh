@@ -19,6 +19,8 @@ recipe_build()
 {
 	cd "$SRC"
 	./configure --prefix=/usr --with-perl=/usr/bin/perl \
+		--sysconfdir=/etc \
+		--localstatedir=/var \
 		--with-curl --with-expat --with-openssl --with-zlib
 	make -j${JOBS:-$(nproc)} NO_TCLTK=YesPlease \
 		NO_RUST=YesPlease USE_LIBPCRE2=YesPlease \

@@ -28,6 +28,7 @@ makedepends="
 recipe_build()
 {
 	./configure --prefix=/usr --sysconfdir=/etc \
+		--localstatedir=/var \
 		--disable-cairo --disable-libxml2
 	make -j${JOBS:-$(nproc)}
 }

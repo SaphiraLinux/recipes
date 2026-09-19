@@ -26,7 +26,7 @@ recipe_build()
 {
 	autoreconf -fi
 	export CFLAGS="-fPIC ${CFLAGS--O2}"
-	./configure --prefix=/usr
+	./configure --prefix=/usr --sysconfdir=/etc --localstatedir=/var
 	make -j${JOBS:-$(nproc)}
 }
 

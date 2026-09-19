@@ -17,6 +17,10 @@ start_pre()
 {
 	checkpath -d -o clamav:clamav -m 0750 /var/run/clamav /var/log/clamav
 	checkpath -d -o clamav:clamav -m 0755 /var/lib/clamav
+	# Stale socket from an unclean shutdown blocks bind (no
+	# daemon-side reclaim found in source); start_pre runs only
+	# when OpenRC is about to start the daemon.
+	rm -f /var/run/clamav/clamd.sock
 	ebegin "Checking clamd configuration"
 	out=$(/usr/sbin/clamd --config-file=/etc/clamav/clamd.conf --check-config 2>&1) ||
 		eend 1 "$out"

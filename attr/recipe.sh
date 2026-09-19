@@ -16,7 +16,7 @@ recipe_build() {
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$RECIPE_DIR/files/attr-2.5.2.tar.xz"
 	cd "$SRC"
 	echo "$attr_sha256  $RECIPE_DIR/files/attr-2.5.2.tar.xz" | sha256sum -c -
-	CFLAGS="-D_GNU_SOURCE -include libgen.h ${CFLAGS:--O2}" ./configure --prefix=/usr --sysconfdir=/etc --libdir=/usr/lib --disable-nls
+	CFLAGS="-D_GNU_SOURCE -include libgen.h ${CFLAGS:--O2}" ./configure --prefix=/usr --sysconfdir=/etc --libdir=/usr/lib --disable-nls --localstatedir=/var
 	make -j${JOBS:-$(nproc)}
 }
 recipe_install() {

@@ -28,7 +28,7 @@ makedepends="
 recipe_build()
 {
 	cd src
-	./configure --prefix=/usr --enable-plugin=/usr/include
+	./configure --prefix=/usr --sysconfdir=/etc --enable-plugin=/usr/include --localstatedir=/var
 	make -j${JOBS:-$(nproc)} CFLAGS="-g -O2 -fno-strict-aliasing -Wall -Wstrict-prototypes -std=gnu99 \$(DEFINES) \$(PATHS) -Ilibevent"
 }
 

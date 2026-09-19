@@ -44,6 +44,8 @@ recipe_build()
 	cd "$SRC"
 	autoreconf -i
 	./configure --prefix=/usr \
+		--sysconfdir=/etc \
+		--localstatedir=/var \
 		--with-gnutls \
 		--with-seccomp \
 		--with-tss-user=root \

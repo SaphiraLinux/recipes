@@ -12,20 +12,24 @@ url=https://libzip.org/
 source=https://github.com/nih-at/libzip/releases/download/v${pkgver}/libzip-${pkgver}.tar.gz
 sha256=82e9f2f2421f9d7c2466bbc3173cd09595a88ea37db0d559a9d0a2dc60dc722e
 
-depends="zlib musl-fts"
-depends_dev="musl-fts-dev"
+depends="zlib musl-fts bzip2 xz zstd openssl"
+depends_dev="musl-fts-dev bzip2-dev xz-dev zstd-dev openssl-dev"
 makedepends="
 	cmake
 	gcc
 	make
 	zlib-dev
 	musl-fts-dev
+	bzip2-dev
+	xz-dev
+	zstd-dev
+	openssl-dev
 "
 
 subpackages="$pkgname-dev"
 
-# Optional codecs (bzip2, zstd, xz, openssl crypto) stay off until their
-# recipes land; core zip read/write works with zlib only.
+# Full codec scope: bzip2, lzma, zstd and OpenSSL crypto (zip AES
+# encryption) — all four backing stacks are native now.
 recipe_build()
 {
 	cmake -S "$SRC" -B "$BUILDDIR" \
@@ -35,10 +39,10 @@ recipe_build()
 		-DBUILD_DOC=OFF \
 		-DBUILD_EXAMPLES=OFF \
 		-DBUILD_REGRESS=OFF \
-		-DENABLE_BZIP2=OFF \
-		-DENABLE_LZMA=OFF \
-		-DENABLE_ZSTD=OFF \
-		-DENABLE_OPENSSL=OFF \
+		-DENABLE_BZIP2=ON \
+		-DENABLE_LZMA=ON \
+		-DENABLE_ZSTD=ON \
+		-DENABLE_OPENSSL=ON \
 		-DENABLE_GNUTLS=OFF \
 		-DENABLE_MBEDTLS=OFF \
 		-DENABLE_COMMONCRYPTO=OFF

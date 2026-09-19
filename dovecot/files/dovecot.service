@@ -4,7 +4,8 @@ After=network.target
 
 [Service]
 Type=forking
-PIDFile=/run/dovecot/master.pid
+PIDFile=/var/run/dovecot/master.pid
+ExecStartPre=/usr/bin/install -d -m 0755 /var/run/dovecot
 ExecStartPre=/usr/sbin/dovecot -c /etc/dovecot/dovecot.conf configtest
 ExecStart=/usr/sbin/dovecot
 ExecReload=/bin/kill -HUP $MAINPID

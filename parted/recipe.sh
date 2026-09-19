@@ -21,6 +21,7 @@ recipe_build() {
 	# from util-linux.
 	./configure --prefix=/usr \
 		--sysconfdir=/etc \
+		--localstatedir=/var \
 		--disable-nls \
 		--without-readline \
 		--disable-device-mapper \

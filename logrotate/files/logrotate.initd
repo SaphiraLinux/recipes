@@ -1,0 +1,14 @@
+#!/sbin/openrc-run
+# One-shot log rotation. There is no daemon to supervise: run
+# `rc-service logrotate start` manually, or leave scheduling to
+# /etc/cron.daily/logrotate under cronie/anacron.
+
+description="Rotate log files (logrotate)"
+
+command="/usr/sbin/logrotate"
+command_args="/etc/logrotate.conf"
+
+depend()
+{
+	use net dns logger
+}

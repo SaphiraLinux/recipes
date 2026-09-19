@@ -4,6 +4,7 @@ After=network.target
 
 [Service]
 Type=simple
+ExecStartPre=/usr/bin/install -d -m 0755 /var/run/kea
 ExecStart=/usr/sbin/kea-ctrl-agent -c /etc/kea/kea-ctrl-agent.conf
 Restart=on-failure
 
