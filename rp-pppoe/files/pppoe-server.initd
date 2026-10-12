@@ -1,0 +1,18 @@
+#!/sbin/openrc-run
+
+description="PPPoE server"
+
+# pppoe-server is a long-running PPPoE daemon. It requires the rp-pppoe pppd
+# plugin, which this package installs under /usr/lib/pppd/<version>/; if
+# that plugin is missing the daemon cannot start, so the check is explicit
+# rather than an opaque pppd failure.
+command="/usr/sbin/pppoe-server"
+command_args="/etc/ppp/pppoe-server-options"
+supervisor="supervise-daemon"
+
+depend()
+{
+	need localmount
+	use net
+	after bootmisc
+}

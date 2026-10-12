@@ -1624,6 +1624,13 @@ def gate_staged(conn: sqlite3.Connection, apk_bin: str, staged_accounts_path: st
             accounts = item["accounts"]
             fhs = item.get("fhs", {"dirs": [], "replaces": [], "removals": []})
             caps = item.get("caps", {"caps": []})
+            # A sysusers stanza IS a declaration: sysusers-native packages
+            # (systemd since r9) ship a fragment naming no users/groups/
+            # files because their identities live in sysusers.d confs, and
+            # makepkg generates the sysusers-running callers from exactly
+            # that stanza. Counting only users/groups/files false-refused
+            # every sysusers-native package (proven: systemd-261.2-r16).
+            # `legacy` stays out: it records the past, never a live claim.
             # A sysusers-native fragment declares its mechanism, not a
             # census: sysusers:true counts as declared (the shipped
             # sysusers.d confs are the declaration; the tree gate pins

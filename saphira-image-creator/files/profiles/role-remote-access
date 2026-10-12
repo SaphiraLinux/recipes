@@ -1,0 +1,5 @@
+# Role layer: hardened remote administration.
+# Layered on top of role-networking; openssh is already in the minimal
+# profile, so this adds the server side explicitly plus host key tooling.
+openssh
+ca-certificates

@@ -1,0 +1,95 @@
+From 407b242a498a417aaa7fce77b5177a8d03d2f97e Mon Sep 17 00:00:00 2001
+From: Gregory Price <gourry@gourry.net>
+Date: Thu, 9 Jul 2026 00:10:52 -0700
+Subject: [PATCH] mm/cram: demote anonymous folios onto the CRAM tier
+
+Wire the reclaim path to place private anonymous folios onto a CRAM node.
+shrink_folio_list() diverts eligible folios (cram_folio_eligible(), from the core
+API) onto the nearest usable CRAM node by migration instead of reclaiming them,
+as a service distinct from tiering demotion.  Migration failures fall back to the
+normal reclaim path.
+
+The write fence is already in place -- a write COWs off (do_wp_page) and
+migration re-installs read-only/non-exclusive -- so a demoted anon folio maps
+read-only and a write promotes it back to DRAM.
+
+Signed-off-by: Gregory Price <gourry@gourry.net>
+Assisted-by: Claude:claude-opus-4-8
+---
+ mm/vmscan.c | 37 +++++++++++++++++++++++++++++++++++++
+ 1 file changed, 37 insertions(+)
+
+diff --git a/mm/vmscan.c b/mm/vmscan.c
+index 57b6b1766dc..74fe4a6d7c5 100644
+--- a/mm/vmscan.c
++++ b/mm/vmscan.c
+@@ -1069,15 +1069,18 @@ static unsigned int shrink_folio_list(struct list_head *folio_list,
+ 	struct folio_batch free_folios;
+ 	LIST_HEAD(ret_folios);
+ 	LIST_HEAD(demote_folios);
++	LIST_HEAD(cram_folios);
+ 	unsigned int nr_reclaimed = 0, nr_demoted = 0;
+ 	unsigned int pgactivate = 0;
+ 	bool do_demote_pass;
+ 	struct swap_io_ctx ctx = {};
++	bool do_cram_pass;
+ 
+ 	folio_batch_init(&free_folios);
+ 	memset(stat, 0, sizeof(*stat));
+ 	cond_resched();
+ 	do_demote_pass = can_demote(pgdat->node_id, sc, memcg);
++	do_cram_pass = cram_can_demote(pgdat->node_id);
+ 
+ retry:
+ 	while (!list_empty(folio_list)) {
+@@ -1258,6 +1261,22 @@ retry:
+ 			continue;
+ 		}
+ 
++		/*
++		 * CRAM read-only tier: divert eligible folios onto a CRAM
++		 * private node by migration instead of reclaiming them.  Private
++		 * anonymous folios qualify (cram_folio_eligible).  They are
++		 * mapped read-only on the tier and a write promotes the folio
++		 * off it.  This is a distinct service from the tiering demotion
++		 * above.  Migration failures are handled by the normal reclaim
++		 * path.
++		 */
++		if (do_cram_pass && cram_folio_eligible(folio) &&
++		    (thp_migration_supported() || !folio_test_large(folio))) {
++			list_add(&folio->lru, &cram_folios);
++			folio_unlock(folio);
++			continue;
++		}
++
+ 		/*
+ 		 * Anonymous process memory has backing store?
+ 		 * Try to allocate it some swap space here.
+@@ -1581,6 +1600,24 @@ keep:
+ 		}
+ 	}
+ 
++	/* Migrate folios selected for CRAM demotion */
++	if (!list_empty(&cram_folios)) {
++		unsigned int nr_crammed = 0;
++
++		cram_migrate_to(&cram_folios, pgdat->node_id, MIGRATE_ASYNC,
++				MR_DEMOTION, &nr_crammed);
++		nr_reclaimed += nr_crammed;
++		stat->nr_demoted += nr_crammed;
++		/* Folios that could not be crammed go back on @folio_list */
++		if (!list_empty(&cram_folios)) {
++			list_splice_init(&cram_folios, folio_list);
++			if (!sc->proactive) {
++				do_cram_pass = false;
++				goto retry;
++			}
++		}
++	}
++
+ 	pgactivate = stat->nr_activate[0] + stat->nr_activate[1];
+ 
+ 	mem_cgroup_uncharge_folios(&free_folios);
+-- 
+2.55.0
+

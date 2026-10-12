@@ -1,0 +1,16 @@
+# Service identity declaration: slurm:153. New Saphira allocation in
+# the 0..199 package range for the Slurm daemons (SlurmUser=slurm):
+# first free ID above the highest claimed identity (152 udpdist),
+# clear of systemd's reserved block (127-131, 144, 145), and proven
+# against the full union (base-seed accounts.tsv plus every recipe
+# fragment) after 111 collided with base-seed chrony at the sign gate.
+# The name is plain `slurm` (no underscore prefix) to match SlurmUser
+# and the compiled-in defaults; renaming would force SlurmUser
+# overrides everywhere for no gain.
+# Single owner: the slurm package; slurm-accounting depends on slurm
+# so the identity exists before slurmdbd is installed.
+user slurm 153 slurm /var/lib/slurm /sbin/nologin
+group slurm 153
+dir /var/spool/slurmctld 0755 slurm slurm
+dir /var/spool/slurmd 0755 root root
+dir /var/log/slurm 0755 slurm slurm

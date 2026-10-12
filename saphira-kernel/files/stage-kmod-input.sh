@@ -41,8 +41,47 @@ die()
 	exit 1
 }
 
+# Effective settings of a .config: comments and blank lines carry no
+# meaning, and generated order must not matter, so strip and sort.
+effective_settings()
+{
+	sed -e 's/[[:space:]]*$//' "$1" 2>/dev/null |
+		grep -vE '^[[:space:]]*(#|$)' |
+		LC_ALL=C sort
+}
+
+# A tree is only fit to build external modules against if it was
+# configured EXACTLY as the published kernel is. This is checked on
+# content, never on mtime or directory name, because neither means
+# anything here: a tree left over from an older pkgrel keeps its
+# timestamp and its name while disagreeing with the running kernel.
+#
+# The check has to exist at all because these kernels build with
+# CONFIG_MODVERSIONS unset. Without symbol CRCs, vermagic is just the
+# upstream version -- "7.2.2" matches every 7.2.2 pkgrel -- so a module
+# built against the wrong tree is ACCEPTED by the loader rather than
+# rejected. It then fails quietly: different inlined decisions, a
+# different exported-symbol set (a config key that moved y->m stops
+# exporting to modules), a different CONFIG_PREFIX_SYMBOLS, and a
+# different CONFIG_MODULE_SIG_KEY. Silent ABI mismatch is the failure
+# mode that matters here, so fail closed instead of staging a guess.
+config_matches_published()
+{
+	_tree=$1
+	_canon=$2
+	[ -f "$_tree/.config" ] || return 1
+	a=$(effective_settings "$_tree/.config")
+	b=$(effective_settings "$_canon")
+	[ "$a" = "$b" ]
+}
+
 [ "$#" -eq 1 ] || die "usage: $0 OUTDIR"
 out=$1
+scriptdir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# Roots are overridable only so the provenance gate can be tested against
+# fixtures instead of the live host. Defaults are the real paths.
+src_root=${SAPHIRA_KMOD_SRC_ROOT:-/usr/src}
+boot_root=${SAPHIRA_KMOD_BOOT_ROOT:-/boot}
 key_src=${SAPHIRA_MODULE_KEY:-/etc/saphira/keys/module-signing.pem}
 
 [ -f "$key_src" ] || die "module signing key missing: $key_src"
@@ -65,10 +104,10 @@ done
 staged=0
 skipped=""
 candidates=""
-for tree in /usr/src/linux-*/; do
+for tree in "$src_root"/linux-*/; do
 	[ -d "$tree" ] || continue
 	base=${tree%/}
-	base=${base#/usr/src/}
+	base=${base#"$src_root"/}
 	rest=${base#linux-}
 	[ "$rest" != "$base" ] || {
 		skipped="$skipped ${base}(bad-name)"
@@ -84,8 +123,20 @@ for tree in /usr/src/linux-*/; do
 			kver=$rest
 			;;
 	esac
+	# Release candidates ride along: 7.3-rc1 is a shipped kernel line
+	# with per-kernel kmod recipes waiting (saphira-zfs-7.3-rc1,
+	# nvidia-open-7.3-rc1, saphira-drbd9-7.3-rc1), but the old guard
+	# below skipped it as bad-name, so no rc kmod could ever stage.
+	# Anything else non-numeric is still refused.
 	case $kver in
-		''|*[!0-9.]*)
+		[0-9][0-9.]*)
+			;;
+		[0-9][0-9.]*-rc[0-9]*)
+			case $kver in
+				*[!0-9.A-Za-z_-]*|*..*) skipped="$skipped ${kver}(bad-name)"; continue ;;
+			esac
+			;;
+		*)
 			skipped="$skipped ${kver}(bad-name)"
 			continue
 			;;
@@ -97,6 +148,41 @@ for tree in /usr/src/linux-*/; do
 	if [ ! -x "$tree/scripts/sign-file" ]; then
 		skipped="$skipped $kver(sign-file-not-built)"
 		continue
+	fi
+	# Fail closed unless the tree is provably configured as the published
+	# kernel for this version is. A stale tree is reported, never staged.
+	# The authority is the config the PUBLISHED kernel package ships
+	# (/boot/config-<kver>-akadata), not the recipe's template: the
+	# template is an input to "make olddefconfig", so the built config
+	# legitimately differs from it (toolchain version, symbols the
+	# Kconfig tree drops or renames). The tree and the running kernel
+	# must agree with EACH OTHER, and that shared file is what says so.
+	published=$boot_root/config-$kver-akadata
+	if [ ! -f "$published" ]; then
+		skipped="$skipped $kver(no-published-config)"
+		continue
+	fi
+	if ! config_matches_published "$tree" "$published"; then
+		skipped="$skipped $kver(config-not-published-$kver)"
+		continue
+	fi
+	[ -r "$tree/include/config/kernel.release" ] || {
+		skipped="$skipped $kver(no-kernel-release)"
+		continue
+	}
+	treerel=$(cat "$tree/include/config/kernel.release")
+	if [ "$treerel" != "$kver" ]; then
+		# Release candidates report a three-part release (7.3.0-rc1)
+		# for a two-part tree version (7.3-rc1); that exact mapping is
+		# accepted because the kmod recipes address the tree by KVER_SHORT
+		# while installing under the Makefile-derived KREL. Anything else
+		# is still a mismatch.
+		rc_base=${kver%-rc*}
+		rc_n=${kver##*-rc}
+		if [ "$rc_base" = "$kver" ] || [ "$treerel" != "$rc_base.0-rc$rc_n" ]; then
+			skipped="$skipped $kver(release-$treerel)"
+			continue
+		fi
 	fi
 	candidates="$candidates $kver:$suffix:$tree"
 done

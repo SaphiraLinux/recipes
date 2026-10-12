@@ -1,0 +1,26 @@
+[Unit]
+Description=DRBD replicated block devices
+Documentation=man:drbdadm(8)
+# `drbdadm up all` is a synchronous resource activation, not a long
+# running process: the daemon is the in-kernel drbd module. So this is a
+# oneshot that has to stay "active" afterwards, or systemd considers the
+# unit finished and `systemctl stop` becomes a no-op.
+After=systemd-modules-load.service network.target
+Wants=network.target
+
+[Service]
+Type=oneshot
+# Mirrors files/drbd.initd start(): `drbdadm up all || fail`. That start()
+# FAILS when no resources are defined yet, which is a legitimate state on
+# a freshly installed host, so guard it the same way the init script's own
+# error message implies rather than wedging the unit.
+ExecCondition=/bin/sh -c 'test -f /etc/drbd.conf || ls /etc/drbd.d/*.conf >/dev/null 2>&1'
+ExecStart=/usr/sbin/drbdadm up all
+ExecReload=/usr/sbin/drbdadm reload all
+ExecStop=/usr/sbin/drbdadm down all
+RemainAfterExit=yes
+# Deliberately NOT set: Restart=. Never restart a oneshot that has
+# already created block devices.
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,21 @@
+# saphira-router control-plane identity.
+#
+# The core needs NO privileged socket and NO hardware access, so it does not
+# run as root (D1 section 8). Anything genuinely privileged is performed at a
+# helper/drone boundary on the managed host, never here.
+#
+# UID/GID namespace: 0..199 preferred, 888..999 forbidden, 1000+ human.
+#
+# 151 is allocated in package-name order from 147, the first free ID above the
+# highest claimed identity (146 openldap), clear of hatchling's systemd block
+# (127-131, 144, 145). The choice is verified against BOTH acceptance hosts,
+# not one: 127 is free on egg but is systemd-network on hatchling.
+#
+# It is NOT the 132 this fragment previously declared. 132 avoided systemd's
+# block but collided with qmail, which is published - a package the earlier
+# check did not consult. saphira-router is unpublished and disabled, so the
+# move costs no migration and needs no legacy sidecar.
+group saphira-router 151
+user saphira-router 151 saphira-router /var/lib/saphira-router /sbin/nologin
+dir  /var/lib/saphira-router 0750 saphira-router saphira-router
+dir  /run/saphira-router 0755 saphira-router saphira-router

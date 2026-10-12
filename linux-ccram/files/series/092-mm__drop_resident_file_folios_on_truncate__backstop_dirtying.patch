@@ -1,0 +1,73 @@
+From 49a886e734aad5a10ef26dfdca904820ed187ab9 Mon Sep 17 00:00:00 2001
+From: Gregory Price <gourry@gourry.net>
+Date: Thu, 9 Jul 2026 00:18:47 -0700
+Subject: [PATCH] mm: drop resident file folios on truncate; backstop dirtying
+
+A resident CRAM file folio maps a read-only device, so a partial truncate or
+hole-punch must not zero it in place.  It is clean by construction, so
+truncate_inode_partial_folio() drops it instead: the kept portion refaults from
+the fs and the zeroed portion refaults as zeros once the fs frees the blocks --
+no in-place device write.
+
+folio_mark_dirty() gains a VM_WARN backstop: a clean file folio on a write-fenced
+node should never be dirtied, since every byte writer promotes it off first.
+Anon folios on the node are swapbacked and are legitimately dirtied on swap-out,
+so they are excluded.
+
+Inert until file folios are placed on such a node.
+
+Signed-off-by: Gregory Price <gourry@gourry.net>
+Assisted-by: Claude:claude-opus-4-8
+---
+ mm/page-writeback.c | 10 ++++++++++
+ mm/truncate.c       | 13 +++++++++++++
+ 2 files changed, 23 insertions(+)
+
+diff --git a/mm/page-writeback.c b/mm/page-writeback.c
+index 47495be6859..41a7d0a6712 100644
+--- a/mm/page-writeback.c
++++ b/mm/page-writeback.c
+@@ -2769,6 +2769,16 @@ bool folio_mark_dirty(struct folio *folio)
+ {
+ 	struct address_space *mapping = folio_mapping(folio);
+ 
++	/*
++	 * Write-fence backstop.  A clean file folio on a write-fenced node is
++	 * clean by construction and every byte writer promotes it off first, so
++	 * it must never be dirtied here.  Anon and shmem folios on the node are
++	 * swapbacked and are legitimately dirtied on the swap-out path by kswapd,
++	 * so folio_test_swapbacked() excludes them.
++	 */
++	VM_WARN_ON_FOLIO(node_write_fenced(folio_nid(folio)) &&
++			 !folio_test_swapbacked(folio), folio);
++
+ 	if (likely(mapping)) {
+ 		/*
+ 		 * readahead/folio_deactivate could remain
+diff --git a/mm/truncate.c b/mm/truncate.c
+index b58ba940be4..c9563aed0d7 100644
+--- a/mm/truncate.c
++++ b/mm/truncate.c
+@@ -237,6 +237,19 @@ bool truncate_inode_partial_folio(struct folio *folio, loff_t start, loff_t end)
+ 		return true;
+ 	}
+ 
++	/*
++	 * A folio on a write-fenced node, such as a resident CRAM tier, maps a
++	 * read-only device, so folio_zero_range() below would write it in place.
++	 * That is worst for a hole-punch or zero-range, whose zeroed region is kept
++	 * as live data.  The folio is clean by construction, so drop it instead.
++	 * The kept portion refaults from the fs.  The zeroed portion refaults as
++	 * zeros once the fs frees the blocks, with no in-place device write.
++	 */
++	if (node_write_fenced(folio_nid(folio))) {
++		truncate_inode_folio(folio->mapping, folio);
++		return true;
++	}
++
+ 	/*
+ 	 * We may be zeroing pages we're about to discard, but it avoids
+ 	 * doing a complex calculation here, and then doing the zeroing
+-- 
+2.55.0
+

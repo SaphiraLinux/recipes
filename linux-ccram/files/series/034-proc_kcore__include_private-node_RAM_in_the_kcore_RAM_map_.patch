@@ -1,0 +1,42 @@
+From 306f892a8ed786344723a44f07c702e82c3f2113 Mon Sep 17 00:00:00 2001
+From: Gregory Price <gourry@gourry.net>
+Date: Sat, 13 Jun 2026 15:25:09 -0700
+Subject: [PATCH] proc/kcore: include private-node RAM in the kcore RAM map
+
+The kcore_ram_list bounds its scan at the highest pfn in N_MEMORY.
+
+As a result, private nodes placed above the last N_MEMORY node, which is
+the common case for device/CXL memory - is truncated out of /proc/kcore.
+
+Include N_MEMORY_PRIVATE nodes in the scan boundary.  /proc/kcore is
+root-only (CAP_SYS_RAWIO), so this exposes nothing new - it just lets
+a debugger read private-node memory like any other RAM.
+
+Signed-off-by: Gregory Price <gourry@gourry.net>
+---
+ fs/proc/kcore.c | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/fs/proc/kcore.c b/fs/proc/kcore.c
+index 390547b992a..f67194dc2a9 100644
+--- a/fs/proc/kcore.c
++++ b/fs/proc/kcore.c
+@@ -251,11 +251,14 @@ static int kcore_ram_list(struct list_head *list)
+ {
+ 	int nid, ret;
+ 	unsigned long end_pfn;
++	nodemask_t mem;
+ 
+ 	/* Not initialized....update now */
+ 	/* find out "max pfn" */
+ 	end_pfn = 0;
+-	for_each_node_state(nid, N_MEMORY) {
++	/* Include private node memory in the scan */
++	nodes_or(mem, node_states[N_MEMORY], node_states[N_MEMORY_PRIVATE]);
++	for_each_node_mask(nid, mem) {
+ 		unsigned long node_end;
+ 		node_end = node_end_pfn(nid);
+ 		if (end_pfn < node_end)
+-- 
+2.55.0
+

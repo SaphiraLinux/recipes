@@ -1,0 +1,117 @@
+From 14d4f54f330709bcf8f4b05e58fc91b73a621de4 Mon Sep 17 00:00:00 2001
+From: Gregory Price <gourry@gourry.net>
+Date: Fri, 12 Jun 2026 06:58:08 -0700
+Subject: [PATCH] mm: add NODE_PRIVATE_CAP_LTPIN for private node folio pinning
+
+Add NODE_PRIVATE_CAP_LTPIN so a node can opt back into gup pins.
+
+An opted-in node is then pinned exactly like ordinary memory, or
+migrated and pinned if in ZONE_MOVABLE.
+
+Signed-off-by: Gregory Price <gourry@gourry.net>
+---
+ include/linux/node_private.h | 29 +++++++++++++++++++++++++++++
+ mm/gup.c                     |  3 ++-
+ mm/internal.h                |  9 +++++----
+ 3 files changed, 36 insertions(+), 5 deletions(-)
+
+diff --git a/include/linux/node_private.h b/include/linux/node_private.h
+index 5c3e070ed0d..6f568bc0d46 100644
+--- a/include/linux/node_private.h
++++ b/include/linux/node_private.h
+@@ -17,6 +17,7 @@ struct page;
+ #define NODE_PRIVATE_CAP_HOTUNPLUG	(1UL << 2)	/* allow hot-unplug */
+ #define NODE_PRIVATE_CAP_DEMOTION	(1UL << 3)	/* allow tiering demotion */
+ #define NODE_PRIVATE_CAP_NUMA_BALANCING	(1UL << 4)	/* allow NUMA balancing */
++#define NODE_PRIVATE_CAP_LTPIN		(1UL << 5)	/* allow GUP pins */
+ 
+ /**
+  * struct node_private - Per-node container for N_MEMORY_PRIVATE nodes
+@@ -167,6 +168,29 @@ static inline bool node_allows_numa_balancing(int nid)
+ 	return ret;
+ }
+ 
++/**
++ * node_allows_ltpin - may a folio on this node be long-term GUP-pinned?
++ * @nid: the node to test
++ *
++ * Opted-out private nodes cause longterm pins to outright fail regardless
++ * of ZONE placement (NORMAL would allow, MOVABLE would migrate first).
++ *
++ * Opted-in private nodes allow longterm pins to operate normally.
++ */
++static inline bool node_allows_ltpin(int nid)
++{
++	struct node_private *np;
++	bool ret;
++
++	if (!node_state(nid, N_MEMORY_PRIVATE))
++		return true;
++	rcu_read_lock();
++	np = rcu_dereference(NODE_DATA(nid)->node_private);
++	ret = np && (np->caps & NODE_PRIVATE_CAP_LTPIN);
++	rcu_read_unlock();
++	return ret;
++}
++
+ #else /* !CONFIG_NUMA */
+ 
+ static inline bool folio_is_private_node(struct folio *folio)
+@@ -209,6 +233,11 @@ static inline bool node_allows_numa_balancing(int nid)
+ 	return true;
+ }
+ 
++static inline bool node_allows_ltpin(int nid)
++{
++	return true;
++}
++
+ #endif /* CONFIG_NUMA */
+ 
+ #if defined(CONFIG_NUMA) && defined(CONFIG_MEMORY_HOTPLUG)
+diff --git a/mm/gup.c b/mm/gup.c
+index a7d4de22378..1e313aa590b 100644
+--- a/mm/gup.c
++++ b/mm/gup.c
+@@ -547,7 +547,8 @@ static struct folio *try_grab_folio_fast(struct page *page, int refs,
+ 	/*
+ 	 * Can't do FOLL_LONGTERM + FOLL_PIN gup fast path if not in a
+ 	 * right zone, so fail and let the caller fall back to the slow
+-	 * path.  Fail for private-node folios here so slow path rejects.
++	 * path.  Fail for non-opted-in private node folios here so the
++	 * slow path can reject the pin entirely.
+ 	 */
+ 	if (unlikely((flags & FOLL_LONGTERM) &&
+ 		     !folio_allows_longterm_pin(folio))) {
+diff --git a/mm/internal.h b/mm/internal.h
+index 01ab8b32b0b..9621eb127c2 100644
+--- a/mm/internal.h
++++ b/mm/internal.h
+@@ -146,19 +146,20 @@ static inline bool folio_allows_numa_balance(struct folio *folio)
+ static inline bool folio_allows_longterm_pin(struct folio *folio)
+ {
+ 	return folio_is_longterm_pinnable(folio) &&
+-	       !folio_is_private_node(folio);
++	       node_allows_ltpin(folio_nid(folio));
+ }
+ 
+ /*
+  * folio_longterm_pin_forbidden() - must a longterm pin of this folio fail
+  * outright (neither pinned in place nor migrated off the node)?
+  *
+- * True for any folio on a private node: such memory can be neither pinned
+- * nor migrated, so the pin must be rejected with the folio left in place.
++ * True only for a folio on a private node that did not opt into longterm
++ * pinning (NODE_PRIVATE_CAP_LTPIN); node_allows_ltpin() is true for ordinary
++ * nodes and for opted-in private nodes, so this never trips them.
+  */
+ static inline bool folio_longterm_pin_forbidden(struct folio *folio)
+ {
+-	return folio_is_private_node(folio);
++	return !node_allows_ltpin(folio_nid(folio));
+ }
+ 
+ /*
+-- 
+2.55.0
+

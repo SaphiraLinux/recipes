@@ -1,0 +1,29 @@
+#!/sbin/openrc-run
+
+description="Validating, recursive, caching DNS resolver (unbound)"
+
+# unbound starts as root, binds port 53 (and 853 with tls), then drops to
+# the unbound user configured by --with-username=unbound and chowns its
+# own state. It must therefore be started privileged and must NOT be given
+# a User= here.
+#
+# -d keeps it in the foreground under supervise-daemon.
+command="/usr/sbin/unbound"
+command_args="-d -c /etc/unbound/unbound.conf"
+supervisor="supervise-daemon"
+pidfile="/run/unbound.pid"
+
+depend()
+{
+	need localmount
+	use net
+	after firewall
+}
+
+start_pre()
+{
+	# Fail with a clear message rather than a daemon that starts and
+	# then silently refuses to answer: a bad config is the common case
+	# and unbound-checkconf is the authoritative parser.
+	/usr/sbin/unbound-checkconf /etc/unbound/unbound.conf || return 1
+}

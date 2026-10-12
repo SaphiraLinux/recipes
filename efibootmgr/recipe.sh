@@ -15,7 +15,7 @@ makedepends="efivar-dev gcc make pkgconf popt-dev"
 
 recipe_build() {
 	# musl-gettext.patch (worker-applied) stubs the i18n macros for
-	# musl (proven akadata decision). EFIDIR groups our boot entries.
+	# musl (proven Saphira decision). EFIDIR groups our boot entries.
 	make -C "$SRC" -j${JOBS:-$(nproc)} PCDIR=/usr/lib/pkgconfig EFIDIR=Saphira
 }
 

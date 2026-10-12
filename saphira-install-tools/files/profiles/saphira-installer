@@ -1,0 +1,73 @@
+# Installer userspace: everything needed to INSTALL a machine, and nothing
+# needed to BE one.
+#
+# This is deliberately not a variant of base-system. An installer has a
+# different job and a different cost centre. It must be able to partition,
+# make filesystems, fetch and verify a package index, configure a network
+# and run the canonical installer tooling against a fresh root. It does not
+# need to be a working server, and it must not carry a kernel, an init
+# system or the kernel's prepared development tree merely to do its job.
+#
+# The bootable installer payload is this profile PLUS a kernel PLUS an
+# initramfs. Those are joined later, once saphira-initramfs-tools exists;
+# until then the payload is userspace only, and pretending otherwise would
+# put a kernel in every test of the installation path.
+#
+# Intentions ONLY: the package manager owns dependency closure. Never
+# enumerate resolved dependencies here; prove the closure with the
+# repository index instead (see saphira-profiles(5)).
+
+# The installer runtime, and the layout it installs into.
+musl
+saphira-base-abi
+saphira-baselayout
+bash
+coreutils
+# The installer tooling is POSIX shell and it uses find(1) and awk. These are
+# not incidental conveniences: saphira-install refuses a non-empty target with
+# find, and saphira-bootstrap builds its package list with awk, so without
+# them the installer cannot run at all. mawk rather than gawk, per the clean-
+# root policy recorded in the mawk recipe.
+findutils
+mawk
+
+# Storage: partition tables, filesystem creation, discovery, mounting.
+util-linux
+e2fsprogs
+dosfstools
+
+# The package manager. The central operation of an install is
+#   apk ... --root <new-root> ...
+# against the canonical repository configured in /etc/apk/repositories.
+apk-tools
+
+# Fetching and verifying that repository. Repository policy belongs to APK
+# configuration, never to the installer: /etc/apk/repositories is the single
+# source of truth, and no tool here may substitute a path of its own.
+openssl
+ca-certificates
+wget
+zlib
+
+# Networking: the installer has to be able to configure an interface and
+# resolve a name in order to be usable over SSH.
+iproute2
+iputils
+dhcpcd
+
+# Remote installation is the point of many installs.
+# openssh is ONE package, carrying both the client and sshd; there is no
+# openssh-server.
+openssh
+# vim, because this is Saphira.
+vim
+
+# Bootloader installation happens AFTER the destination is populated, from
+# the installer, for BIOS and UEFI alike.
+grub
+efibootmgr
+
+# The canonical installation tooling itself. It is what turns a profile and
+# an empty directory into a coherent system, so the installer carries the
+# same tools it will use on its target rather than a reimplementation.
+saphira-install-tools

@@ -1,0 +1,17 @@
+--- a/src/common/macros.h
++++ b/src/common/macros.h
+@@ -60,6 +60,14 @@
+ #  define MIN(a,b) ((a) < (b) ? (a) : (b))
+ #endif
+ 
++/* W_EXITCODE is glibc-only (sys/wait.h); musl omits it. Slurm
++ * builds wait statuses with it in slurmstepd/srun, so provide
++ * glibc's identical construction here, guarded so glibc keeps
++ * its own definition. Saphira/musl port patch. */
++#ifndef W_EXITCODE
++#  define W_EXITCODE(ret, sig) ((ret) << 8 | (sig))
++#endif
++
+ #ifndef ROUNDUP
+ #  define ROUNDUP(a,b) ((a + (b - 1)) / b)
+ #endif

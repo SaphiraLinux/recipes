@@ -1,0 +1,160 @@
+.TH SAPHIRA-BRIDGE 1 "2026" "saphira-bridge" "Saphira Linux"
+.SH NAME
+saphira-bridge \- a tiny userspace Ethernet MAC-learning bridge
+.SH SYNOPSIS
+.B saphira-bridge
+.RB \-c
+.I CONFIG
+.RB [ \-n
+.IR NAME ]
+.RB [ \-\-check ]
+.SH DESCRIPTION
+.B saphira-bridge
+joins two or more interfaces into one Layer 2 segment. It learns which port each
+source hardware address is on, forwards known unicast traffic to that port alone,
+floods unknown and group traffic to every port except the one a frame arrived on,
+and expires addresses it has not seen for a while.
+.PP
+Linux retains ownership of ARP, NDP, IP, routing and NAT.
+.B saphira-bridge
+implements none of them. That is deliberate: a second neighbour resolver would
+disagree with the first in ways that are indistinguishable from a genuine
+duplicate-address event, and a lab segment needs no gateway. Every stack on the
+segment therefore behaves exactly as it would behind a kernel bridge.
+.PP
+The configuration language is deliberately small: which ports, how long an
+address may sit unseen, and how many addresses may be held. Unknown keys are
+refused rather than ignored, so that a typo cannot silently leave a port
+unbridged.
+.SH BOUNDARIES
+This is a lab instrument, not a network stack. There is no VLAN support, no
+spanning tree, no OpenFlow, no tunnelling, no QoS and no bonding. Those belong to
+OVS and to
+.BR saphira-network ,
+which already exist.
+.PP
+VLAN-tagged frames are refused and counted rather than handled. A tagged frame's
+real destination is not at offset 0 and its real ethertype is not at offset 12,
+so forwarding it untagged would hand the next port a frame whose headers mean
+something else entirely.
+.PP
+There is no loop prevention. A source address seen on two ports is counted as a
+move and reported, because that is what a loop looks like from inside a bridge,
+but nothing is repaired: silently healing a miswired topology hides the mistake
+that caused it.
+.B THE TOPOLOGY MUST BE A TREE.
+.SH FORWARDING RULES
+.TP
+.B unicast source
+Learned against the port it arrived on. A group address as a source teaches the
+table nothing, because a table that takes a group's word for who it speaks for can
+be fed a forged mapping for a legitimate host. The frame still forwards.
+.TP
+.B known unicast
+Sent to the learned port only.
+.TP
+.B unknown unicast
+Flooded, and counted, so a segment flooding far more than it should is visible
+rather than merely slow.
+.TP
+.B broadcast and multicast
+Flooded to every port except the ingress port. Never back out the port a frame
+arrived on. Multicast is treated as broadcast: there is no IGMP or MLD snooping.
+.TP
+.B self-addressed
+A frame whose destination is the address it arrived from is dropped and counted
+rather than reflected, because reflecting it is how a loop multiplies itself.
+.TP
+.B 802.1D reserved
+.BR 01:80:c2:00:00:00 " through " 01:80:c2:00:00:0f
+are neither learnt nor forwarded. A bridge that floods other bridges' control
+frames is a bridge that can be steered by them.
+.SH ADDRESS TABLE
+The table is bounded and ages.
+.I age_secs
+(default 300, the Linux bridge default) sets how long an address may sit unseen
+before it is dropped;
+.I max_entries
+sets the ceiling. Both are load-bearing: the table is filled from addresses
+appearing in incoming frames, so without a bound it is a memory exhaustion target,
+and without ageing a lab that recreates its interfaces fills it with dead entries
+within a few runs.
+.PP
+When the table is full, expired entries are reclaimed first. Only if that frees
+nothing is the least recently seen address given up, counted as
+.BR evicted .
+A full table is not by itself a reason to drop a live host.
+.SH CONFIGURATION
+.TP
+.BI port= NAME
+An interface to bridge. Repeatable. At least two are required. A repeated name is
+refused, because it would make "the port this frame arrived from" ambiguous and
+every flood would echo back into the sender.
+.TP
+.BI age_secs= SECONDS
+1 to 86400. Default 300.
+.TP
+.BI max_entries= COUNT
+8 to 65536. Default 4096.
+.TP
+.BI promiscuous= 0|1
+Default 1. A bridge must see frames that are not addressed to it.
+.TP
+.BI uid= N
+.TQ
+.BI gid= N
+The account to drop to once the ports are open. Default 128.
+.SH SIGNALS
+.TP
+.B SIGUSR1
+Dump counters, per port and in total.
+.TP
+.B SIGHUP
+Reload
+.IR age_secs .
+A reload that would change the port set is refused, because that would drop the
+address table and a new packet socket cannot be opened after the privilege drop.
+.TP
+.B SIGTERM
+Shut down and print a final summary.
+.SH PRIVILEGE
+Promiscuous packet sockets require
+.BR CAP_NET_ADMIN ,
+so the daemon must start privileged. It drops to
+.I uid
+immediately afterwards and retains no capability. Packet sockets are already
+established at that point, so no further privilege is needed. A reload that needs
+a new socket is therefore refused rather than attempted.
+.SH EXIT STATUS
+.TP
+.B 0
+Clean shutdown, or a successful
+.BR \-\-check .
+.TP
+.B 1
+Configuration refused, or a port could not be opened.
+.TP
+.B 2
+Usage error.
+.SH FILES
+.TP
+.I /etc/saphira/saphira-bridge.conf
+.TP
+.I /var/log/saphira-bridge.log
+.SH SEE ALSO
+.BR saphira-udpdist (1),
+.BR saphira-gredist (1),
+.BR bridge (8),
+.BR ip-link (8)
+.SH LICENSE
+BUSL-1.1.
+.SH UPSTREAM INSPIRATION
+saphira-bridge was inspired by Madhav Khosla's
+.I arp-from-scratch
+project, in particular its userspace Layer 2 MAC-learning bridge component:
+.UR https://github.com/madhavkhoslaa/arp-from-scratch
+.UE .
+No source code or implementation structure from that Rust project is copied or
+transliterated. The upstream repository carried no licence when reviewed, so this
+is an independent C implementation based on standard Ethernet bridging behaviour
+and Linux and IEEE 802.1D semantics. The credit is for the idea.

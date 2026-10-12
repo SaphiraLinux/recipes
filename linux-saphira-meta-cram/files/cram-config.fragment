@@ -1,0 +1,27 @@
+# linux-saphira-meta-cram Kconfig fragment (applied over config-7.2.2-akadata)
+#
+# Narrow by construction: only the CRAM service plus the minimal
+# DAX/KMEM/NVDIMM closure its documented test backend (dax_kmem
+# private=1) requires. No CXL_BUS, no broad CXL, no extra filesystems,
+# no debug bloat beyond what 7.2.2 already carries (DEBUG_FS=y).
+# Resolved with `make olddefconfig`; see CONFIG-DIFF-JUSTIFICATION.md.
+#
+# Release identity: distinct /lib/modules/7.2.9-meta-cram so the normal
+# 7.2.x kernels keep their module tree untouched (GRUB fallback stays).
+CONFIG_LOCALVERSION="-meta-cram"
+#
+# The service itself (bool; deps NUMA+MIGRATION+MMU+MEMORY_HOTPLUG
+# already y in the Saphira baseline).
+CONFIG_CRAM=y
+#
+# Differentiated-memory plumbing for the test backend, all modules:
+#   DAX core -> device-dax -> pmem-dax (memmap=/NFIT-provided) -> kmem
+#   (kmem onlines it; private=1 makes it N_MEMORY_PRIVATE for CRAM).
+CONFIG_DAX=m
+CONFIG_DEV_DAX=m
+CONFIG_DEV_DAX_PMEM=m
+CONFIG_DEV_DAX_KMEM=m
+# NVDIMM bus + NFIT parsing for QEMU-emulated NVDIMMs (module).
+CONFIG_LIBNVDIMM=m
+CONFIG_BLK_DEV_PMEM=m
+CONFIG_ACPI_NFIT=m

@@ -1,0 +1,25 @@
+[Unit]
+Description=GlusterFS events daemon
+Documentation=man:glustereventsd(8)
+# Mirrors `need glusterd` in files/glustereventsd.initd: the events
+# daemon is useless, and exits, without the management daemon.
+After=glusterd.service
+Requires=glusterd.service
+
+[Service]
+# Mirrors files/glustereventsd.initd: forks, told its own pid file.
+Environment=GLUSTEREVENTSD_ARGS=--pid-file /run/glustereventsd.pid
+Type=forking
+PIDFile=/run/glustereventsd.pid
+ExecStart=/usr/sbin/glustereventsd $GLUSTEREVENTSD_ARGS
+Restart=on-failure
+RestartSec=5
+
+# Deliberately NOT set: ProtectSystem=strict, PrivateDevices, or a
+# CapabilityBoundingSet. See the note in glusterd.service.
+
+PrivateTmp=yes
+ProtectHome=yes
+
+[Install]
+WantedBy=multi-user.target

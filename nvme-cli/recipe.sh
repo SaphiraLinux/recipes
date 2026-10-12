@@ -23,6 +23,7 @@ depends="
 makedepends="
     binutils
     gcc
+    gettext
     libnvme-dev
     meson
     ninja
@@ -31,7 +32,14 @@ makedepends="
 
 recipe_build()
 {
-	meson setup --prefix=/usr --sysconfdir=/etc --buildtype=release "$BUILDDIR" "$SRC"
+	# -Dtests=false: nvme-cli's test tree is written against glibc. On musl
+	# tests/cli/libmock_nvme.c overrides ioctl with glibc's unsigned-long
+	# prototype (musl declares int ioctl(int, int, ...)) and uses struct stat64,
+	# which needs a large-file feature-test macro musl does not expose by
+	# default. Nothing in the payload needs the test suite; cbuild makes the
+	# same call with '!check' in /cports/main/nvme-cli/template.py.
+	meson setup --prefix=/usr --sysconfdir=/etc --buildtype=release \
+		-Dtests=false "$BUILDDIR" "$SRC"
 	ninja -C "$BUILDDIR" -j${JOBS:-$(nproc)}
 }
 

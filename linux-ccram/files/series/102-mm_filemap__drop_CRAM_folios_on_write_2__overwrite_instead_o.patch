@@ -1,0 +1,83 @@
+From 5a98e7c45c274eb1944821074b63c75d5ab2a6d7 Mon Sep 17 00:00:00 2001
+From: Gregory Price <gourry@gourry.net>
+Date: Fri, 17 Jul 2026 15:55:52 -0700
+Subject: [PATCH] mm/filemap: drop CRAM folios on write(2) overwrite instead of
+ promoting
+
+The file-CRAM write fence in __filemap_get_folio() promotes a resident
+CRAM folio back to DRAM before any writer touches it, via a synchronous
+cram_promote_pagecache() migrate (isolate + allocate a DRAM destination +
+copy + rmap).  For a buffered write(2) that copy is wasted: the store is
+about to overwrite the folio, so its old contents need not survive.
+
+Drop the folio from the page cache instead and let the acquire's
+FGP_CREAT retry allocate a fresh DRAM folio in its place.  This turns the
+write path into the ordinary cold-cache buffered-write path -- allocate,
+memcpy, mark dirty, write back asynchronously -- the same work the write
+would do on a node with no CRAM tier, minus the synchronous promote-copy.
+A partial write reads the untouched bytes back from disk exactly as a
+cold-cache write would.
+
+Only the write(2) path is dropped: it is FGP_WRITE without FGP_FOR_MMAP,
+and holds the folio lock (FGP_LOCK) that filemap_remove_folio() requires.
+A folio mapped read-only in place cannot be dropped -- its PTEs would
+dangle -- so !folio_mapped() gates the drop and a mapped folio falls back
+to promote (migration re-points the mappings).  A shared mmap write fault
+(FGP_FOR_MMAP|FGP_WRITE) must keep the folio uptodate and likewise
+promotes.  Read acquires and the mmap read fault are unaffected: the folio
+is still served read-only in place.  CRAM folios are clean by
+construction, so no dirty/writeback data can be lost by the drop.
+
+Signed-off-by: Gregory Price <gourry@gourry.net>
+Assisted-by: Claude:claude-opus-4-8
+---
+ mm/filemap.c | 28 ++++++++++++++++------------
+ 1 file changed, 16 insertions(+), 12 deletions(-)
+
+diff --git a/mm/filemap.c b/mm/filemap.c
+index 25171f57bc0..bb0c4e93a5c 100644
+--- a/mm/filemap.c
++++ b/mm/filemap.c
+@@ -1970,23 +1970,27 @@ repeat:
+ 	}
+ 
+ 	/*
+-	 * File-CRAM write fence.  A non-mmap acquire is a byte access.  Promote the
+-	 * folio off the CRAM tier to DRAM before handing it back, so no writer ever
+-	 * touches the device.  The mmap read fault path (FGP_FOR_MMAP without
+-	 * FGP_WRITE) is exempt and maps the CRAM folio read-only in place.  A shared
+-	 * mmap write fault sets FGP_WRITE and promotes here too, because
+-	 * do_shared_fault()'s page_mkwrite() would dirty the folio in place before
+-	 * the wp promote fires.  Never serve an un-promoted CRAM folio.  A later
+-	 * write_begin() store is a kernel memcpy into it, not a fault, so it would
+-	 * bypass the PTE fences and hit the device.  cram_promote_pagecache() is
+-	 * one-shot.  A blocking caller retries via the repeat loop and converges,
+-	 * because CRAM folios are never long-term pinned.  Only NOWAIT gets -EAGAIN.
++	 * File-CRAM write fence: never hand a writer a folio on the tier.  A
++	 * write(2) overwrite (locked, FGP_WRITE, not mmap, unmapped) drops it and
++	 * reallocates on DRAM, skipping the promote-copy; anything else that would
++	 * write it promotes off the tier.  The mmap read fault (FGP_FOR_MMAP, no
++	 * FGP_WRITE) is exempt -- served read-only in place.
+ 	 */
+ 	if (unlikely(folio_is_cram(folio)) &&
+ 	    (!(fgp_flags & FGP_FOR_MMAP) || (fgp_flags & FGP_WRITE))) {
+-		if (fgp_flags & FGP_LOCK)
++		bool locked = !!(fgp_flags & FGP_LOCK);
++		bool drop = locked && (fgp_flags & FGP_WRITE) &&
++			    !(fgp_flags & FGP_FOR_MMAP) && !folio_mapped(folio);
++
++		if (drop)
++			filemap_remove_folio(folio);	/* reallocate on DRAM */
++		if (locked)
+ 			folio_unlock(folio);
+ 		folio_put(folio);
++		if (drop) {
++			folio = NULL;
++			goto no_page;
++		}
+ 		if (cram_promote_pagecache(mapping, index, fgp_flags & FGP_NOWAIT)) {
+ 			if (fgp_flags & FGP_NOWAIT)
+ 				return ERR_PTR(-EAGAIN);
+-- 
+2.55.0
+

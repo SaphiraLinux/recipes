@@ -21,6 +21,7 @@ makedepends="
     cmake
     gcc
     json-c
+    json-c-dev
     libxml2-dev
     make
     ninja
@@ -59,7 +60,7 @@ recipe_build()
 		-DENABLE_EXAMPLES=OFF -DENABLE_STATIC_LIB=OFF \
 		-DENABLE_SHARED_LIB=ON -DENABLE_JSON_SHARED=ON \
 		-DDO_NOT_SET_RPATH=ON
-	CARGO_NET_OFFLINE=true RUSTFLAGS="-Clink-arg=-no-pie" ninja -C "$BUILDDIR" clamdscan
+	CARGO_NET_OFFLINE=true ninja -C "$BUILDDIR" clamdscan
 }
 
 recipe_install()

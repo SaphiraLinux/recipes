@@ -1,0 +1,34 @@
+[Unit]
+Description=Connection tracking daemon (conntrackd)
+Documentation=man:conntrackd(8)
+# conntrackd reads and writes the nf_conntrack table, so the module must
+# be loaded before it starts or every table operation fails.
+After=systemd-modules-load.service network-online.target
+Wants=network-online.target
+
+[Service]
+# Mirrors files/conntrackd.initd. -f keeps it in the foreground, so
+# Type=simple and there is no pidfile to track.
+Type=simple
+ExecStart=/usr/sbin/conntrackd -f
+# /run/conntrackd holds the default control socket
+# (conntrackd.ctl) and the events socket.
+RuntimeDirectory=conntrackd
+RuntimeDirectoryMode=0755
+Restart=on-failure
+RestartSec=2
+
+# conntrackd programs and reads the kernel netfilter state, so it needs
+# CAP_NET_ADMIN. Deliberately NOT set: ProtectKernelTunables=** -- this
+# daemon's entire job is netfilter state, so locking that down is exactly
+# the wrong hardening. No User= either: reading the conntrack table is
+# privileged and there is no upstream privilege-drop configuration.
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN
+NoNewPrivileges=yes
+ProtectHome=yes
+ReadOnlyPaths=/etc/conntrackd
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target

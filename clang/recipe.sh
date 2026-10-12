@@ -2,7 +2,7 @@
 
 pkgname=clang
 pkgver=22.1.8
-pkgrel=1
+pkgrel=2
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="C language family frontend for LLVM (clang and clang++)"
 license="Apache-2.0 WITH LLVM-exception"
@@ -32,6 +32,13 @@ makedepends="
 # linked against libclang.dylib-style shared library; tests/examples
 # off; static analyzer on. libclang.so and clang-c headers are removed
 # at install exactly as in v0 (libclang is a separate future port).
+# The BPF backend is a property of THIS build, not merely of the installed
+# LLVM. When llvm gained the BPF target, the already-installed clang still
+# failed `clang -target bpf` against the new libLLVM, while
+# `llvm-config --targets-built` correctly reported "X86 BPF": the driver
+# resolves its target list from what it was compiled with, so the shared
+# libLLVM alone is not enough. Rebuild clang whenever llvm's target list
+# changes.
 recipe_build()
 {
 	cmake -G Ninja "$SRC/clang" -B "$BUILDDIR" \

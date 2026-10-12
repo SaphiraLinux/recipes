@@ -2,7 +2,7 @@
 
 pkgname=saphira-sysref
 pkgver=0.1.0
-pkgrel=2
+pkgrel=5
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='Minimal local man-page context for AI agents (MCP/CLI sysref tool)'
 license='BUSL-1.1'
@@ -12,7 +12,7 @@ url=https://saphira.vm2.uk/
 # Vendored upstream bytes (rebranded akaman 0.1.0; the tarball carries
 # stale build artifacts, cleaned before build - never built from the
 # checked-out tree):
-akaman_sha256=3d6c8d8b38fcfb0c98d595a5f95560a2708e94002e4f690dae956d4fbb83b21f
+akaman_sha256=0170e3e23fd112a5ca5859ecd56c4fa2e5445cf992951505e961737bc6cbccd4
 
 depends=""
 makedepends="

@@ -76,8 +76,16 @@ replace-with = "saphira-vendored"
 directory = "$vendor"
 EOF
 	cd "$SRC"
+	# No -Clink-arg=-no-pie: the Saphira akadata target builds static-PIE
+	# (static_position_independent_executables) and rustc links its
+	# bundled static-PIE CRT; appending -no-pie forces EXEC output
+	# from PIE startup objects and every emitted executable dies in
+	# pre-main startup (deterministic SIGSEGV, e.g. serde_json's
+	# build script). The Sep-4 rationale (non-PIC libunwind.a) is
+	# obsolete since libunwind r2 ships a PIC static archive with a
+	# static-PIE policy assert.
 	CARGO_HOME=$BUILDDIR/cargo-home \
-		RUSTFLAGS="-Ctarget-cpu=x86-64-v3 -Clink-arg=-Wl,--build-id=sha1 -Clink-arg=-no-pie" \
+		RUSTFLAGS="-Ctarget-cpu=x86-64-v3 -Clink-arg=-Wl,--build-id=sha1" \
 		OPENSSL_DIR=/usr \
 		cargo build --frozen --offline --profile release-lto
 }

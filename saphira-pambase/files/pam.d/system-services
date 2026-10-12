@@ -1,0 +1,14 @@
+#%PAM-1.0
+# Saphira Linux daemon-services stack (saphira-pambase).
+# Permissive auth (daemons authenticate their own clients) with full
+# account/session handling. Adapted from the Arch pambase model.
+
+auth      sufficient  pam_permit.so
+
+account   include     system-auth
+
+session   optional    pam_loginuid.so
+session   required    pam_limits.so
+session   required    pam_unix.so
+session   optional    pam_permit.so
+session   required    pam_env.so

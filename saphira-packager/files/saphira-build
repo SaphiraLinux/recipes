@@ -8,6 +8,14 @@ Queue is SQLite at $SAPHIRA_BUILD_STATE/queue.db (default /var/lib/saphira-build
 Per-stage verdicts: BUILD INSTALL RUNTIME POLICY OPENRC SYSTEMD IDENTITY TEST.
 A package is PASS only when every applicable stage passes; PUBLISH is an
 explicit human-invoked step (sign-apk-repo is the privileged boundary).
+
+Row states: QUEUED -> BUILDING -> PASS|FAIL, plus BLOCKED (a dependency is not
+satisfied) and INTERRUPTED (a build that was in flight when its builder died,
+was killed, or was never restarted after a reboot). INTERRUPTED is a recorded
+truth, not an absence: it carries the reason, the owning pid, the boot id, the
+start time and the log directory. It is retired by `reconcile` and by daemon
+startup, and re-attempted only by an explicit `retry PACKAGE` - a machine that
+just lost power has not proven that every in-flight build needs repeating.
 """
 
 import calendar
@@ -71,6 +79,34 @@ APK = os.environ.get("SAPHIRA_APK", "apk")
 BUILDCMD = os.environ.get("SAPHIRA_BUILDCMD", "buildpkg").split()
 TEST_ROOT_PARENT = Path(os.environ.get("SAPHIRA_TEST_ROOTS", "/build/saphira-build"))
 
+BOOT_ID_PATH = Path("/proc/sys/kernel/random/boot_id")
+
+
+def boot_id():
+    """Identity of the current boot.
+
+    This is what makes an interrupted build distinguishable from a running
+    one across a reboot: a row written before the reboot records a different
+    boot id, so it cannot be mistaken for work the current daemon is doing.
+    A sentinel keeps the comparison meaningful where /proc is unavailable
+    (the test hermetic roots), rather than silently treating 'unknown' as a
+    match.
+    """
+    try:
+        return BOOT_ID_PATH.read_text().strip() or "unknown-boot"
+    except OSError:
+        return "unknown-boot"
+
+
+def pid_alive(pid):
+    if not pid:
+        return False
+    try:
+        os.kill(int(pid), 0)
+    except (OSError, ValueError, TypeError):
+        return False
+    return True
+
 LOGNAME_RE = re.compile(r"^(?P<name>[A-Za-z0-9._+-]+)-(?P<ver>[0-9][^-]*)-r(?P<rel>[0-9]+)\.apk$")
 
 
@@ -90,9 +126,18 @@ def db():
             log_dir TEXT,
             commit_hash TEXT,
             queued_at TEXT, started_at TEXT, finished_at TEXT,
-            published_at TEXT
+            published_at TEXT,
+            builder_pid INTEGER, boot_id TEXT
         )"""
     )
+    # Additive migration: the provenance columns arrived after rows already
+    # existed. ALTER TABLE ADD COLUMN is a no-op-safe way to bring an
+    # existing queue.db forward without touching its rows.
+    have = {r["name"] for r in conn.execute("PRAGMA table_info(builds)")}
+    for column, decl in (("builder_pid", "INTEGER"), ("boot_id", "TEXT")):
+        if column not in have:
+            conn.execute(f"ALTER TABLE builds ADD COLUMN {column} {decl}")
+    conn.commit()
     return conn
 
 
@@ -130,11 +175,23 @@ def recipe_dirs():
 
 
 def recipe_info(pkgdir):
+    # subpackages are OUTPUTS, not inputs, and must not enter the dependency
+    # list. norm_dep() reduces "-dev"/"-doc" to the base name, so declaring
+    # subpackages="mhash-dev" made mhash depend on "mhash" - i.e. on itself.
+    # A package that has never been published then deadlocks permanently: it
+    # is BLOCKED waiting for a subpackage that only its own build can produce,
+    # so it can never run, so it is never published. mhash sat in exactly
+    # that state and blocked 23 packages behind it. A published package
+    # escaped only because dep_state() is satisfied by a published version,
+    # which is why this looked like it only affected new recipes.
+    #
+    # A genuine build-time need for another package's -dev output belongs in
+    # makedepends explicitly, where it is stated rather than inferred.
     script = (
         '. "$1" >/dev/null 2>&1\n'
         'printf "%s\\n" "name=$pkgname" "ver=$pkgver" "rel=$pkgrel"'
         ' "disabled=${disabled-}" "reason=${disabled_reason-}"\n'
-        'printf "deps=%s\\n" "$depends $makedepends $subpackages"\n'
+        'printf "deps=%s\\n" "$depends $makedepends"\n'
     )
     r = run_out(["/bin/sh", "-c", script, "sh", str(pkgdir / "recipe.sh")])
     info = {"pkgdir": str(pkgdir), "deps": []}
@@ -158,10 +215,63 @@ def recipe_info(pkgdir):
     return info
 
 
+# Material that cannot affect the package artefact, so a change to it must not
+# force a rebuild of that package.
+#
+# The rule is defined by DIRECTORY, not by file suffix, because a suffix rule
+# would be wrong in both directions here: nftables installs
+# files/saphira-classification-README.md into its payload, so a `.md` under
+# files/ is a real build input, while a `.md` at a recipe's top level is not.
+#
+#   tests/, acceptance/  verification material. No recipe_build or
+#                        recipe_install reads it; the suites read it from the
+#                        tree directly.
+#   *.sha256 sidecars    integrity metadata describing files/ content that is
+#                        already hashed below. A retouched sidecar is not a
+#                        change to any input.
+#   editor/VCS droppings by name: a merge left one behind, it is not an input.
+#
+# Everything else is INCLUDED, and that is deliberate: under-inclusion means a
+# rebuilt package that silently does not contain the change it was rebuilt
+# for, while over-inclusion only costs one wasted build cycle. Where those two
+# are in tension - a top-level README.md, say - inclusion wins.
+HASH_EXCLUDED_DIRS = ("tests", "acceptance")
+HASH_EXCLUDED_SUFFIXES = (".sha256",)
+# fnmatch has no escape character, so these are literal patterns: "*~" is a
+# backup, ".#*" and "#*#" are emacs lock and auto-save files.
+HASH_EXCLUDED_NAMES = ("*~", "*.orig", "*.rej", "*.swp", "*.bak", ".#*", "#*#", ".DS_Store")
+
+
+def hash_excluded(rel: Path) -> bool:
+    if any(part in HASH_EXCLUDED_DIRS for part in rel.parts[:-1]):
+        return True
+    if rel.suffix in HASH_EXCLUDED_SUFFIXES:
+        return True
+    import fnmatch
+    return any(fnmatch.fnmatch(rel.name, pattern) for pattern in HASH_EXCLUDED_NAMES)
+
+
 def recipe_hash(pkgdir):
+    """Identity of a recipe's build-relevant inputs.
+
+    scan() uses this to decide whether a package needs building, so it must
+    track the ARTEFACT and nothing else. Hashing the whole directory instead
+    made an unrelated commit cost a build cycle: editing
+    saphira-packager/tests/recipe-rules.sh requeued saphira-packager, and that
+    package was rebuilt every scan for as long as the tree moved - which is
+    also what produced the un-publishable-NVR churn recorded with it.
+    """
     h = hashlib.sha256()
+    included = 0
     for f in sorted(p for p in pkgdir.rglob("*") if p.is_file()):
-        h.update(str(f.relative_to(pkgdir)).encode() + b"\0" + f.read_bytes() + b"\0")
+        rel = f.relative_to(pkgdir)
+        if hash_excluded(rel):
+            continue
+        included += 1
+        h.update(str(rel).encode() + b"\0" + f.read_bytes() + b"\0")
+    # The count is part of the identity, so adding or removing an included
+    # input changes the hash even when no included byte differs.
+    h.update(f"\0count={included}\0".encode())
     return h.hexdigest()[:16]
 
 
@@ -221,6 +331,96 @@ def dep_state(conn, dep):
     return False, False, f"{dep}: no recipe and no repository package"
 
 
+def reconcile_interrupted(conn):
+    """Retire BUILDING rows no live builder owns, explicitly.
+
+    A build that was in flight when the machine died, or when the daemon was
+    killed, or when the daemon was simply never restarted after a reboot,
+    leaves its row in BUILDING forever.
+
+    The harm is not cosmetic. cmd_retry() only requeues a row that is FAIL or
+    BLOCKED, so a package whose most recent attempt died mid-build is
+    permanently un-retryable: the one attempt that would have produced a FAIL
+    row never happened, the row says BUILDING, and every future `retry` is
+    refused with "is BUILDING, not FAIL/BLOCKED". Nothing in the system ever
+    moves it. The queue database asserts, indefinitely, that work is in
+    progress which is not in progress - the same failure shape as a
+    persistence layer that keeps answering "was running" after the process is
+    gone: an unrefreshed claim masquerading as a live one.
+
+    So the claim is retired with its reason, rather than deleted or left to rot:
+
+      boot changed      the row was written under a different boot id, so the
+                        builder that owned it cannot be running now. This is
+                        the reboot case, and it is exact rather than
+                        heuristic - no threshold, no age guess.
+      builder pid gone  same boot, but the recorded pid is not alive.
+      unowned           a legacy row with neither recorded. Only this daemon
+                        writes BUILDING, and reconcile runs before the loop
+                        starts any build, so a row we did not write is a row
+                        nobody is building.
+
+    A row whose recorded pid is THIS process is never touched, so reconcile
+    is safe to run against a live daemon, and a row owned by some other live
+    builder is left alone too.
+
+    Provenance is preserved, not discarded: the previous state, reason, pid,
+    boot id, start time and log directory are all written into result_json
+    under an `interrupted` block, and every stage that ran before the crash
+    is kept. Only the BUILD verdict itself is replaced, because "pending"
+    after a dead builder is precisely the untrue claim. The retained
+    workspace and its logs remain the evidence.
+
+    Nothing is requeued. An interrupted build is re-attempted by an explicit
+    `retry PACKAGE`, never automatically: a machine that just lost power has
+    not thereby proven that every in-flight build needs repeating.
+    """
+    current = boot_id()
+    rows = conn.execute(
+        "SELECT * FROM builds WHERE state='BUILDING' ORDER BY id"
+    ).fetchall()
+    retired = []
+    for row in rows:
+        if row["builder_pid"] and int(row["builder_pid"]) == os.getpid():
+            continue  # ours, in this process: not stale
+        if row["boot_id"] and row["boot_id"] != current:
+            reason = "boot changed"
+        elif row["builder_pid"] and not pid_alive(row["builder_pid"]):
+            reason = "builder pid gone"
+        elif row["builder_pid"] is None:
+            reason = "unowned (no recorded builder)"
+        else:
+            continue  # a live builder owns it; not ours to retire
+        result = json.loads(row["result_json"] or "{}")
+        result.setdefault("stages", {})
+        detail = (
+            f"{reason}: pid={row['builder_pid']} boot={row['boot_id']} "
+            f"started={row['started_at']} logs={row['log_dir']}"
+        )
+        result["stages"]["BUILD"] = {"status": "interrupted", "detail": detail}
+        result["interrupted"] = {
+            "previous_state": "BUILDING",
+            "reason": reason,
+            "builder_pid": row["builder_pid"],
+            "boot_id": row["boot_id"],
+            "started_at": row["started_at"],
+            "log_dir": row["log_dir"],
+        }
+        conn.execute(
+            "UPDATE builds SET state='INTERRUPTED', finished_at=?, result_json=? WHERE id=?",
+            (now(), json.dumps(result), row["id"]),
+        )
+        retired.append((row["package"], row["version"], reason))
+    if retired:
+        conn.commit()
+    for pkg, ver, reason in retired:
+        print(
+            f"reconcile: {pkg} {ver or ''} BUILDING -> INTERRUPTED ({reason}); "
+            "not requeued, retry it explicitly if the build still matters"
+        )
+    return retired
+
+
 def recompute_blocking(conn):
     for row in conn.execute(
         "SELECT * FROM builds WHERE state IN ('QUEUED','BLOCKED')"
@@ -260,6 +460,24 @@ def cmd_scan(args):
         if info.get("disabled") == "yes":
             reason = info.get("reason") or "no reason given"
             print(f"scan: skipping disabled {info['name']}: {reason}")
+            skipped += 1
+            continue
+        # An exact NVR already in the live repository is not work. Publishing
+        # it again is impossible - sign-apk-repo refuses a rebuild whose NVR is
+        # already there, by the immutable-filename rule - so queueing it can
+        # only ever produce a FAIL row and a retained workspace.
+        #
+        # This was not hypothetical: saphira-packager 1.0-r70 is published and
+        # installed on Egg, and scan queued it anyway, so the daemon burned a
+        # build cycle on it about every 76 seconds - five attempts between
+        # 18:06 and 18:11, five retained workspaces, five FAIL rows, forever.
+        # The hash check below cannot catch it, because a recipe whose bytes
+        # did not change keeps its hash and is only queued when something
+        # ELSE in its tree moved.
+        recipe_nvr = "-".join(
+            part for part in (info.get("version"), "r" + str(info["revision"])) if part
+        )
+        if recipe_nvr and recipe_nvr in published_versions(info["name"]):
             skipped += 1
             continue
         h = recipe_hash(d)
@@ -332,15 +550,32 @@ def pick_next(conn):
 
 
 def ready_apk(ready_dir, pkg, ver_rel):
-    cands = list(ready_dir.glob(f"{pkg}-*-{ver_rel}.apk")) if ver_rel else list(ready_dir.glob(f"{pkg}-*.apk"))
+    # Candidate set: every artefact belonging to this package name, which is
+    # the main package plus any splits.
+    cands = list(ready_dir.glob(f"{pkg}-*.apk"))
     if not cands:
         cands = [p for p in ready_dir.glob("*.apk")]
-    # Prefer the main package over splits: glob order is readdir
-    # order (nondeterministic), and installing e.g. grub-doc alone
-    # can never satisfy its versioned parent dep. Splits ride the
-    # same transaction and publish with it; they are not separately
-    # install-tested.
+    # Prefer the MAIN package over splits.
+    #
+    # This is not a preference between equals. A split such as
+    # saphira-router-doc-0.1.0-r12 depends on saphira-router=0.1.0-r12, so
+    # installing the split on its own can never satisfy its own versioned
+    # parent dep: apk reports "unable to select packages: saphira-router (no
+    # such package)" and the INSTALL stage fails for a reason that has
+    # nothing to do with the package under test.
+    #
+    # The main package is named exactly "<pkg>-<ver_rel>.apk", with NO middle
+    # component, so the previous glob "<pkg>-*-<ver_rel>.apk" could not match
+    # it -- that pattern requires a component between the dashes. It matched
+    # only the splits, which made the exact-name preference below dead code and
+    # guaranteed the wrong artefact was chosen whenever a split existed.
+    #
+    # Splits ride the same transaction and publish with it; they are not
+    # separately install-tested.
     if ver_rel:
+        main = ready_dir / f"{pkg}-{ver_rel}.apk"
+        if main.is_file():
+            return main
         for p in cands:
             if p.name == f"{pkg}-{ver_rel}.apk":
                 return p
@@ -465,6 +700,103 @@ def evaluate_stages(root, payload, recipe_dir, log_dir):
     return stages
 
 
+def initialise_install_root(root):
+    """Make the disposable install root a usable Saphira root.
+
+    Two things are needed, and only one of them is still no package's business.
+
+    The interpreter links. apk runs a package maintainer scripts chrooted in
+    the root, and makepkg generates every one of them with a #!/bin/sh
+    shebang. /bin/sh -> bash is owned by the bash package, so it normally
+    arrives through the dependency closure like any other file; this function
+    keeps creating it only as an ordering safety net for roots where the bash
+    payload has not landed yet, and asserts the result either way. buildpkg
+    does the same in a clean build root and asserts the link afterwards;
+    saphira-bootstrap does the same in a target root, with the same note about
+    apk executing scripts in a target that has no shell yet.
+
+    A root that skips this can install a package but cannot RUN its scripts.
+    apk reports that as `execve: No such file or directory` and 127, which
+    reads like a missing helper and is not: it is a missing interpreter.
+    Proven on saphira-bridge-0.1.0-r2, where the reconciler was present and
+    correct - saphira-baselayout 0.1-r20 arrived through normal dependency
+    resolution - and only /bin/sh was absent, so saphira-baselayout OWN
+    post-install failed identically.
+
+    The account database. Once the scripts do run, the next failure is the
+    reconciler refusing with `account database is missing`, because a root
+    assembled from scratch has no passwd/group/shadow. On a live system those
+    come from the image; installable roots get them from the
+    saphira-base-accounts package, whose hooks seed a locked root-only
+    database where none exists. (The buildpkg clean-root path has its own
+    rootless precedent and reasoning: the database must be COMPLETE, not
+    merely resolvable, because ensure-identity.sh requires passwd, group
+    AND shadow; and a LOCKED root row is the safe seed, since live
+    provisioning owns real credentials and these roots are disposable and
+    never reach a payload or an image.)
+
+    The package side of the closure is already right and is deliberately not
+    touched here: makepkg injects saphira-baselayout, bash and coreutils into
+    every package that ships an accounts.d fragment (IDENTITY_DEPS), so the
+    reconciler and the tools it uses are installed before any script runs.
+    This adds only what still no package can provide (/usr/bin/env), for any
+    package, plus the /bin/sh ordering safety net above. Nothing here
+    is package-specific.
+
+    Fail closed when the link target is absent: a root without bash is not a
+    usable Saphira root, and creating a dangling link would only move the
+    failure to the first script that runs.
+    """
+    root = Path(root)
+    shell_link = root / "bin/sh"
+    if not os.path.lexists(shell_link):
+        if not (root / "bin/bash").exists():
+            die(f"install root has no /bin/bash to link /bin/sh to: {root}")
+        shell_link.parent.mkdir(parents=True, exist_ok=True)
+        shell_link.symlink_to("bash")
+    if not shell_link.is_symlink() or os.readlink(shell_link) != "bash":
+        die(f"install root /bin/sh is not the expected link to bash: {shell_link}")
+    env_link = root / "usr/bin/env"
+    if not os.path.lexists(env_link):
+        if not (root / "bin/env").exists():
+            die(f"install root has no /bin/env to link /usr/bin/env to: {root}")
+        env_link.parent.mkdir(parents=True, exist_ok=True)
+        env_link.symlink_to("/bin/env")
+    if not (env_link.is_symlink() or env_link.exists()):
+        die(f"install root initialisation did not provide /usr/bin/env: {env_link}")
+
+    # Minimal but COMPLETE account database, matching buildpkg's clean-root
+    # seed. Appended only when absent, so a root that already carries one is
+    # left exactly as it is.
+    etc = root / "etc"
+    etc.mkdir(parents=True, exist_ok=True)
+
+    def has_row(database, prefix):
+        if not database.exists():
+            return False
+        text = database.read_text(encoding="utf-8", errors="replace")
+        if prefix == "root:x:0:0":
+            return "root:x:0:0" in text
+        return any(line.startswith(prefix) for line in text.splitlines())
+
+    passwd = etc / "passwd"
+    if not has_row(passwd, "root:x:0:0"):
+        with passwd.open("a", encoding="utf-8") as stream:
+            stream.write("root:x:0:0:root:/root:/bin/sh\n")
+    group = etc / "group"
+    if not has_row(group, "root:"):
+        with group.open("a", encoding="utf-8") as stream:
+            stream.write("root:x:0:\n")
+    shadow = etc / "shadow"
+    if not has_row(shadow, "root:"):
+        with shadow.open("a", encoding="utf-8") as stream:
+            stream.write("root:!:0:0:99999:7:::\n")
+        shadow.chmod(0o600)
+    for database in (passwd, group, shadow):
+        if not database.exists():
+            die(f"install root initialisation did not provide {database}")
+
+
 def cmd_run(args):
     limit = 1
     for a in args:
@@ -493,8 +825,11 @@ def cmd_run(args):
         log_dir = STATE / "logs" / pkg / f"{ver_rel or 'unknown'}-{row['recipe_hash'][:8]}"
         shutil.rmtree(log_dir, ignore_errors=True)
         log_dir.mkdir(parents=True)
-        conn.execute("UPDATE builds SET state='BUILDING', started_at=?, log_dir=? WHERE id=?",
-                     (now(), str(log_dir), row["id"]))
+        conn.execute(
+            "UPDATE builds SET state='BUILDING', started_at=?, log_dir=?,"
+            " builder_pid=?, boot_id=? WHERE id=?",
+            (now(), str(log_dir), os.getpid(), boot_id(), row["id"]),
+        )
         conn.commit()
         print(f"run: {pkg} {ver_rel or '(version unknown)'} building...")
         rc = run(BUILDCMD + [pkg], log=log_dir / "build.log",
@@ -525,8 +860,26 @@ def cmd_run(args):
                 "--allow-untrusted", "--force-non-repository",
                 f"--repository={REPO}/Packages.adb",
             ]
-            run(base_apk_args + ["add", "saphira-base-abi"],
+            # A Saphira root is seeded from the distribution's own base
+            # group, whose closure apk resolves from metadata: it brings
+            # bash, coreutils and saphira-baselayout (and therefore
+            # /usr/libexec/saphira/ensure-identity.sh) through the normal
+            # package relationship rather than a hand-picked list.
+            #
+            # The seed is installed --no-scripts, and that is not a shortcut:
+            # apk runs maintainer scripts chrooted in the root, every
+            # generated one starts with #!/bin/sh, and /bin/sh is owned by NO
+            # package, so a root assembled from scratch cannot run any script
+            # until the link exists. This is the documented recovery shape
+            # (RECIPE_RULES: `apk add --no-scripts`, initialise, `apk fix`) and
+            # is what saphira-bootstrap does for the same reason. The scripts
+            # this stage actually verifies - the package under test's - DO
+            # run, in the install immediately below.
+            run(base_apk_args + ["add", "--no-scripts", "saphira-base"],
                 log=log_dir / "install.log")
+            # Then the part no package can provide, exactly as buildpkg does
+            # in a clean build root and saphira-bootstrap in a target root.
+            initialise_install_root(root)
             irc = run(
                 base_apk_args + ["add", apk],
                 log=log_dir / "install.log",
@@ -588,6 +941,15 @@ def row_start(conn, rid):
     return calendar.timegm(t)
 
 
+def cmd_reconcile(args):
+    """Operator-facing form of the startup recovery: retire BUILDING rows no
+    live builder owns, without waiting for a daemon restart."""
+    retired = reconcile_interrupted(db())
+    if not retired:
+        print("reconcile: no interrupted build rows")
+    return 0
+
+
 def cmd_status(args):
     conn = db()
     rows = conn.execute(
@@ -603,7 +965,8 @@ def cmd_status(args):
         res = json.loads(r["result_json"])
         st = res.get("stages", {})
         s = " ".join(
-            {"pass": "+", "fail": "F", "na": "-", "pending": ".", "blocked": "B"}.get(
+            {"pass": "+", "fail": "F", "na": "-", "pending": ".", "blocked": "B",
+                    "interrupted": "X"}.get(
                 v.get("status"), "?") for k, v in
             sorted(st.items(), key=lambda kv: ["BUILD", "INSTALL", "RUNTIME", "POLICY", "OPENRC", "SYSTEMD", "IDENTITY", "TEST", "DEPENDENCIES"].index(kv[0]) if kv[0] in ["BUILD", "INSTALL", "RUNTIME", "POLICY", "OPENRC", "SYSTEMD", "IDENTITY", "TEST", "DEPENDENCIES"] else 99)
         )
@@ -625,8 +988,8 @@ def cmd_retry(args):
     row = latest(conn, pkg)
     if row is None:
         die(f"retry: {pkg} not in queue")
-    if row["state"] not in ("FAIL", "BLOCKED"):
-        die(f"retry: {pkg} is {row['state']}, not FAIL/BLOCKED")
+    if row["state"] not in ("FAIL", "BLOCKED", "INTERRUPTED"):
+        die(f"retry: {pkg} is {row['state']}, not FAIL/BLOCKED/INTERRUPTED")
     conn.execute(
         """INSERT INTO builds(package,version,revision,recipe_hash,state,commit_hash,queued_at,result_json)
            SELECT package,version,revision,recipe_hash,'QUEUED',commit_hash,?,? FROM builds WHERE id=?""",
@@ -688,6 +1051,13 @@ def cmd_daemon(args):
             interval = int(a.split("=", 1)[1])
         elif a.startswith("--limit="):
             limit = int(a.split("=", 1)[1])
+    # Before the loop, not inside it: the claim cleanup is a startup
+    # recovery, and running it once means a row this daemon builds is never
+    # a candidate for its own reconcile.
+    conn = db()
+    retired = reconcile_interrupted(conn)
+    if retired:
+        print(f"daemon: recovered {len(retired)} interrupted build row(s) at startup")
     while True:
         cmd_scan([])
         cmd_run([f"--limit={limit}"])
@@ -857,14 +1227,15 @@ def main():
         "scan": cmd_scan, "run": cmd_run, "status": cmd_status,
         "retry": cmd_retry, "log": cmd_log, "queue": cmd_queue,
         "evaluate": cmd_evaluate, "publish": cmd_publish,
-        "daemon": cmd_daemon,
+        "daemon": cmd_daemon, "reconcile": cmd_reconcile,
         "rel-plan": cmd_rel_plan, "rel-status": cmd_rel_status,
         "rel-bump": cmd_rel_bump, "rel-normalize": cmd_rel_normalize,
     }
     if len(sys.argv) < 2 or sys.argv[1] not in cmds:
         print(
             "usage: saphira-build "
-            "scan | run [--limit=N|--all] | queue | status | retry PACKAGE | "
+            "scan | run [--limit=N|--all] | queue | status | reconcile | "
+            "retry PACKAGE | "
             "log PACKAGE | publish [--sync] [PKG...] | evaluate ROOT PKG [RECIPE_DIR] | "
             "daemon [--interval=S] [--limit=N] [--once] | "
             "rel-plan [all|PKG...] | rel-status | rel-bump [all|PKG...] | "

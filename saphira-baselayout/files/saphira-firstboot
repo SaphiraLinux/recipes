@@ -26,7 +26,7 @@ if test -e "$completed"; then
 	exit 1
 fi
 test -e "$marker" || {
-	printf 'Akadata first-boot configuration is already complete.\n'
+	printf 'Saphira first-boot configuration is already complete.\n'
 	exit 0
 }
 

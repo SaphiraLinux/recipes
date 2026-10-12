@@ -127,7 +127,31 @@ buildpkg_exit()
 trap buildpkg_exit EXIT
 
 if [ -n "$SOURCE" ]; then
-	cp -a "$SOURCE"/. "$SRC"/
+	# Staged build INPUT (kernel trees, any extra input dir), copied
+	# into $SRC. Ownership is deliberately NOT preserved, and only here.
+	#
+	# $SRC is disposable private build workspace, and the package
+	# payload establishes its own ownership independently, so the input
+	# tree's uid/gid are not package semantics -- nothing downstream
+	# reads them. Preserving them is in fact impossible: builds run under
+	# a single-uid bwrap mapping (0 -> the build user), so a staged tree
+	# owned by real root, such as the package-shipped prepared kernel
+	# tree at /usr/src/linux-<ver>-saphira, appears inside as the
+	# unmapped uid 65534, and cp -a then fails with EINVAL on chown.
+	# That aborted saphira-zfs-userspace outright.
+	#
+	# The alternative fixes are both wrong-layer: chowning the staged
+	# tree would mutate a package-owned authoritative artefact and
+	# destroy its provenance, and dropping the tree from a recipe that
+	# genuinely needs it would change that recipe's build contract
+	# instead of fixing the builder.
+	#
+	# Everything else stays archive-faithful: modes, timestamps, symlinks
+	# and directory structure are all still preserved. This does not
+	# touch package payload ownership handling, nor the archive
+	# extraction paths below, which already extract with
+	# --no-same-owner.
+	cp -a --no-preserve=ownership "$SOURCE"/. "$SRC"/
 	SOURCE_ARCHIVE=""
 else
 	command -v curl >/dev/null 2>&1 || die "curl is required to download source"
@@ -258,11 +282,18 @@ for subpackage in $subpackages; do
 			move_staged_tree usr/share/doc "$subpackage"
 			;;
 		"$pkgname"-libs)
+			# The SONAME symlinks (libstdc++.so.6 -> libstdc++.so.6.0.36)
+			# must travel WITH the real file they name, or gcc-libs is
+			# useless on its own: the dynamic linker opens the SONAME, and
+			# -type f alone left every .so.N link behind in the parent,
+			# where -type l -name '*.so' does not reach it either. Match
+			# both regular files and symlinks. move_staged_file uses mv,
+			# so a symlink is moved as a symlink - never a hardlink.
 			for root in "$PKGDEST/usr/lib" "$PKGDEST/lib"; do
 				[ -d "$root" ] || continue
 				while IFS= read -r -d '' file; do
 					move_staged_file "$file" "$subpackage"
-				done < <(find "$root" -type f -name '*.so.*' -print0)
+				done < <(find "$root" \( -type f -o -type l \) -name '*.so.*' -print0)
 			done
 			;;
 	esac
@@ -299,7 +330,7 @@ for subpackage in $subpackages; do
 	esac
 	printf '%s\t%s\t%s\t%s\n' \
 		"$subpackage" "subpkg/$subpackage" "$description" \
-		"${dev_dependencies:-$pkgname=$pkgver-r$pkgrel}" >> "$outputs_file"
+		"${dev_dependencies-$pkgname=$pkgver-r$pkgrel}" >> "$outputs_file"
 	unset dev_dependencies
 done
 

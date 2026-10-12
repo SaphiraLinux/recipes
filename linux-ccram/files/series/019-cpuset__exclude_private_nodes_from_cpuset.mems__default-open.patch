@@ -1,0 +1,119 @@
+From 8edda43aee16a97d0845931bd37272f6d0e1b9c9 Mon Sep 17 00:00:00 2001
+From: Gregory Price <gourry@gourry.net>
+Date: Mon, 9 Feb 2026 20:07:07 -0800
+Subject: [PATCH] cpuset: exclude private nodes from cpuset.mems (default-open)
+
+N_MEMORY_PRIVATE node access is gated by per-node capabilities and
+the zonelist.  Isolating by cpuset offers no functionality and
+creates issues on rebind when a cpuset loses access to that node
+(in particular: it generates migrations that may not be supported).
+
+Do not partition private nodes via cpuset.mem, instead treat them
+as globally accessible resources.  Do not engage in silent background
+operations on these nodes due to cpuset.mem membership changing.
+
+The result: cpuset operations checking for node validity always
+allow N_MEMORY_PRIVATE nodes.
+
+On hot-unplug, we still need to rebind memory policies if the
+private node has left N_MEMORY_PRIVATE (i.e. no more memory).
+
+Signed-off-by: Gregory Price <gourry@gourry.net>
+---
+ kernel/cgroup/cpuset.c | 26 ++++++++++++++++++++++----
+ mm/memcontrol.c        |  2 ++
+ 2 files changed, 24 insertions(+), 4 deletions(-)
+
+diff --git a/kernel/cgroup/cpuset.c b/kernel/cgroup/cpuset.c
+index dfd0f827e3b..05468f95c10 100644
+--- a/kernel/cgroup/cpuset.c
++++ b/kernel/cgroup/cpuset.c
+@@ -26,6 +26,7 @@
+ #include <linux/mempolicy.h>
+ #include <linux/mm.h>
+ #include <linux/memory.h>
++#include <linux/node_private.h>
+ #include <linux/rcupdate.h>
+ #include <linux/sched.h>
+ #include <linux/sched/deadline.h>
+@@ -3867,7 +3868,8 @@ static void cpuset_handle_hotplug(void)
+ 	static DECLARE_WORK(hk_sd_work, hk_sd_workfn);
+ 	static cpumask_t new_cpus;
+ 	static nodemask_t new_mems;
+-	bool cpus_updated, mems_updated;
++	static nodemask_t prev_priv_mems;
++	bool cpus_updated, mems_updated, priv_shrank;
+ 	bool on_dfl = is_in_v2_mode();
+ 	struct tmpmasks tmp, *ptmp = NULL;
+ 
+@@ -3890,6 +3892,14 @@ static void cpuset_handle_hotplug(void)
+ 		       !cpumask_empty(subpartitions_cpus);
+ 	mems_updated = !nodes_equal(top_cpuset.effective_mems, new_mems);
+ 
++	/*
++	 * Private nodes are not partitioned by cpuset, but if one leaves
++	 * N_MEMORY_PRIVATE we still need to run mpol_rebind_* to clean up
++	 * mempolicies that are binding them.
++	 */
++	priv_shrank = !nodes_subset(prev_priv_mems, node_states[N_MEMORY_PRIVATE]);
++	prev_priv_mems = node_states[N_MEMORY_PRIVATE];
++
+ 	/* For v1, synchronize cpus_allowed to cpu_active_mask */
+ 	if (cpus_updated) {
+ 		cpuset_force_rebuild();
+@@ -3922,9 +3932,12 @@ static void cpuset_handle_hotplug(void)
+ 			top_cpuset.mems_allowed = new_mems;
+ 		top_cpuset.effective_mems = new_mems;
+ 		spin_unlock_irq(&callback_lock);
+-		cpuset_update_tasks_nodemask(&top_cpuset);
+ 	}
+ 
++	/* Rebind task mempolicies if any memory node changed state */
++	if (mems_updated || priv_shrank)
++		cpuset_update_tasks_nodemask(&top_cpuset);
++
+ 	mutex_unlock(&cpuset_mutex);
+ 
+ 	/* if cpus or mems changed, we need to propagate to descendants */
+@@ -4155,11 +4168,13 @@ nodemask_t cpuset_mems_allowed(struct task_struct *tsk)
+  * cpuset_nodemask_valid_mems_allowed - check nodemask vs. current mems_allowed
+  * @nodemask: the nodemask to be checked
+  *
+- * Are any of the nodes in the nodemask allowed in current->mems_allowed?
++ * Are any of the nodes in the nodemask usable?  N_MEMORY nodes must be in
++ * current->mems_allowed, while N_MEMORY_PRIVATE nodes are always valid.
+  */
+ int cpuset_nodemask_valid_mems_allowed(const nodemask_t *nodemask)
+ {
+-	return nodes_intersects(*nodemask, current->mems_allowed);
++	return nodes_intersects(*nodemask, current->mems_allowed) ||
++	       nodes_intersects(*nodemask, node_states[N_MEMORY_PRIVATE]);
+ }
+ 
+ /*
+@@ -4223,6 +4238,9 @@ bool cpuset_current_node_allowed(int node, gfp_t gfp_mask)
+ 
+ 	if (in_interrupt())
+ 		return true;
++	/* N_MEMORY_PRIVATE nodes are not partitioned by cpusets.mems */
++	if (node_is_private(node))
++		return true;
+ 	if (node_isset(node, current->mems_allowed))
+ 		return true;
+ 	/*
+diff --git a/mm/memcontrol.c b/mm/memcontrol.c
+index 8319ad8c5c2..f0dde52dc9e 100644
+--- a/mm/memcontrol.c
++++ b/mm/memcontrol.c
+@@ -6069,6 +6069,8 @@ void mem_cgroup_node_filter_allowed(struct mem_cgroup *memcg, nodemask_t *mask)
+ 	 * mask is acceptable.
+ 	 */
+ 	cpuset_nodes_allowed(memcg->css.cgroup, &allowed);
++	/* N_MEMORY_PRIVATE nodes are not partitioned by cpuset, include them */
++	nodes_or(allowed, allowed, node_states[N_MEMORY_PRIVATE]);
+ 	nodes_and(*mask, *mask, allowed);
+ }
+ 
+-- 
+2.55.0
+

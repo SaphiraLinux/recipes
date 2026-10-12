@@ -1,0 +1,1104 @@
+From 4f3c46415216dfdbbafd76ff2ad0471a001ff831 Mon Sep 17 00:00:00 2001
+From: AKADATA LIMITED <linux@saphira.vm2.uk>
+Date: Sun, 11 Oct 2026 03:52:31 +0000
+Subject: [PATCH] ccram: software-compressed object store + self-test (Phase
+ 2A, unwired)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Part of CCRAM — AKADATA LIMITED adaptation of Meta CRAM (see
+CRAM.PROVENANCE in linux-saphira-meta-cram; Saphira-original code,
+GPL-2.0-only).
+
+Standalone 4096-byte page -> LZ4 object store, proven on its own
+before any residency wiring: variable-sized objects with original
+length, stored length, algo/flags, xxhash64 and backing handle pack
+into 512-byte units over node-local chunk pages held off-LRU;
+incompressible pages store raw as 8 units.  lib/lz4 and xxhash64 are
+reused; zsmalloc/zswap/async-crypto were audited and deliberately not
+reused (recorded in the file header).  Compression uses per-CPU
+scratch only; every store allocation is NORETRY|NOWARN fail-fast with
+caller fallback, so no reclaim cycle can form.  Exact-once release via
+erase-then-release refcounting.
+
+Includes a deterministic self-test (zeros/ones/patterns/counter/
+textlike/random/half: store, class check, load, memcmp+hash, free,
+double-free refusal, leak balance) that runs once on a throwaway
+store when ccram.compress=lz4 is given, plus debugfs store_stats and
+a selftest retrigger.  A failed self-test disables compression and
+the tier keeps serving 1:1, fail closed.  Default off.  No existing
+CCRAM or CRAM file is modified by this commit.
+---
+ include/linux/ccram_store.h |  62 +++
+ mm/Makefile                 |   1 +
+ mm/ccram_store.c            | 976 ++++++++++++++++++++++++++++++++++++
+ 3 files changed, 1039 insertions(+)
+ create mode 100644 include/linux/ccram_store.h
+ create mode 100644 mm/ccram_store.c
+
+diff --git a/include/linux/ccram_store.h b/include/linux/ccram_store.h
+new file mode 100644
+index 000000000..ede00e28a
+--- /dev/null
++++ b/include/linux/ccram_store.h
+@@ -0,0 +1,62 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/* CCRAM — AKADATA LIMITED adaptation of Meta CRAM (Saphira-original
++ * integration; Meta's CRAM mechanism used as-is).  Licence: GPL-2.0-only.
++ *
++ * Software-compressed object store (Phase 2A): 4096-byte pages go in,
++ * variable-sized LZ4 objects come out, packed into 512-byte backing
++ * units.  See mm/ccram_store.c for the reuse audit, the recursion and
++ * locking discipline, and the exact-once release protocol.
++ */
++#ifndef _LINUX_CCRAM_STORE_H
++#define _LINUX_CCRAM_STORE_H
++
++#include <linux/types.h>
++
++/* compress= modes for ccram.compress (default off). */
++#define CCRAM_COMPRESS_OFF	0
++#define CCRAM_COMPRESS_LZ4	1
++
++/* Object flags. */
++#define CCRAM_OBJ_RAW		0x00000001U	/* stored uncompressed */
++#define CCRAM_OBJ_ALGO_LZ4	0x00000100U	/* LZ4 content (only algo now) */
++
++struct ccram_store;
++struct ccram_obj;
++struct page;
++
++struct ccram_store_stats {
++	__u64 phys_bytes;	/* chunk pages held x 4096 */
++	__u64 logical_bytes;	/* live objects x 4096 */
++	__u64 stored_bytes;	/* sum of len_stored */
++	__u64 waste_bytes;	/* sum of (nunits*512 - len_stored) */
++	__u64 nobjs;
++	__u64 nchunks;
++	__u64 ncomp;
++	__u64 nraw;
++	__u64 ncompress_ops;
++	__u64 ndecompress_ops;
++	__u64 nfail;
++};
++
++#ifdef CONFIG_CCRAM_SYSRAM
++struct ccram_store *ccram_store_create(int nid);
++int ccram_store_destroy(struct ccram_store *s);
++int ccram_store_page(struct ccram_store *s, struct page *src, gfp_t gfp,
++		     u32 *id_out);
++int ccram_store_load(struct ccram_store *s, u32 id, struct page *dst);
++int ccram_store_free(struct ccram_store *s, u32 id);
++struct ccram_obj *ccram_obj_get(struct ccram_store *s, u32 id);
++void ccram_obj_put(struct ccram_store *s, struct ccram_obj *o);
++void ccram_store_stats(struct ccram_store *s, struct ccram_store_stats *out);
++int ccram_store_selftest(int nid);
++int ccram_compress_mode_now(void);
++struct ccram_store *ccram_live_store_now(void);
++#else
++static inline struct ccram_store *ccram_store_create(int nid) { return NULL; }
++static inline int ccram_store_destroy(struct ccram_store *s) { return 0; }
++static inline int ccram_store_selftest(int nid) { return 0; }
++static inline int ccram_compress_mode_now(void) { return CCRAM_COMPRESS_OFF; }
++static inline struct ccram_store *ccram_live_store_now(void) { return NULL; }
++#endif
++
++#endif /* _LINUX_CCRAM_STORE_H */
+diff --git a/mm/Makefile b/mm/Makefile
+index 5cb091aae..8bbc584d6 100644
+--- a/mm/Makefile
++++ b/mm/Makefile
+@@ -98,6 +98,7 @@ obj-$(CONFIG_MEMTEST)		+= memtest.o
+ obj-$(CONFIG_MIGRATION) += migrate.o
+ obj-$(CONFIG_CRAM) += cram.o
+ obj-$(CONFIG_CCRAM_SYSRAM) += ccram_sysram.o
++obj-$(CONFIG_CCRAM_SYSRAM) += ccram_store.o
+ obj-$(CONFIG_NUMA) += memory-tiers.o
+ obj-$(CONFIG_DEVICE_MIGRATION) += migrate_device.o
+ obj-$(CONFIG_TRANSPARENT_HUGEPAGE) += huge_memory.o khugepaged.o
+diff --git a/mm/ccram_store.c b/mm/ccram_store.c
+new file mode 100644
+index 000000000..e8ef8df47
+--- /dev/null
++++ b/mm/ccram_store.c
+@@ -0,0 +1,976 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * mm/ccram_store.c - CCRAM Phase 2A: software-compressed object store.
++ *
++ * CCRAM — AKADATA LIMITED adaptation of Meta CRAM.  CCRAM is based on
++ * Meta's CRAM work (Gregory Price; see CRAM.PROVENANCE in
++ * linux-saphira-meta-cram) and extends/adapts it for Saphira Linux and
++ * AKADATA LIMITED's tiered-memory experiments.  Meta's CRAM mechanism
++ * is used as-is; this file is Saphira-original code.  Licence:
++ * GPL-2.0-only.
++ *
++ * What this is: a 4096-byte page goes in, a variable-sized object comes
++ * out.  Objects pack into 512-byte backing units (8 units cover one raw
++ * page); a page that does not save at least one unit is stored raw.
++ * Logical identity stays one 4K page; residency/fault wiring (which maps
++ * objects back into address spaces) is a later step and lives elsewhere.
++ * This file proves the store and the exact 4K round trip on its own.
++ *
++ * Reuse audit (deliberate, do not "simplify" away without re-reading):
++ *  - lib/lz4 (LZ4_compress_default / LZ4_decompress_safe): REUSED.
++ *    Synchronous, no hidden allocations; caller-provided work area fits
++ *    per-CPU scratch.  In-tree users: dm-vdo, f2fs, crypto/lz4.
++ *  - xxhash64: REUSED for post-decompression verification (fail closed
++ *    on corruption; LZ4 itself carries no checksum).
++ *  - zsmalloc: NOT reused now.  It does have node affinity
++ *    (zs_create_pool + nid-aware alloc) and stable handles, so it is a
++ *    credible upgrade path — but this store needs an exact 512-byte
++ *    packing quantum with exact waste accounting (the quantum-sweep
++ *    experiment needs a QUANTUM parameter, not size classes), plus
++ *    freedom from zsmalloc's compaction/shrinker entanglement in the
++ *    reclaim path.  Revisit with measurements, not assumptions.
++ *  - zswap/zpool: NOT reused.  zswap is frontswap-tied (needs swap
++ *    entries we do not have on this path); zpool.c is absent from the
++ *    7.2.9 tree at all.
++ *  - async crypto (zcomp-style acomp): NOT reused.  Sleeping/async
++ *    compression has no place in the reclaim/fault paths this store
++ *    serves; raw lib/lz4 is the correct tool here.
++ *
++ * Recursion/locking discipline (part of the design, not an afterthought):
++ *  - Compression and decompression allocate NOTHING: per-CPU scratch
++ *    (LZ4 stream + dst/gather buffers, ~29KB/CPU, bounded) under
++ *    get_cpu_var(), xxhash is pure arithmetic, kmap_local nests at most
++ *    two deep and allocates nothing.
++ *  - Every buddy/slab allocation in the store ORs __GFP_NORETRY |
++ *    __GFP_NOWARN and fails fast; callers fall back (today: refuse the
++ *    store, keep the folio on its normal path).  The store never retries
++ *    pool growth in a loop: each call grows at most until satisfied or
++ *    first buddy failure.  No reclaim cycle can form.
++ *  - Chunk pages live on the store's node, are never mapped into any
++ *    process and never join any LRU: reclaim cannot see them (same
++ *    reasoning as balloon-held pages).  Metadata (xarray + object structs)
++ *    lives in normal kernel memory, freed with the object.
++ *  - One spinlock guards chunks, stats and the object table; the xarray's
++ *    internal lock always nests inside it, never the reverse.  All callers
++ *    are process context (reclaim, fault, init, debugfs); never IRQ.
++ *  - Freed objects erase-then-release: xarray erase under the lock first,
++ *    backing released after, so a concurrent lookup can never observe a
++ *    half-freed object and a double free is a loud -ENOENT, not a
++ *    double release.  Refcounts make fault/fork-style sharing exact.
++ */
++
++#include <linux/mm.h>
++#include <linux/mmzone.h>
++#include <linux/gfp.h>
++#include <linux/slab.h>
++#include <linux/spinlock.h>
++#include <linux/xarray.h>
++#include <linux/xxhash.h>
++#include <linux/lz4.h>
++#include <linux/percpu.h>
++#include <linux/string.h>
++#include <linux/atomic.h>
++#include <linux/bits.h>
++#include <linux/highmem.h>
++#include <linux/lockdep.h>
++#include <linux/nodemask.h>
++#include <linux/numa.h>
++#include <linux/cram.h>
++#include <linux/debugfs.h>
++#include <linux/seq_file.h>
++#include <linux/init.h>
++#include <linux/kernel.h>
++#include <linux/memory.h>
++#include <linux/memory_hotplug.h>
++
++#include <linux/ccram_store.h>
++
++/* Backing quantum.  A parameter, not a constant of nature: the future
++ * quantum-sweep experiment (256/512/1024/2048) varies exactly this. */
++#define CCRAM_STORE_QUANTUM	512U
++#define CCRAM_STORE_UNITS_PER_PAGE	(PAGE_SIZE / CCRAM_STORE_QUANTUM)
++/* Largest object we will pack: LZ4 bound for one page fits 9 units. */
++#define CCRAM_STORE_MAX_UNITS	9U
++/* Must save at least this much to bother compressing, else store raw. */
++#define CCRAM_STORE_MIN_SAVINGS	CCRAM_STORE_QUANTUM
++/* xxhash seed: fixed domain constant, not a secret. */
++#define CCRAM_STORE_HASH_SEED	0xC6A4A7935BD1E995ULL
++
++/* Per-CPU scratch: LZ4 stream (~16KB) + compress dst + gather buffer.
++ * Bounded (~29KB/CPU), never allocated at runtime. */
++struct ccram_scratch {
++	LZ4_stream_t lz4;
++	u8 cbuf[8192];
++	u8 gbuf[CCRAM_STORE_MAX_UNITS * CCRAM_STORE_QUANTUM];
++};
++static DEFINE_PER_CPU(struct ccram_scratch, ccram_scratch);
++
++struct ccram_chunk {
++	struct page *page;
++	unsigned long used;	/* bitmap, UNITS_PER_PAGE bits */
++	unsigned int nused;
++	unsigned int base;	/* first global unit number in chunk */
++	struct list_head list;
++};
++
++struct ccram_store {
++	int nid;		/* backing node, or NUMA_NO_NODE */
++	spinlock_t lock;
++	struct xarray objs;	/* u32 id -> struct ccram_obj *, ids from 1 */
++	struct list_head chunks;
++	unsigned int nchunks;
++	unsigned int next_base;
++	unsigned int nobjs;
++	/* Accounting gauges (current) */
++	u64 phys_bytes;
++	u64 logical_bytes;
++	u64 stored_bytes;
++	u64 waste_bytes;
++	/* Accounting counters (monotonic) */
++	u64 ncomp;
++	u64 nraw;
++	u64 ncompress_ops;
++	u64 ndecompress_ops;
++	u64 nfail;
++};
++
++/* Object metadata: identity, sizes, integrity, backing map, lifetime.
++ * Units hold pure payload; everything else lives here. */
++struct ccram_obj {
++	u32 id;
++	u32 len_orig;	/* always PAGE_SIZE (asserted by construction) */
++	u32 len_stored;	/* compressed bytes, or PAGE_SIZE when raw */
++	u32 flags;	/* CCRAM_OBJ_RAW, CCRAM_OBJ_ALGO_* */
++	u64 hash;	/* xxh64(original page): fail-closed verify */
++	atomic_t refcnt;
++	u16 nunits;
++	u32 units[];	/* global unit numbers, nunits entries */
++};
++
++/* Force fail-fast allocation everywhere in the store.  Callers pass
++ * GFP_KERNEL (self-test/init) or GFP_NOFS (reclaim/fault paths); either
++ * way the store itself never retries into the allocator. */
++static inline gfp_t ccram_store_gfp(gfp_t gfp)
++{
++	return gfp | __GFP_NORETRY | __GFP_NOWARN;
++}
++
++struct ccram_store *ccram_store_create(int nid)
++{
++	struct ccram_store *s;
++
++	s = kzalloc(sizeof(*s), GFP_KERNEL);
++	if (!s)
++		return NULL;
++	s->nid = nid;
++	spin_lock_init(&s->lock);
++	xa_init(&s->objs);
++	INIT_LIST_HEAD(&s->chunks);
++	return s;
++}
++
++static struct ccram_chunk *ccram_chunk_alloc(struct ccram_store *s, gfp_t gfp)
++{
++	struct ccram_chunk *c;
++	struct page *page;
++
++	if (s->nid == NUMA_NO_NODE)
++		page = alloc_pages(ccram_store_gfp(gfp) | __GFP_ZERO,
++				   0);
++	else
++		page = alloc_pages_node(s->nid,
++					ccram_store_gfp(gfp) | __GFP_ZERO,
++					0);
++	if (!page)
++		return NULL;
++	c = kmalloc(sizeof(*c), ccram_store_gfp(gfp));
++	if (!c) {
++		__free_pages(page, 0);
++		return NULL;
++	}
++	c->page = page;
++	c->used = 0;
++	c->nused = 0;
++	c->base = 0;	/* assigned under lock in pool_grow */
++	return c;
++}
++
++static void ccram_chunk_free_locked(struct ccram_store *s,
++				    struct ccram_chunk *c)
++{
++	list_del(&c->list);
++	s->nchunks--;
++	s->phys_bytes -= PAGE_SIZE;
++	__free_pages(c->page, 0);
++	kfree(c);
++}
++
++static struct ccram_chunk *ccram_chunk_find(struct ccram_store *s, u32 unit)
++{
++	struct ccram_chunk *c;
++
++	list_for_each_entry(c, &s->chunks, list) {
++		if (unit >= c->base &&
++		    unit < c->base + CCRAM_STORE_UNITS_PER_PAGE)
++			return c;
++	}
++	return NULL;
++}
++
++/* Take @n free units if available.  No growth, no sleeping: safe
++ * under the lock.  Returns 0 with @out filled, or -ENOSPC leaving
++ * everything untouched. */
++static int ccram_units_take_locked(struct ccram_store *s, unsigned int n,
++				   u32 *out)
++{
++	unsigned int got = 0;
++	struct ccram_chunk *c;
++
++	lockdep_assert_held(&s->lock);
++	list_for_each_entry(c, &s->chunks, list) {
++		unsigned int i;
++
++		for (i = 0; i < CCRAM_STORE_UNITS_PER_PAGE && got < n; i++) {
++			if (!(c->used & BIT(i))) {
++				c->used |= BIT(i);
++				c->nused++;
++				out[got++] = c->base + i;
++			}
++		}
++		if (got == n)
++			return 0;
++	}
++	/* Untake the partial set so the caller sees all-or-nothing. */
++	while (got--) {
++		c = ccram_chunk_find(s, out[got]);
++		if (c) {
++			c->used &= ~BIT(out[got] - c->base);
++			c->nused--;
++		}
++	}
++	return -ENOSPC;
++}
++
++/* Add one chunk to the pool.  Sleepable buddy allocation: caller must
++ * NOT hold the lock (reclaim paths sleep here). */
++static int ccram_pool_grow(struct ccram_store *s, gfp_t gfp)
++{
++	struct ccram_chunk *c;
++	unsigned long flags;
++
++	c = ccram_chunk_alloc(s, gfp);
++	if (!c)
++		return -ENOSPC;
++	/* Base assignment and linking under lock.  Unit numbers are
++	 * monotonic and never reused, so a stale unit can never alias a
++	 * live one; guard the (absurd) wrap explicitly. */
++	spin_lock_irqsave(&s->lock, flags);
++	if (s->next_base + CCRAM_STORE_UNITS_PER_PAGE < s->next_base) {
++		spin_unlock_irqrestore(&s->lock, flags);
++		__free_pages(c->page, 0);
++		kfree(c);
++		return -ENOSPC;
++	}
++	c->base = s->next_base;
++	s->next_base += CCRAM_STORE_UNITS_PER_PAGE;
++	list_add_tail(&c->list, &s->chunks);
++	s->nchunks++;
++	s->phys_bytes += PAGE_SIZE;
++	spin_unlock_irqrestore(&s->lock, flags);
++	return 0;
++}
++
++/* Ensure @n free units exist, growing the pool outside the lock.
++ * Bounded: at most 4 grow rounds, then fail closed.  A racing consumer
++ * can only delay us to the cap, never livelock us. */
++static int ccram_units_ensure(struct ccram_store *s, unsigned int n,
++			      gfp_t gfp)
++{
++	int i;
++
++	for (i = 0; i < 4; i++) {
++		unsigned int free = 0;
++		struct ccram_chunk *c;
++		unsigned long flags;
++
++		spin_lock_irqsave(&s->lock, flags);
++		list_for_each_entry(c, &s->chunks, list)
++			free += CCRAM_STORE_UNITS_PER_PAGE - c->nused;
++		spin_unlock_irqrestore(&s->lock, flags);
++		if (free >= n)
++			return 0;
++		if (ccram_pool_grow(s, gfp))
++			return -ENOSPC;
++	}
++	return -ENOSPC;
++}
++
++static void ccram_units_free_locked(struct ccram_store *s, const u32 *units,
++				    unsigned int n)
++{
++	unsigned int i;
++
++	lockdep_assert_held(&s->lock);
++	for (i = 0; i < n; i++) {
++		struct ccram_chunk *c = ccram_chunk_find(s, units[i]);
++
++		if (WARN_ON_ONCE(!c))
++			continue;
++		c->used &= ~BIT(units[i] - c->base);
++		c->nused--;
++		if (!c->nused)
++			ccram_chunk_free_locked(s, c);
++	}
++}
++
++static void ccram_unit_write(struct ccram_chunk *c, unsigned int slot,
++			     const void *src)
++{
++	char *dst = kmap_local_page(c->page) + slot * CCRAM_STORE_QUANTUM;
++
++	memcpy(dst, src, CCRAM_STORE_QUANTUM);
++	kunmap_local(dst);
++}
++
++static void ccram_unit_read(struct ccram_chunk *c, unsigned int slot,
++			    void *dst)
++{
++	char *src = kmap_local_page(c->page) + slot * CCRAM_STORE_QUANTUM;
++
++	memcpy(dst, src, CCRAM_STORE_QUANTUM);
++	kunmap_local(src);
++}
++
++int ccram_store_page(struct ccram_store *s, struct page *src, gfp_t gfp,
++		     u32 *id_out)
++{
++	struct ccram_obj *o;
++	struct ccram_scratch *sc;
++	char *srcp;
++	u64 hash;
++	int ret, nunits, i;
++	u32 id;
++	bool raw = false;
++	unsigned long flags;
++
++	gfp = ccram_store_gfp(gfp);
++	/* Compress first, lock-free: per-CPU scratch, no allocation. */
++	srcp = kmap_local_page(src);
++	hash = xxh64(srcp, PAGE_SIZE, CCRAM_STORE_HASH_SEED);
++	sc = &get_cpu_var(ccram_scratch);
++	ret = LZ4_compress_default(srcp, (char *)sc->cbuf, PAGE_SIZE,
++				   sizeof(sc->cbuf), &sc->lz4);
++	if (ret <= 0 || (unsigned int)ret > PAGE_SIZE - CCRAM_STORE_MIN_SAVINGS)
++		raw = true;
++	nunits = raw ? CCRAM_STORE_UNITS_PER_PAGE :
++		       DIV_ROUND_UP((unsigned int)ret, CCRAM_STORE_QUANTUM);
++	if (nunits > CCRAM_STORE_MAX_UNITS) {
++		nunits = CCRAM_STORE_UNITS_PER_PAGE;
++		raw = true;
++	}
++	/* Metadata alloc sleeps: outside the lock. */
++	o = kmalloc(struct_size(o, units, nunits), gfp);
++	if (!o) {
++		ret = -ENOMEM;
++		goto out_cpu;
++	}
++	o->len_orig = PAGE_SIZE;
++	o->len_stored = raw ? PAGE_SIZE : (u32)ret;
++	o->flags = CCRAM_OBJ_ALGO_LZ4;
++	if (raw)
++		o->flags |= CCRAM_OBJ_RAW;
++	o->hash = hash;
++	atomic_set(&o->refcnt, 1);
++	o->nunits = nunits;
++	/* Pool growth sleeps: outside the lock, bounded rounds. */
++	ret = ccram_units_ensure(s, nunits, gfp);
++	if (ret)
++		goto out_meta;
++	spin_lock_irqsave(&s->lock, flags);
++	ret = ccram_units_take_locked(s, nunits, o->units);
++	if (ret) {
++		spin_unlock_irqrestore(&s->lock, flags);
++		goto out_meta;
++	}
++	for (i = 0; i < nunits; i++) {
++		struct ccram_chunk *c = ccram_chunk_find(s, o->units[i]);
++
++		if (!c) {
++			ret = -EIO;
++			break;
++		}
++		if (raw) {
++			ccram_unit_write(c, o->units[i] - c->base,
++					 srcp + i * CCRAM_STORE_QUANTUM);
++		} else if (i == nunits - 1) {
++			/* Last unit: payload tail + zeroed padding, so no
++			 * stale bytes ever sit in the waste. */
++			u8 tmp[CCRAM_STORE_QUANTUM] = { 0 };
++			unsigned int off = i * CCRAM_STORE_QUANTUM;
++			unsigned int tail = o->len_stored - off;
++
++			memcpy(tmp, sc->cbuf + off, tail);
++			ccram_unit_write(c, o->units[i] - c->base, tmp);
++		} else {
++			ccram_unit_write(c, o->units[i] - c->base,
++					 sc->cbuf + i * CCRAM_STORE_QUANTUM);
++		}
++	}
++	if (!ret) {
++		/* xa_alloc with NOWAIT-inherited gfp: never sleeps, so it
++		 * is safe under the lock (bounded, fail-fast).  IDs from
++		 * 1: 0 stays an invalid handle. */
++		ret = xa_alloc(&s->objs, &id, o, XA_LIMIT(1, UINT_MAX), gfp);
++		if (!ret) {
++			o->id = id;
++			s->nobjs++;
++			s->logical_bytes += PAGE_SIZE;
++			s->stored_bytes += o->len_stored;
++			s->waste_bytes += (u64)nunits * CCRAM_STORE_QUANTUM -
++					  o->len_stored;
++			if (raw)
++				s->nraw++;
++			else
++				s->ncomp++;
++			s->ncompress_ops++;
++			*id_out = id;
++			ret = 0;
++		} else {
++			ret = -ENOSPC;
++		}
++	}
++	if (ret)
++		ccram_units_free_locked(s, o->units, nunits);
++	spin_unlock_irqrestore(&s->lock, flags);
++	if (ret) {
++		spin_lock_irqsave(&s->lock, flags);
++		s->nfail++;
++		spin_unlock_irqrestore(&s->lock, flags);
++		kfree(o);
++	}
++	goto out_cpu;
++out_meta:
++	kfree(o);
++	spin_lock_irqsave(&s->lock, flags);
++	s->nfail++;
++	spin_unlock_irqrestore(&s->lock, flags);
++out_cpu:
++	put_cpu_var(ccram_scratch);
++	kunmap_local(srcp);
++	return ret;
++}
++
++int ccram_store_load(struct ccram_store *s, u32 id, struct page *dst)
++{
++	struct ccram_obj *o;
++	struct ccram_scratch *sc;
++	char *dstp;
++	unsigned long flags;
++	unsigned int nunits, len_stored, o_flags;
++	u64 hash, want;
++	int ret = 0, i;
++
++	spin_lock_irqsave(&s->lock, flags);
++	o = xa_load(&s->objs, id);
++	if (!o || !atomic_inc_not_zero(&o->refcnt)) {
++		spin_unlock_irqrestore(&s->lock, flags);
++		return -ENOENT;
++	}
++	nunits = o->nunits;
++	len_stored = o->len_stored;
++	o_flags = o->flags;
++	want = o->hash;
++	sc = &get_cpu_var(ccram_scratch);
++	for (i = 0; (unsigned int)i < nunits; i++) {
++		struct ccram_chunk *c = ccram_chunk_find(s, o->units[i]);
++
++		if (!c) {
++			ret = -EIO;
++			break;
++		}
++		ccram_unit_read(c, o->units[i] - c->base,
++				sc->gbuf + i * CCRAM_STORE_QUANTUM);
++	}
++	spin_unlock_irqrestore(&s->lock, flags);
++	if (ret)
++		goto out;
++	/* Heavy work (decompress + verify) runs WITHOUT the lock.  The
++	 * lookup ref pins the object and its units for the duration. */
++	dstp = kmap_local_page(dst);
++	if (o_flags & CCRAM_OBJ_RAW) {
++		if (len_stored != PAGE_SIZE) {
++			ret = -EIO;
++		} else {
++			memcpy(dstp, sc->gbuf, PAGE_SIZE);
++		}
++	} else {
++		ret = LZ4_decompress_safe((char *)sc->gbuf, dstp,
++					  len_stored, PAGE_SIZE);
++		if (ret != PAGE_SIZE)
++			ret = -EIO;
++		else
++			ret = 0;
++	}
++	if (!ret) {
++		hash = xxh64(dstp, PAGE_SIZE, CCRAM_STORE_HASH_SEED);
++		if (hash != want)
++			ret = -EIO;
++	}
++	kunmap_local(dstp);
++out:
++	put_cpu_var(ccram_scratch);
++	/* Drop the lookup ref taken above; release happens at zero. */
++	ccram_obj_put(s, o);
++	spin_lock_irqsave(&s->lock, flags);
++	if (!ret)
++		s->ndecompress_ops++;
++	else
++		s->nfail++;
++	spin_unlock_irqrestore(&s->lock, flags);
++	return ret;
++}
++
++struct ccram_obj *ccram_obj_get(struct ccram_store *s, u32 id)
++{
++	struct ccram_obj *o;
++	unsigned long flags;
++
++	spin_lock_irqsave(&s->lock, flags);
++	o = xa_load(&s->objs, id);
++	if (o && !atomic_inc_not_zero(&o->refcnt))
++		o = NULL;
++	spin_unlock_irqrestore(&s->lock, flags);
++	return o;
++}
++
++/* Erase @o from the lookup index, adjusting gauges exactly once.
++ * Caller holds the lock.  Returns true if the entry was present.
++ * A miss means someone already erased it (free() ran first); the
++ * backing is still released by whoever observes the last put. */
++static bool __obj_erase_locked(struct ccram_store *s, struct ccram_obj *o)
++{
++	void *found = xa_erase(&s->objs, o->id);
++
++	lockdep_assert_held(&s->lock);
++	if (!found)
++		return false;
++	/* Any present entry for this id must be this object. */
++	if (WARN_ON_ONCE(found != o))
++		return true;
++	s->nobjs--;
++	s->logical_bytes -= PAGE_SIZE;
++	s->stored_bytes -= o->len_stored;
++	s->waste_bytes -= (u64)o->nunits * CCRAM_STORE_QUANTUM -
++			  o->len_stored;
++	return true;
++}
++
++void ccram_obj_put(struct ccram_store *s, struct ccram_obj *o)
++{
++	unsigned long flags;
++	bool last;
++
++	spin_lock_irqsave(&s->lock, flags);
++	last = atomic_dec_and_test(&o->refcnt);
++	if (last) {
++		__obj_erase_locked(s, o);
++		ccram_units_free_locked(s, o->units, o->nunits);
++	}
++	spin_unlock_irqrestore(&s->lock, flags);
++	if (last)
++		kfree(o);
++}
++
++int ccram_store_free(struct ccram_store *s, u32 id)
++{
++	struct ccram_obj *o;
++	unsigned long flags;
++
++	spin_lock_irqsave(&s->lock, flags);
++	o = xa_load(&s->objs, id);
++	if (!o) {
++		/* Unknown id: silent -ENOENT (exact-once free detection
++		 * without dmesg noise; the leak check proves balance). */
++		spin_unlock_irqrestore(&s->lock, flags);
++		return -ENOENT;
++	}
++	/* Erase first so a concurrent lookup can never observe a
++	 * half-freed object; then drop the owner reference.  Borrowers
++	 * holding refs release the backing at zero. */
++	__obj_erase_locked(s, o);
++	spin_unlock_irqrestore(&s->lock, flags);
++	ccram_obj_put(s, o);
++	return 0;
++}
++
++void ccram_store_stats(struct ccram_store *s, struct ccram_store_stats *out)
++{
++	unsigned long flags;
++
++	spin_lock_irqsave(&s->lock, flags);
++	out->phys_bytes = s->phys_bytes;
++	out->logical_bytes = s->logical_bytes;
++	out->stored_bytes = s->stored_bytes;
++	out->waste_bytes = s->waste_bytes;
++	out->nobjs = s->nobjs;
++	out->nchunks = s->nchunks;
++	out->ncomp = s->ncomp;
++	out->nraw = s->nraw;
++	out->ncompress_ops = s->ncompress_ops;
++	out->ndecompress_ops = s->ndecompress_ops;
++	out->nfail = s->nfail;
++	spin_unlock_irqrestore(&s->lock, flags);
++}
++
++int ccram_store_destroy(struct ccram_store *s)
++{
++	struct ccram_chunk *c, *tmp;
++
++	if (s->nobjs) {
++		pr_err("ccram-store: destroy with %u live objects; refusing\n",
++		       s->nobjs);
++		WARN_ON_ONCE(1);
++		return -EBUSY;
++	}
++	list_for_each_entry_safe(c, tmp, &s->chunks, list)
++		ccram_chunk_free_locked(s, c);
++	xa_destroy(&s->objs);
++	kfree(s);
++	return 0;
++}
++
++/* --- deterministic self-test ---------------------------------------- */
++
++struct ccram_st_case {
++	const char *name;
++	void (*gen)(char *p);
++	bool expect_raw;	/* only asserted where deterministic */
++};
++
++static void st_gen_zero(char *p) { memset(p, 0, PAGE_SIZE); }
++static void st_gen_ones(char *p) { memset(p, 0xff, PAGE_SIZE); }
++static void st_gen_repeat8(char *p)
++{
++	int i;
++
++	for (i = 0; i < PAGE_SIZE; i += 8)
++		memcpy(p + i, "ABCDEFGH", 8);
++}
++static void st_gen_counter(char *p)
++{
++	int i;
++
++	for (i = 0; i < PAGE_SIZE; i++)
++		p[i] = (char)i;
++}
++static void st_gen_altbit(char *p)
++{
++	int i;
++
++	for (i = 0; i < PAGE_SIZE; i++)
++		p[i] = (i & 1) ? (char)0xaa : (char)0x55;
++}
++static void st_gen_textlike(char *p)
++{
++	static const char line[] =
++		"ccram phase2a object store round-trip proof block 0123456789\n";
++	int i, off = 0;
++
++	for (i = 0; i < PAGE_SIZE / (int)sizeof(line); i++) {
++		memcpy(p + off, line, sizeof(line) - 1);
++		off += sizeof(line) - 1;
++	}
++}
++static void st_gen_random(char *p)
++{
++	/* Local splitmix64: deterministic, no entropy needed, good enough
++	 * to be incompressible (uniform bytes defeat LZ4 matching). */
++	u64 s = 0x9E3779B97F4A7C15ULL;
++	int i;
++
++	for (i = 0; i < PAGE_SIZE; i += 8) {
++		u64 z = (s += 0x9E3779B97F4A7C15ULL);
++
++		z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
++		z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
++		z ^= z >> 31;
++		memcpy(p + i, &z, 8);
++	}
++}
++static void st_gen_half(char *p)
++{
++	u64 s = 0x123456789ABCDEF0ULL;
++	int i;
++
++	memset(p, 0, PAGE_SIZE / 2);
++	for (i = PAGE_SIZE / 2; i < PAGE_SIZE; i += 8) {
++		u64 z = (s += 0x9E3779B97F4A7C15ULL);
++
++		z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
++		z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
++		z ^= z >> 31;
++		memcpy(p + i, &z, 8);
++	}
++}
++
++static const struct ccram_st_case ccram_st_cases[] = {
++	{ "zero",     st_gen_zero,     false },
++	{ "ones",     st_gen_ones,     false },
++	{ "repeat8",  st_gen_repeat8,  false },
++	{ "counter",  st_gen_counter,  false },
++	{ "altbit",   st_gen_altbit,   false },
++	{ "textlike", st_gen_textlike, false },
++	{ "random",   st_gen_random,    true  },
++	{ "half",     st_gen_half,     false },
++};
++
++int ccram_store_selftest(int nid)
++{
++	struct ccram_store *s;
++	struct page *src, *dst;
++	char *p;
++	int i, ret = 0;
++
++	s = ccram_store_create(nid);
++	if (!s) {
++		pr_err("ccram-store: selftest: store create failed\n");
++		return -ENOMEM;
++	}
++	src = alloc_page(GFP_KERNEL);
++	dst = alloc_page(GFP_KERNEL);
++	if (!src || !dst) {
++		ret = -ENOMEM;
++		goto out_free;
++	}
++	for (i = 0; i < (int)ARRAY_SIZE(ccram_st_cases); i++) {
++		const struct ccram_st_case *c = &ccram_st_cases[i];
++		u32 id;
++		u64 h1, h2;
++		char *d;
++
++		p = kmap_local_page(src);
++		c->gen(p);
++		h1 = xxh64(p, PAGE_SIZE, CCRAM_STORE_HASH_SEED);
++		kunmap_local(p);
++		ret = ccram_store_page(s, src, GFP_KERNEL, &id);
++		if (ret) {
++			pr_err("ccram-store: selftest %s: store failed %d\n",
++			       c->name, ret);
++			break;
++		}
++		{
++			struct ccram_obj *o = ccram_obj_get(s, id);
++			bool is_raw;
++
++			if (!o) {
++				pr_err("ccram-store: selftest %s: lost object\n",
++				       c->name);
++				ret = -EIO;
++				break;
++			}
++			is_raw = !!(o->flags & CCRAM_OBJ_RAW);
++			pr_info("ccram-store: selftest %-8s: %u bytes in %u units (%s) stored\n",
++				c->name, o->len_stored, o->nunits,
++				is_raw ? "raw" : "lz4");
++			if (c->expect_raw && !is_raw) {
++				pr_err("ccram-store: selftest %s: expected raw fallback\n",
++				       c->name);
++				ccram_obj_put(s, o);
++				ret = -EIO;
++				ccram_store_free(s, id);
++				break;
++			}
++			ccram_obj_put(s, o);
++		}
++		d = kmap_local_page(dst);
++		memset(d, 0xa5, PAGE_SIZE);
++		kunmap_local(d);
++		ret = ccram_store_load(s, id, dst);
++		if (ret) {
++			pr_err("ccram-store: selftest %s: load failed %d\n",
++			       c->name, ret);
++			ccram_store_free(s, id);
++			break;
++		}
++		p = kmap_local_page(src);
++		d = kmap_local_page(dst);
++		if (memcmp(p, d, PAGE_SIZE))
++			ret = -EIO;
++		h2 = xxh64(d, PAGE_SIZE, CCRAM_STORE_HASH_SEED);
++		kunmap_local(d);
++		kunmap_local(p);
++		if (ret || h1 != h2) {
++			pr_err("ccram-store: selftest %s: round-trip mismatch\n",
++			       c->name);
++			ret = ret ? : -EIO;
++			ccram_store_free(s, id);
++			break;
++		}
++		ret = ccram_store_free(s, id);
++		if (ret) {
++			pr_err("ccram-store: selftest %s: free failed %d\n",
++			       c->name, ret);
++			break;
++		}
++		/* Double free must fail silently, exactly once semantics. */
++		if (!ccram_store_free(s, id)) {
++			pr_err("ccram-store: selftest %s: double free accepted!\n",
++			       c->name);
++			ret = -EIO;
++			break;
++		}
++	}
++	if (!ret) {
++		struct ccram_store_stats st;
++
++		ccram_store_stats(s, &st);
++		if (st.nobjs || st.logical_bytes || st.stored_bytes ||
++		    st.waste_bytes || st.phys_bytes) {
++			pr_err("ccram-store: selftest: leak: objs %llu phys %llu\n",
++			       st.nobjs, st.phys_bytes);
++			ret = -EIO;
++		}
++	}
++	if (!ret)
++		ret = ccram_store_destroy(s);
++	else
++		ccram_store_destroy(s);
++out_free:
++	if (src)
++		__free_page(src);
++	if (dst)
++		__free_page(dst);
++	pr_info("ccram-store: selftest %s\n", ret ? "FAIL" : "PASS, 8 cases, exact 4K round-trip");
++	return ret;
++}
++
++/* --- enable path, params, debugfs ----------------------------------- */
++
++static int ccram_compress_mode = CCRAM_COMPRESS_OFF;
++
++static int __init ccram_parse_compress(char *s)
++{
++	if (!strcmp(s, "off"))
++		ccram_compress_mode = CCRAM_COMPRESS_OFF;
++	else if (!strcmp(s, "lz4"))
++		ccram_compress_mode = CCRAM_COMPRESS_LZ4;
++	else
++		pr_info("ccram: unknown compress mode '%s', staying off\n", s);
++	return 0;
++}
++early_param("ccram.compress", ccram_parse_compress);
++
++int ccram_compress_mode_now(void)
++{
++	return ccram_compress_mode;
++}
++
++static struct ccram_store *ccram_live_store;
++
++struct ccram_store *ccram_live_store_now(void)
++{
++	return READ_ONCE(ccram_live_store);
++}
++
++static int ccram_stats_show(struct seq_file *m, void *v)
++{
++	struct ccram_store_stats st;
++	struct ccram_store *s = m->private;
++
++	if (!s) {
++		seq_puts(m, "store: none\n");
++		return 0;
++	}
++	ccram_store_stats(s, &st);
++	seq_printf(m, "mode: %s\n", ccram_compress_mode_now() ?
++		   "lz4" : "off");
++	seq_printf(m, "objs: %llu chunks: %llu\n", st.nobjs, st.nchunks);
++	seq_printf(m, "physical_backing_bytes: %llu\n", st.phys_bytes);
++	seq_printf(m, "logical_bytes: %llu\n", st.logical_bytes);
++	seq_printf(m, "compressed_bytes: %llu\n", st.stored_bytes);
++	seq_printf(m, "packing_waste_bytes: %llu\n", st.waste_bytes);
++	seq_printf(m, "compressed_pages: %llu raw_pages: %llu\n",
++		   st.ncomp, st.nraw);
++	seq_printf(m, "compress_ops: %llu decompress_ops: %llu failures: %llu\n",
++		   st.ncompress_ops, st.ndecompress_ops, st.nfail);
++	if (st.stored_bytes)
++		seq_printf(m, "ratio_logical_stored_per mille: %llu\n",
++			   st.logical_bytes * 1000 / st.stored_bytes);
++	else
++		seq_puts(m, "ratio_logical_stored_per mille: n/a\n");
++	if (st.phys_bytes)
++		seq_printf(m, "ratio_logical_physical_per mille: %llu\n",
++			   st.logical_bytes * 1000 / st.phys_bytes);
++	else
++		seq_puts(m, "ratio_logical_physical_per mille: n/a\n");
++	return 0;
++}
++
++static int ccram_stats_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, ccram_stats_show, inode->i_private);
++}
++
++static const struct file_operations ccram_stats_fops = {
++	.open		= ccram_stats_open,
++	.read		= seq_read,
++	.llseek		= seq_lseek,
++	.release	= single_release,
++};
++
++static ssize_t ccram_selftest_write(struct file *f, const char __user *buf,
++				    size_t len, loff_t *off)
++{
++	int ret = ccram_store_selftest(NUMA_NO_NODE);
++
++	return ret ? ret : len;
++}
++
++static const struct file_operations ccram_selftest_fops = {
++	.write = ccram_selftest_write,
++};
++
++static int __init ccram_store_late_init(void)
++{
++	struct dentry *dbg;
++	int nid, ret;
++
++	if (ccram_compress_mode != CCRAM_COMPRESS_LZ4) {
++		pr_info("ccram-store: disabled (ccram.compress=off)\n");
++		return 0;
++	}
++	if (nodes_empty(cram_node_mask)) {
++		pr_info("ccram-store: no CRAM tier online, store not created\n");
++		return 0;
++	}
++	nid = first_node(cram_node_mask);
++	ccram_live_store = ccram_store_create(nid);
++	if (!ccram_live_store) {
++		pr_err("ccram-store: live store create failed\n");
++		return 0;
++	}
++	/* Prove the format on a throwaway store BEFORE trusting the live
++	 * one.  A self-test failure disables compression outright: the
++	 * tier keeps serving 1:1, fail closed. */
++	ret = ccram_store_selftest(NUMA_NO_NODE);
++	if (ret) {
++		pr_err("ccram-store: selftest failed, compression stays off\n");
++		ccram_store_destroy(ccram_live_store);
++		ccram_live_store = NULL;
++		ccram_compress_mode = CCRAM_COMPRESS_OFF;
++		return 0;
++	}
++	dbg = debugfs_lookup("ccram", NULL);
++	if (!dbg)
++		dbg = debugfs_create_dir("ccram", NULL);
++	if (!IS_ERR(dbg)) {
++		debugfs_create_file("store_stats", 0444, dbg,
++				    ccram_live_store, &ccram_stats_fops);
++		debugfs_create_file("selftest", 0200, dbg,
++				    NULL, &ccram_selftest_fops);
++	}
++	pr_info("ccram-store: lz4 store ready on node %d (selftest PASS)\n",
++		nid);
++	return 0;
++}
++late_initcall(ccram_store_late_init);
+-- 
+2.55.0
+

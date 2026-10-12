@@ -1,0 +1,38 @@
+#!/sbin/openrc-run
+# Saphira Garden — openrc service
+# Ships alongside the systemd unit; both are inert unless the operator enables
+# them. Saphira is dual-init and never infers which init is running.
+name="saphira-garden"
+description="Saphira Garden network access controller and walled garden"
+
+: ${saphira_garden_config:=/etc/saphira/garden/garden.toml}
+: ${saphira_garden_args:=}
+
+depend() {
+	need net
+	after firewall
+}
+
+start_pre() {
+	checkpath --directory --mode 0750 /run/saphira-garden
+	checkpath --directory --mode 0750 /var/lib/saphira-garden
+	# Validate the configuration before starting. An invalid configuration
+	# is a startup failure, not a warning.
+	/usr/sbin/saphira-garden -t -c "$saphira_garden_config" \
+		|| { eerror "configuration is invalid; refusing to start"; return 1; }
+}
+
+start() {
+	ebegin "Starting saphira-garden"
+	start-stop-daemon --start --background --make-pidfile \
+		--pidfile /run/saphira-garden/saphira-garden.pid \
+		--exec /usr/sbin/saphira-garden -- -f -c "$saphira_garden_config" \
+		${saphira_garden_args}
+	eend $?
+}
+
+stop() {
+	ebegin "Stopping saphira-garden"
+	start-stop-daemon --stop --pidfile /run/saphira-garden/saphira-garden.pid
+	eend $?
+}

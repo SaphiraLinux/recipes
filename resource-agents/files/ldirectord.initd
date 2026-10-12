@@ -1,0 +1,61 @@
+#!/sbin/openrc-run
+
+description="ldirectord load balancer director (Layer 4 LVS)"
+
+# ldirectord is both the daemon and its own control interface: the
+# `start' / `stop' / `reload' subcommands drive the virtual IP and real
+# server tables described in the configuration file. There is no separate
+# foreground mode to supervise, so this is a oneshot with a status probe
+# rather than a command/supervisor pair.
+#
+# Upstream ships only an LSB sysvinit script (chkconfig, ### BEGIN INIT
+# INFO, no depend(), no supervisor=), which rc-service cannot run without
+# the LSB compatibility shim. This is the Saphira OpenRC equivalent.
+
+ldirectord=/usr/sbin/ldirectord
+: ${ldirectord_config:=/etc/ha.d/ldirectord.cf}
+
+depend()
+{
+	need localmount
+	use net
+	after net
+}
+
+start()
+{
+	if ! test -f "$ldirectord_config"; then
+		eerror "no configuration: $ldirectord_config (see $ldirectord_config.example)"
+		return 1
+	fi
+	# ipvsadm is a hard runtime requirement: ldirectord refuses to
+	# start without it, so failing here gives a clear message instead
+	# of an opaque daemon exit.
+	if ! command -v ipvsadm >/dev/null 2>&1; then
+		eerror "ipvsadm is not installed; ldirectord needs it"
+		return 1
+	fi
+	ebegin "Starting ldirectord with $ldirectord_config"
+	"$ldirectord" "$ldirectord_config" start
+	eend $?
+}
+
+stop()
+{
+	ebegin "Stopping ldirectord"
+	"$ldirectord" "$ldirectord_config" stop
+	eend $?
+}
+
+reload()
+{
+	ebegin "Reloading ldirectord configuration"
+	"$ldirectord" "$ldirectord_config" reload
+	eend $?
+}
+
+status()
+{
+	# ldirectord reports on its own state for a given configuration.
+	"$ldirectord" "$ldirectord_config" monitor
+}

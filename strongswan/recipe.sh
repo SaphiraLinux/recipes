@@ -46,5 +46,13 @@ recipe_build()
 
 recipe_install()
 {
-	make DESTDIR="$PKGDEST" install
+	make DESTDIR="$PKGDEST" install	# Dual-init policy: both definitions ship unconditionally; neither is
+	# enabled or started at install.
+	install -D -m 0755 "$RECIPE_DIR/files/charon.initd" \
+		"$PKGDEST/etc/init.d/charon"
+	install -D -m 0644 "$RECIPE_DIR/files/charon.service" \
+		"$PKGDEST/usr/lib/systemd/system/charon.service"
+	[ -e "$PKGDEST/etc/init.d/charon" ] || { echo "ERROR: strongswan payload is missing etc/init.d/charon" >&2; return 1; }
+	[ -e "$PKGDEST/usr/lib/systemd/system/charon.service" ] || { echo "ERROR: strongswan payload is missing usr/lib/systemd/system/charon.service" >&2; return 1; }
+
 }

@@ -107,6 +107,28 @@ assert drift(["a"], {"a": "1.0-r1"}, []) == []
 assert drift(["a"], {}, ["a-1.0-r1.apk"]) == ["a"]
 assert drift(["a"], {"b": "1.0-r1"}, ["a-1.0-r1.apk"]) == ["a"]
 assert drift(["a"], {"a": "bogus"}, ["a-1.0-r1.apk"]) == ["a"]
+# Fuzzy line pins (build-UAPI policy): the receipt sits on the pinned
+# line at any packaging revision, so no perpetual drift; leaving the
+# line, or an exact pin mismatch, still drifts.
+assert drift(["kh~7.1.5"], {"kh": "7.1.5-r2"},
+             ["kh-7.1.5-r1.apk", "kh-7.1.5-r2.apk",
+              "kh-7.2.2-r1.apk", "kh-7.2.3-r2.apk"]) == []
+assert drift(["kh~7.1.5"], {"kh": "7.1.5-r2"},
+             ["kh-7.2.2-r1.apk", "kh-7.2.3-r2.apk"]) == ["kh~7.1.5"]
+assert drift(["kh=7.1.5-r2"], {"kh": "7.1.5-r2"},
+             ["kh-7.1.5-r1.apk", "kh-7.1.5-r2.apk"]) == []
+assert drift(["kh=7.1.5-r2"], {"kh": "7.1.5-r1"},
+             ["kh-7.1.5-r1.apk", "kh-7.1.5-r2.apk"]) == ["kh=7.1.5-r2"]
+satisfies = module._seed_atom_satisfies
+apk_bin = "apk"
+assert satisfies(apk_bin, "7.1.5-r2", "kh~7.1.5")
+assert satisfies(apk_bin, "7.1.5-r1", "kh~7.1.5")
+assert not satisfies(apk_bin, "7.2.3-r2", "kh~7.1.5")
+assert not satisfies(apk_bin, "7.1.50-r1", "kh~7.1.5")
+assert satisfies(apk_bin, "7.1.5-r2", "kh=7.1.5-r2")
+assert not satisfies(apk_bin, "7.1.5-r1", "kh=7.1.5-r2")
+assert not satisfies(apk_bin, "7.1.5-r2", "kh=7.1.5")
+assert satisfies(apk_bin, "9.7-r3", "coreutils")
 disposition = module._workspace_disposition
 assert disposition("g", "g") == "reuse"
 assert disposition("g", "h") == "move_aside"

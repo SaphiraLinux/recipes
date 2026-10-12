@@ -1,0 +1,14 @@
+#%PAM-1.0
+# Saphira shadow su service. Root keeps pam_rootok; wheel lines stay
+# commented (opt-in). Matches the Arch su shape.
+
+auth            sufficient      pam_rootok.so
+# Uncomment the following line to implicitly trust users in the "wheel" group.
+#auth           sufficient      pam_wheel.so trust use_uid
+# Uncomment the following line to require a user to be in the "wheel" group.
+#auth           required        pam_wheel.so use_uid
+auth            required        pam_unix.so
+account         required        pam_unix.so
+session         required        pam_unix.so
+session         required        pam_limits.so
+password        include         system-auth

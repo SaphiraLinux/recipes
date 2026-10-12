@@ -4,6 +4,7 @@ After=network.target
 
 [Service]
 Type=simple
+ExecStartPre=/bin/mkdir -p /var/run/rspamd
 ExecStartPre=/bin/rm -f /var/run/rspamd/rspamd.pid
 ExecStartPre=/usr/sbin/rspamd -c /etc/rspamd/rspamd.conf -t
 ExecStart=/usr/sbin/rspamd -c /etc/rspamd/rspamd.conf -f

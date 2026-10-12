@@ -1,0 +1,15 @@
+#%PAM-1.0
+# Saphira shadow su-l service (login-shell su). Shadow's su consults
+# `su`; this twin covers login-shell semantics if a util-linux su ever
+# returns to the tree. Same shape as su.
+
+auth            sufficient      pam_rootok.so
+# Uncomment the following line to implicitly trust users in the "wheel" group.
+#auth           sufficient      pam_wheel.so trust use_uid
+# Uncomment the following line to require a user to be in the "wheel" group.
+#auth           required        pam_wheel.so use_uid
+auth            required        pam_unix.so
+account         required        pam_unix.so
+session         required        pam_unix.so
+session         required        pam_limits.so
+password        include         system-auth

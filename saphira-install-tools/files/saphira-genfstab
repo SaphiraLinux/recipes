@@ -8,6 +8,16 @@ die()
 	exit 1
 }
 
+# Saphira tool scratch lives under SAPHIRA_TMPDIR, never host /tmp.
+# RECIPE_RULES.md: "Host /tmp is never Saphira scratch: not for archives,
+# not for work, not for tests. Tool and test scratch lives under
+# SAPHIRA_TMPDIR (/build/tmp default)". /tmp is wiped on reboot, shared,
+# and invisible; on a live system it is also a small tmpfs.
+saphira_tmpdir()
+{
+	printf '%s\n' "${SAPHIRA_TMPDIR:-/build/tmp}"
+}
+
 test $# -eq 1 || {
 	printf 'usage: saphira-genfstab TARGET\n' >&2
 	exit 2
@@ -19,7 +29,7 @@ target=$(readlink -f -- "$target") || die "cannot resolve target: $target"
 findmnt_command=${SAPHIRA_FINDMNT:-findmnt}
 blkid_command=${SAPHIRA_BLKID:-blkid}
 
-mounts=$(mktemp /tmp/saphira-genfstab.mounts.XXXXXX) ||
+mounts=$(mktemp "$(saphira_tmpdir)/saphira-genfstab.mounts.XXXXXX") ||
 	die 'cannot create mount workspace'
 trap 'rm -f -- "$mounts"' EXIT HUP INT TERM
 "$findmnt_command" -Rrn -o TARGET --target "$target" | LC_ALL=C sort -u > "$mounts" ||

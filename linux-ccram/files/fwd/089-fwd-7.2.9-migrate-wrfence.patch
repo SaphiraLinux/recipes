@@ -1,0 +1,68 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Saphira forward-port <builder@saphira.vm2.uk>
+Date: Thu, 9 Oct 2026 12:00:00 +0000
+Subject: [FWD 7.2.9] mm: keep write-fenced file folios read-only on migration
+
+Fwd-port of upstream ("mm/migrate: keep write-fenced file folios
+read-only on migration", Gregory Price, series position 089) onto
+Linux 7.2.9.
+
+Why needed: 7.2.9 lacks the uffd-rwp PAGE_NONE rework step that the
+branch anchors to; the guard is anchored at the device_private block
+instead (same position relative to the installed pte). huge_memory
+hunk verbatim upstream.
+
+Byte-identical upstream patch retained in series/ (recorded SKIP-FWD).
+Verifies with git apply --check (no fuzz).
+
+Signed-off-by: Saphira builder <builder@saphira.vm2.uk>
+---
+ mm/huge_memory.c | 10 ++++++++++
+ mm/migrate.c     | 11 +++++++++++
+ 2 files changed, 21 insertions(+)
+
+diff --git a/mm/huge_memory.c b/mm/huge_memory.c
+index 209763550c1..b92b4ba96cf 100644
+--- a/mm/huge_memory.c
++++ b/mm/huge_memory.c
+@@ -5104,6 +5104,16 @@ void remove_migration_pmd(struct page_vma_mapped_walk *pvmw, struct page *new)
+ 	if (folio_test_dirty(folio) && softleaf_is_migration_dirty(entry))
+ 		pmde = pmd_mkdirty(pmde);
+ 
++	/*
++	 * Write-fenced node: migration_remap_writable() re-adds write for a file
++	 * folio whose migration entry was writable.  A folio on a write-fenced
++	 * node must stay read-only so the next write promotes.  Mirrors the pte
++	 * fence in remove_migration_pte().  Anon is unaffected because it is kept
++	 * non-exclusive above.
++	 */
++	if (node_write_fenced(folio_nid(folio)))
++		pmde = pmd_wrprotect(pmde);
++
+ 	if (folio_is_device_private(folio)) {
+ 		swp_entry_t entry;
+ 
+diff --git a/mm/migrate.c b/mm/migrate.c
+index 6777db04817..6de0f2a83c9 100644
+--- a/mm/migrate.c
++++ b/mm/migrate.c
+@@ -399,6 +399,17 @@ static bool remove_migration_pte(struct folio *folio,
+ 		else if (pte_swp_uffd_wp(old_pte))
+ 			pte = pte_mkuffd_wp(pte);
+ 
++		/*
++		 * Force read-only for a folio on a write-fenced node.  A shared
++		 * writable file mapping leaves write in vma->vm_page_prot, mk_pte()
++		 * set it above, and migration_remap_writable() only ever adds write,
++		 * never clears it.  Clearing it here keeps the write fence intact for a
++		 * demoted file folio; the next write re-faults and promotes, as in
++		 * set_pte_range().  Anon is unaffected, kept non-exclusive above.
++		 */
++		if (node_write_fenced(folio_nid(folio)))
++			pte = pte_wrprotect(pte);
++
+ 		if (unlikely(is_device_private_page(new))) {
+ 			if (pte_write(pte))
+ 				entry = make_writable_device_private_entry(
+-- 
+2.55.0

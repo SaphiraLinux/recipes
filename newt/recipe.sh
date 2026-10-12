@@ -17,7 +17,7 @@ subpackages="$pkgname-dev $pkgname-doc"
 recipe_build() {
 	# configure-cache-cmp.patch is applied by the worker from patches/.
 	# --enable-nls is a no-op stub on musl (no gettext) but keeps the
-	# upstream flags close to the proven akadata build.
+	# upstream flags close to the proven Saphira build.
 	./configure --prefix=/usr --libdir=/usr/lib \
 		--sysconfdir=/etc \
 		--localstatedir=/var \

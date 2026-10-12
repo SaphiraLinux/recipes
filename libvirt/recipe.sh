@@ -96,5 +96,63 @@ recipe_install()
 			"$PKGDEST/etc/libvirt/network.conf"
 	[ -f "$PKGDEST/etc/libvirt/network.conf" ] || \
 		printf '# Saphira: nftables firewall backend (no iptables)\nfirewall_backend = "nftables"\n' \
-			> "$PKGDEST/etc/libvirt/network.conf"
+			> "$PKGDEST/etc/libvirt/network.conf"	# Dual-init policy: both definitions ship unconditionally; neither is
+	# enabled or started at install.
+	install -D -m 0755 "$RECIPE_DIR/files/virtqemud.initd" \
+		"$PKGDEST/etc/init.d/virtqemud"
+	install -D -m 0644 "$RECIPE_DIR/files/virtqemud.service" \
+		"$PKGDEST/usr/lib/systemd/system/virtqemud.service"
+	install -D -m 0755 "$RECIPE_DIR/files/virtstoraged.initd" \
+		"$PKGDEST/etc/init.d/virtstoraged"
+	install -D -m 0644 "$RECIPE_DIR/files/virtstoraged.service" \
+		"$PKGDEST/usr/lib/systemd/system/virtstoraged.service"
+	install -D -m 0755 "$RECIPE_DIR/files/virtnetworkd.initd" \
+		"$PKGDEST/etc/init.d/virtnetworkd"
+	install -D -m 0644 "$RECIPE_DIR/files/virtnetworkd.service" \
+		"$PKGDEST/usr/lib/systemd/system/virtnetworkd.service"
+	install -D -m 0755 "$RECIPE_DIR/files/virtnodedevd.initd" \
+		"$PKGDEST/etc/init.d/virtnodedevd"
+	install -D -m 0644 "$RECIPE_DIR/files/virtnodedevd.service" \
+		"$PKGDEST/usr/lib/systemd/system/virtnodedevd.service"
+	install -D -m 0755 "$RECIPE_DIR/files/virtsecretd.initd" \
+		"$PKGDEST/etc/init.d/virtsecretd"
+	install -D -m 0644 "$RECIPE_DIR/files/virtsecretd.service" \
+		"$PKGDEST/usr/lib/systemd/system/virtsecretd.service"
+	install -D -m 0755 "$RECIPE_DIR/files/virtproxyd.initd" \
+		"$PKGDEST/etc/init.d/virtproxyd"
+	install -D -m 0644 "$RECIPE_DIR/files/virtproxyd.service" \
+		"$PKGDEST/usr/lib/systemd/system/virtproxyd.service"
+	install -D -m 0755 "$RECIPE_DIR/files/virtlogd.initd" \
+		"$PKGDEST/etc/init.d/virtlogd"
+	install -D -m 0644 "$RECIPE_DIR/files/virtlogd.service" \
+		"$PKGDEST/usr/lib/systemd/system/virtlogd.service"
+	install -D -m 0755 "$RECIPE_DIR/files/virtlockd.initd" \
+		"$PKGDEST/etc/init.d/virtlockd"
+	install -D -m 0644 "$RECIPE_DIR/files/virtlockd.service" \
+		"$PKGDEST/usr/lib/systemd/system/virtlockd.service"
+	# The two state-holding daemons must never be restart-looped: a
+	# restart mid-operation can leave a lock or a log inconsistent.
+	for d in virtlogd virtlockd; do
+		grep -q 'Restart=' "$RECIPE_DIR/files/$d.service" && {
+			echo "ERROR: libvirt $d.service must not set Restart=" >&2
+			return 1
+		}
+	done
+	[ -e "$PKGDEST/etc/init.d/virtqemud" ] || { echo "ERROR: libvirt payload is missing etc/init.d/virtqemud" >&2; return 1; }
+	[ -e "$PKGDEST/usr/lib/systemd/system/virtqemud.service" ] || { echo "ERROR: libvirt payload is missing usr/lib/systemd/system/virtqemud.service" >&2; return 1; }
+	[ -e "$PKGDEST/etc/init.d/virtstoraged" ] || { echo "ERROR: libvirt payload is missing etc/init.d/virtstoraged" >&2; return 1; }
+	[ -e "$PKGDEST/usr/lib/systemd/system/virtstoraged.service" ] || { echo "ERROR: libvirt payload is missing usr/lib/systemd/system/virtstoraged.service" >&2; return 1; }
+	[ -e "$PKGDEST/etc/init.d/virtnetworkd" ] || { echo "ERROR: libvirt payload is missing etc/init.d/virtnetworkd" >&2; return 1; }
+	[ -e "$PKGDEST/usr/lib/systemd/system/virtnetworkd.service" ] || { echo "ERROR: libvirt payload is missing usr/lib/systemd/system/virtnetworkd.service" >&2; return 1; }
+	[ -e "$PKGDEST/etc/init.d/virtnodedevd" ] || { echo "ERROR: libvirt payload is missing etc/init.d/virtnodedevd" >&2; return 1; }
+	[ -e "$PKGDEST/usr/lib/systemd/system/virtnodedevd.service" ] || { echo "ERROR: libvirt payload is missing usr/lib/systemd/system/virtnodedevd.service" >&2; return 1; }
+	[ -e "$PKGDEST/etc/init.d/virtsecretd" ] || { echo "ERROR: libvirt payload is missing etc/init.d/virtsecretd" >&2; return 1; }
+	[ -e "$PKGDEST/usr/lib/systemd/system/virtsecretd.service" ] || { echo "ERROR: libvirt payload is missing usr/lib/systemd/system/virtsecretd.service" >&2; return 1; }
+	[ -e "$PKGDEST/etc/init.d/virtproxyd" ] || { echo "ERROR: libvirt payload is missing etc/init.d/virtproxyd" >&2; return 1; }
+	[ -e "$PKGDEST/usr/lib/systemd/system/virtproxyd.service" ] || { echo "ERROR: libvirt payload is missing usr/lib/systemd/system/virtproxyd.service" >&2; return 1; }
+	[ -e "$PKGDEST/etc/init.d/virtlogd" ] || { echo "ERROR: libvirt payload is missing etc/init.d/virtlogd" >&2; return 1; }
+	[ -e "$PKGDEST/usr/lib/systemd/system/virtlogd.service" ] || { echo "ERROR: libvirt payload is missing usr/lib/systemd/system/virtlogd.service" >&2; return 1; }
+	[ -e "$PKGDEST/etc/init.d/virtlockd" ] || { echo "ERROR: libvirt payload is missing etc/init.d/virtlockd" >&2; return 1; }
+	[ -e "$PKGDEST/usr/lib/systemd/system/virtlockd.service" ] || { echo "ERROR: libvirt payload is missing usr/lib/systemd/system/virtlockd.service" >&2; return 1; }
+
 }

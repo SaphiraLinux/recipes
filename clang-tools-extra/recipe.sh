@@ -22,6 +22,7 @@ makedepends="
     clang>=22.1.8-r1
     cmake
     gcc
+    gettext
     llvm>=22.1.8-r1
     ninja
     python3

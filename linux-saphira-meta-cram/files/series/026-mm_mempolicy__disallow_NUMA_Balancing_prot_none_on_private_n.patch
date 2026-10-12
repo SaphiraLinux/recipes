@@ -1,0 +1,30 @@
+From d6ed82aa15a62b6bcfd673da3eae946f196eaf4e Mon Sep 17 00:00:00 2001
+From: Gregory Price <gourry@gourry.net>
+Date: Mon, 20 Apr 2026 18:37:35 -0700
+Subject: [PATCH] mm/mempolicy: disallow NUMA Balancing prot_none on private
+ nodes
+
+Skip private node memory the same way zone device memory is
+skipped, since private nodes do not presently support migration.
+
+Signed-off-by: Gregory Price <gourry@gourry.net>
+---
+ mm/mempolicy.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/mm/mempolicy.c b/mm/mempolicy.c
+index 8e8763f6e5f..2b76c57a460 100644
+--- a/mm/mempolicy.c
++++ b/mm/mempolicy.c
+@@ -845,7 +845,7 @@ bool folio_can_map_prot_numa(struct folio *folio, struct vm_area_struct *vma,
+ {
+ 	int nid;
+ 
+-	if (!folio || folio_is_zone_device(folio) || folio_test_ksm(folio))
++	if (!folio || folio_is_private_managed(folio) || folio_test_ksm(folio))
+ 		return false;
+ 
+ 	/* Also skip shared copy-on-write folios */
+-- 
+2.55.0
+

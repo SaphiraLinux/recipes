@@ -1,0 +1,41 @@
+From f96562b166ce5b332df2e4fc9eb950ff7c8568a7 Mon Sep 17 00:00:00 2001
+From: Gregory Price <gourry@gourry.net>
+Date: Wed, 15 Jul 2026 09:04:32 -0700
+Subject: [PATCH] dax/kmem: expose adistance on all kmem nodes, not just
+ private ones
+
+adistance was in the private-gated dax_kmem_private_group, so a normal
+(non-private) kmem node had no adistance knob and could not be placed
+below DRAM as a demotion target without first opting the node into
+private mode.  base_nodes already exposes adistance in the always-present
+dev_dax_kmem_attrs[]; move it there here too so the knob behaves
+identically on every node type.  adistance_store still gates on the
+device being unplugged, independent of private-ness, so no functional
+change for private nodes.
+---
+ drivers/dax/kmem.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/dax/kmem.c b/drivers/dax/kmem.c
+index 9b5500ae796..90d01e7e783 100644
+--- a/drivers/dax/kmem.c
++++ b/drivers/dax/kmem.c
+@@ -1014,7 +1014,6 @@ KMEM_PRIVATE_CAP_ATTR(ltpin, NODE_PRIVATE_CAP_LTPIN);
+ 
+ /* Per-service opt-ins. Visibility toggled by 'private' control */
+ static struct attribute *dax_kmem_private_attrs[] = {
+-	&dev_attr_adistance.attr,
+ 	&dev_attr_reclaim.attr,
+ 	&dev_attr_user_numa.attr,
+ 	&dev_attr_hotunplug.attr,
+@@ -1236,6 +1235,7 @@ static DEVICE_ATTR_RW(state);
+ 
+ static struct attribute *dev_dax_kmem_attrs[] = {
+ 	&dev_attr_state.attr,
++	&dev_attr_adistance.attr,
+ 	&dev_attr_dax_file.attr,
+ 	&dev_attr_private.attr,
+ 	&dev_attr_cram.attr,
+-- 
+2.55.0
+

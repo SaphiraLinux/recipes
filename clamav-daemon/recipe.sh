@@ -3,10 +3,13 @@
 pkgname=clamav-daemon
 pkgver=1.5.3
 # r2: rebuild against the branded rustc (x86_64-akadata-linux-musl).
-pkgrel=3
+pkgrel=4
 # r3: LocalSocket unified on /var/run/clamav (was split-brain);
 # stale socket cleared at start; shared dir lifecycle in base.
 # Payload change, revision bumps.
+# r4: merge line (unit carries both the mkdir and the stale-socket
+# rm ExecStartPre lines; merged unit differs from both parents).
+# Payload change, bumps.
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="ClamAV scanner daemon (clamd)"
 license="GPL-2.0-or-later"

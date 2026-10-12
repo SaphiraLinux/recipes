@@ -1,0 +1,18 @@
+#!/sbin/openrc-run
+
+description="Lightweight DNS forwarder, DHCP and TFTP server"
+
+# dnsmasq daemonizes by default; -k keeps it in the foreground so there is
+# a real process to supervise and no pidfile to go stale. It binds port 53
+# (DNS), 67 (DHCP) and optionally 69 (TFTP), so it starts as root and
+# drops to --user=/--group= itself.
+command="/usr/sbin/dnsmasq"
+command_args="-k -C /etc/dnsmasq.conf"
+supervisor="supervise-daemon"
+
+depend()
+{
+	need localmount
+	use net
+	after firewall
+}

@@ -1,0 +1,265 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Saphira forward-port <builder@saphira.vm2.uk>
+Date: Thu, 9 Oct 2026 12:00:00 +0000
+Subject: [FWD 7.2.9] mm: add ZONELIST_PRIVATE(_NOFALLBACK) for
+ N_MEMORY_PRIVATE nodes
+
+Fwd-port of upstream 7b7ca0860b54 ("mm: add ZONELIST_PRIVATE(_NOFALLBACK)
+for N_MEMORY_PRIVATE nodes", Gregory Price, 2026-06-16, series position
+018) onto Linux 7.2.9.
+
+Why needed:
+- mm/page_alloc.h does not exist in 7.2.9 (decls live in gfp.h +
+  internal.h): the ALLOC_ZONELIST_PRIVATE macro, select_zonelist() and
+  its static_assert move to mm/internal.h (0x2000; 0x1000 left free
+  for upstream code-tagging ALLOC_NO_CODETAG to ease rebases).
+- __alloc_frozen_pages_noprof() in 7.2.9 lacks the akpm-7.3 NOLOCK
+  restructure, so there is no WARN_ON site to extend; no new
+  validation is added (single producer of the PRIVATE bit, added
+  here as alloc_pages_node_private/folio_alloc_node_private).
+- __alloc_pages_noprof() decl gains the flags param here (the
+  akpm-ancestor change never landed in 7.2.x; fwd-016 covered the
+  folio/bulk/frozen entry points, this completes the page path) plus
+  the two private entry points, zonelist selection, the
+  build_zonelists PRIVATE family and the alloc_contig guard.
+- build_zonelists()/build_thisnode_zonelists() contexts refreshed for
+  the fwd-015 refactor shape already present in 7.2.9 tree.
+- mmzone.h + mm_init.c hunks are verbatim upstream.
+
+Byte-identical upstream patch retained in series/ (recorded SKIP-FWD).
+Verifies with git apply --check (no fuzz).
+
+Signed-off-by: Saphira builder <builder@saphira.vm2.uk>
+---
+diff --git a/include/linux/gfp.h b/include/linux/gfp.h
+index cb5310e67..b6750db66 100644
+--- a/include/linux/gfp.h
++++ b/include/linux/gfp.h
+@@ -227,13 +227,24 @@ static inline void arch_alloc_page(struct page *page, int order) { }
+ #endif
+ 
+ struct page *__alloc_pages_noprof(gfp_t gfp, unsigned int order, int preferred_nid,
+-		nodemask_t *nodemask);
++		nodemask_t *nodemask, unsigned int alloc_flags);
+ #define __alloc_pages(...)			alloc_hooks(__alloc_pages_noprof(__VA_ARGS__))
+ 
+ struct folio *__folio_alloc_noprof(gfp_t gfp, unsigned int order, int preferred_nid,
+ 		nodemask_t *nodemask, unsigned int alloc_flags);
+ #define __folio_alloc(...)			alloc_hooks(__folio_alloc_noprof(__VA_ARGS__))
+ 
++/* Allocate from an N_MEMORY_PRIVATE node (selects the private zonelist). */
++struct page *alloc_pages_node_private_noprof(gfp_t gfp, unsigned int order,
++		int nid);
++#define alloc_pages_node_private(...)				\
++	alloc_hooks(alloc_pages_node_private_noprof(__VA_ARGS__))
++
++struct folio *folio_alloc_node_private_noprof(gfp_t gfp, unsigned int order,
++		int nid);
++#define folio_alloc_node_private(...)				\
++	alloc_hooks(folio_alloc_node_private_noprof(__VA_ARGS__))
++
+ /* Bulk allocator taking explicit alloc_flags; alloc_pages_bulk() wraps it. */
+ unsigned long __alloc_pages_bulk_noprof(gfp_t gfp, unsigned int alloc_flags,
+ 		int preferred_nid, nodemask_t *nodemask, int nr_pages,
+diff --git a/include/linux/mmzone.h b/include/linux/mmzone.h
+index 2f5e87f10..56f09f314 100644
+--- a/include/linux/mmzone.h
++++ b/include/linux/mmzone.h
+@@ -1390,13 +1390,22 @@ enum {
+ #ifdef CONFIG_NUMA
+ 	/*
+ 	 * The NUMA zonelists are doubled because we need zonelists that
+-	 * restrict the allocations to a single node for __GFP_THISNODE.
++	 * restrict the allocations to a single node for __GFP_THISNODE
++	 * and N_MEMORY_PRIVATE nodes (isolated from default lists).
+ 	 */
+ 	ZONELIST_NOFALLBACK,	/* zonelist without fallback (__GFP_THISNODE) */
++	ZONELIST_PRIVATE,	/* N_MEMORY_PRIVATE access, falls back to DRAM */
++	ZONELIST_PRIVATE_NOFALLBACK, /* N_MEMORY_PRIVATE access, __GFP_THISNODE */
+ #endif
+ 	MAX_ZONELISTS
+ };
+ 
++#ifndef CONFIG_NUMA
++/* Without NUMA only ZONELIST_FALLBACK exists so everything collapses there */
++#define ZONELIST_PRIVATE		ZONELIST_FALLBACK
++#define ZONELIST_PRIVATE_NOFALLBACK	ZONELIST_FALLBACK
++#endif
++
+ /*
+  * This struct contains information about a zone in a zonelist. It is stored
+  * here to avoid dereferences into large structures and lookups of tables
+diff --git a/mm/internal.h b/mm/internal.h
+index 098d834d1..0ca843a4e 100644
+--- a/mm/internal.h
++++ b/mm/internal.h
+@@ -707,6 +707,29 @@ struct alloc_context {
+ 	unsigned int alloc_flags;
+ };
+ 
++#ifdef CONFIG_NUMA
++static_assert(ZONELIST_PRIVATE + 1 == ZONELIST_PRIVATE_NOFALLBACK);
++#endif
++
++/*
++ * select_zonelist - resolve the zonelist for an allocation
++ *
++ * The default matches node_zonelist(); ALLOC_ZONELIST_PRIVATE selects the
++ * private-node family so an allocation may reach an N_MEMORY_PRIVATE node.
++ */
++static inline struct zonelist *
++select_zonelist(int nid, gfp_t gfp, unsigned int alloc_flags)
++{
++#ifdef CONFIG_NUMA
++	if (alloc_flags & ALLOC_ZONELIST_PRIVATE) {
++		int idx = ZONELIST_PRIVATE + !!(gfp & __GFP_THISNODE);
++
++		return &NODE_DATA(nid)->node_zonelists[idx];
++	}
++#endif
++	return node_zonelist(nid, gfp);
++}
++
+ /*
+  * This function returns the order of a free page in the buddy system. In
+  * general, page_zone(page)->lock must be held by the caller to prevent the
+@@ -1510,6 +1533,9 @@ unsigned int reclaim_clean_pages_from_list(struct zone *zone,
+ #define ALLOC_TRYLOCK		0x400 /* Only use spin_trylock in allocation path */
+ #define ALLOC_KSWAPD		0x800 /* allow waking of kswapd, __GFP_KSWAPD_RECLAIM set */
+ #define ALLOC_DEFAULT		0x0 /* no explicit selection: historical gfp-based path */
++/* Select the N_MEMORY_PRIVATE zonelist family (see select_zonelist()).
++ * 0x1000 is left free for upstream's code-tagging flag to ease rebases. */
++#define ALLOC_ZONELIST_PRIVATE	0x2000
+ 
+ /* Flags that allow allocations below the min watermark. */
+ #define ALLOC_RESERVES (ALLOC_NON_BLOCK|ALLOC_MIN_RESERVE|ALLOC_HIGHATOMIC|ALLOC_OOM)
+diff --git a/mm/mm_init.c b/mm/mm_init.c
+index d50a54dbb..c07011eb3 100644
+--- a/mm/mm_init.c
++++ b/mm/mm_init.c
+@@ -2720,7 +2720,7 @@ void __init mm_core_init(void)
+ 	init_zero_page_pfn();
+ 
+ 	/* Initializations relying on SMP setup */
+-	BUILD_BUG_ON(MAX_ZONELISTS > 2);
++	BUILD_BUG_ON(MAX_ZONELISTS > 4);
+ 	build_all_zonelists(NULL);
+ 	page_alloc_init_cpuhp();
+ 	alloc_tag_sec_init();
+diff --git a/mm/page_alloc.c b/mm/page_alloc.c
+index 7396b82a7..f6ac03093 100644
+--- a/mm/page_alloc.c
++++ b/mm/page_alloc.c
+@@ -5085,7 +5085,7 @@ static inline bool prepare_alloc_pages(gfp_t gfp_mask, unsigned int order,
+ 		unsigned int *alloc_flags)
+ {
+ 	ac->highest_zoneidx = gfp_zone(gfp_mask);
+-	ac->zonelist = node_zonelist(preferred_nid, gfp_mask);
++	ac->zonelist = select_zonelist(preferred_nid, gfp_mask, ac->alloc_flags);
+ 	ac->nodemask = nodemask;
+ 	ac->migratetype = gfp_migratetype(gfp_mask);
+ 
+@@ -5420,6 +5420,22 @@ struct folio *__folio_alloc_noprof(gfp_t gfp, unsigned int order, int preferred_
+ }
+ EXPORT_SYMBOL(__folio_alloc_noprof);
+ 
++struct page *alloc_pages_node_private_noprof(gfp_t gfp, unsigned int order,
++		int nid)
++{
++	return __alloc_pages_noprof(gfp, order, nid, NULL,
++				   ALLOC_ZONELIST_PRIVATE);
++}
++EXPORT_SYMBOL_GPL(alloc_pages_node_private_noprof);
++
++struct folio *folio_alloc_node_private_noprof(gfp_t gfp, unsigned int order,
++		int nid)
++{
++	return __folio_alloc_noprof(gfp, order, nid, NULL,
++				   ALLOC_ZONELIST_PRIVATE);
++}
++EXPORT_SYMBOL_GPL(folio_alloc_node_private_noprof);
++
+ /*
+  * Common helper functions. Never use with __GFP_HIGHMEM because the returned
+  * address cannot represent highmem pages. Use alloc_pages and then kmap if
+@@ -5817,9 +5833,21 @@ static void build_zonelists_in_node_order(pg_data_t *pgdat, int *node_order,
+ static void build_thisnode_zonelists(pg_data_t *pgdat)
+ {
+ 	struct zoneref *zonerefs;
+-	int nr_zones;
++	int nr_zones = 0;
+ 
++	/*
++	 * NOFALLBACK: the node's own zones. EMPTY for private nodes so a
++	 * stray __GFP_THISNODE allocation can't violate isolation.
++	 */
+ 	zonerefs = pgdat->node_zonelists[ZONELIST_NOFALLBACK]._zonerefs;
++	if (!node_is_private(pgdat->node_id))
++		nr_zones = build_zonerefs_node(pgdat, zonerefs);
++	zonerefs += nr_zones;
++	zonerefs->zone = NULL;
++	zonerefs->zone_idx = 0;
++
++	/* PRIVATE_NOFALLBACK: the node's own zones, private nodes included. */
++	zonerefs = pgdat->node_zonelists[ZONELIST_PRIVATE_NOFALLBACK]._zonerefs;
+ 	nr_zones = build_zonerefs_node(pgdat, zonerefs);
+ 	zonerefs += nr_zones;
+ 	zonerefs->zone = NULL;
+@@ -5862,11 +5890,28 @@ static void build_node_zonelist(pg_data_t *pgdat, const nodemask_t *candidates,
+ static void build_zonelists(pg_data_t *pgdat)
+ {
+ 	static int node_order[MAX_NUMNODES];
++	nodemask_t tier_nodes;
+ 	int local_node = pgdat->node_id;
+ 	int node, nr_nodes = 0;
+ 
+ 	memset(node_order, 0, sizeof(node_order));
+ 
++	/*
++	 * Zonelists: FALLBACK, NOFALLBACK, PRIVATE
++	 *
++	 * FALLBACK:   Allocation order for all nodes.  Private nodes have lists
++	 *             but never appear as an entry in any list. Allocations
++	 *             targeting a private node w/ FALLBACK land on N_MEMORY.
++	 *
++	 * NOFALLBACK: A list for each node containing only itself.
++	 *             Allocations targeting a private node w/ NOFALLBACK
++	 *             will always fail (their NOFALLBACK is empty)
++	 *
++	 * PRIVATE:    (N_MEMORY | N_MEMORY_PRIVATE) - allows access to
++	 *             private nodes, and falls back to normal memory unless
++	 *             __GFP_THISNODE otherwise constrains it.
++	 */
++
+ 	build_node_zonelist(pgdat, &node_states[N_MEMORY], ZONELIST_FALLBACK,
+ 			    true, node_order, &nr_nodes);
+ 	build_thisnode_zonelists(pgdat);
+@@ -5875,6 +5920,10 @@ static void build_zonelists(pg_data_t *pgdat)
+ 	for (node = 0; node < nr_nodes; node++)
+ 		pr_cont("%d ", node_order[node]);
+ 	pr_cont("\n");
++
++	nodes_or(tier_nodes, node_states[N_MEMORY], node_states[N_MEMORY_PRIVATE]);
++	build_node_zonelist(pgdat, &tier_nodes, ZONELIST_PRIVATE, false,
++			    node_order, &nr_nodes);
+ }
+ 
+ #ifdef CONFIG_HAVE_MEMORYLESS_NODES
+@@ -7226,6 +7275,15 @@ int alloc_contig_frozen_range_noprof(unsigned long start, unsigned long end,
+ 	if (__alloc_contig_verify_gfp_mask(gfp_mask, (gfp_t *)&cc.gfp_mask))
+ 		return -EINVAL;
+ 
++	/*
++	 * Private nodes are kept unreachable via the zonelists, but
++	 * alloc_contig works directly on a zone derived from the caller's
++	 * pfn range, bypassing that.  Reject this operation explicitly
++	 * rather than silently carving memory out of an isolated node.
++	 */
++	if (unlikely(node_is_private(zone_to_nid(cc.zone))))
++		return -EBUSY;
++
+ 	/*
+ 	 * What we do here is we mark all pageblocks in range as
+ 	 * MIGRATE_ISOLATE.  Because pageblock and max order pages may
+--
+2.55.0

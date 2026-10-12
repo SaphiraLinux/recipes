@@ -1,0 +1,115 @@
+.TH SAPHIRA-ROUTER 1 "2026" "saphira-router" "Saphira Linux"
+.SH NAME
+saphira-router \- Saphira Linux multi-tenant control plane
+.SH SYNOPSIS
+.B saphira-router
+.I init
+.B \-\-user
+.I NAME
+.B \-\-password
+.I SECRET
+.br
+.B saphira-router daemon
+.br
+.B saphira-router tui
+.br
+.B saphira-router
+.I login
+.B \-\-user
+.I NAME
+.br
+.B saphira-router host list|enroll|caps
+.br
+.B saphira-router module list
+.br
+.B saphira-router capability
+.I CODE
+.SH DESCRIPTION
+The control plane for load balancing, routing, virtual networking and
+managed nodes.  One binary carries three roles: the daemon, the CLI and the
+terminal interface.
+.PP
+The daemon is the
+.B only writer
+of persistent state.  The CLI and the TUI are clients of its local Unix
+socket and never open the database themselves.  That is not a style rule: if a
+client could write the database, authorization, the audit trail, the
+transaction engine and the desired/observed separation would all be
+bypassable by anyone who could reach the file.
+.SH ROLES
+.TP
+.B init
+Create the database, run migrations, and bootstrap the first tenant, user and
+role.  The bootstrap administrator is a role with an enumerated set of
+capabilities, not a wildcard: a capability introduced later does not join it
+automatically.
+.TP
+.B daemon
+Run the control plane.  Loads modules from the module directory, refuses an
+incompatible ABI with a diagnostic, and serves the local API.  Run
+unprivileged; it needs no privileged socket and no hardware access.
+.TP
+.B tui
+The primary human interface.  Its sections are derived at runtime from the
+module registry, so installing a module makes its functionality appear and
+removing it makes it disappear, with no change to the interface.
+.TP
+.B anything else
+The CLI, a thin client of the same API.  Every read and write command
+supports
+.BR \-\-json .
+Exit codes distinguish denied, failed and partial so automation can tell them
+apart.
+.SH ENVIRONMENT
+.TP
+.B SR_DB
+Path to the SQLite database. Default
+.IR /var/lib/saphira-router/router.db .
+.TP
+.B SR_SOCK
+Path to the local control socket. Default
+.IR /run/saphira-router/api.sock .
+.TP
+.B SR_SOCK_GROUP
+Group permitted to reach the control socket, default
+.BR wheel .
+Membership is the only thing an operator needs to drive the control plane;
+it confers NO database access.  The state directory stays 0750 to the
+.B saphira-router
+identity regardless.
+.TP
+.B SR_SOCK_MODE
+Mode for the control socket, default 0660.
+.TP
+.B SR_MODULES
+Module directory, scanned at startup. Default
+.IR /usr/lib/saphira-router/modules .
+The core is usable with this empty and with every module absent.
+.TP
+.B SR_TOKEN
+A session token, so a script or the TUI can skip the login prompt.
+.TP
+.B HOME
+A session token is cached in
+.IR $HOME/.saphira-router/token ,
+mode 0600.
+.SH FILES
+.TP
+.I /var/lib/saphira-router/router.db
+Core state. Writable only by the
+.B saphira-router
+identity.
+.TP
+.I /run/saphira-router/api.sock
+The local control surface. Owner
+.BR saphira-router ,
+group as configured, mode 0660.
+.TP
+.I /usr/lib/saphira-router/modules
+Module directory, discovered at runtime.
+.TP
+.I /etc/conf.d/saphira-router
+Instance configuration read by both inits.
+.SH SEE ALSO
+The design documents shipped in
+.IR /usr/share/doc/saphira-router/ .

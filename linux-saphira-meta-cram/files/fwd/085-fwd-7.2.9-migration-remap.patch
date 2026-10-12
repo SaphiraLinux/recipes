@@ -1,0 +1,138 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Saphira forward-port <builder@saphira.vm2.uk>
+Date: Thu, 9 Oct 2026 12:00:00 +0000
+Subject: [FWD 7.2.9] mm: re-install migrated write-fenced folios read-only
+
+Fwd-port of upstream ("mm/migrate: re-install migrated write-fenced
+folios read-only", Gregory Price, series position 085) onto Linux
+7.2.9.
+
+Why needed: 7.2.9 carries the uffd-wp API evolution
+(pte_swp_uffd_wp/pte_mkuffd_wp, pmd_swp_uffd_wp/pmd_mkuffd_wp) plus
+extra young/dirty preservation lines that the branch base lacks, so
+the mkwrite-site hunks are refreshed to the _wp forms with identical
+helper wiring (migration_remap_rmap_flags/migration_remap_writable).
+Redundant anon-exclusive blocks removed as upstream. internal.h
+helpers verbatim upstream.
+
+Byte-identical upstream patch retained in series/ (recorded SKIP-FWD).
+Verifies with git apply --check (no fuzz).
+
+Signed-off-by: Saphira builder <builder@saphira.vm2.uk>
+---
+diff --git a/mm/huge_memory.c b/mm/huge_memory.c
+index 08e95fbc8..cd32e43b0 100644
+--- a/mm/huge_memory.c
++++ b/mm/huge_memory.c
+@@ -5080,6 +5080,7 @@ void remove_migration_pmd(struct page_vma_mapped_walk *pvmw, struct page *new)
+ 	unsigned long haddr = address & HPAGE_PMD_MASK;
+ 	pmd_t pmde;
+ 	softleaf_t entry;
++	rmap_t rmap_flags;
+ 
+ 	if (!(pvmw->pmd && !pvmw->pte))
+ 		return;
+@@ -5087,10 +5088,13 @@ void remove_migration_pmd(struct page_vma_mapped_walk *pvmw, struct page *new)
+ 	entry = softleaf_from_pmd(*pvmw->pmd);
+ 	folio_get(folio);
+ 	pmde = folio_mk_pmd(folio, READ_ONCE(vma->vm_page_prot));
++	rmap_flags = migration_remap_rmap_flags(folio,
++					softleaf_is_migration_read(entry));
+ 
+ 	if (pmd_swp_soft_dirty(*pvmw->pmd))
+ 		pmde = pmd_mksoft_dirty(pmde);
+-	if (softleaf_is_migration_write(entry))
++	if (migration_remap_writable(folio, softleaf_is_migration_write(entry),
++				     rmap_flags))
+ 		pmde = pmd_mkwrite(pmde, vma);
+ 	if (pmd_swp_uffd_wp(*pvmw->pmd))
+ 		pmde = pmd_mkuffd_wp(pmde);
+@@ -5118,11 +5122,6 @@ void remove_migration_pmd(struct page_vma_mapped_walk *pvmw, struct page *new)
+ 	}
+ 
+ 	if (folio_test_anon(folio)) {
+-		rmap_t rmap_flags = RMAP_NONE;
+-
+-		if (!softleaf_is_migration_read(entry))
+-			rmap_flags |= RMAP_EXCLUSIVE;
+-
+ 		folio_add_anon_rmap_pmd(folio, new, vma, haddr, rmap_flags);
+ 	} else {
+ 		folio_add_file_rmap_pmd(folio, new, vma);
+diff --git a/mm/internal.h b/mm/internal.h
+index e969a9b34..0555f1ea4 100644
+--- a/mm/internal.h
++++ b/mm/internal.h
+@@ -2113,6 +2113,46 @@ static inline bool folio_must_cow(struct folio *folio)
+ 	return folio_test_ksm(folio) || node_write_fenced(folio_nid(folio));
+ }
+ 
++/*
++ * rmap_t and the migration-entry callers (remove_migration_pte/_pmd) are only
++ * built for CONFIG_MMU; CONFIG_MIGRATION depends on MMU.
++ */
++#ifdef CONFIG_MMU
++/*
++ * Resolve rmap flags and writability for a folio being re-installed present
++ * after migration.  Shared by remove_migration_pte() and remove_migration_pmd().
++ *
++ * Exclusivity is the single lever.  Anon writability requires exclusive
++ * ownership.  A writable migration entry is only ever made for an exclusive anon
++ * page; see make_writable_migration_entry() and the VM_WARN in
++ * try_to_migrate_one().  A folio that must stay read-only, one on a write-fenced
++ * node, is kept non-exclusive here, and writability falls out as false.  The
++ * next write then COW-promotes it off-node.  This also makes the "writable anon
++ * implies exclusive" invariant structural rather than a tripwire.
++ */
++static inline rmap_t migration_remap_rmap_flags(struct folio *folio,
++						bool was_read)
++{
++	if (folio_test_anon(folio) && !was_read &&
++	    !node_write_fenced(folio_nid(folio)))
++		return RMAP_EXCLUSIVE;
++	return RMAP_NONE;
++}
++
++static inline bool migration_remap_writable(struct folio *folio, bool was_write,
++					    rmap_t rmap_flags)
++{
++	if (!was_write)
++		return false;
++	/*
++	 * Anon writable mappings require exclusive ownership.  A folio kept
++	 * non-exclusive, one on a write-fenced node, re-installs read-only and the
++	 * next write COW-promotes it off-node.  See migration_remap_rmap_flags().
++	 */
++	return !folio_test_anon(folio) || (rmap_flags & RMAP_EXCLUSIVE);
++}
++#endif /* CONFIG_MMU */
++
+ /**
+  * node_placement_check() - may @folio be migrated onto node @nid?
+  * @nid: the node the folio would be placed on
+diff --git a/mm/migrate.c b/mm/migrate.c
+index 61e41066e..5e471d778 100644
+--- a/mm/migrate.c
++++ b/mm/migrate.c
+@@ -393,14 +393,15 @@ static bool remove_migration_pte(struct folio *folio,
+ 		else
+ 			pte = pte_clear_soft_dirty(pte);
+ 
+-		if (softleaf_is_migration_write(entry))
++		rmap_flags = migration_remap_rmap_flags(folio,
++					softleaf_is_migration_read(entry));
++
++		if (migration_remap_writable(folio,
++				softleaf_is_migration_write(entry), rmap_flags))
+ 			pte = pte_mkwrite(pte, vma);
+ 		else if (pte_swp_uffd_wp(old_pte))
+ 			pte = pte_mkuffd_wp(pte);
+ 
+-		if (folio_test_anon(folio) && !softleaf_is_migration_read(entry))
+-			rmap_flags |= RMAP_EXCLUSIVE;
+-
+ 		if (unlikely(is_device_private_page(new))) {
+ 			if (pte_write(pte))
+ 				entry = make_writable_device_private_entry(
+--
+2.55.0

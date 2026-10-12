@@ -2,7 +2,10 @@
 
 pkgname=rspamd
 pkgver=4.1.4
-pkgrel=3
+pkgrel=4
+# r4: merge line (unit carries both the /var/run mkdir and the stale-pid
+# rm ExecStartPre lines; merged unit differs from both parents).
+# Payload change, bumps.
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="Rapid spam filtering system"
 license="Apache-2.0"

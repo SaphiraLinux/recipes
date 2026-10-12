@@ -1,122 +1,6 @@
---- a/src/main.c	2026-09-05 10:38:25.353389642 +0000
-+++ new/akaman/src/main.c	2026-09-05 10:37:39.134221500 +0000
-@@ -7,21 +7,21 @@
- #include <unistd.h>
- 
- static const char *usage =
--    "akaman - minimal local man-page context for AI agents\n"
-+    "sysref - minimal local man-page context for AI agents\n"
-     "\n"
-     "usage:\n"
--    "  akaman QUERY [SECTION]         query native man pages (source=man)\n"
-+    "  sysref QUERY [SECTION]         query native man pages (source=man)\n"
-     "                                 SECTION numeric = man section, alphabetic = named section\n"
--    "  akaman -s SECTION QUERY        same\n"
--    "  akaman --source doc QUERY      query /usr/share/doc (README/FAQ/.txt/.md)\n"
--    "  akaman --source headers QUERY  query system headers (stdio.h printf)\n"
--    "  akaman --source man QUERY      query native man pages (default)\n"
--    "  akaman --stats QUERY [SECTION] print result plus token metrics\n"
--    "  akaman --mcp                   MCP stdio server (one tool: man)\n"
--    "  akaman --http[=ADDR] | --web[=ADDR]   webMCP HTTP server (default 127.0.0.1:8931)\n"
--    "                                 requires APIKEY in /etc/akaman/akamcp.conf\n"
--    "  akaman --conf PATH             config file path (APIKEY for webMCP)\n"
--    "  akaman --bench                 benchmark table\n"
-+    "  sysref -s SECTION QUERY        same\n"
-+    "  sysref --source doc QUERY      query /usr/share/doc (README/FAQ/.txt/.md)\n"
-+    "  sysref --source headers QUERY  query system headers (stdio.h printf)\n"
-+    "  sysref --source man QUERY      query native man pages (default)\n"
-+    "  sysref --stats QUERY [SECTION] print result plus token metrics\n"
-+    "  sysref --mcp                   MCP stdio server (one tool: man)\n"
-+    "  sysref --http[=ADDR] | --web[=ADDR]   webMCP HTTP server (default 127.0.0.1:8931)\n"
-+    "                                 requires APIKEY in /etc/sysref/sysref.conf\n"
-+    "  sysref --conf PATH             config file path (APIKEY for webMCP)\n"
-+    "  sysref --bench                 benchmark table\n"
-     "\n"
-     "  QUERY forms: command [option] | command [section-name] | command subcommand\n"
-     "    e.g. \"grep -r\"      -> the -r, --recursive option entry\n"
-@@ -36,12 +36,12 @@
-     "  (starting -/--) additionally list the nearest real option names.\n"
-     "\n"
-     "examples:\n"
--    "  akaman \"ip link set\"\n"
--    "  akaman \"rsync --delete\"\n"
--    "  akaman -s 2 open\n";
-+    "  sysref \"ip link set\"\n"
-+    "  sysref \"rsync --delete\"\n"
-+    "  sysref -s 2 open\n";
- 
- int main(int argc, char **argv) {
--	const char *conf = "/etc/akaman/akamcp.conf";
-+	const char *conf = "/etc/sysref/sysref.conf";
- 	int mode = 0; /* 0 cli, 1 mcp, 2 http, 3 bench */
- 	char httpaddr[256] = "127.0.0.1:8931";
- 	const char *query = NULL;
-@@ -70,14 +70,14 @@
- 		} else if (strcmp(a, "-s") == 0 && i + 1 < argc) {
- 			section = argv[++i];
- 		} else if (a[0] == '-' && a[1]) {
--			fprintf(stderr, "akaman: unknown option: %s\n", a);
-+			fprintf(stderr, "sysref: unknown option: %s\n", a);
- 			fputs(usage, stderr);
- 			return 2;
- 		} else {
- 			if (!query) query = a;
- 			else if (!section) section = a;
- 			else {
--				fprintf(stderr, "akaman: too many arguments\n");
-+				fprintf(stderr, "sysref: too many arguments\n");
- 				return 2;
- 			}
- 		}
-@@ -87,7 +87,7 @@
- 	if (mode == 2) {
- 		char key[512] = {0};
- 		if (!conf_load(conf, key, sizeof key)) {
--			fprintf(stderr, "akaman: webMCP requires APIKEY defined in %s\n", conf);
-+			fprintf(stderr, "sysref: webMCP requires APIKEY defined in %s\n", conf);
- 			return 1;
- 		}
- 		return run_http(httpaddr, key);
---- a/src/mcp.c	2026-09-05 10:38:25.353347909 +0000
-+++ new/akaman/src/mcp.c	2026-09-05 10:42:31.300882234 +0000
-@@ -14,7 +14,7 @@
- #include <fcntl.h>
- 
- /* ------------------------------------------------------------------ */
--/* config: /etc/akaman/akamcp.conf  (APIKEY=...)                         */
-+/* config: /etc/sysref/sysref.conf  (APIKEY=...)                         */
- /* ------------------------------------------------------------------ */
- int conf_load(const char *path, char *key, size_t keysz) {
- 	FILE *f = fopen(path, "r");
-@@ -112,7 +112,7 @@
- 		json_escape(&r, pv, strlen(pv));
- 		gbuf_adds(&r,
- 		          ",\"capabilities\":{\"tools\":{\"listChanged\":false}},"
--		          "\"serverInfo\":{\"name\":\"akaman\",\"version\":\"0.1.0\"}}");
-+		          "\"serverInfo\":{\"name\":\"sysref\",\"version\":\"0.1.0\"}}");
- 		jsonrpc_result(resp, id->raw, id->rawlen, r.p);
- 		gbuf_free(&r);
- 	} else if (strcmp(m, "ping") == 0) {
-@@ -397,7 +397,7 @@
- 	}
- 	struct in_addr bind_addr;
- 	if (inet_pton(AF_INET, host, &bind_addr) != 1) {
--		fprintf(stderr, "akaman: invalid IPv4 bind address: %s\n", host);
-+		fprintf(stderr, "sysref: invalid IPv4 bind address: %s\n", host);
- 		return 1;
- 	}
- 
-@@ -413,7 +413,7 @@
- 	sa.sin_addr = bind_addr;
- 	if (bind(fd, (struct sockaddr *)&sa, sizeof sa) < 0) { perror("bind"); close(fd); return 1; }
- 	if (listen(fd, 16) < 0) { perror("listen"); close(fd); return 1; }
--	fprintf(stderr, "akaman webMCP listening on %s:%d (api key: %s)\n", host, port,
-+	fprintf(stderr, "sysref webMCP listening on %s:%d (api key: %s)\n", host, port,
- 	        api_key && api_key[0] ? "required" : "none");
- 
- 	for (;;) {
---- a/docs/akaman.1	2026-09-05 10:38:25.353216748 +0000
-+++ new/akaman/docs/akaman.1	2026-09-05 10:37:39.134221500 +0000
+diff -ruN T/docs/akaman.1 T2/docs/akaman.1
+--- a/docs/akaman.1	
++++ new/akaman//docs/akaman.1	
 @@ -1,41 +1,41 @@
 -.TH AKAMAN 1 "August 2026" "akaman 0.1.0" "User Commands"
 +.TH SYSREF 1 "August 2026" "sysref 0.1.0" "User Commands"
@@ -254,3 +138,188 @@
  Configuration file for the webMCP HTTP server.  A single
  .B APIKEY=
  assignment is read; blank lines and lines beginning with \fB#\fR are ignored.
+diff -ruN T/src/main.c T2/src/main.c
+--- a/src/main.c	
++++ new/akaman//src/main.c	
+@@ -7,21 +7,21 @@
+ #include <unistd.h>
+ 
+ static const char *usage =
+-    "akaman - minimal local man-page context for AI agents\n"
++    "sysref - minimal local man-page context for AI agents\n"
+     "\n"
+     "usage:\n"
+-    "  akaman QUERY [SECTION]         query native man pages (source=man)\n"
++    "  sysref QUERY [SECTION]         query native man pages (source=man)\n"
+     "                                 SECTION numeric = man section, alphabetic = named section\n"
+-    "  akaman -s SECTION QUERY        same\n"
+-    "  akaman --source doc QUERY      query /usr/share/doc (README/FAQ/.txt/.md)\n"
+-    "  akaman --source headers QUERY  query system headers (stdio.h printf)\n"
+-    "  akaman --source man QUERY      query native man pages (default)\n"
+-    "  akaman --stats QUERY [SECTION] print result plus token metrics\n"
+-    "  akaman --mcp                   MCP stdio server (one tool: man)\n"
+-    "  akaman --http[=ADDR] | --web[=ADDR]   webMCP HTTP server (default 127.0.0.1:8931)\n"
+-    "                                 requires APIKEY in /etc/akaman/akamcp.conf\n"
+-    "  akaman --conf PATH             config file path (APIKEY for webMCP)\n"
+-    "  akaman --bench                 benchmark table\n"
++    "  sysref -s SECTION QUERY        same\n"
++    "  sysref --source doc QUERY      query /usr/share/doc (README/FAQ/.txt/.md)\n"
++    "  sysref --source headers QUERY  query system headers (stdio.h printf)\n"
++    "  sysref --source man QUERY      query native man pages (default)\n"
++    "  sysref --stats QUERY [SECTION] print result plus token metrics\n"
++    "  sysref --mcp                   MCP stdio server (one tool: man)\n"
++    "  sysref --http[=ADDR] | --web[=ADDR]   webMCP HTTP server (default 127.0.0.1:8931)\n"
++    "                                 requires APIKEY in /etc/sysref/sysref.conf\n"
++    "  sysref --conf PATH             config file path (APIKEY for webMCP)\n"
++    "  sysref --bench                 benchmark table\n"
+     "\n"
+     "  QUERY forms: command [option] | command [section-name] | command subcommand\n"
+     "    e.g. \"grep -r\"      -> the -r, --recursive option entry\n"
+@@ -36,12 +36,12 @@
+     "  (starting -/--) additionally list the nearest real option names.\n"
+     "\n"
+     "examples:\n"
+-    "  akaman \"ip link set\"\n"
+-    "  akaman \"rsync --delete\"\n"
+-    "  akaman -s 2 open\n";
++    "  sysref \"ip link set\"\n"
++    "  sysref \"rsync --delete\"\n"
++    "  sysref -s 2 open\n";
+ 
+ int main(int argc, char **argv) {
+-	const char *conf = "/etc/akaman/akamcp.conf";
++	const char *conf = "/etc/sysref/sysref.conf";
+ 	int mode = 0; /* 0 cli, 1 mcp, 2 http, 3 bench */
+ 	char httpaddr[256] = "127.0.0.1:8931";
+ 	const char *query = NULL;
+@@ -70,14 +70,14 @@
+ 		} else if (strcmp(a, "-s") == 0 && i + 1 < argc) {
+ 			section = argv[++i];
+ 		} else if (a[0] == '-' && a[1]) {
+-			fprintf(stderr, "akaman: unknown option: %s\n", a);
++			fprintf(stderr, "sysref: unknown option: %s\n", a);
+ 			fputs(usage, stderr);
+ 			return 2;
+ 		} else {
+ 			if (!query) query = a;
+ 			else if (!section) section = a;
+ 			else {
+-				fprintf(stderr, "akaman: too many arguments\n");
++				fprintf(stderr, "sysref: too many arguments\n");
+ 				return 2;
+ 			}
+ 		}
+@@ -87,7 +87,7 @@
+ 	if (mode == 2) {
+ 		char key[512] = {0};
+ 		if (!conf_load(conf, key, sizeof key)) {
+-			fprintf(stderr, "akaman: webMCP requires APIKEY defined in %s\n", conf);
++			fprintf(stderr, "sysref: webMCP requires APIKEY defined in %s\n", conf);
+ 			return 1;
+ 		}
+ 		return run_http(httpaddr, key);
+diff -ruN T/src/mcp.c T2/src/mcp.c
+--- a/src/mcp.c	
++++ new/akaman//src/mcp.c	
+@@ -14,7 +14,7 @@
+ #include <fcntl.h>
+ 
+ /* ------------------------------------------------------------------ */
+-/* config: /etc/akaman/akamcp.conf  (APIKEY=...)                         */
++/* config: /etc/sysref/sysref.conf  (APIKEY=...)                         */
+ /* ------------------------------------------------------------------ */
+ int conf_load(const char *path, char *key, size_t keysz) {
+ 	FILE *f = fopen(path, "r");
+@@ -112,7 +112,7 @@
+ 		json_escape(&r, pv, strlen(pv));
+ 		gbuf_adds(&r,
+ 		          ",\"capabilities\":{\"tools\":{\"listChanged\":false}},"
+-		          "\"serverInfo\":{\"name\":\"akaman\",\"version\":\"0.1.0\"}}");
++		          "\"serverInfo\":{\"name\":\"sysref\",\"version\":\"0.1.0\"}}");
+ 		jsonrpc_result(resp, id->raw, id->rawlen, r.p);
+ 		gbuf_free(&r);
+ 	} else if (strcmp(m, "ping") == 0) {
+@@ -181,17 +181,17 @@
+ 			 * nothing was measured. Report n/a instead of inventing a number. */
+ 			if (res.full_bytes == 0)
+ 				snprintf(foot, sizeof foot,
+-				         "\n[akaman] %s full=n/a returned=%zuB/~%zutok status=%d\n",
++				         "\n[sysref] %s full=n/a returned=%zuB/~%zutok status=%d\n",
+ 				         who, res.text.len, EST_TOKENS(res.text.len), res.status);
+ 			else if (reduction > 99.9)
+ 				snprintf(foot, sizeof foot,
+-				         "\n[akaman] %s full=%zuB/~%zutok returned=%zuB/~%zutok "
++				         "\n[sysref] %s full=%zuB/~%zutok returned=%zuB/~%zutok "
+ 				         "reduction=>99.9%% status=%d\n",
+ 				         who, res.full_bytes, EST_TOKENS(res.full_bytes), res.text.len,
+ 				         EST_TOKENS(res.text.len), res.status);
+ 			else
+ 				snprintf(foot, sizeof foot,
+-				         "\n[akaman] %s full=%zuB/~%zutok returned=%zuB/~%zutok "
++				         "\n[sysref] %s full=%zuB/~%zutok returned=%zuB/~%zutok "
+ 				         "reduction=%.1f%% status=%d\n",
+ 				         who, res.full_bytes, EST_TOKENS(res.full_bytes), res.text.len,
+ 				         EST_TOKENS(res.text.len), reduction, res.status);
+@@ -453,7 +453,7 @@
+ 	}
+ 	struct in_addr bind_addr;
+ 	if (inet_pton(AF_INET, host, &bind_addr) != 1) {
+-		fprintf(stderr, "akaman: invalid IPv4 bind address: %s\n", host);
++		fprintf(stderr, "sysref: invalid IPv4 bind address: %s\n", host);
+ 		return 1;
+ 	}
+ 
+@@ -469,7 +469,7 @@
+ 	sa.sin_addr = bind_addr;
+ 	if (bind(fd, (struct sockaddr *)&sa, sizeof sa) < 0) { perror("bind"); close(fd); return 1; }
+ 	if (listen(fd, 16) < 0) { perror("listen"); close(fd); return 1; }
+-	fprintf(stderr, "akaman webMCP listening on %s:%d (api key: %s)\n", host, port,
++	fprintf(stderr, "sysref webMCP listening on %s:%d (api key: %s)\n", host, port,
+ 	        api_key && api_key[0] ? "required" : "none");
+ 
+ 	for (;;) {
+diff -ruN T/tests/test.sh T2/tests/test.sh
+--- a/tests/test.sh	
++++ new/akaman//tests/test.sh	
+@@ -356,7 +356,7 @@
+ 	printf '%s' "${resp#*$'\r\n\r\n'}"
+ }
+ out=$(mcp_call '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26"}}')
+-t_contains "initialize server name" "$out" '"name":"akaman"'
++t_contains "initialize server name" "$out" '"name":"sysref"'
+ t_contains "initialize protocol echo" "$out" '"protocolVersion":"2025-03-26"'
+ 
+ out=$(mcp_call '{"jsonrpc":"2.0","id":2,"method":"tools/list"}')
+@@ -521,19 +521,19 @@
+ # assert both that the metrics are available AND that asking for them is
+ # genuinely optional: the default reply must be byte-identical to before.
+ out=$(mcp_json '{"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"man","arguments":{"query":"grep exit status","stats":true}}}')
+-t_contains "mcp stats footer present" "$out" '[akaman]'
++t_contains "mcp stats footer present" "$out" '[sysref]'
+ t_contains "mcp stats reports reduction" "$out" 'reduction='
+ t_contains "mcp stats reports page" "$out" 'grep(1)'
+ t_contains "mcp stats reports status" "$out" 'status=0'
+ 
+ out=$(mcp_json '{"jsonrpc":"2.0","id":22,"method":"tools/call","params":{"name":"man","arguments":{"query":"grep exit status"}}}')
+-t_not_contains "mcp stats is opt-in (absent by default)" "$out" '[akaman]'
++t_not_contains "mcp stats is opt-in (absent by default)" "$out" '[sysref]'
+ 
+ out=$(mcp_json '{"jsonrpc":"2.0","id":23,"method":"tools/call","params":{"name":"man","arguments":{"query":"grep exit status","stats":false}}}')
+-t_not_contains "mcp stats=false stays off" "$out" '[akaman]'
++t_not_contains "mcp stats=false stays off" "$out" '[sysref]'
+ 
+ out=$(mcp_json '{"jsonrpc":"2.0","id":24,"method":"tools/call","params":{"name":"man","arguments":{"query":"grep exit status","stats":"true"}}}')
+-t_contains "mcp stats accepts stringified boolean" "$out" '[akaman]'
++t_contains "mcp stats accepts stringified boolean" "$out" '[sysref]'
+ 
+ mcp_schema=$(printf 'Content-Length: %d\r\n\r\n{"jsonrpc":"2.0","id":25,"method":"tools/list"}' "$(printf '%s' '{"jsonrpc":"2.0","id":25,"method":"tools/list"}' | wc -c)" | "$BIN" --mcp)
+ t_contains "schema advertises stats" "$mcp_schema" '"stats":{"type":"boolean"}'
+@@ -549,7 +549,7 @@
+ t_not_contains "unmeasured path is not falsely 0.0%" "$out" 'reduction=0.0%'
+ 
+ out=$(mcp_json '{"jsonrpc":"2.0","id":32,"method":"tools/call","params":{"name":"man","arguments":{"query":"nosuchsymbol_zzz","source":"headers","stats":true}}}')
+-t_contains "miss labels the source, not a phantom page" "$out" '[akaman] headers'
++t_contains "miss labels the source, not a phantom page" "$out" '[sysref] headers'
+ t_not_contains "miss does not render ?()" "$out" '?()'
+ 
+ # A real measured result must still be a plain number, never n/a.

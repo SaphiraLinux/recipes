@@ -1,0 +1,46 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Saphira forward-port <builder@saphira.vm2.uk>
+Date: Thu, 9 Oct 2026 12:00:00 +0000
+Subject: [FWD 7.2.9] mm: fix missed alloc-flags call sites (slub, hugetlb)
+
+Follow-up to fwd-016, required to build: fwd-016 threaded alloc_flags
+through __alloc_frozen_pages_noprof() but missed the two callers using
+the __alloc_frozen_pages() wrapper macro (mm/slub.c alloc_slab_page,
+mm/hugetlb.c hugetlb folio alloc). Both now pass ALLOC_DEFAULT:
+behavior-preserving. Found via the 7.2.9-r1 build log, mirroring the
+identical upstream call sites.
+
+Verifies with git apply --check (no fuzz).
+
+Signed-off-by: Saphira builder <builder@saphira.vm2.uk>
+---
+diff --git a/mm/hugetlb.c b/mm/hugetlb.c
+index abb15476e..1e31f028c 100644
+--- a/mm/hugetlb.c
++++ b/mm/hugetlb.c
+@@ -1806,7 +1806,8 @@ static struct folio *alloc_buddy_frozen_folio(int order, gfp_t gfp_mask,
+ 	if (alloc_try_hard)
+ 		gfp_mask |= __GFP_RETRY_MAYFAIL;
+ 
+-	folio = (struct folio *)__alloc_frozen_pages(gfp_mask, order, nid, nmask);
++	folio = (struct folio *)__alloc_frozen_pages(gfp_mask, order, nid, nmask,
++						     ALLOC_DEFAULT);
+ 
+ 	/*
+ 	 * If we did not specify __GFP_RETRY_MAYFAIL, but still got a
+diff --git a/mm/slub.c b/mm/slub.c
+index 06bb7f8d1..3f2bb1e42 100644
+--- a/mm/slub.c
++++ b/mm/slub.c
+@@ -3269,7 +3269,8 @@ static inline struct slab *alloc_slab_page(gfp_t flags, int node,
+ 	else if (node == NUMA_NO_NODE)
+ 		page = alloc_frozen_pages(flags, order);
+ 	else
+-		page = __alloc_frozen_pages(flags, order, node, NULL);
++		page = __alloc_frozen_pages(flags, order, node, NULL,
++					    ALLOC_DEFAULT);
+ 
+ 	if (!page)
+ 		return NULL;
+--
+2.55.0

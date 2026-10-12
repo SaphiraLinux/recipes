@@ -1,0 +1,16 @@
+[Unit]
+Description=Slurm accounting daemon
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/slurm/slurmdbd.conf
+
+[Service]
+Type=notify
+User=slurm
+Group=slurm
+ExecStart=/usr/sbin/slurmdbd -D -s
+ExecReload=/bin/kill -HUP $MAINPID
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

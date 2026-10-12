@@ -4,7 +4,10 @@ AddressFamily any
 ListenAddress 0.0.0.0
 ListenAddress ::
 
+HostKey /etc/ssh/ssh_host_mldsa44_ed25519_key
 HostKey /etc/ssh/ssh_host_ed25519_key
+HostKey /etc/ssh/ssh_host_ecdsa_key
+# RSA last: legacy fallback for clients without newer host-key support.
 HostKey /etc/ssh/ssh_host_rsa_key
 
 SyslogFacility AUTHPRIV
@@ -18,6 +21,9 @@ MaxAuthTries 4
 PubkeyAuthentication yes
 PasswordAuthentication yes
 KbdInteractiveAuthentication no
+# PAM per Saphira platform policy (built --with-pam); the service
+# entry in /etc/pam.d/sshd is owned by this package.
+UsePAM yes
 
 UseDNS no
 AllowTcpForwarding yes

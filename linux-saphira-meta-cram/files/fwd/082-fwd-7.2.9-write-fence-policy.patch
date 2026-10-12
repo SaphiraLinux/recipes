@@ -1,0 +1,154 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Saphira forward-port <builder@saphira.vm2.uk>
+Date: Thu, 9 Oct 2026 12:00:00 +0000
+Subject: [FWD 7.2.9] mm: add NODE_PRIVATE_POLICY_WRITE_FENCE
+
+Fwd-port of upstream ("mm: add NODE_PRIVATE_POLICY_WRITE_FENCE for
+read-only private nodes", Gregory Price, series position 082) onto
+Linux 7.2.9.
+
+Why needed: 7.2.9 mm/internal.h ends with different trailing content
+(may_expand_vm decl; no can_spin_trylock tail), so the appended
+node_placement_check() helper is anchored at the file-end guard
+instead. Helper body + node_private.h + migrate.c hunks verbatim
+upstream.
+
+Byte-identical upstream patch retained in series/ (recorded SKIP-FWD).
+Verifies with git apply --check (no fuzz).
+
+Signed-off-by: Saphira builder <builder@saphira.vm2.uk>
+---
+diff --git a/include/linux/node_private.h b/include/linux/node_private.h
+index 6f568bc0d..81be1b33b 100644
+--- a/include/linux/node_private.h
++++ b/include/linux/node_private.h
+@@ -19,6 +19,16 @@ struct page;
+ #define NODE_PRIVATE_CAP_NUMA_BALANCING	(1UL << 4)	/* allow NUMA balancing */
+ #define NODE_PRIVATE_CAP_LTPIN		(1UL << 5)	/* allow GUP pins */
+ 
++/*
++ * Per-node POLICY bits, stored in the same node_private.caps field.  A CAP says
++ * what a node allows a service to do.  A POLICY says how the mm must handle
++ * folios that live on the node.  The two axes are orthogonal.  CAPs are
++ * assigned from the low end (above) and POLICYs from the high end (here).  Move
++ * POLICYs into their own field when the two ranges would meet.
++ */
++/* folios map read-only; a write must COW-promote off-node */
++#define NODE_PRIVATE_POLICY_WRITE_FENCE	(1UL << (BITS_PER_LONG - 1))
++
+ /**
+  * struct node_private - Per-node container for N_MEMORY_PRIVATE nodes
+  *
+@@ -191,6 +201,30 @@ static inline bool node_allows_ltpin(int nid)
+ 	return ret;
+ }
+ 
++/**
++ * node_write_fenced - must a write to a folio on this node COW-promote off-node?
++ * @nid: the node to test
++ *
++ * POLICY_WRITE_FENCE nodes (e.g. a read-only compressed tier) map their folios
++ * read-only; a write must relocate the folio rather than reuse it in place.
++ * Consumed by the write-fault reuse predicate (folio_must_cow()) and the
++ * migration re-install helpers.  False for every node without the policy, so a
++ * plain private node stays writable in place.
++ */
++static inline bool node_write_fenced(int nid)
++{
++	struct node_private *np;
++	bool ret;
++
++	if (!node_state(nid, N_MEMORY_PRIVATE))
++		return false;
++	rcu_read_lock();
++	np = rcu_dereference(NODE_DATA(nid)->node_private);
++	ret = np && (np->caps & NODE_PRIVATE_POLICY_WRITE_FENCE);
++	rcu_read_unlock();
++	return ret;
++}
++
+ #else /* !CONFIG_NUMA */
+ 
+ static inline bool folio_is_private_node(struct folio *folio)
+@@ -238,6 +272,11 @@ static inline bool node_allows_ltpin(int nid)
+ 	return true;
+ }
+ 
++static inline bool node_write_fenced(int nid)
++{
++	return false;
++}
++
+ #endif /* CONFIG_NUMA */
+ 
+ #if defined(CONFIG_NUMA) && defined(CONFIG_MEMORY_HOTPLUG)
+diff --git a/mm/internal.h b/mm/internal.h
+index c742d8f87..8c6893116 100644
+--- a/mm/internal.h
++++ b/mm/internal.h
+@@ -2089,4 +2089,42 @@ static inline int get_sysctl_max_map_count(void)
+ bool may_expand_vm(struct mm_struct *mm, const vma_flags_t *vma_flags,
+ 		   unsigned long npages);
+ 
++/**
++ * node_placement_check() - may @folio be migrated onto node @nid?
++ * @nid: the node the folio would be placed on
++ * @folio: the folio being migrated
++ *
++ * Placement dispatch for the per-node POLICY set.  A folio may live on a private
++ * node only if it satisfies every placement-relevant POLICY that node enforces.
++ * This switches on POLICY bits and the checks are never driver-provided, so it
++ * is kernel-internal by construction.  Add a block per placement-relevant
++ * POLICY.  A normal or policy-free node accepts anything.
++ *
++ * Checked at the migration commit point, with the source folio locked and about
++ * to be frozen, so the mutable folio state tested here is stable and a folio
++ * that has become ineligible cannot be committed onto the node.
++ */
++static inline bool node_placement_check(int nid, struct folio *folio)
++{
++	/*
++	 * WRITE_FENCE: the node maps folios read-only and drops clean FILE folios
++	 * on reclaim, re-reading them from the fs.  A file folio may be placed here
++	 * only if it is safe to drop and refault.  It must be clean and not under
++	 * writeback, else a dropped dirty folio loses data since the node has no
++	 * in-place write path.  It must be uptodate, else it is not re-readable to
++	 * serve the drop.  It must be evictable, else an mlocked folio can never be
++	 * dropped and would be stranded.  Anon folios are swapped out under pressure,
++	 * not dropped, so they are exempt.
++	 */
++	if (node_write_fenced(nid)) {
++		if (folio_test_swapbacked(folio))
++			return true;
++		return folio_test_uptodate(folio) && folio_evictable(folio) &&
++		       !folio_test_dirty(folio) && !folio_test_writeback(folio);
++	}
++
++	/* add a block per placement-relevant POLICY */
++	return true;
++}
++
+ #endif	/* __MM_INTERNAL_H */
+diff --git a/mm/migrate.c b/mm/migrate.c
+index e90d22be9..61e41066e 100644
+--- a/mm/migrate.c
++++ b/mm/migrate.c
+@@ -581,6 +581,16 @@ static int __folio_migrate_mapping(struct address_space *mapping,
+ 	int dirty;
+ 	long nr = folio_nr_pages(folio);
+ 
++	/*
++	 * Refuse a migration whose destination node policy cannot accept the
++	 * folio.  A write-fenced node takes a clean file folio only when it is
++	 * still safe to drop and refault.  Tested with the source folio locked and
++	 * about to be frozen, so the state is stable; a refused migration returns
++	 * -EBUSY and the caller falls back to normal reclaim.
++	 */
++	if (!node_placement_check(folio_nid(newfolio), folio))
++		return -EBUSY;
++
+ 	if (!mapping) {
+ 		/* Take off deferred split queue while frozen and memcg set */
+ 		if (folio_test_large(folio) &&
+--
+2.55.0

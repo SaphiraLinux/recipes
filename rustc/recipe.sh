@@ -1,8 +1,8 @@
 #!/bin/sh
 
 pkgname=rustc
-pkgver=1.97.1
-pkgrel=2
+pkgver=1.98.1
+pkgrel=1
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="Rust language compiler, cargo, clippy and rustfmt"
 license="MIT OR Apache-2.0"
@@ -11,8 +11,8 @@ repo=main
 url=https://www.rust-lang.org/
 # Official dist source tarball carries the full vendored crate set
 # (vendor=true, locked-deps=true below); GitHub tag archives do not.
-source=https://static.rust-lang.org/dist/rustc-1.97.1-src.tar.xz
-sha256=0ed06fdaffd4722a7702e0b4eebfafc897ab8f513e8e1b247cdd7e5c6df6ded2
+source=https://static.rust-lang.org/dist/rustc-1.98.1-src.tar.xz
+sha256=be1816e7f6c40abb90245ad6e024bed2a7e88d7dda4561e4d5470207df616b9f
 
 depends="
     llvm>=22.1.8-r2
@@ -81,7 +81,7 @@ recipe_build()
 	cd "$SRC"
 	patch -p1 < "$RECIPE_DIR/files/akadata-target.patch"
 	# Cargo-channeled env for the x.py tool builds (stage2-tools cargo
-	# for the akadata host): the build log proves OPENSSL_DIR is unset
+	# for the akadata toolchain host): the build log proves OPENSSL_DIR is unset
 	# in openssl-sys's build-script env despite the recipe-process
 	# prefix below, so channel it through cargo config (filesystem,
 	# always read) instead of process inheritance. /usr (not /usr/lib
@@ -103,20 +103,24 @@ PKG_CONFIG_ALLOW_CROSS = "1"
 EOF
 	bootstrap=$BUILDDIR/bootstrap
 	install_bootstrap_component \
-		rustc-1.96.0-x86_64-unknown-linux-musl.tar.xz "$bootstrap"
+		rustc-1.97.1-x86_64-unknown-linux-musl.tar.xz "$bootstrap"
 	install_bootstrap_component \
-		rust-std-1.96.0-x86_64-unknown-linux-musl.tar.xz "$bootstrap"
+		rust-std-1.97.1-x86_64-unknown-linux-musl.tar.xz "$bootstrap"
 	install_bootstrap_component \
-		cargo-1.96.0-x86_64-unknown-linux-musl.tar.xz "$bootstrap"
+		cargo-1.97.1-x86_64-unknown-linux-musl.tar.xz "$bootstrap"
 	cat > "$SRC/bootstrap.toml" <<EOF
 change-id = "ignore"
 
+[build]
+# Vendor branding: surfaces in rustc -Vv as
+# "Saphira Linux rust <pkgver>" instead of bootstrap's
+# "built from a source tarball" fallback.
+description = "Saphira Linux rust $pkgver"
 # Branded bootstrap: the stage0/build machine stays
 # x86_64-unknown-linux-musl (the old working compiler), while host and
 # target become x86_64-akadata-linux-musl. BOTH target sections are
 # deliberate: x.py still needs build-tuple tool settings while
 # constructing stage1, and must not fall back to plain cc there.
-[build]
 build = "x86_64-unknown-linux-musl"
 host = ["x86_64-akadata-linux-musl"]
 target = ["x86_64-akadata-linux-musl"]
@@ -200,7 +204,7 @@ recipe_install()
 	LD_LIBRARY_PATH="$PKGDEST/usr/lib" \
 		"$PKGDEST/usr/bin/rustfmt" --version
 	# Branded-host acceptance: the stage2 compiler must report the
-	# AKADATA triple, not the bootstrap seed's unknown tuple.
+	# akadata triple, not the bootstrap seed unknown tuple.
 	# Captured comparison (not `... | grep -q ...`): a direct
 	# grep -q pipeline false-negatived here under set -o pipefail
 	# while every staged binary reports the branded host. The

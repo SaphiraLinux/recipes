@@ -1,0 +1,79 @@
+--- a/src/common/slurm_resolv.c
++++ b/src/common/slurm_resolv.c
+@@ -48,6 +48,39 @@
+ 
+ #define SRV_RECORD "_slurmctld._tcp"
+ 
++
++/*
++ * musl libc provides struct __res_state and the classic res_search()
++ * API but omits the reentrant res_ninit/res_nsearch/res_nclose entry
++ * points. This file uses them only to resolve "_slurmctld._tcp" SRV
++ * records with a zeroed state, ignoring return state afterwards, so
++ * thin statics over the classic API are behavior-equivalent here.
++ * One known delta: res.ndots = 2 has no effect (musl res_search uses
++ * its own search rules); SRV auto-discovery still works, and
++ * saphira-cluster always writes an explicit SlurmctldHost anyway.
++ * Saphira/musl port patch.
++ */
++static int
++slurm_res_ninit(res_state statp)
++{
++	(void)statp;
++	return 0;
++}
++
++static int
++slurm_res_nsearch(res_state statp, const char *dname, int class,
++		  int type, unsigned char *answer, int anslen)
++{
++	(void)statp;
++	return res_search(dname, class, type, answer, anslen);
++}
++
++static void
++slurm_res_nclose(res_state statp)
++{
++	(void)statp;
++}
++
+ static int _sort_controllers(void *x, void *y)
+ {
+ 	ctl_entry_t *ctl1 = *(ctl_entry_t **) x;
+@@ -65,24 +98,24 @@
+ 	int len;
+ 	list_t *controllers;
+ 
+-	if (res_ninit(&res)) {
++	if (slurm_res_ninit(&res)) {
+ 		error("%s: res_ninit error: %m", __func__);
+ 		return NULL;
+ 	}
+ 
+ 	res.ndots = 2;
+ 
+-	if ((len = res_nsearch(&res, SRV_RECORD, C_IN, T_SRV,
++	if ((len = slurm_res_nsearch(&res, SRV_RECORD, C_IN, T_SRV,
+ 			       answer, sizeof(answer))) < 0) {
+ 		error("%s: res_nsearch error: %s",
+ 		      __func__, hstrerror(h_errno));
+-		res_nclose(&res);
++		slurm_res_nclose(&res);
+ 		return NULL;
+ 	}
+ 
+ 	if (ns_initparse(answer, len, &handle) < 0) {
+ 		error("%s: ns_initparse error: %m", __func__);
+-		res_nclose(&res);
++		slurm_res_nclose(&res);
+ 		return NULL;
+ 	}
+ 
+@@ -119,6 +152,6 @@
+ 	} else
+ 		list_sort(controllers, _sort_controllers);
+ 
+-	res_nclose(&res);
++	slurm_res_nclose(&res);
+ 	return controllers;
+ }

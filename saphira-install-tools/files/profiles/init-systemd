@@ -1,0 +1,6 @@
+# systemd as the init system for a Saphira machine.
+#
+# Named for the init it selects, and separate from base-system so that the
+# init choice is stated exactly once and never restated by a caller. See
+# saphira-profiles(5) for the profile invariant.
+systemd

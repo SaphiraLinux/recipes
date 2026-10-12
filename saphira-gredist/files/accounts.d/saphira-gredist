@@ -1,0 +1,29 @@
+# gredist runtime identity (canonical, fixed): user gredist UID 150,
+# primary group gredist GID 150.
+#
+# Required by the in-daemon privilege drop in r9. gredist needs CAP_NET_RAW
+# only to create its raw sockets; after setgroups/setgid/setuid it forwards,
+# re-reads its configuration and runs its ICMP health probe unprivileged. This
+# was measured on a real node before the drop was written, so the identity is
+# designed around what the daemon actually needs rather than around what is
+# convenient.
+#
+# UID 150 sits in the preferred 0..199 packaged range. Home /var/empty is
+# shared infrastructure (left untouched by design); no dir stanza needed.
+#
+# 150, not the 123 this fragment originally declared: 123 is gopher's in the
+# base seed and 124 is hostapd's, and one package owns each declared identity.
+# This identity first appears in r9, which was staged but never published
+# (published r4/r5 predate the privilege drop and declare no identity at
+# all), so the move costs no migration and needs no legacy sidecar. 150 is
+# allocated in package-name order from 147, the first free ID above the
+# highest claimed identity (146 openldap), clear of systemd's block
+# (127-131, 144, 145).
+#
+# NOTE for operators: because gredist runs as this user, its configuration
+# directory must be readable by it. The package installs /etc/saphira as
+# 0750 root:root, which does not allow that; gredist checks at startup and
+# refuses to run rather than come up unable to reload, naming the exact
+# chgrp it needs.
+user gredist 150 gredist /var/empty /sbin/nologin
+group gredist 150

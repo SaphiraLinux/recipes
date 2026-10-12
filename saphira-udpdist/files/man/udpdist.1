@@ -1,0 +1,348 @@
+.TH UDPDIST 1 "2026" "saphira-udpdist" "System Administration"
+.SH NAME
+udpdist \- Layer 4 UDP distributor for Saphira Linux, DSR/LVS-DR style
+.SH SYNOPSIS
+.B udpdist
+.RI [ options ]
+.IR service_name
+.br
+.B udpdist
+.RI [ options ]
+.BI \-c " path"
+.br
+.B udpdist
+.B \-\-check
+.BI \-c " path"
+.SH DESCRIPTION
+.B udpdist
+accepts UDP datagrams addressed to one or more frontend addresses and ports
+and redirects each flow, at layer 2, to a backend selected by rendezvous
+(rendezvous/HRW) hashing. It is a distributor, not a proxy: no address is ever
+rewritten, so the backend observes the real client address and replies to the
+client directly, without the distributor on the return path.
+.PP
+This is the same shape as LVS-DR. Consequences worth understanding before
+deploying it:
+.IP \(bu 3
+The frontend address is the service identity. It must be configured on the
+distributor and, as a /32 (IPv4) or /128 (IPv6) on the loopback interface of
+every backend.
+.IP \(bu 3
+Backends must be reachable on the same layer 2 segment. This release does not
+tunnel to a backend on a remote segment.
+.IP \(bu 3
+Nothing is translated, so there is no state table for ordinary UDP flows, no
+per-flow descriptor, and no return-path ambiguity. Two datagrams with an
+identical 5-tuple are one flow and always go to the same backend.
+.PP
+Because the layer 3 header is forwarded unchanged, the destination address in
+every frame is the frontend address. The backend accepts it because the same
+address is local to it.
+.SH OPTIONS
+.TP
+.BI \-c " path"
+Read
+.I path
+instead of
+.IR /etc/saphira/udpdist/<service_name>.conf .
+The derived service name is validated with exactly the same character set as
+one given positionally.
+.TP
+.B \-\-check
+Validate the configuration, print a one-line summary and exit. Opens no
+sockets and requires no privilege.
+.TP
+.B \-\-syslog
+Log to syslog instead of standard error.
+.SH SIGNALS
+.TP
+.B SIGHUP
+Reload the configuration. The file is parsed in full first; if anything is
+invalid the previous configuration is kept and the failure is logged. Counters
+are preserved.
+.IP
+A reload that would require opening a new layer 2 socket, or binding a port
+below 1024, is refused and the old configuration is kept: those operations are
+not permitted after the privilege drop, and half-applying a reload is worse
+than not applying it. Everything else \(em backends, hardware addresses, health
+thresholds, QUIC configuration, and frontends on ports of 1024 or above \(em
+applies on the next datagram. There is no address baked into a socket, so a
+frontend change cannot desynchronise anything.
+.TP
+.B SIGUSR1
+Write a statistics dump to the log. Every counter is included, together with
+the QUIC routing state actually in use for each frontend.
+.TP
+.B SIGTERM ", " SIGINT
+Exit.
+.SH CONFIGURATION
+Comments begin with
+.B #
+or
+.BR ; .
+A line longer than 1023 bytes is rejected rather than silently split.
+Unknown keys and unknown attributes are rejected.
+.SS frontend
+.BI frontend= address : port
+.I iface
+.I proto
+.I quic_mode
+.TP
+.B iface=\fINAME\fR
+Interface carrying the frontend. Optional: if omitted, the interface owning
+the address is discovered at startup.
+.TP
+.B proto=udp|quic
+Default
+.BR udp .
+.B q
+uic makes the daemon interpret the connection id where it can. See
+.B QUIC
+below. It is never inferred: any non-QUIC datagram whose first byte has the
+header-form bit clear is byte-identical in shape to a QUIC packet, so a
+frontend must say which it carries.
+.SS backend
+.BI backend= address : port
+.I mac
+.I sid
+.TP
+.BI mac= xx:xx:xx:xx:xx:xx
+Required in practice. Layer 2 redirection needs the hardware address, and it
+cannot be discovered on the forwarding path. At startup each configured
+address is compared against the neighbour table; a mismatch is fatal, because
+a wrong hardware address is an invisible blackhole rather than a recoverable
+fault.
+.TP
+.BI sid= N
+QUIC-LB server id for this backend. Required when any
+.B quic_config
+is present, and unique across the pool.
+.SS quic_config
+.BI quic_config= id
+.I cid_len
+.I server_id_len
+.I self_describing
+.TP
+.BI quic_config= N
+Configuration codepoint, 0 to 6. The first three bits of every connection id
+name the configuration. Codepoint 7 is reserved by the load-balancer
+specification, always means "unroutable", and is never accepted.
+.TP
+.BI cid_len= N
+Total connection id length in bytes for this configuration. A short-header
+packet carries no length field, so the length must come from here; the daemon
+never guesses it.
+.TP
+.BI self_describing= 1
+The five low bits of the first connection-id octet encode the length of the
+connection id that follows it. Mutually exclusive with
+.BR cid_len .
+.TP
+.BI server_id_len= N
+Plaintext server id length in bytes, 1 to 7. This release implements the
+unkeyed (plaintext) routing scheme only. Encrypted connection ids are a later
+milestone and are not implemented; a pool using them is not supported.
+.SS Other keys
+.TP
+.BI max_datagram= N
+Largest datagram accepted, 64 to 65535, default 9000. Larger datagrams are
+dropped and counted. A datagram is never truncated, because a truncated
+datagram is corruption rather than loss.
+.TP
+.BI require_mac= 1
+Refuse to start unless every backend carries an explicit
+.BR mac .
+.TP
+.BI skip_csum_offload_check= 1
+Do not check for checksum offload at startup. See
+.BR REQUIREMENTS .
+.SH BACKEND ADDRESSES
+A backend normally carries an explicit
+.BR mac= ,
+which udpdist cross-checks against the kernel's neighbour table and refuses to
+start if the two disagree.
+.PP
+.B mac=auto
+instead takes the hardware address from that table at startup, and follows it
+thereafter: if a backend's address changes, udpdist follows the change and counts
+it as
+.BR mac_changed ,
+rather than continuing to send frames to an address nobody answers.
+.PP
+.B mac=auto
+is only meaningful for a backend on the same broadcast domain. Neighbour
+resolution is undefined across a router, and a gateway never answers an ARP
+request for an address beyond it, so an off-segment backend marked
+.B mac=auto
+cannot be resolved by any amount of retrying. udpdist reports that case
+explicitly instead of retrying forever: reaching such a backend requires
+tunnelled DSR, not a longer timeout.
+.PP
+A neighbour state udpdist cannot name is refused rather than assumed usable. An
+unrecognised value usually means the table is being misread, and installing a
+hardware address on that evidence would be guessing; failing closed costs a
+startup refusal with a diagnostic, where guessing costs a silent blackhole.
+
+.SH QUIC
+.B udpdist
+does not terminate TLS and does not parse HTTP/3. It routes QUIC, including
+HTTP/3, without understanding it.
+.PP
+A QUIC connection is identified by its connection id, not by its 5-tuple, and
+QUIC is designed to survive the client changing address or port. Hashing the
+tuple alone therefore moves a connection to a different backend when the client
+rebinds, and the second backend does not hold that connection's state.
+.SS quic_mode=fallback
+Requires nothing from the backends. Affinity is held by a bounded 4-tuple
+table for as long as the client is still using client-generated connection ids,
+which is the window before the server issues one of its own. Ordinary HTTP/3
+traverses correctly. A source-port rebinding may survive if the datagram still
+matches the recorded tuple.
+.IP
+Genuine address or path migration is
+.BR "not"
+guaranteed in this mode, and this program makes no claim that it is. IPv4 to
+IPv6 migration is not covered.
+.SS quic_mode=quic_lb
+Every backend must emit routable connection ids following the
+.B quic_config
+scheme. Affinity is then taken from the connection id, so a connection stays on
+its backend across source-port and address changes. This is the mode that earns
+the migration-safe claim.
+.IP
+Both mechanisms apply within a single connection and the progression is
+automatic: client-generated connection id, then bounded 4-tuple affinity, then
+routable connection id, after which the fallback state expires unused.
+.IP
+If
+.B quic_mode=quic_lb
+is configured and the connection-id configuration is missing or invalid,
+configuration validation
+.B fails
+and the daemon refuses to start. It never silently degrades to
+.BR fallback ,
+and the status output never reports a frontend as QUIC-LB merely because it
+carries QUIC traffic.
+.SS Backend loss
+A new connection is never sent to a backend that is not healthy. An
+established connection whose backend has failed is
+.B dropped and counted
+.RB ( quic_backend_down ).
+It is never re-routed: a different server does not hold that connection's state
+and would reject the connection id. Clients re-establish on their own.
+.SH DEPLOYMENT REQUIREMENTS
+.SS On the distributor
+.TP
+.B Checksum offload must be disabled
+on every interface the distributor redirects on:
+.PP
+.RS
+.nf
+ethtool -K \fIinterface\fR tx off rx off
+.fi
+.RE
+.PP
+The daemon forwards received bytes unchanged, so a transport checksum that
+hardware has not finished computing reaches the backend, which discards the
+datagram at its own verification. Every packet would be lost while the daemon
+reported a successful forward. The condition is checked before the first
+packet and is fatal unless
+.B skip_csum_offload_check=1
+is set.
+.TP
+The frontend address must be present on the distributor so the host answers for
+it. A UDP socket is bound to every frontend address and port purely so the
+local kernel considers the service owned and does not emit ICMP
+port-unreachable for datagrams being handled elsewhere. That socket is never
+read for forwarding, is drained so its receive queue cannot grow, and is one
+descriptor per frontend, not per flow.
+.TP
+.B /etc/saphira
+must be traversable and readable by the
+.B udpdist
+user, or the daemon refuses to start rather than run unable to reload.
+.SS On every backend
+.TP
+The frontend address as a /32 on
+.B lo
+for IPv4, or a /128 for IPv6. This makes the address local without
+advertising it.
+.TP
+ARP and neighbour announcement suppressed on that address, so the backend does
+not answer for the frontend address. Linux:
+.BR "arp_ignore=1, arp_announce=2" .
+Windows requires the weak-host receive setting
+.BR "ipsender=weak" .
+BSD equivalents apply.
+.TP
+A direct route from the backend to the client. The reply never traverses the
+distributor, so the backend must be able to reach the client itself.
+.TP
+For QUIC: a certificate valid for the frontend's hostname, issued by an
+authority the client trusts. All backends are indistinguishable to the client,
+and a connection that migrates between them verifies the second one's
+certificate. Per-backend self-signed certificates do not work.
+.TP
+Identical QUIC-LB parameters across the pool, including the configuration
+codepoint and the server id allocation.
+.SH PRIVILEGE
+The daemon needs CAP_NET_RAW to open its layer 2 sockets and nothing
+afterwards. It then drops supplementary groups, gid and uid to the packaged
+.B udpdist
+identity and proves the drop by requiring
+.B setuid(0)
+to fail. No capability is retained, not even CAP_NET_RAW, and there is no
+privileged supervisor and no file capability.
+.SH STATISTICS
+Counters are in memory only and reset on restart. SIGUSR1 prints:
+.TP
+.B rx
+Frames received from the network and accepted for processing.
+.TP
+.B fwd
+Datagrams handed to a backend. This is
+.B "accepted by the kernel",
+not a delivery receipt; loss after the send is invisible here and is inherent to
+an unacknowledged datagram.
+.TP
+.B drops
+non_ip, not_udp, malformed, truncated, oversized, bad_cksum, multicast,
+broadcast, not_ours, no_backend, send_failed, and self_echo, which counts
+frames this host itself emitted and deliberately ignored.
+.PP
+Fragment state is reported as frag initial, subsequent, orphan, table_full.
+Every received frame has exactly one disposition, so
+.B rx
+equals
+.B fwd
+plus the sum of the drop counters.
+.SH LIMITS
+.TP
+.B Frontends per service
+32
+.TP
+.B Backends per service
+64
+.TP
+.B Interfaces per service
+8
+.TP
+.B Fragment associations
+4096, short lived; a full table is counted and the datagram dropped
+.TP
+.B QUIC fallback affinities
+4096, short lived
+.TP
+.B Service name
+.Letters, digits, underscore and hyphen only
+.SH EXIT STATUS
+0 on success, 1 on a configuration or startup failure.
+.SH SEE ALSO
+.BR ping (1),
+.BR ip (8),
+.BR ethtool (8)
+.PP
+RFC 9000 (QUIC transport), draft-ietf-quic-load-balancers (routable connection
+ids).
+.SH LICENSE
+BUSL-1.1. Copyright (C) 2026 Saphira Linux.

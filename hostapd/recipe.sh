@@ -1,8 +1,14 @@
 #!/bin/sh
 
 pkgname=hostapd
-pkgver=2.11
-pkgrel=3
+pkgver=2.12
+pkgrel=1
+# 2.12: rebase from 2.11 (upstream 2026-08-07). Carries forward r4/r5:
+# AX/SAE/OWE/ACS/VLAN pins (OWE is now upstream-default-on; the pin is
+# a no-op there and the fail-closed loop still proves the state),
+# default AP template, hostapd_cli. (r4 proven on minimer: AX/HE/SAE
+# accepted, AP-ENABLED ch36; 2.11 N/W unconditional.) New upstream
+# version: pkgrel resets.
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='IEEE 802.11 AP, IEEE 802.1X/WPA/WPA2/EAP/RADIUS Authenticator'
 license='BSD-3-Clause'
@@ -10,7 +16,7 @@ origin=hostapd
 repo=saphira
 url=https://w1.fi/hostapd/
 source=https://w1.fi/releases/hostapd-${pkgver}.tar.gz
-sha256=2b3facb632fd4f65e32f4bf82a76b4b72c501f995a4f62e330219fe7aed1747a
+sha256=f43502561c28ba47ab77e18e1a973d07361c68cc8b14178e619bd5796b70eabd
 
 depends="libnl openssl"
 makedepends="
@@ -27,10 +33,22 @@ recipe_build()
 	cd "$SRC/hostapd"
 	cp defconfig .config
 	# nl80211 driver needs libnl-3; TLS via openssl; ctrl iface defaults on.
+	# AX/SAE/OWE/ACS/VLAN for Wi-Fi 6 + WPA3 AP operation (minimer).
 	sed -i -e 's|^#CONFIG_LIBNL32=y|CONFIG_LIBNL32=y|' \
 		-e 's|^#CONFIG_IEEE80211N=y|CONFIG_IEEE80211N=y|' \
 		-e 's|^#CONFIG_IEEE80211AC=y|CONFIG_IEEE80211AC=y|' \
+		-e 's|^#CONFIG_IEEE80211AX=y|CONFIG_IEEE80211AX=y|' \
+		-e 's|^#CONFIG_SAE=y|CONFIG_SAE=y|' \
+		-e 's|^#CONFIG_OWE=y|CONFIG_OWE=y|' \
+		-e 's|^#CONFIG_ACS=y|CONFIG_ACS=y|' \
+		-e 's|^#CONFIG_FULL_DYNAMIC_VLAN=y|CONFIG_FULL_DYNAMIC_VLAN=y|' \
 		.config
+	# Fail closed: every requested knob must have taken effect (a silent
+	# no-op sed from upstream renames would ship the same broken AP).
+	for knob in LIBNL32 IEEE80211AC IEEE80211AX SAE OWE ACS FULL_DYNAMIC_VLAN; do
+		grep -q "^CONFIG_${knob}=y" .config || \
+			{ echo "ERROR: hostapd .config lost CONFIG_${knob}=y" >&2; return 1; }
+	done
 	make -j${JOBS:-$(nproc)}
 
 	# hostapd -v writes the banner to stderr AND exits 1 (usage-style):
@@ -44,6 +62,10 @@ recipe_install()
 {
 	cd "$SRC/hostapd"
 	install -D -m755 hostapd "$PKGDEST/usr/bin/hostapd"
+	# hostapd_cli is the standard AP diagnostics/control client
+	# (status, associated stations, HE capability proof); tiny, same
+	# build, no extra dependencies.
+	install -D -m755 hostapd_cli "$PKGDEST/usr/bin/hostapd_cli"
 	install -D -m644 hostapd.conf \
 		"$PKGDEST/usr/share/doc/hostapd/hostapd.conf"
 	# Dual-init, instance-aware: the interface AND its configuration are
@@ -51,6 +73,13 @@ recipe_install()
 	# /etc/hostapd/<iface>.conf; OpenRC: rc-service hostapd.<iface>).
 	# Nothing is auto-enabled at install.
 	install -d -m 0755 "$PKGDEST/etc/hostapd"
+	# Default AP template (fail-closed: credentials commented, so an
+	# enabled-but-unedited service errors loudly instead of opening
+	# an AP). Ships as a conffile: apk .apk-new handling protects
+	# operator edits on upgrade. Correct AP syntax throughout
+	# (wpa_key_mgmt, not supplicant-style key_mgmt).
+	install -D -m 0644 "$RECIPE_DIR/files/hostapd.conf" \
+		"$PKGDEST/etc/hostapd/hostapd.conf"
 	install -D -m 0644 "$RECIPE_DIR/files/hostapd@.service" \
 		"$PKGDEST/usr/lib/systemd/system/hostapd@.service"
 	install -D -m 0644 "$RECIPE_DIR/files/hostapd.service" \

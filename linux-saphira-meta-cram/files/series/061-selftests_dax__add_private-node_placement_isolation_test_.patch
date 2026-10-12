@@ -1,0 +1,91 @@
+From cea75745793b8ad74f7df7919839a8e4b6c7f3ff Mon Sep 17 00:00:00 2001
+From: Gregory Price <gourry@gourry.net>
+Date: Tue, 23 Jun 2026 10:30:50 -0700
+Subject: [PATCH] selftests/dax: add private-node placement/isolation test
+
+private_node_isolation.sh (with the private_node_tool helper) verifies that
+memory mapped from a private dax-file device is resident on the private node,
+and that MAP_SHARED is rejected.
+
+Signed-off-by: Gregory Price <gourry@gourry.net>
+---
+ tools/testing/selftests/dax/Makefile          |  1 +
+ .../selftests/dax/private_node_isolation.sh   | 55 +++++++++++++++++++
+ 2 files changed, 56 insertions(+)
+ create mode 100644 tools/testing/selftests/dax/private_node_isolation.sh
+
+diff --git a/tools/testing/selftests/dax/Makefile b/tools/testing/selftests/dax/Makefile
+index 1c7a9743a35..9ec890725d0 100644
+--- a/tools/testing/selftests/dax/Makefile
++++ b/tools/testing/selftests/dax/Makefile
+@@ -8,5 +8,6 @@ TEST_GEN_FILES := private_node_tool
+ TEST_PROGS := dax-kmem-hotplug.sh
+ TEST_PROGS += dax-kmem-dax_file.sh
+ TEST_PROGS += private_node_hotplug.sh
++TEST_PROGS += private_node_isolation.sh
+ 
+ include ../lib.mk
+diff --git a/tools/testing/selftests/dax/private_node_isolation.sh b/tools/testing/selftests/dax/private_node_isolation.sh
+new file mode 100644
+index 00000000000..b95151f651b
+--- /dev/null
++++ b/tools/testing/selftests/dax/private_node_isolation.sh
+@@ -0,0 +1,55 @@
++#!/bin/bash
++# SPDX-License-Identifier: GPL-2.0
++#
++# Private-node placement test: dax-mapped memory lands on its private node and
++# MAP_SHARED is rejected.
++#
++#   1. faulted pages are resident on the private node
++#   2. MAP_SHARED is rejected
++#
++# Placement comes from the driver stamping an MPOL_F_PRIVATE bind via
++# ->get_policy; needs no opt-in.  The node is brought up ZONE_MOVABLE with
++# hotunplug=1 so teardown can migrate residue off and unplug never EBUSYs.
++# Needs a kmem-bindable dax device on a memoryless node; SKIPs otherwise.
++
++# shellcheck disable=SC1091
++DIR="$(dirname "$(readlink -f "$0")")"
++. "$DIR"/../kselftest/ktap_helpers.sh
++. "$DIR"/private_node_common.sh
++
++pn_begin
++pn_require_tool
++pn_provision
++pn_reset
++
++pn_set hotunplug 1
++pn_hotplug online_movable
++if [ "$(pn_state)" != online_movable ] || ! pn_is_private; then
++	ktap_skip_all "$DAX: could not online node $PN as private (state=$(pn_state))"
++	pn_reset; exit "$KSFT_SKIP"
++fi
++ktap_print_msg "using $DAX on private node $PN"
++ktap_set_plan 2
++
++# 1. faulted pages are resident on the private node
++out=$("$TOOL" map "/dev/$DAX" 64 "$PN"); rc=$?
++total=$(echo "$out" | pn_field total_pages)
++onnode=$(echo "$out" | pn_field "on_node$PN")
++if [ "$rc" = "$KSFT_SKIP" ]; then
++	ktap_test_skip "mmap/fault unavailable: $out"
++elif [ -n "$total" ] && [ "$total" -gt 0 ] && [ "$onnode" = "$total" ]; then
++	ktap_test_pass "all $total faulted pages resident on private node $PN"
++else
++	ktap_test_fail "off-node placement: on_node$PN=$onnode of total=$total ($out)"
++fi
++
++# 2. MAP_SHARED is rejected (private-node mappings are private by definition)
++out=$("$TOOL" shared "/dev/$DAX")
++if echo "$out" | grep -q 'shared_mmap=rejected'; then
++	ktap_test_pass "MAP_SHARED rejected ($out)"
++else
++	ktap_test_fail "MAP_SHARED not rejected ($out)"
++fi
++
++pn_reset
++ktap_finished
+-- 
+2.55.0
+

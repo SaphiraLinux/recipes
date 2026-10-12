@@ -1,0 +1,82 @@
+# CRAM.PROVENANCE — revision pinning for linux-saphira-meta-cram
+
+## Selected revision (single revision, never mixed)
+
+- Branch: `https://github.com/gourryinverse/linux`
+  `scratch/gourry/cramtest/cram_72` @ `22cb35457d24` (2026-07-20,
+  "selftests/dax: add CRAM write(2)-drop adversarial test").
+- Upstream base of that branch: 7.2.0-rc2 era (`VERSION=7 PATCHLEVEL=2
+  SUBLEVEL=0 EXTRAVERSION=-rc2` in the branch Makefile).
+- Series extracted: all 103 commits by Gregory Price dated >= 2026-06-01
+  on that branch, in chronological order, stored byte-identical under
+  `files/series/` (mbox Message-IDs are not available for scratch-branch
+  commits; identity is commit SHA + subject, listed in GATE-REPORT).
+- Target base: Linux 7.2.9 from
+  `https://cdn.kernel.org/pub/linux/kernel/v7.x/linux-7.2.9.tar.xz`
+  (160392664 bytes, 2026-10-03,
+  sha256 `b4c5dfbe51a364a6c7f03869200f88c8e1f77403539005f14b7fc6bc91b8d8ba`).
+
+## Revisions considered and rejected (do not mix)
+
+- RFC v4 mbox `[RFC PATCH v4 00/27] Private Memory Nodes (w/ Compressed
+  RAM)` (2026-02-22, `20260222084842.1824063-1-gourry@gourry.net`,
+  27 patches, `node_private_ops` + `__GFP_PRIVATE` design): SUPERSEDED
+  by the author's own later work. Forward-porting it onto 7.2.9 would
+  re-do design its author already reworked.
+- Branch `private_compression` @ `9fa5ffee4f` (Feb 2026): v4-era code,
+  same reason.
+- Branches `private_compression_v2` (2026-03-06) / `_v3` (2026-03-09):
+  intermediate fixes, superseded by the July branch.
+- Branch `private_nodes_v7` @ `aeab74415788` (2026-08-05, base
+  7.2.0-rc4): newest infrastructure generation (per-feature
+  N_MEMORY_* states, private zonelist family, MPOL_F_PRIVATE,
+  `private_node=` boot param) but contains NO mm/cram.c service, so it
+  cannot satisfy the CRAM goal on its own.
+- Reported "v5 00/36" (July 2026, zonelist redesign, no ops structs):
+  no retrievable coherent CRAM-carrying mbox/branch was found on the
+  permitted surfaces; the selected July branch already incorporates
+  that design direction (ZONELIST_PRIVATE, capability model) WITH the
+  CRAM service.
+
+## Backend conclusion (material finding, please read)
+
+The February `compressed_cxl_clean` QEMU device
+(`github.com/gourryinverse/qemu @ a078aaed`) speaks vendor CCI mailbox
+commands understood ONLY by the superseded v4 `cxl_compression` type-3
+driver. That driver does not exist in the selected revision (there are
+no `drivers/cxl/type3_drivers` here). The only in-tree `cram_register()`
+caller in this revision is `drivers/dax/kmem.c` (the `private`
+attribute onlines DAX memory as N_MEMORY_PRIVATE and hands it to CRAM).
+
+Therefore the test backend for THIS revision, according to its own
+implementation and docs (`Documentation/mm/numa_private_nodes.rst`
+"Testing", `tools/testing/selftests/dax/config`), is:
+
+1. DAX-accessible memory presented to the guest (QEMU `nvdimm` device
+   via ACPI NFIT, or `memmap=nn!ss` e820 persistent memory carved by
+   BLK_DEV_PMEM), bound to `dax_kmem` with `private=1` plus the wanted
+   CAP toggles;
+2. the `[TEST]` debugfs interface (`mm/cram: add the [TEST] debugfs
+   control interface`, `cram/control`: inflate/deflate/block/unblock
+   by nid) for balloon and backpressure driving;
+3. the KTAP suites under `tools/testing/selftests/dax/`
+   (`private_node_*`, `cram_*`) for demotion/promotion/pressure proofs.
+
+Using `compressed_cxl_clean` against this kernel would exercise
+nothing: no driver binds that device to the CRAM path. This is a
+faithful-to-implementation deviation from the letter of the build
+request, recorded here explicitly rather than simulated.
+
+## Application record
+
+- `files/SERIES-ORDER` is the authoritative application manifest
+  (85 UPSTREAM + 16 FWD + 2 SKIP-UPSTREAM = all 103 accounted).
+- Upstream files are byte-identical to `git format-patch` output of
+  the pinned SHAs. Every 7.2.9 adaptation lives in a separate
+  `files/fwd/NNN-fwd-*.patch` with its own why-header; see GATE-REPORT.
+- Gate: `git apply --check` per patch in order (no fuzz, no offsets);
+  the recipe re-enforces `patch --fuzz=0` and fails closed on any fuzz,
+  malformed, reversed, or FAILED notice at build time. Pure line-number
+  offsets (exact context found at a shifted position) are tolerated but
+  left visible in the build log — they are the same search git-apply
+  performs, not information loss.

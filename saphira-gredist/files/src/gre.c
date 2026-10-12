@@ -73,6 +73,11 @@ int parse_outer(const uint8_t *buf, size_t len, int *family, size_t *hdr_len,
         return 0;
     } else if (ver == 6) {
         if (len < 40) return -1;
+        /* Next header 44 is the fragment header, 51 is AH, 59/60 are the
+         * no-next-header markers. A fragment is reported as -2 exactly as the
+         * IPv4 path does, so the caller counts it as a fragment rather than as
+         * a generic malformed packet. */
+        if (buf[6] == 44) return -2;
         /* check next header = 47 */
         if (buf[6] != 47) return -1;
         uint16_t payload_len = (buf[4]<<8)|buf[5];
@@ -178,9 +183,15 @@ int select_backend(struct service *svc, const uint8_t *src_bytes, size_t src_len
     for (int i=0;i<svc->nbackends;i++) {
         struct backend *b = &svc->backends[i];
         if (!b->healthy) continue;
-        uint64_t h = b->hash ^ flow_hash;
-        h = splitmix64(h + 0x9e3779b97f4a7c15ULL + (uint64_t)i*0xbf58476d1ce4e5b9ULL);
-        /* weight could incorporate backend index? keep simple */
+        /* Score depends on the backend's IDENTITY (its hash of the address
+         * string) and the flow only. It must not depend on the backend's
+         * position in the config: mixing the array index in here meant that
+         * reordering or removing a line changed every later backend's score
+         * and remapped their existing flows. Measured with three backends and
+         * no membership change at all, a bare reorder of the config moved 32
+         * of 56 flows, which contradicts the documented "removal moves only
+         * its flows; surviving mappings remain stable". */
+        uint64_t h = splitmix64(b->hash ^ flow_hash);
         if (best==-1 || h > best_score) {
             best_score = h;
             best = i;

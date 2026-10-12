@@ -10,7 +10,10 @@ Type=simple
 # A unit-level User= would break privileged-port instances and merely
 # duplicate the self-drop; the running process is proxyto:19 either way.
 EnvironmentFile=-/etc/conf.d/proxyto
-ExecStart=/usr/bin/proxyto --syslog ${proxyto_name:-geomyidae}
+# systemd expands ${VAR} from EnvironmentFile but has no shell, so the
+# ${VAR:-default} form is passed through literally and the daemon rejects
+# it as an invalid instance name. The default lives in /etc/conf.d/proxyto.
+ExecStart=/usr/bin/proxyto --syslog ${proxyto_name}
 Restart=on-failure
 
 [Install]

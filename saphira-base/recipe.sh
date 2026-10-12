@@ -2,12 +2,15 @@
 
 pkgname=saphira-base
 pkgver=0.1
-pkgrel=4
+pkgrel=6
 # r4: saphira-permissions joins the base group (ensure-permissions /
 # ensure-caps available on every installed machine for runtime
 # audit/recovery). Deliberately the base group, not the bootstrap
 # seed: the seed split would create the baselayout cycle already
 # reviewed and refused. Metadata change, revision bumps.
+# (r4 adopted from hotfix/var-packaging-bug-var-run-isnot-run.)
+# r6: merge line (r5 line + r4 base-group membership combined).
+# Metadata change, bumps.
 # x86_64, not noarch: apk-tools v3 fetches noarch payloads from a
 # per-arch noarch/ subdir that the Saphira repo layout does not
 # publish yet (verified 2026-09-08: hatched/noarch/ absent, fetch
@@ -32,6 +35,7 @@ depends="
 	coreutils
 	musl
 	saphira-base-abi
+	saphira-base-accounts
 	saphira-baselayout
 	saphira-permissions
 	shadow

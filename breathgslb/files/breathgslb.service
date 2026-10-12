@@ -11,7 +11,7 @@ Wants=network-online.target
 [Service]
 EnvironmentFile=/etc/breathgslb/env
 Environment=BREATHGSLB_CONFIG=/etc/breathgslb/config.yaml
-ExecStartPre=+/usr/bin/install -d -m 0750 -o breathgslb -g breathgslb /var/log/breathgslb /var/lib/breathgslb
+ExecStartPre=+/bin/install -d -m 0750 -o breathgslb -g breathgslb /var/log/breathgslb /var/lib/breathgslb
 ExecStart=/usr/sbin/breathgslb -config ${BREATHGSLB_CONFIG}
 ExecReload=/bin/kill -HUP $MAINPID
 User=breathgslb

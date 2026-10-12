@@ -1,0 +1,9 @@
+#%PAM-1.0
+# Saphira dovecot service (IMAP/POP3 auth). Includes the shared
+# authentication stack; the daemon authenticates its own clients
+# against system users when configured with passdb pam.
+
+auth include system-auth
+account include system-auth
+session include system-auth
+password include system-auth

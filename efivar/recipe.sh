@@ -1,6 +1,6 @@
 pkgname=efivar
 pkgver=39
-pkgrel=2
+pkgrel=3
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='EFI variable library and efivar tool'
 license='LGPL-2.1-or-later GPL-2.0-or-later'
@@ -12,13 +12,25 @@ url=https://github.com/rhboot/efivar
 source=https://github.com/rhboot/efivar/archive/refs/tags/${pkgver}.tar.gz
 sha256=c9edd15f2eeeea63232f3e669a48e992c7be9aff57ee22672ac31f5eca1609a6
 
-depends="gcc-libs"
+# No runtime dependencies. r2 declared depends="gcc-libs", which was wrong and
+# expensive: gcc-libs depends on gcc, and gcc depends on binutils, gcc-dev, gmp,
+# isl, mpc, mpfr and zstd. That is a 599 MiB compiler toolchain, and it reached
+# every runtime root and every image because efibootmgr depends on efivar and
+# efibootmgr is an explicit entry in the base-system profile for UEFI boot. One
+# unjustified dependency on a UEFI boot path is how a 184 MiB runtime image
+# became an 818 MiB build workstation.
+#
+# The dependency was never real. The whole shipped payload -- /usr/bin/efivar,
+# libefivar.so.1 and libefivar.so.1.39 -- links only libc.so and
+# libefivar.so.1, and nothing in the package references libgcc at all. gcc is
+# needed to BUILD it, and makedepends already says so.
+depends=""
 makedepends="gcc make"
 subpackages="$pkgname-dev"
 
 recipe_build() {
 	# no-march-native.patch (worker-applied) keeps -march=native out of
-	# the ABI; HOST_MARCH= matches the proven akadata build decision.
+	# the ABI; HOST_MARCH= matches the proven Saphira build decision.
 	make -C "$SRC" -j${JOBS:-$(nproc)} libdir=/usr/lib HOST_MARCH= ENABLE_DOCS=0
 }
 

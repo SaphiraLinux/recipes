@@ -1,0 +1,15 @@
+# saphira-router environment. Read by BOTH inits: the OpenRC script sources
+# it via the same variable names, and the systemd unit uses EnvironmentFile.
+# Kept in sync with /etc/saphira/saphira-router/router.conf.
+
+# Group permitted to reach the control socket. Membership in this group is how
+# an operator drives the control plane WITHOUT any ability to write SQLite
+# directly -- the single-write-authority rule (D1 3.2, D4 1).
+saphira_router_group="wheel"
+
+# Exported to the daemon, which applies the group to the control socket itself.
+saphira_router_socket_group="wheel"
+
+saphira_router_state="/var/lib/saphira-router"
+saphira_router_socket="/run/saphira-router/api.sock"
+saphira_router_modules="/usr/lib/saphira-router/modules"

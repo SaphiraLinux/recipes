@@ -1,0 +1,10 @@
+# Saphira Garden service identity.
+# The daemon starts as root only long enough to create the TUN and open its
+# access-side AF_PACKET socket, then drops to this account permanently.
+name=saphira-garden
+uid=
+gid=
+description=Saphira Garden network access controller
+home=/var/lib/saphira-garden
+shell=/sbin/nologin
+groups=nogroup

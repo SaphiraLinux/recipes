@@ -1,0 +1,19 @@
+--- a/rpmio/rpmglob.cc
++++ b/rpmio/rpmglob.cc
+@@ -26,6 +26,16 @@
+ #include <fnmatch.h>
+ #include <glob.h>
+ 
++/* musl libc provides no GLOB_BRACE (a glibc/BSD extension): degrade
++ * the flag to a no-op so brace patterns fall through to the
++ * GLOB_NOCHECK handling below instead of failing the build. Only
++ * brace expansion in rpm file globs is affected, which spec %files
++ * sections rarely use; GLOB_TILDE exists in musl and is untouched.
++ */
++#ifndef GLOB_BRACE
++#define GLOB_BRACE 0
++#endif
++
+ #include <rpm/rpmfileutil.h>
+ #include <rpm/rpmurl.h>
+ 

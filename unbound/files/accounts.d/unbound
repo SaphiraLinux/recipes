@@ -1,0 +1,13 @@
+# unbound service identity.
+#
+# The recipe configures --with-username=unbound, so unbound(8) drops from
+# root to this user and chowns its own state. Until this fragment existed
+# the identity was unowned: configure proved a service account the package
+# never declared, which is the same class of gap as frr and lldpd having
+# identities and no way to start, only quieter.
+#
+# ID 64: in the preferred 0..199 tier, above the foundation range and
+# clear of every other declared package identity (0-19, 53, 100-123).
+user unbound 64 unbound /var/lib/unbound /sbin/nologin
+group unbound 64
+dir /var/lib/unbound 0755 unbound unbound

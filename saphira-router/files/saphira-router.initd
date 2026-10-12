@@ -1,0 +1,61 @@
+#!/sbin/openrc-run
+# OpenRC service definition for the saphira-router control plane.
+# Dual-init: this and the systemd unit ship together, and NEITHER is enabled
+# at install time. Enabling is a profile decision (D10 section 4).
+name="saphira-router"
+description="Saphira Linux multi-tenant control plane"
+
+: ${saphira_router_state:=/var/lib/saphira-router}
+: ${saphira_router_socket:=/run/saphira-router/api.sock}
+: ${saphira_router_modules:=/usr/lib/saphira-router/modules}
+: ${saphira_router_group:=wheel}
+
+command="/usr/bin/saphira-router"
+command_args="daemon"
+command_user="saphira-router:saphira-router"
+command_background="yes"
+pidfile="/run/saphira-router/daemon.pid"
+output_log="/var/log/saphira-router.log"
+error_log="/var/log/saphira-router.log"
+
+export SR_DB="${saphira_router_state}/router.db"
+export SR_SOCK="${saphira_router_socket}"
+export SR_MODULES="${saphira_router_modules}"
+export SR_SOCK_GROUP="${saphira_router_group}"
+
+depend() {
+	need localmount
+	use net
+	after firewall
+	before sshd
+}
+
+start_pre() {
+	checkpath --directory --owner saphira-router:saphira-router \
+		--mode 0750 "${saphira_router_state}"
+	checkpath --directory --owner saphira-router:saphira-router \
+		--mode 0755 "$(dirname ${saphira_router_socket})"
+}
+
+# The daemon is unprivileged and cannot chown its socket to another group --
+# that needs CAP_CHOWN. start_post runs as root, so the group is applied here
+# at the service boundary (D1 section 8). The socket is the ONLY path to the
+# database: its group lets an authorised operator drive the control plane
+# with no ability to write SQLite at all (D1 3.2, D4 1).
+start_post() {
+	# Wait for the socket, then verify the group actually landed on the inode
+	# the daemon bound. A stale socket from a killed run would otherwise be
+	# chgrp'd and then unlinked by the daemon, leaving nobody able to connect.
+	local i=0
+	while [ $i -lt 50 ]; do
+		if [ -S "${saphira_router_socket}" ] && \
+		   chgrp "${saphira_router_group}" "${saphira_router_socket}" 2>/dev/null && \
+		   [ "$(stat -c %G "${saphira_router_socket}")" = "${saphira_router_group}" ]; then
+			chmod 0660 "${saphira_router_socket}"
+			return 0
+		fi
+		i=$((i + 1))
+		sleep 0.1
+	done
+	eerror "cannot apply socket group ${saphira_router_group}; operators cannot connect"
+}

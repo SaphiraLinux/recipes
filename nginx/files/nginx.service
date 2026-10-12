@@ -4,6 +4,7 @@ After=network.target
 
 [Service]
 Type=simple
+ExecStartPre=+/bin/install -d -o nginx -g nginx -m 0755 /var/run/nginx
 ExecStartPre=/usr/sbin/nginx -t
 ExecStart=/usr/sbin/nginx -g "daemon off;"
 ExecReload=/usr/sbin/nginx -s reload

@@ -1,0 +1,88 @@
+From b7c52837be5efff3e2d0834685b5f6b5dcd20ef7 Mon Sep 17 00:00:00 2001
+From: Gregory Price <gourry@gourry.net>
+Date: Thu, 11 Jun 2026 18:56:25 -0700
+Subject: [PATCH] mm: add NODE_PRIVATE_CAP_HOTUNPLUG for opted-in private nodes
+
+Add CAP_HOTUNPLUG, which allows memory_hotplug to migrate a private
+node's folios for the purpose of hotunplugging memory.
+
+Without this, hotunplug fails if any folio on the node is allocated.
+
+Add node_allows_hotunplug() - which returns true for any normal node
+and private nodes with CAP_HOTUNPLUG.
+
+Signed-off-by: Gregory Price <gourry@gourry.net>
+---
+ include/linux/node_private.h | 26 ++++++++++++++++++++++++++
+ mm/memory_hotplug.c          |  4 ++--
+ 2 files changed, 28 insertions(+), 2 deletions(-)
+
+diff --git a/include/linux/node_private.h b/include/linux/node_private.h
+index 655fe9ec5cb..7b617b1fa9c 100644
+--- a/include/linux/node_private.h
++++ b/include/linux/node_private.h
+@@ -14,6 +14,7 @@ struct page;
+  */
+ #define NODE_PRIVATE_CAP_RECLAIM	(1UL << 0)	/* allow mm reclaim */
+ #define NODE_PRIVATE_CAP_USER_NUMA	(1UL << 1)	/* allow mempolicy */
++#define NODE_PRIVATE_CAP_HOTUNPLUG	(1UL << 2)	/* allow hot-unplug */
+ 
+ /**
+  * struct node_private - Per-node container for N_MEMORY_PRIVATE nodes
+@@ -97,6 +98,26 @@ static inline bool node_allows_user_numa(int nid)
+ 	return ret;
+ }
+ 
++/**
++ * node_allows_hotunplug - may hot-unplug migrate this node's folios?
++ * @nid: the node to test
++ *
++ * True for normal nodes and private nodes opted into CAP_HOTUNPLUG.
++ */
++static inline bool node_allows_hotunplug(int nid)
++{
++	struct node_private *np;
++	bool ret;
++
++	if (!node_state(nid, N_MEMORY_PRIVATE))
++		return true;
++	rcu_read_lock();
++	np = rcu_dereference(NODE_DATA(nid)->node_private);
++	ret = np && (np->caps & NODE_PRIVATE_CAP_HOTUNPLUG);
++	rcu_read_unlock();
++	return ret;
++}
++
+ #else /* !CONFIG_NUMA */
+ 
+ static inline bool folio_is_private_node(struct folio *folio)
+@@ -124,6 +145,11 @@ static inline bool node_allows_user_numa(int nid)
+ 	return true;
+ }
+ 
++static inline bool node_allows_hotunplug(int nid)
++{
++	return true;
++}
++
+ #endif /* CONFIG_NUMA */
+ 
+ #if defined(CONFIG_NUMA) && defined(CONFIG_MEMORY_HOTPLUG)
+diff --git a/mm/memory_hotplug.c b/mm/memory_hotplug.c
+index 1f42ed30336..e9573f90e0d 100644
+--- a/mm/memory_hotplug.c
++++ b/mm/memory_hotplug.c
+@@ -1943,8 +1943,8 @@ static int do_migrate_range(unsigned long start_pfn, unsigned long end_pfn)
+ 			goto put_folio;
+ 		}
+ 
+-		/* Private node folios cannot migrate, fail outright */
+-		if (folio_is_private_node(folio)) {
++		/* Fail outright on private nodes w/o hotunplug support */
++		if (!node_allows_hotunplug(folio_nid(folio))) {
+ 			pr_info_ratelimited("memory offline refused: node %d pfn %lx\n",
+ 					    folio_nid(folio), pfn);
+ 			folio_put(folio);
+-- 
+2.55.0
+

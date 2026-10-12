@@ -1,7 +1,11 @@
 #!/bin/sh
 
 pkgname=nginx
-pkgver=1.30.4
+pkgver=1.30.5
+# 1.30.5: stable security release (CVE-2026-90439: heap buffer overflow
+# in ngx_http_v3_module with OpenSSL <= 3.5.0; Saphira builds http_v3).
+# New upstream version: pkgrel resets to 1. Carries forward the r11
+# /var/run runtime contract, feature set, and rule locks unchanged.
 # r7: connector unbundled (r6 was drafted but never published):
 # the ModSecurity v3 nginx connector now ships as the separate
 # nginx-mod-modsecurity package, built against this exact source
@@ -18,19 +22,32 @@ pkgver=1.30.4
 # r8: own the nginx logrotate fragment (migrated out of the
 # logrotate package per the logrotate.d convention: the service
 # recipe owns its reload semantics).
-pkgrel=10
+# r11: /var/run runtime contract (r9/r10 were built from uncommitted
+# build-host state and are not in git; r11 is the next published
+# revision after r10). Saphira rule: a server running from /usr/sbin
+# keeps runtime state under /var/run (root /bin//sbin services use
+# /run). nginx therefore uses /var/run/nginx consistently: binary
+# pid/lock defaults, both conffiles, tmpfiles entry, OpenRC checkpath.
+# systemd cannot use RuntimeDirectory= (it always creates under /run,
+# the wrong tree), so the unit creates the dir with a privileged
+# ExecStartPre (+/bin/install -d, idempotent: creates or repairs
+# owner/mode every start, before nginx -t runs).
+# r12: merge line (1.30.5-r1 rebuilt): adopt hotfix r9 (fhs.d/nginx
+# runtime migration declaration) and r10 (proxy/fastcgi temp dirs
+# 0700 for transient response bodies). Payload change, bumps.
 # r10: proxy/fastcgi temp dirs ship 0700 (homer recon carries 0700;
 # these hold transient response bodies, so world-readable temp
 # storage was never intended). client_body and the other temp
 # paths keep 0755 (no signal either way). Payload change, bumps.
+pkgrel=2
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="Saphira webDragon HTTP server and reverse proxy"
 license="BSD-2-Clause"
 origin=nginx
 repo=main
 url=https://nginx.org/
-source=https://nginx.org/download/nginx-1.30.4.tar.gz
-sha256=4261dc90e9e47c1c4041276e9aaa3d48ebe2e664f728e14fa95ae6c67d57a08b
+source=https://nginx.org/download/nginx-1.30.5.tar.gz
+sha256=6c20565aa2325cb82216ae804f4a4ff1875179014759a381c42ddc8e11c4906d
 
 depends="
     brotli

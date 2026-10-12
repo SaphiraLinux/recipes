@@ -1,0 +1,4 @@
+src/saphira-bridge
+tests/br-probe
+*.o
+tests/vhdr

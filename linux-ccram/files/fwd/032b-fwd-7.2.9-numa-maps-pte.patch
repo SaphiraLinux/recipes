@@ -1,0 +1,38 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Saphira forward-port <builder@saphira.vm2.uk>
+Date: Thu, 9 Oct 2026 12:00:00 +0000
+Subject: [FWD 7.2.9] proc: numa_maps pte variant + display (2/2)
+
+Split of the 032 adaptation, applied second: pte-variant hunk (now
+unambiguous: the pmd twin is already converted) plus the
+show_numa_map display hunk, both verbatim upstream. See 032a.
+
+Signed-off-by: Saphira builder <builder@saphira.vm2.uk>
+---
+diff --git a/fs/proc/task_mmu.c b/fs/proc/task_mmu.c
+--- a/fs/proc/task_mmu.c
++++ b/fs/proc/task_mmu.c
+@@ -3389,7 +3389,8 @@ static struct page *can_gather_numa_stats(pte_t pte, struct vm_area_struct *vma,
+ 		return NULL;
+ 
+ 	nid = page_to_nid(page);
+-	if (!node_isset(nid, node_states[N_MEMORY]))
++	if (!node_isset(nid, node_states[N_MEMORY]) &&
++	    !node_isset(nid, node_states[N_MEMORY_PRIVATE]))
+ 		return NULL;
+ 
+ 	return page;
+@@ -3602,6 +3604,10 @@ static int show_numa_map(struct seq_file *m, void *v)
+ 		if (md->node[nid])
+ 			seq_printf(m, " N%d=%lu", nid, md->node[nid]);
+ 
++	for_each_node_state(nid, N_MEMORY_PRIVATE)
++		if (md->node[nid])
++			seq_printf(m, " N%d=%lu", nid, md->node[nid]);
++
+ 	seq_printf(m, " kernelpagesize_kB=%lu", vma_kernel_pagesize(vma) >> 10);
+ out:
+ 	seq_putc(m, '\n');
+-- 
+2.55.0
+

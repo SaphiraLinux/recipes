@@ -1,0 +1,152 @@
+From eee60f0225c0b074c63ea99ed17d35250c517ba1 Mon Sep 17 00:00:00 2001
+From: Gregory Price <gourry@gourry.net>
+Date: Wed, 15 Jul 2026 09:28:31 -0700
+Subject: [PATCH] selftests/dax: rework demotion subtest 2 to actually exercise
+ promotion
+
+The old promote-off-private subtest could never pass: subtest 1 kills the
+process holding the demoted pages before subtest 2 runs, so nothing hot is
+resident on the lower tier for NUMA balancing to promote, and the generic
+churn it launched only pressured DRAM.  It therefore always self-SKIPped
+on 'no promotion observed'.
+
+Replace it with a real mechanism: a new 'promoteset <nid> <MB> <secs>'
+tool verb mmaps an anon set, relocates it onto the lower-tier node with
+move_pages(2) (unbound, so it stays promotable -- unlike an mbind), then
+keeps the whole set hot.  With numa_balancing=2 the scanner should see hot
+lower-tier pages and promote them back to a top tier.  cfg() now also
+enables the node's user_numa cap so move_pages placement onto the private
+node is permitted.
+
+NOTE: verified to build and run (still self-SKIPs cleanly when promotion
+does not fire), but promotion firing has NOT yet been confirmed under vng
+-- NUMA-balancing hint-fault promotion is unreliable under emulation.
+Confirm on baremetal / qemu-direct where NUMA balancing behaves normally.
+---
+ .../selftests/dax/private_node_demotion.sh    | 11 +++-
+ .../testing/selftests/dax/private_node_tool.c | 63 ++++++++++++++++++-
+ 2 files changed, 70 insertions(+), 4 deletions(-)
+
+diff --git a/tools/testing/selftests/dax/private_node_demotion.sh b/tools/testing/selftests/dax/private_node_demotion.sh
+index e59c6b91cdc..c3de542fb22 100755
+--- a/tools/testing/selftests/dax/private_node_demotion.sh
++++ b/tools/testing/selftests/dax/private_node_demotion.sh
+@@ -52,6 +52,7 @@ cfg() {	# cfg DAX ADIST
+ 	echo "$2" > "$DAX_BASE/$1/adistance"
+ 	echo 1 > "$DAX_BASE/$1/demotion"
+ 	echo 1 > "$DAX_BASE/$1/numa_balancing"
++	echo 1 > "$DAX_BASE/$1/user_numa"	# move_pages(2) placement for promote test
+ 	echo 1 > "$DAX_BASE/$1/hotunplug"
+ 	echo online_movable > "$DAX_BASE/$1/state" 2>/dev/null
+ }
+@@ -92,12 +93,16 @@ else
+ 		ktap_test_skip "NUMA balancing mode 2 (promotion) unavailable"
+ 	else
+ 		p0=$(vstat pgpromote_success)
+-		"$TOOL" churn $(( $(dram_mb "$DRAM0") + 512 )) 60 >/dev/null 2>&1 & cp=$!
++		# Place a hot working set ON P1 (unbound move_pages, still promotable)
++		# and keep it hot; mode-2 NUMA balancing promotes hot lower-tier pages.
++		promb=$(( $(dram_mb "$P1") / 2 ))
++		[ "$promb" -gt 512 ] && promb=512; [ "$promb" -lt 64 ] && promb=64
++		"$TOOL" promoteset "$P1" "$promb" 120 >/dev/null 2>&1 & cp=$!
+ 		ok=0
+-		for _ in $(seq 1 12); do sleep 5; [ "$(vstat pgpromote_success)" -gt $(( p0 + 1024 )) ] 2>/dev/null && { ok=1; break; }; done
++		for _ in $(seq 1 24); do sleep 5; [ "$(vstat pgpromote_success)" -gt $(( p0 + 1024 )) ] 2>/dev/null && { ok=1; break; }; done
+ 		kill "$cp" 2>/dev/null; wait "$cp" 2>/dev/null
+ 		if [ "$ok" = 1 ]; then
+-			ktap_test_pass "pages demoted to node $P1 were promoted back to DRAM"
++			ktap_test_pass "hot pages on node $P1 were promoted back to DRAM"
+ 		else
+ 			ktap_test_skip "no promotion observed (pgpromote_success flat in this env)"
+ 		fi
+diff --git a/tools/testing/selftests/dax/private_node_tool.c b/tools/testing/selftests/dax/private_node_tool.c
+index fcfc7e81000..a4b7ec83f14 100644
+--- a/tools/testing/selftests/dax/private_node_tool.c
++++ b/tools/testing/selftests/dax/private_node_tool.c
+@@ -396,6 +396,64 @@ static int do_churn(long mb, long secs)
+ 	return 0;
+ }
+ 
++/*
++ * Place an anon working set on a lower-tier node and keep it hot, so mode-2
++ * NUMA balancing promotes it back to a top tier.  The set is relocated with
++ * move_pages(2) (not mbind) so it stays unbound and therefore promotable;
++ * requires the node's user_numa cap for a private target.
++ */
++static int do_promoteset(int nid, long mb, long secs)
++{
++	long ps = sysconf(_SC_PAGESIZE);
++	size_t len = (size_t)mb << 20;
++	long np = len / ps, i;
++	unsigned long total, on_nid;
++	void **pages;
++	int *nodes, *status;
++	time_t end;
++	char *p = mmap(NULL, len, PROT_READ | PROT_WRITE,
++		       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
++
++	if (p == MAP_FAILED) {
++		printf("promoteset: mmap(%ld MB) FAILED: %m\n", mb);
++		return 1;
++	}
++	memset(p, 1, len);			/* fault onto a top tier first */
++
++	pages = calloc(np, sizeof(*pages));
++	nodes = calloc(np, sizeof(*nodes));
++	status = calloc(np, sizeof(*status));
++	if (!pages || !nodes || !status) {
++		printf("promoteset: calloc FAILED: %m\n");
++		return 1;
++	}
++	for (i = 0; i < np; i++) {
++		pages[i] = p + i * ps;
++		nodes[i] = nid;
++		status[i] = 0x7fffffff;
++	}
++	if (sys_move_pages(0, np, pages, nodes, status, MPOL_MF_MOVE) != 0)
++		printf("promoteset: move_pages -> node %d rc=-1 errno=%d (%s)\n",
++		       nid, errno, strerror(errno));
++	numa_residency((unsigned long)p, nid, &total, &on_nid, NULL);
++	printf("promoteset: placed %lu/%lu pages on node%d; touching hot for %ld s\n",
++	       on_nid, total, nid, secs);
++	fflush(stdout);
++
++	/* keep the whole set hot so the scanner sees hot lower-tier pages */
++	end = time(NULL) + secs;
++	do {
++		for (i = 0; i < np; i++)
++			*(volatile char *)(p + i * ps) = (char)i;
++	} while (time(NULL) < end);
++
++	free(pages);
++	free(nodes);
++	free(status);
++	munmap(p, len);
++	return 0;
++}
++
+ static int do_daxmap(const char *path, long mb, int nid, long hold)
+ {
+ 	size_t len = (size_t)mb << 20;
+@@ -1158,6 +1216,8 @@ int main(int argc, char **argv)
+ 		return do_anon(atol(argv[2]), argc >= 4 ? atol(argv[3]) : 10);
+ 	if (argc >= 3 && !strcmp(argv[1], "churn"))
+ 		return do_churn(atol(argv[2]), argc >= 4 ? atol(argv[3]) : 12);
++	if (argc == 5 && !strcmp(argv[1], "promoteset"))
++		return do_promoteset(atoi(argv[2]), atol(argv[3]), atol(argv[4]));
+ 	if (argc >= 5 && !strcmp(argv[1], "daxmap"))
+ 		return do_daxmap(argv[2], atol(argv[3]), atoi(argv[4]),
+ 				 argc >= 6 ? atol(argv[5]) : 8);
+@@ -1206,7 +1266,8 @@ int main(int argc, char **argv)
+ 
+ 	fprintf(stderr,
+ 		"usage: %s map <daxdev> <MB> <nid> | shared <daxdev> | ltpin <daxdev> <MB> <nid> |\n"
+-		"       anon <MB> [hold] | churn <MB> [secs] | daxmap <daxdev> <MB> <nid> [hold] |\n"
++		"       anon <MB> [hold] | churn <MB> [secs] | promoteset <nid> <MB> <secs> |\n"
++		"       daxmap <daxdev> <MB> <nid> [hold] |\n"
+ 		"       daxchurn <daxdev> <MB> [secs] | daxmadv <daxdev> <MB> <pageout|cold|free> |\n"
+ 		"       daxswap <daxdev> <nid> <MB> [evict_MB] |\n"
+ 		"       mbind <nid> <MB> [hold] | mbindns <nid> <MB> [hold] |\n"
+-- 
+2.55.0
+

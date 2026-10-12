@@ -1,0 +1,81 @@
+Saphira init-switch network migration RUNBOOK
+============================================
+
+Tool: saphira-net-migrate + saphira-init-switch (both in
+saphira-init-switch, /usr/sbin). `apk add/del` alone migrates
+nothing; the orchestrator owns the flow. Scope: network
+configuration ONLY. OVS topology, identities, init packages
+themselves are handled elsewhere.
+
+The contract
+------------
+Changing init systems must never make remote access depend on
+console recovery. lo and the management NIC come back after every
+swap, or the swap does not proceed.
+
+Identity rule
+-------------
+The MAC is the NIC; interface names are per-init labels
+(eth0 <-> enp1s0, wlan0 <-> wlp2s0u5 are expected cases).
+Every migrated stanza records its Source-MAC; systemd output
+matches PermanentMACAddress=, never Name=.
+
+systemd -> OpenRC
+------------------
+Deliberate path (one command):
+
+  saphira-init-switch --to openrc [--apply-services] [--yes]
+
+which runs: preflight migrate (dry-run; any ERROR refuses the
+whole swap) -> migrate --apply (backup taken, source never
+deleted) -> apk del systemd && apk add openrc (skipped if
+openrc already present) -> enablement (printed always, executed
+only with --apply-services) -> verify (addresses, routes,
+init state).
+
+Destination names the tool could only guess (positional
+evidence, no anchoring config) stop the flow unless accepted
+with --accept-heuristic-names: whatever the evidence, the files
+are right before the swap or the tool refuses. There is no
+post-reboot repair step.
+
+Manual equivalent (what the orchestrator does):
+
+1. On the RUNNING systemd machine (interface must exist for
+   Name= resolution):
+     saphira-net-migrate --to openrc
+   Read the whole report. Every interface shows its evidence
+   class (existing config, positional). Warnings list everything
+   carried as comments (MTU, extra addresses/routes).
+   Any ERROR aborts with zero writes: resolve it first.
+2. Apply:
+     saphira-net-migrate --to openrc --apply
+   Destination /etc/network.d is backed up alongside itself
+   (/etc/network.d.pre-migrate-<ts>). Sources are never deleted.
+3. Swap init (existing del-then-add flow):
+     apk del systemd && apk add openrc
+4. Enablement (printed by the tool; nothing auto-enables):
+     rc-update add network default
+     rc-update add openvswitch default   # only if OVS present
+   Ordering is existing metadata: openvswitch declares
+   "before net", network provides "net".
+5. Reboot. Verify: ip addr, ip route, rc-status. SSH returns.
+
+OpenRC -> systemd
+------------------
+Mirror image with --to systemd. The tool emits MAC-anchored
+units (/etc/systemd/network/10-<iface>.network). Enable with
+systemctl enable systemd-networkd (and openvswitch if present).
+
+OVS
+---
+Topology (bridges, ports, patch ports, trunks) lives in
+/etc/openvswitch/conf.db, survives the swap untouched, and is
+never translated. L3 on an OVS interface translates normally as
+TYPE=physical with an OVS-Device provenance comment.
+
+Rollback
+--------
+Both native configurations remain in place (migration never
+deletes source), so reinstalling the previous init restores the
+previous network path. Timestamped backups cover mistakes.

@@ -33,7 +33,14 @@ CONFIG_KEYS = (
     "SAPHIRA_CONFIG_FILE", "SAPHIRA_RECIPE_ROOT", "SAPHIRA_BUILD_ROOT",
     "SAPHIRA_PACKAGE_TMP", "SAPHIRA_REPO_DIR", "SAPHIRA_INCOMING_DIR",
     "SAPHIRA_REPO_NAMES", "SAPHIRA_ARCH", "SAPHIRA_BINDIR", "SAPHIRA_BUILD_SEED", "SAPHIRA_APK",
-    "SAPHIRA_BWRAP", "SAPHIRA_PYTHON", "SAPHIRA_TRUST_KEY",
+    "SAPHIRA_BWRAP", "SAPHIRA_PYTHON",
+    # The metadata sandbox probe below execs this shell through bwrap to read
+    # one boolean off the host. It was read from config[] but never listed
+    # here, so load_config() could not supply it and every build died with a
+    # bare KeyError naming this variable. resolvepkg has carried the key all
+    # along; keep the two lists in step.
+    "SAPHIRA_METADATA_SHELL",
+    "SAPHIRA_TRUST_KEY",
     "SAPHIRA_ROOT_SHELL",
     "SAPHIRA_HOST_RESOLV_CONF", "SAPHIRA_HOST_HOSTS_FILE",
     "SAPHIRA_SOURCE_DATE_EPOCH",
@@ -89,13 +96,48 @@ def live_repo_dir(config: dict[str, str]) -> Path:
     return Path(config["SAPHIRA_REPO_DIR"]) / names[-1] / config["SAPHIRA_ARCH"]
 
 
+def _version_line(version: str) -> str:
+    """Version line: full version minus one trailing -rN packaging
+    revision. apk treats the -r suffix as the packaging revision, so
+    7.1.5-r2 is on the 7.1.5 line and 7.2.3-r9 is not. Pure function."""
+    return re.sub(r"-r\d+$", "", version)
+
+
+def _seed_atom_satisfies(apk: str, candidate: str, atom: str) -> bool:
+    """Whether a repository version satisfies a seed dependency atom,
+    using apk's own version semantics throughout: exact full-version
+    match for = (a missing -r means r0, so =7.1.5 never matches
+    7.1.5-rN), same version line ignoring one trailing -rN for ~, and
+    apk version -t ordering for the range operators. Bare names match
+    everything. Only the range operators shell out; =/~ are pure.
+    Pure except subprocess (unit-tested for the pure paths)."""
+    m = re.match(r"^(.*?)(>=|<=|>|<|=|~)(.*)$", atom)
+    if not m:
+        return True
+    op, want = m.group(2), m.group(3)
+    if op == "=":
+        return candidate == want
+    if op == "~":
+        return _version_line(candidate) == _version_line(want)
+    rel = subprocess.run([apk, "version", "-t", candidate, want],
+                         check=True, text=True,
+                         capture_output=True).stdout.strip()
+    if op == ">=":
+        return rel in (">", "=")
+    if op == "<=":
+        return rel in ("<", "=")
+    if op == ">":
+        return rel == ">"
+    return rel == "<"
+
+
 def _seed_drift_names(seed_names: list[str], receipt_nvrs: dict[str, str],
                       live_filenames: list[str]) -> list[str]:
     """Seed names whose base receipt no longer resolves against the live
     repository: the receipt NVR is absent (purged, replaced, or never
-    published), or a higher pkgrel exists on its line. Pure function
-    (unit-tested). Coexisting upstream lines (kernel headers per
-    kernel, kmods per kver) are normal and never drift on their own;
+    published), a pinned version is not what resolved, or a higher pkgrel
+    exists on its line. Pure function (unit-tested). Coexisting upstream
+    lines (kmods per kver) are normal and never drift on their own;
     version ordering across lines is deliberately never attempted
     (same discipline as _newer_live_nvr). An empty live listing means
     the repo cannot be judged, never drift."""
@@ -109,17 +151,35 @@ def _seed_drift_names(seed_names: list[str], receipt_nvrs: dict[str, str],
             continue
         by_name.setdefault(parts[0], []).append(filename)
     drift = []
-    for name in seed_names:
+    for atom in seed_names:
+        # Seed atoms may carry an explicit =version pin (the Genesis UAPI
+        # baseline does). Resolve by bare name, then enforce the pin: a
+        # resolved version that does not satisfy it is drift, exactly as
+        # a missing NVR is.
+        name = re.split(r"[<>=~]", atom, maxsplit=1)[0]
         receipt = receipt_nvrs.get(name)
         if receipt is None:
-            drift.append(name)
+            drift.append(atom)
             continue
+        if "~" in atom and not atom.startswith("~"):
+            # Fuzzy line pin (the build-UAPI policy): the receipt must
+            # sit on the pinned line at any packaging revision. Exact
+            # comparison here would drift forever (7.1.5-r2 != 7.1.5).
+            want = atom.split("~", 1)[1]
+            if _version_line(receipt) != _version_line(want):
+                drift.append(atom)
+                continue
+        elif "=" in atom and not atom.startswith("="):
+            want = atom.split("=", 1)[1]
+            if receipt != want:
+                drift.append(atom)
+                continue
         candidate = f"{name}-{receipt}.apk"
         if _split_nvr(candidate) is None:
-            drift.append(name)
+            drift.append(atom)
             continue
         if candidate not in live_set:
-            drift.append(name)
+            drift.append(atom)
             continue
         if _newer_live_nvr(by_name[name], candidate) is not None:
             drift.append(name)
@@ -201,7 +261,29 @@ def sha256_file(path: Path) -> str:
 def overlay_mounts_referencing(path: str) -> list[tuple[int, str]]:
     """Every process whose mountinfo contains an overlay mount referencing
     ``path`` (as lower/upper/work or mountpoint). Used to keep retired base
-    roots alive while any live overlay still depends on them."""
+    roots alive while any live overlay still depends on them.
+
+    Path matching alone is not sufficient and was actively wrong here. A
+    workspace mounts ``lowerdir=/build/rootfs_overlay/base`` and nothing
+    ever mounts a ``base.old-*`` directory, so after a base rebuild the
+    substring ``base.old-<epoch>-<pid>`` appears nowhere in any mountinfo:
+    the guard returned an empty list for every retired base and
+    ``_retire_stale_bases`` unconditionally deleted the lowerdir of a
+    live overlay. That contradicts README.md ("removed unless a live
+    overlay still references them") and produced a build root that
+    silently loses files underneath a running build.
+
+    So the check is by INODE identity, not by path. The rename in
+    ``_rebuild`` happens after the inode is captured, and this function
+    resolves each mountinfo path to its own inode and compares. Renaming
+    a directory does not change its inode, so a renamed-then-referenced
+    base is still recognised.
+    """
+    try:
+        target = os.stat(path)
+    except OSError:
+        return []
+    identity = (target.st_dev, target.st_ino)
     references: list[tuple[int, str]] = []
     for entry in Path("/proc").iterdir():
         if not entry.name.isdigit():
@@ -211,7 +293,29 @@ def overlay_mounts_referencing(path: str) -> list[tuple[int, str]]:
         except OSError:
             continue
         for line in mountinfo.splitlines():
-            if " - overlay " in line and path in line:
+            if " - overlay " not in line:
+                continue
+            # The overlay's options live after the "-" separator; the
+            # lower/upper/work paths are all real host paths.
+            options = line.split(" - ", 1)[1] if " - " in line else ""
+            mentioned = False
+            for option in options.split():
+                if option.startswith(("lowerdir=", "upperdir=", "workdir=")):
+                    candidate = option.split("=", 1)[1]
+                    for element in candidate.split(":"):
+                        try:
+                            resolved = os.stat(element)
+                        except OSError:
+                            # Already unlinked: the kernel may still pin
+                            # the inodes, in which case there is nothing
+                            # left on disk to protect.
+                            continue
+                        if (resolved.st_dev, resolved.st_ino) == identity:
+                            mentioned = True
+                            break
+                if mentioned:
+                    break
+            if mentioned:
                 references.append((int(entry.name), line))
                 break
     return references
@@ -485,8 +589,15 @@ class Transaction:
         self.log_stream.write(message.rstrip("\n") + "\n")
         self.log_stream.flush()
 
-    def run(self, command: list[str], *, env: dict[str, str] | None = None, capture: bool = False) -> subprocess.CompletedProcess[str]:
-        self.log(f"RUN {shlex.join(command)}")
+    def run(self, command: list[str], *, env: dict[str, str] | None = None, capture: bool = False,
+            label: str = "") -> subprocess.CompletedProcess[str]:
+        # A bare "command failed (2): /usr/bin/nsenter" is worse than no
+        # message at all: every build runs through the nsenter/bwrap wrapper,
+        # so the wrapper's name is reported for every possible cause and the
+        # real error is only findable by opening the workspace log by hand.
+        # Name the stage instead, and point at the log that has the detail.
+        stage = label or Path(command[0]).name
+        self.log(f"RUN [{stage}] {shlex.join(command)}")
         self.last_stdout, self.last_stderr = "", ""
         try:
             result = subprocess.run(
@@ -502,7 +613,11 @@ class Transaction:
                 self.log(exc.stdout)
             if exc.stderr:
                 self.log(exc.stderr)
-            die(f"command failed ({exc.returncode}): {command[0]}")
+            where = ""
+            build_log = self.workspace / "logs" / "buildpkg.log"
+            if build_log.is_file():
+                where = f"; full output: {build_log}"
+            die(f"{self.target}: {stage} stage failed (rc={exc.returncode}){where}")
         self.last_stdout = result.stdout or ""
         self.last_stderr = result.stderr or ""
         if result.stdout:
@@ -661,9 +776,9 @@ class Transaction:
     def resolve(self) -> dict[str, object]:
         resolver = str(Path(self.config["SAPHIRA_BINDIR"]) / "resolvepkg")
         try:
-            result = self.run([resolver, self.target], capture=True)
+            result = self.run([resolver, self.target], capture=True, label="resolve dependencies")
         except BuildError:
-            # Surface the resolver's own refusal (not the bare rc wrapper):
+            # Surface the resolver's own refusal (not the stage wrapper):
             # the refusal text is the operator-facing diagnostic and the
             # pre-build abort path prints it verbatim.
             refusal = self.last_stderr.strip().splitlines()
@@ -751,7 +866,7 @@ class Transaction:
         # (e.g. /usr/share/info/dir) during clean-root bootstrap; see
         # root_apk for the matching flag and the planned validation stage.
         command.extend((self.config["SAPHIRA_APK"], "--force-overwrite", *apk_arguments))
-        self.run(command)
+        self.run(command, label="seed install")
 
     def write_package_receipt(self) -> None:
         seed = shlex.split(self.config["SAPHIRA_BUILD_SEED"])
@@ -775,10 +890,20 @@ class Transaction:
         if "name" in current and "version" in current:
             installed[current["name"]] = current
         resolved = []
-        for name in seed:
+        for atom in seed:
+            # Seed atoms may carry an explicit =version pin (the Genesis
+            # UAPI baseline does). Look up by bare name, then assert the
+            # resolved version satisfies the pin -- an NVR mismatch here
+            # is a misconfigured seed, never something to resolve around.
+            name = re.split(r"[<>=~]", atom, maxsplit=1)[0]
             entry = installed.get(name)
             if entry is None:
-                die(f"seed package missing from clean root database: {name}")
+                die(f"seed package missing from clean root database: {atom}")
+            if "=" in atom and not atom.startswith("="):
+                want_version = atom.split("=", 1)[1]
+                if entry["version"] != want_version:
+                    die(f"seed pin unsatisfied: world wants {atom} "
+                        f"but clean root resolved {name}-{entry['version']}")
             resolved.append(entry)
         receipt = {
             "schema": "saphira-package-seed/v1",
@@ -793,6 +918,48 @@ class Transaction:
             f"SEED installed {len(resolved)} repository packages into clean root"
         )
 
+    def verify_seed_uapi(self) -> None:
+        # Genesis UAPI baseline, fail closed: the seed root's
+        # /usr/include/linux/version.h must match the pinned
+        # saphira-kernel-headers line in SAPHIRA_BUILD_SEED. The pin is
+        # a version-line constraint (=7.1.5 and ~7.1.5 both pin the
+        # line; a bare unpinned name floats to newest and silently
+        # re-baselines every toolchain build (proven: 7.2.2/7.2.3 drift
+        # contaminated the sysroot); host-state pins (/etc/apk/world)
+        # are never a substitute for this build-policy check.
+        seed = shlex.split(self.config["SAPHIRA_BUILD_SEED"])
+        pins = [a for a in seed
+                if re.match(r"^saphira-kernel-headers[=~]", a)]
+        if not pins:
+            # No pinned UAPI baseline declared (hermetic test seeds):
+            # nothing to enforce against. Production seeds must carry
+            # exactly one pin (enforced below); custom seeds opt out
+            # explicitly by omitting it.
+            self.log("SEED UAPI baseline unpinned, skipping version.h check")
+            return
+        if len(pins) != 1:
+            die(f"seed must pin exactly one saphira-kernel-headers line, got: {pins}")
+        want = re.split(r"[=~]", pins[0], maxsplit=1)[1]
+        core = want.split("-r")[0].replace("_", "-")
+        nums = re.findall(r"\d+", core)
+        if len(nums) < 3:
+            die(f"seed headers pin has no numeric kernel triplet: {pins[0]}")
+        expect = tuple(int(x) for x in nums[:3])
+        try:
+            text = (self.root / "usr/include/linux/version.h").read_text(encoding="utf-8")
+        except OSError as exc:
+            die(f"cannot read seed UAPI version.h: {exc}")
+        got = {}
+        for field in ("MAJOR", "PATCHLEVEL", "SUBLEVEL"):
+            match = re.search(rf"^#define\s+LINUX_VERSION_{field}\s+(\d+)", text, re.MULTILINE)
+            if match is None:
+                die(f"seed version.h lacks LINUX_VERSION_{field}")
+            got[field] = int(match.group(1))
+        actual = (got["MAJOR"], got["PATCHLEVEL"], got["SUBLEVEL"])
+        if actual != expect:
+            die(f"seed UAPI mismatch: version.h is {actual[0]}.{actual[1]}.{actual[2]} "
+                f"but seed pins {pins[0]} (want {expect[0]}.{expect[1]}.{expect[2]})")
+        self.log(f"SEED UAPI baseline proven: {pins[0]}")
     def _seed_script_summary(self) -> dict[str, dict[str, object]]:
         """Newest-file adbdump summary per seed name: scripts presence plus
         fhs.d/accounts.d fragment carriage. Seed assembly runs no package
@@ -801,7 +968,13 @@ class Transaction:
         repo = live_repo_dir(self.config)
         apk = self.config["SAPHIRA_APK"]
         summary: dict[str, dict[str, object]] = {}
-        for name in shlex.split(self.config["SAPHIRA_BUILD_SEED"]):
+        for atom in shlex.split(self.config["SAPHIRA_BUILD_SEED"]):
+            # Seed atoms may carry a dependency constraint (=version,
+            # ~line, >=floor...). Filenames never contain the operator,
+            # so glob by the bare package name, then enforce the
+            # constraint against resolved candidates below. A raw atom
+            # in the glob matches nothing and fails closed here.
+            name = re.split(r"[<>=~]", atom, maxsplit=1)[0]
             best: str | None = None
             best_version = ""
             for path in sorted(repo.glob(f"{name}-*.apk")):
@@ -815,6 +988,8 @@ class Transaction:
                     if line.startswith("  version: "):
                         ver = line.split(": ", 1)[1].strip()
                         break
+                if not _seed_atom_satisfies(apk, ver, atom):
+                    continue
                 if best is None:
                     best, best_version = path.name, ver
                     continue
@@ -881,12 +1056,19 @@ class Transaction:
             "--root", "/target", "--initdb", "--no-cache", "--no-network",
             "--repositories-file", "/dev/null", "--keys-dir", "/keys",
             "--repository", "/repository/Packages.adb",
-            # Install files only, never converge: scripts cannot run
-            # meaningfully in an incomplete virgin root (see above), and
-            # their one current effect (fhs.d convergence) is reproduced
-            # explicitly below. Same --no-scripts rule as workspace
-            # dependency installs and repo_db scratch installs.
-            "--no-scripts", "add", *seed,
+            # Install files only, never converge: package scripts assume a
+            # live system with a shell, but the seed root has no /bin/sh
+            # until root-init creates it below, so any seed script fails
+            # closed with execve 127 (proven: saphira-baselayout post-install
+            # wedged every base rebuild once acl-2.4.0-r3 drifted the seed).
+            # Same --no-scripts rule as workspace dependency installs: the
+            # scripts solely invoke the identity reconciler, whose chowns
+            # cannot succeed under the rootless single-UID namespace and
+            # whose results no build consumes. Everything the seed root
+            # actually needs (CA bundle, /bin/sh link, passwd/shadow,
+            # FHS reconciliation) already runs explicitly below.
+            "--no-scripts",
+            "add", *seed,
         ])
         ca_update = self.root / "usr/sbin/update-ca-certificates"
         if not ca_update.is_file():
@@ -897,7 +1079,7 @@ class Transaction:
                 self.config["SAPHIRA_BWRAP"], "--die-with-parent", "--new-session",
                 "--unshare-all", "--uid", "0", "--gid", "0", "--clearenv",
                 "--bind", str(self.root), "/", "/bin/ln", "-s", "bash", "/bin/sh",
-            ])
+            ], label="root init /bin/sh")
         if not shell_link.is_symlink() or os.readlink(shell_link) != "bash":
             die("Saphira root /bin/sh is not the expected link to bash")
         env_link = self.root / "usr/bin/env"
@@ -907,7 +1089,7 @@ class Transaction:
                 "--unshare-all", "--uid", "0", "--gid", "0", "--clearenv",
                 "--bind", str(self.root), "/", "/bin/ln", "-s", "/bin/env",
                 "/usr/bin/env",
-            ])
+            ], label="root init /usr/bin/env")
         if not (env_link.is_symlink() or env_link.is_file()):
             die("Saphira root initialization did not provide /usr/bin/env")
         self.run([
@@ -916,7 +1098,7 @@ class Transaction:
             "--bind", str(self.root), "/", "--dev", "/dev", "--proc", "/proc",
             *self._ns_tmp_options(), "--setenv", "PATH", "/usr/bin:/bin:/usr/sbin:/sbin",
             "/usr/sbin/update-ca-certificates",
-        ])
+        ], label="root init CA bundle")
         if not (self.root / "etc/ssl/certs/ca-certificates.crt").is_file():
             die("Saphira root initialization did not create the CA certificate bundle")
         # A minimal account database: builds routinely run `install -o root`
@@ -935,7 +1117,7 @@ class Transaction:
                 "printf 'root:x:0:0:root:/root:/bin/sh\\n' >> /etc/passwd && "
                 "{ grep -q '^root:' /etc/group 2>/dev/null || "
                 "printf 'root:x:0:\\n' >> /etc/group; }",
-            ])
+            ], label="account seed /etc/passwd")
         # The account database must be complete, not just resolvable:
         # package install scripts reconcile declared identities through
         # ensure-identity.sh, which requires passwd, group AND shadow.
@@ -954,7 +1136,7 @@ class Transaction:
                 "--bind", str(self.root), "/", "/bin/sh", "-c",
                 "printf 'root:!:0:0:99999:7:::\\n' >> /etc/shadow && "
                 "chmod 0600 /etc/shadow",
-            ])
+            ], label="account seed /etc/shadow")
         # Explicit fhs.d convergence for the seed set: the install above
         # runs --no-scripts, so reproduce the one script effect seed
         # packages may carry (today: only saphira-baselayout's global
@@ -1015,7 +1197,7 @@ class Transaction:
         if allow_untrusted:
             command.extend(("--allow-untrusted", "--force-non-repository"))
         command.extend(arguments)
-        self.run(command)
+        self.run(command, label="dependency install")
 
     def install_repository_requirements(self, plan: dict[str, object]) -> None:
         requirements = [f"{node['name']}={node['version']}" for node in plan["repository"]]
@@ -1128,23 +1310,43 @@ class Transaction:
             command.extend(("--dir", "/input", "--ro-bind", str(source), "/input"))
             worker_arguments.append("/input")
         command.extend(worker_arguments)
-        self.run(command)
+        self.run(command, label="build")
 
     def package(self, producer: str) -> dict[str, object]:
         makepkg = str(Path(self.config["SAPHIRA_BINDIR"]) / "makepkg")
-        environment = os.environ.copy()
-        environment.update({
+        # Built from an explicit allowlist, NOT from os.environ.
+        #
+        # makepkg is the sole APK constructor and it runs outside any
+        # namespace, so inheriting the operator's environment handed CC,
+        # CFLAGS, LDFLAGS, MAKEFLAGS, LD_PRELOAD, LD_LIBRARY_PATH,
+        # PKG_CONFIG_PATH, PYTHONPATH, IFS and PATH straight to the code
+        # that decides package bytes. That attacks the byte-identical
+        # rebuild property package_builder.sh relies on for idempotent
+        # republication. Only 9 keys were overridden before, so
+        # SAPHIRA_RECIPE_ROOT, SAPHIRA_REPO_DIR, SAPHIRA_BINDIR and
+        # SAPHIRA_BUILD_SEED were inherited rather than taken from the
+        # resolved config, and could differ from what load_config decided.
+        environment = {
+            "PATH": f"{self.config['SAPHIRA_BINDIR']}:/usr/bin:/bin:/usr/sbin:/sbin",
+            "HOME": str(self.package_tmp),
+            "LANG": "C",
+            "LC_ALL": "C",
+            "TZ": "UTC",
             "SAPHIRA_CONFIG_FILE": self.config["SAPHIRA_CONFIG_FILE"],
+            "SAPHIRA_RECIPE_ROOT": self.config["SAPHIRA_RECIPE_ROOT"],
             "SAPHIRA_BUILD_ROOT": str(self.stage),
+            "SAPHIRA_REPO_DIR": self.config["SAPHIRA_REPO_DIR"],
             "SAPHIRA_INCOMING_DIR": str(self.artifacts),
             "SAPHIRA_PACKAGE_TMP": str(self.package_tmp),
             "SAPHIRA_ARCH": self.config["SAPHIRA_ARCH"],
+            "SAPHIRA_BINDIR": self.config["SAPHIRA_BINDIR"],
             "SAPHIRA_APK": self.config["SAPHIRA_APK"],
+            "SAPHIRA_TRUST_KEY": self.config["SAPHIRA_TRUST_KEY"],
             "SAPHIRA_FAKEROOT_BOOTSTRAP": "1" if self.target == "fakeroot" else "0",
             "SAPHIRA_BOOTSTRAP_TARGET": self.target,
             "SOURCE_DATE_EPOCH": self.config["SAPHIRA_SOURCE_DATE_EPOCH"],
-        })
-        self.run([makepkg, producer], env=environment)
+        }
+        self.run([makepkg, producer], env=environment, label="package")
         receipt_path = self.stage / producer / "artifact-manifest.json"
         try:
             with receipt_path.open(encoding="utf-8") as stream:
@@ -1168,15 +1370,71 @@ class Transaction:
 
     def build(self, plan: dict[str, object]) -> list[dict[str, object]]:
         receipts = []
-        for node in plan["builds"]:
+        completed_nodes: list[dict[str, object]] = []
+        for position, node in enumerate(plan["builds"]):
             producer = node["producer"]
+            if position:
+                # Every closure node used to run against the SAME OverlayFS
+                # upper with no reset, so a recipe that installs without
+                # DESTDIR (a bare `make install', a `cmake --install' with no
+                # staging prefix, a stray cp to /usr/lib) left files in the
+                # merged root that were visible to every later node and to
+                # the final target.
+                #
+                # That is the cleanest route to a valid-looking but wrong
+                # package: a dependency's stray libfoo.so.1 or header
+                # silently satisfies the top-level link, and the shipped
+                # binary then links a library no package provides. Nothing
+                # detected it -- the final package's own payload looks
+                # perfect and every declared dependency resolves.
+                #
+                # The upper layer is discarded and recreated for each node,
+                # so a node sees exactly the seeded base plus the APKs
+                # installed through the package manager, which is the only
+                # state a build is permitted to inherit.
+                self.reset_root_between_nodes()
+                # The reset returns the root to the seeded base, so the
+                # node's inherited state is reinstalled through the package
+                # manager (never by copying files): the plan's repository
+                # requirements plus every already-built closure output.
+                # Without this the node builds against a bare seed and
+                # fails on its first dependency guard (closure-local-deps).
+                self.install_repository_requirements(plan)
+                for done in completed_nodes:
+                    self.install_local_outputs(done)
             self.log(f"BUILD {producer} {node['version']}")
             self.run_worker(producer, top_target=bool(node["target"]))
             receipt = self.package(producer)
             receipts.append(receipt)
+            completed_nodes.append(node)
             if not node["target"]:
                 self.install_local_outputs(node)
         return receipts
+
+    def reset_root_between_nodes(self) -> None:
+        """Discard the merged-root upper layer so each closure node starts
+        from the seeded base plus package-manager-installed dependencies.
+
+        The overlay must be stopped first: the kernel holds a reference to
+        the upper and work directories, and recreating them under a live
+        mount would give the running build a different view than the one it
+        mounted.
+        """
+        self.stop_overlay()
+        self._kill_recorded_holder()
+        for path in (self.upper, self.work):
+            if path.exists() or path.is_symlink():
+                # work/work is created mode 0000 by the kernel; the
+                # controller holds CAP_DAC_OVERRIDE inside its user
+                # namespace, but be explicit rather than relying on it.
+                subprocess.run(["chmod", "-R", "u+rwX", str(path)], check=False)
+                shutil.rmtree(path, ignore_errors=True)
+        for path in (self.root, self.upper, self.work):
+            path.mkdir(parents=True, exist_ok=True)
+        # stop_overlay() already cleared self.holder; start_overlay()
+        # writes a fresh overlay-holder.json, so the recorded holder stays
+        # accurate across the reset.
+        self.start_overlay()
 
     def _published_content_hash(self, package: Path) -> str | None:
         """Signature-independent identity of a published APK (the adbdump
@@ -1242,26 +1500,24 @@ class Transaction:
             pub_hash = self._published_content_hash(published)
             if new_hash is None or pub_hash is None or new_hash == pub_hash:
                 continue
-            recipe = Path(self.config["SAPHIRA_RECIPE_ROOT"]) / self.target / "recipe.sh"
-            text = recipe.read_text(encoding="utf-8")
-            match = re.search(r"^pkgrel=(\d+)\s*$", text, re.MULTILINE)
-            if not match:
-                die(f"payload differs from published {package.name} but pkgrel cannot be auto-bumped in {recipe}")
-            old_rel = int(match.group(1))
-            new_rel = old_rel + 1
-            recipe.write_text(re.sub(r"^pkgrel=\d+\s*$", f"pkgrel={new_rel}", text, count=1, flags=re.MULTILINE), encoding="utf-8")
-            ledger_dir = Path(self.config.get("SAPHIRA_RELEASE_STATE", "/var/lib/saphira-build/releases"))
-            ledger_dir.mkdir(parents=True, exist_ok=True)
-            entry = {
-                "ts": subprocess.run(["date", "-u", "+%Y-%m-%dT%H:%M:%SZ"], capture_output=True, text=True).stdout.strip(),
-                "action": "auto-bump-payload-change", "package": self.target,
-                "version": package.name[len(self.target) + 1:].rsplit(".", 1)[0],
-                "from": f"r{old_rel}", "to": f"r{new_rel}",
-                "tool": "buildpkg", "reason": f"payload differs from published {package.name}",
-            }
-            with (ledger_dir / "releases.jsonl").open("a", encoding="utf-8") as stream:
-                stream.write(json.dumps(entry, sort_keys=True) + "\n")
-            die(f"payload differs from published {package.name}: recipe auto-bumped r{old_rel} -> r{new_rel} (recorded in the release ledger); rebuild required to publish")
+            # The payload genuinely differs from what is published, so the
+            # recipe changed without its pkgrel following. That is a decision
+            # for a person or an agent that can see WHY the payload moved, not
+            # something to paper over mid-build: an automatic bump rewrites a
+            # version-controlled recipe behind the operator's back, invents a
+            # new NVR, and leaves the tree dirty with an unreviewed edit and no
+            # commit. It also cannot converge on its own - the recipe is bumped
+            # once per run and the run then dies demanding a rebuild, so a
+            # package that is requeued in a loop burns a full rebuild each cycle
+            # and only trips a warning nobody reads. Report it plainly instead
+            # and let the bump be a deliberate, reviewable act.
+            die(
+                f"payload differs from published {package.name}: the recipe changed "
+                f"without a pkgrel bump, so this build would republish a different "
+                f"payload under an immutable filename. Refusing rather than bumping "
+                f"automatically - review the diff, then run: bumppkg {self.target} && "
+                f"buildpkg {self.target}"
+            )
 
     def promote(self, receipts: list[dict[str, object]]) -> Path:
         aggregate = {
@@ -1497,6 +1753,7 @@ class BaseRoot:
         seeder.log_stream = self.seed_log.open("a", encoding="utf-8")
         try:
             seeder.seed_root_packages()
+            seeder.verify_seed_uapi()
             seeder.write_package_receipt()
         finally:
             seeder.log_stream.close()
@@ -1528,17 +1785,100 @@ def check_disabled_recipe(config: dict[str, str], package: str) -> None:
     recipe = Path(config["SAPHIRA_RECIPE_ROOT"]) / package / "recipe.sh"
     if not recipe.is_file():
         return
-    probe = subprocess.run(
-        ["/bin/bash", "--noprofile", "--norc", "-c",
-         '. "$1" >/dev/null 2>&1\n'
-         'printf "%s\\0%s\\0" disabled "${disabled-}" reason "${disabled_reason-}"\n',
-         "buildpkg-disabled-probe", str(recipe)],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-    )
+    # A recipe is arbitrary shell. Sourcing it on the host, in the host
+    # mount namespace, with the full inherited environment, ran before any
+    # isolation existed -- directly contradicting buildpkg-single's own
+    # header ("Recipe code is executed only after the isolated root is
+    # active"). No env= meant LD_PRELOAD, BASH_ENV, PATH and http_proxy
+    # all reached it, and it had the builder's full read/write access to
+    # /recipes, /build, /out and the network.
+    #
+    # The probe only needs to READ one boolean, so it is sandboxed: no
+    # network, no /build, no /out, the recipe tree read-only, and an
+    # explicit environment rather than an inherited one. Stricter than the
+    # worker's mount set on purpose -- this runs on the host.
+    #
+    # The mount shape is resolvepkg's own metadata sandbox
+    # (sandbox_metadata), reused deliberately: binding only the recipe file
+    # leaves no shell to exec, and hardcoding /bin plus a loader is how
+    # that gets subtly wrong. dynamic_runtime_files resolves the shell and
+    # everything it actually needs.
+    shell = config["SAPHIRA_METADATA_SHELL"]
+    runtime = dynamic_runtime_files(shell)
+    directories = {"/bin", "/lib", "/usr", "/usr/lib", "/recipe"}
+    for path in runtime:
+        parent = Path(path).parent
+        while str(parent) not in ("/", "."):
+            directories.add(str(parent))
+            parent = parent.parent
+    command = [
+        config["SAPHIRA_BWRAP"], "--die-with-parent", "--new-session",
+        "--unshare-all", "--uid", "0", "--gid", "0", "--clearenv",
+    ]
+    for directory in sorted(directories, key=lambda item: (item.count("/"), item)):
+        command.extend(("--dir", directory))
+    # No host /tmp: the probe's /tmp is a private empty dir. Nothing in
+    # this probe should touch it, and if a recipe does, it touches nothing
+    # outside the namespace.
+    probe_tmp = Path(config.get("SAPHIRA_TMPDIR", "") or "/build/tmp") / "buildpkg-probe-tmp"
+    probe_tmp.mkdir(parents=True, exist_ok=True)
+    for child in probe_tmp.iterdir():
+        if child.is_symlink() or child.is_file():
+            child.unlink()
+        elif child.is_dir():
+            shutil.rmtree(child)
+    command.extend(("--dir", "/tmp", "--bind", str(probe_tmp), "/tmp", "--dev", "/dev"))
+    for path in runtime:
+        command.extend(("--ro-bind", path, path))
+    command.extend(("--ro-bind", str(recipe.parent), "/recipe"))
+    command.extend(("--setenv", "PATH", f"{config['SAPHIRA_BINDIR']}:/usr/bin:/bin:/usr/sbin:/sbin"))
+    command.extend(("--setenv", "HOME", "/tmp"))
+    command.extend(("--setenv", "LANG", "C"))
+    for name in RECIPE_ENV_PASSTHROUGH:
+        value = os.environ.get(name)
+        if value:
+            command.extend(("--setenv", name, value))
+    extractor = r'''
+set -eu
+builtin source /recipe/recipe.sh >/dev/null 2>&1
+builtin printf '%s\0%s\0' disabled "${disabled-}" reason "${disabled_reason-}"
+'''
+    command.extend((shell, "--noprofile", "--norc", "-c", extractor))
+    probe = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    # Fail closed. Previously a recipe that died mid-source produced empty
+    # output, `disabled' read as "", and the guard PASSED -- so a recipe
+    # whose disabled computation crashes was treated as enabled, and the
+    # skip was recorded nowhere.
+    if probe.returncode != 0:
+        detail = probe.stderr.decode("utf-8", "replace").strip().splitlines()
+        die(f"cannot read metadata from {package}/recipe.sh: "
+            + (detail[-1] if detail else f"probe exited {probe.returncode}"))
     parts = probe.stdout.split(b"\0")
     values = dict(zip(parts[0::2], parts[1::2]))
     if values.get(b"disabled", b"").decode() == "yes":
         reason = values.get(b"reason", b"").decode() or "no reason given"
+        if os.environ.get("SAPHIRA_ALLOW_DISABLED") == "1":
+            # Deliberate, explicit, and LOUD. A disabled recipe is one the
+            # operator has taken out of the normal build and publication set
+            # -- not a broken one -- and disabling it must not make it
+            # unbuildable. Lab builds, install testing and packaging work on
+            # such a package are legitimate and have to stay possible.
+            #
+            # The override is scoped to the package named on the command line
+            # and nothing else. A disabled recipe reached as a DEPENDENCY
+            # still fails closed inside resolvepkg, so this cannot be used to
+            # smuggle a disabled package into someone else's closure.
+            print(
+                f"buildpkg: WARNING: building DISABLED recipe by explicit request: "
+                f"{package} ({reason})",
+                file=sys.stderr,
+            )
+            print(
+                "buildpkg: this package is excluded from the normal build and "
+                "publication set; it is NOT being released by this build",
+                file=sys.stderr,
+            )
+            return
         die(f"recipe disabled: {package} ({reason})")
 
 
@@ -1548,6 +1888,28 @@ def main() -> int:
         print(f"usage: {sys.argv[0]} PACKAGE [SOURCE]", file=sys.stderr)
         return 1
     transaction = None
+    interrupted = {"signal": None}
+
+    def on_signal(signum, _frame):
+        # Record and re-raise as an exception so the ordinary failure path
+        # runs: it writes the FAILED marker and stops the overlay holder.
+        # Previously there was no signal handler at all and KeyboardInterrupt
+        # was not in the except tuple, so Ctrl-C left an UNMARKED workspace
+        # with a live overlay holder still mounted. That workspace was then
+        # refused by the next run ("already exists without a trusted FAILED
+        # marker") and by cleanpkg as well, so the documented recovery path
+        # was a manual rm -rf. AGENTS.md promises a marker for every failed
+        # run; that was true only for clean non-signal exits.
+        interrupted["signal"] = signum
+        raise InterruptedError(f"interrupted by signal {signum}")
+
+    for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        try:
+            signal.signal(signum, on_signal)
+        except (OSError, ValueError):
+            # Not the main thread, or the platform lacks it.
+            pass
+
     try:
         config = load_config()
         check_disabled_recipe(config, sys.argv[1])
@@ -1575,8 +1937,23 @@ def main() -> int:
         transaction.succeed()
         print(f"buildpkg: built {sys.argv[1]}; unsigned artifacts ready at {ready}")
         return 0
-    except (BuildError, OSError, ValueError, json.JSONDecodeError, subprocess.CalledProcessError) as exc:
-        message = str(exc)
+    except KeyboardInterrupt:
+        message = "interrupted"
+        if transaction is not None:
+            transaction.fail(message)
+            print(f"buildpkg: failed workspace retained at {transaction.workspace}", file=sys.stderr)
+        print("buildpkg: interrupted", file=sys.stderr)
+        return 130
+    except Exception as exc:
+        # Deliberately broad. The previous tuple was a fixed list of five
+        # exception types, so anything outside it -- KeyError and
+        # TypeError from a schema-valid-but-unexpected resolver plan,
+        # subprocess.TimeoutExpired, UnicodeDecodeError -- bypassed fail()
+        # entirely and reproduced exactly the unmarked-workspace state the
+        # signal path used to produce. Any exception at this point is a
+        # failed build and must be reported as one; BaseException is not
+        # caught so SystemExit and KeyboardInterrupt still route as above.
+        message = str(exc) or exc.__class__.__name__
         if transaction is not None:
             transaction.fail(message)
             print(f"buildpkg: failed workspace retained at {transaction.workspace}", file=sys.stderr)

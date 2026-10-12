@@ -1,13 +1,20 @@
 #!/bin/sh
 
-# Kernel installed-layout regression: the module-tree relationship
-# without compiling a kernel. Exercises
-# saphira-kernel/files/install-kernel-layout.sh against a fixture tree
-# (fake Makefile with a kernelrelease target, prepared-state files,
-# build-time junk, a leaked signing key) and a fixture PKGDEST seeded
-# with the historical bug (build/source symlinks into /build).
+# kernel-layout: the saphira-kernel runtime module-tree gate.
 #
 # usage: kernel-layout.sh INSTALL-KERNEL-LAYOUT-SH
+#
+# The gate was INVERTED in the r10 corrective release. It used to require
+# lib/modules/<rel>/build -> /usr/src/<tree> and then walk that tree checking
+# Makefile, .config, Module.symvers, the generated UAPI syscall header, modpost
+# and sign-file. Those assertions are why d2e581d had to ship the prepared tree
+# in a RUNTIME package, which cost 1648 MiB and 77,655 files and grew every
+# installed rootfs to roughly 3 GiB.
+#
+# A runtime package must now carry NO build tree and NO build pointer. This
+# suite covers the positive case and, more importantly, the four ways a build
+# tree could creep back in -- each of which must FAIL, because a gate nobody
+# has seen reject is not a gate.
 
 set -eu
 
@@ -15,104 +22,117 @@ set -eu
 	printf 'usage: %s INSTALL-KERNEL-LAYOUT-SH\n' "$0" >&2
 	exit 1
 }
+helper=$1
+[ -f "$helper" ] || { printf 'no such file: %s\n' "$helper" >&2; exit 1; }
 
-layout_sh=$1
-test_tmp_base=${SAPHIRA_TMPDIR:-/build/test-tmp}
-mkdir -p "$test_tmp_base"
-test_root=$(mktemp -d "$test_tmp_base/saphira-kernel-layout-test.XXXXXX")
-trap 'rm -rf "$test_root"' EXIT HUP INT TERM
+test_root=${SAPHIRA_TMPDIR:-/build/tmp}/kernel-layout-test
+rm -rf "$test_root"
+mkdir -p "$test_root"
+trap 'rm -rf "$test_root"' EXIT
 
-# shellcheck disable=SC1090
-. "$layout_sh"
+pass=0
+fail=0
+ok() { pass=$((pass + 1)); printf '  ok   %s\n' "$1"; }
+no() { fail=$((fail + 1)); printf '  FAIL %s\n' "$1"; }
 
-# Fixture source tree: prepared state plus everything the installer
-# must prune (objects, images, leaked key, userspace bulk, docs).
-mkdir -p "$test_root/faketree/include/generated" \
-	"$test_root/faketree/arch/x86/include/generated/asm" \
-	"$test_root/faketree/scripts/mod" "$test_root/faketree/certs" \
-	"$test_root/faketree/drivers/net" "$test_root/faketree/tools/perf" \
-	"$test_root/faketree/tools/objtool" "$test_root/faketree/tools/include" \
-	"$test_root/faketree/Documentation" "$test_root/faketree/.tmp_versions"
-printf '%s\n' 'kernelrelease:' '	@echo 7.2.2' > "$test_root/faketree/Makefile"
-printf '%s\n' 'CONFIG_TEST=y' > "$test_root/faketree/.config"
-printf '%s\n' '0x00000000	symbol	testmod	EXPORT_SYMBOL' > "$test_root/faketree/Module.symvers"
-printf '%s\n' '#define AUTOCONF_INCLUDED' > "$test_root/faketree/include/generated/autoconf.h"
-printf '%s\n' '#define __NR_test 999' > "$test_root/faketree/arch/x86/include/generated/asm/unistd_64.h"
-printf '%s\n' '#!/bin/sh' 'exit 0' > "$test_root/faketree/scripts/mod/modpost"
-printf '%s\n' '#!/bin/sh' 'exit 0' > "$test_root/faketree/scripts/sign-file"
-printf '%s\n' '#!/bin/sh' 'exit 0' > "$test_root/faketree/tools/objtool/objtool"
-chmod 755 "$test_root/faketree/scripts/mod/modpost" \
-	"$test_root/faketree/scripts/sign-file" "$test_root/faketree/tools/objtool/objtool"
-printf '%s\n' 'object' > "$test_root/faketree/drivers/net/driver.o"
-printf '%s\n' 'cmd' > "$test_root/faketree/drivers/net/driver.o.cmd"
-printf '%s\n' 'module' > "$test_root/faketree/drivers/net/driver.ko"
-printf '%s\n' 'tmp' > "$test_root/faketree/.tmp_versions/driver.mod"
-printf '%s\n' 'image' > "$test_root/faketree/vmlinux"
-printf '%s\n' 'map' > "$test_root/faketree/System.map"
-printf '%s\n' 'PRIVATE KEY (must never ship)' > "$test_root/faketree/certs/module-signing.pem"
-printf '%s\n' 'perf' > "$test_root/faketree/tools/perf/perf"
-printf '%s\n' 'doc' > "$test_root/faketree/Documentation/README"
-printf '%s\n' 'old' > "$test_root/faketree/.config.old"
+. "$helper"
 
-# Fixture PKGDEST with the historical bug: upstream modules_install
-# baked absolute constructor paths into build and source.
-mkdir -p "$test_root/fakepkg/lib/modules/7.2.2/kernel"
-ln -s /build/saphira-kernel/source/linux-7.2.2 "$test_root/fakepkg/lib/modules/7.2.2/build"
-ln -s /build/saphira-kernel/source/linux-7.2.2 "$test_root/fakepkg/lib/modules/7.2.2/source"
+KREL=7.2.2
 
-krel=$(kernel_layout_release "$test_root/faketree")
-[ "$krel" = "7.2.2" ] || { printf '%s\n' "kernelrelease derivation broke: $krel" >&2; exit 1; }
+# A minimal VALID runtime payload: a module dir with depmod metadata and at
+# least one module, and nothing else.
+make_valid()
+{
+	_root=$1
+	rm -rf "$_root"
+	mkdir -p "$_root/lib/modules/$KREL/kernel/virt"
+	: >"$_root/lib/modules/$KREL/kernel/virt/dummy.ko"
+	printf 'kernel/virt/dummy.ko:\n' >"$_root/lib/modules/$KREL/modules.dep"
+	printf 'kernel/virt/dummy.ko:\n' >"$_root/lib/modules/$KREL/modules.softdep"
+	printf 'alias dummy\n' >"$_root/lib/modules/$KREL/modules.alias"
+	printf '\n' >"$_root/lib/modules/$KREL/modules.order"
+}
 
-install_prepared_tree "$test_root/faketree" "$test_root/fakepkg/usr/src/linux-7.2.2-saphira"
-tree=$test_root/fakepkg/usr/src/linux-7.2.2-saphira
-
-# Prune proof: intermediates, images, leaked key, bulk and docs are
-# gone; source, prepared state and the objtool chain survive.
-for gone in drivers/net/driver.o drivers/net/driver.o.cmd \
-	drivers/net/driver.ko .tmp_versions vmlinux System.map \
-	certs/module-signing.pem tools/perf Documentation .config.old; do
-	[ ! -e "$tree/$gone" ] || { printf '%s\n' "prune missed: $gone" >&2; exit 1; }
-done
-for kept in Makefile .config Module.symvers include/generated/autoconf.h \
-	arch/x86/include/generated/asm/unistd_64.h tools/objtool/objtool tools/include; do
-	[ -e "$tree/$kept" ] || { printf '%s\n' "prune ate required file: $kept" >&2; exit 1; }
-done
-[ -x "$tree/scripts/mod/modpost" ] || { printf '%s\n' 'modpost lost exec bit' >&2; exit 1; }
-[ -x "$tree/scripts/sign-file" ] || { printf '%s\n' 'sign-file lost exec bit' >&2; exit 1; }
-
-install_module_build_link "$test_root/fakepkg" 7.2.2 linux-7.2.2-saphira
-check_module_layout "$test_root/fakepkg" 7.2.2 linux-7.2.2-saphira 7.2.2
-
-# Negative: the floating convenience link is not a valid build target.
-ln -sfn /usr/src/linux "$test_root/fakepkg/lib/modules/7.2.2/build"
-if check_module_layout "$test_root/fakepkg" 7.2.2 linux-7.2.2-saphira 7.2.2 \
-	> "$test_root/floating.out" 2> "$test_root/floating.err"; then
-	printf '%s\n' 'floating /usr/src/linux build target unexpectedly verified' >&2
-	exit 1
+# ------------------------------------------------------------- positive case
+make_valid "$test_root/pk"
+if check_module_layout "$test_root/pk" "$KREL" "$KREL" >/dev/null 2>&1; then
+	ok "a clean runtime module tree is accepted"
+else
+	no "a clean runtime module tree was rejected"
 fi
-grep 'want /usr/src/linux-7.2.2-saphira' "$test_root/floating.err" >/dev/null
 
-# Negative: any installed symlink into /build fails the check, even
-# with a correct build link (generic constructor-leak scan).
-ln -sfn /usr/src/linux-7.2.2-saphira "$test_root/fakepkg/lib/modules/7.2.2/build"
-mkdir -p "$test_root/fakepkg/usr/bin"
-ln -s /build/bzip2/pkg/usr/bin/bzgrep "$test_root/fakepkg/usr/bin/bzfgrep"
-if check_module_layout "$test_root/fakepkg" 7.2.2 linux-7.2.2-saphira 7.2.2 \
-	> "$test_root/releak.out" 2> "$test_root/releak.err"; then
-	printf '%s\n' '/build leak unexpectedly verified' >&2
-	exit 1
+# ------------------------------------------------- the four ways to regress
+# 1. /usr/src present at all.
+make_valid "$test_root/a"
+mkdir -p "$test_root/a/usr/src/linux-$KREL-saphira"
+if check_module_layout "$test_root/a" "$KREL" "$KREL" >/dev/null 2>&1; then
+	no "a payload shipping /usr/src was ACCEPTED"
+else
+	ok "a payload shipping /usr/src is rejected"
 fi
-grep 'point into /build' "$test_root/releak.err" >/dev/null
-rm "$test_root/fakepkg/usr/bin/bzfgrep"
 
-# Negative: a source symlink must not exist.
-ln -sfn /usr/src/linux-7.2.2-saphira "$test_root/fakepkg/lib/modules/7.2.2/build"
-ln -s /usr/src/linux-7.2.2-saphira "$test_root/fakepkg/lib/modules/7.2.2/source"
-if check_module_layout "$test_root/fakepkg" 7.2.2 linux-7.2.2-saphira 7.2.2 \
-	> "$test_root/source.out" 2> "$test_root/source.err"; then
-	printf '%s\n' 'source symlink unexpectedly verified' >&2
-	exit 1
+# 2. the build symlink upstream modules_install creates.
+make_valid "$test_root/b"
+ln -s /usr/src/linux-$KREL-saphira "$test_root/b/lib/modules/$KREL/build"
+if check_module_layout "$test_root/b" "$KREL" "$KREL" >/dev/null 2>&1; then
+	no "a payload shipping lib/modules/$KREL/build was ACCEPTED"
+else
+	ok "a payload shipping the build symlink is rejected"
 fi
-grep 'must not exist' "$test_root/source.err" >/dev/null
 
-printf '%s\n' 'kernel installed-layout (versioned build link, prepared-tree prune, key hygiene, /build ban): OK'
+# 3. the source symlink.
+make_valid "$test_root/c"
+ln -s /build/stage/source "$test_root/c/lib/modules/$KREL/source"
+if check_module_layout "$test_root/c" "$KREL" "$KREL" >/dev/null 2>&1; then
+	no "a payload shipping lib/modules/$KREL/source was ACCEPTED"
+else
+	ok "a payload shipping the source symlink is rejected"
+fi
+
+# 4. a DANGLING build symlink. Shipping a link that can only dangle helps
+#    nobody and misleads whoever debugs the next thing, so it is refused too.
+make_valid "$test_root/d"
+ln -s /usr/src/gone "$test_root/d/lib/modules/$KREL/build"
+if check_module_layout "$test_root/d" "$KREL" "$KREL" >/dev/null 2>&1; then
+	no "a DANGLING build symlink was ACCEPTED"
+else
+	ok "a dangling build symlink is rejected"
+fi
+
+# 5. a symlink anywhere else pointing into a build tree.
+make_valid "$test_root/e"
+mkdir -p "$test_root/e/usr/local/lib"
+ln -s /build/saphira-kernel/source "$test_root/e/usr/local/lib/src"
+if check_module_layout "$test_root/e" "$KREL" "$KREL" >/dev/null 2>&1; then
+	no "a payload with a /build pointer was ACCEPTED"
+else
+	ok "a payload with a /build pointer is rejected"
+fi
+
+# 6. missing depmod metadata must still fail.
+make_valid "$test_root/f"
+rm -f "$test_root/f/lib/modules/$KREL/modules.dep"
+if check_module_layout "$test_root/f" "$KREL" "$KREL" >/dev/null 2>&1; then
+	no "a payload missing modules.dep was ACCEPTED"
+else
+	ok "a payload missing modules.dep is rejected"
+fi
+
+# 7. an empty module tree must fail.
+make_valid "$test_root/g"
+rm -f "$test_root/g/lib/modules/$KREL"/kernel/virt/dummy.ko
+if check_module_layout "$test_root/g" "$KREL" "$KREL" >/dev/null 2>&1; then
+	no "an empty module tree was ACCEPTED"
+else
+	ok "an empty module tree is rejected"
+fi
+
+# 8. the wrong argument count is refused rather than silently accepted.
+if check_module_layout "$test_root/pk" "$KREL" >/dev/null 2>&1; then
+	no "a 2-argument call was ACCEPTED"
+else
+	ok "a wrong-arity call is refused"
+fi
+
+printf 'kernel-layout: %d passed, %d failed\n' "$pass" "$fail"
+[ "$fail" -eq 0 ]

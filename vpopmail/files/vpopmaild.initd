@@ -1,0 +1,22 @@
+#!/sbin/openrc-run
+
+description="vpopmail virtual domain/user manager (MySQL backend)"
+
+# vpopmaild runs in the FOREGROUND (per recipe.sh), so supervise-daemon
+# owns the real process and there is no pidfile to track.
+#
+# It owns identities vpopmail:140 / vchkpw:141 (files/accounts.d/vpopmail)
+# and reads its database credentials from
+# /home/vpopmail/etc/vpopmail.mysql, which that fragment pins 0640
+# vpopmail:vchkpw.
+#
+# The MySQL backend means this cannot be a standalone definition: with no
+# database reachable, every domain lookup fails.
+command="/home/vpopmail/bin/vpopmaild"
+supervisor="supervise-daemon"
+
+depend()
+{
+	need localmount
+	after mariadb
+}

@@ -1,0 +1,22 @@
+#!/sbin/openrc-run
+
+description="Slurm node daemon"
+
+# slurmd must start privileged (it spawns slurmstepd as root and
+# manages job cgroups) and must NOT be given command_user.
+# -D keeps it in the foreground under supervise-daemon.
+command="/usr/sbin/slurmd"
+command_args="-D"
+supervisor="supervise-daemon"
+
+depend()
+{
+	need localmount
+	use net logger dns
+}
+
+start_pre()
+{
+	checkpath -d -m 0755 /var/spool/slurmd
+	checkpath -d -m 0755 /var/log/slurm
+}

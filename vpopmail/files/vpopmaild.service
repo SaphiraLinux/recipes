@@ -1,0 +1,35 @@
+[Unit]
+Description=vpopmail virtual domain/user manager (MySQL backend)
+Documentation=man:vpopmaild(8)
+# MySQL-backed: with no database reachable every domain lookup fails, so
+# the unit is meaningless without one. The mariadb-server package ships
+# both formats, so After= is the portable statement.
+After=mariadb.service network.target
+Wants=network.target
+
+[Service]
+# Mirrors files/vpopmaild.initd. vpopmaild runs in the foreground, so
+# Type=simple and the supervised process IS the daemon.
+User=vpopmail
+Group=vchkpw
+Type=simple
+ExecStart=/home/vpopmail/bin/vpopmaild
+Restart=on-failure
+RestartSec=2
+
+# The identities are declared by files/accounts.d/vpopmail, which also
+# pins the database credential file 0640 vpopmail:vchkpw. That is the
+# reason the daemon runs as vpopmail:vchkpw rather than root.
+ReadOnlyPaths=/home/vpopmail/etc/vpopmail.mysql
+# The domain tree and the qmail cache/overlimit directories are the
+# daemon's writable state; they are declared by the same fragment.
+ReadWritePaths=/home/vpopmail/domains /var/qmail/control/cache /var/qmail/overlimit
+# vpopmail's data lives under /home/vpopmail, so ProtectHome must permit
+# it: read-only everywhere else, writable only via the paths above.
+ProtectHome=read-only
+NoNewPrivileges=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX AF_INET
+
+[Install]
+WantedBy=multi-user.target

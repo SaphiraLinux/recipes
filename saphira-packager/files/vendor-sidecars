@@ -1,0 +1,158 @@
+#!/bin/sh
+#
+# vendor-sidecars: emit files/<archive>.sha256 for every vendored archive
+# that a recipe CONSUMES but that has no sidecar yet.
+#
+# The rule this tool exists to enforce: a sidecar is VERIFICATION, never
+# invention.
+#
+# It is tempting to compute sha256 of whatever bytes happen to be in
+# files/ and write that down. That is exactly wrong: it pins whatever is
+# present, so a tampered or truncated archive becomes "verified" by the very
+# act of checking it. A sidecar is only meaningful if the hash came from
+# somewhere independent of the bytes it describes.
+#
+# So every emitted sidecar must first match a hash the RECIPE already
+# declares -- which came from upstream -- and the archive's bytes must
+# equal it. That makes emitting a sidecar a statement that the tree matches
+# what upstream published, not a rubber stamp.
+#
+# An archive the recipe does not reference is never touched: it is not
+# build input, and pinning a superseded tarball is pinning nothing.
+#
+# usage: vendor-sidecars [--check] [--dry-run]
+#   --check   report only, exit 1 if any sidecar is missing
+#   --dry-run report what would be written, write nothing
+
+set -eu
+
+root=${SAPHIRA_RECIPE_ROOT:-$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)}
+mode=emit
+case ${1:-} in
+--check) mode=check ;;
+--dry-run) mode=dry ;;
+'') ;;
+*) printf 'usage: %s [--check|--dry-run]\n' "$0" >&2; exit 2 ;;
+esac
+
+command -v sha256sum >/dev/null 2>&1 || {
+	printf '%s\n' 'vendor-sidecars: sha256sum is required' >&2
+	exit 1
+}
+
+# Scratch for the archive list. Saphira tool scratch lives under
+# SAPHIRA_TMPDIR, never host /tmp, and it is removed on every exit path.
+tmpbase=${SAPHIRA_TMPDIR:-/build/tmp}
+mkdir -p "$tmpbase" || {
+	printf 'vendor-sidecars: cannot create scratch under %s\n' "$tmpbase" >&2
+	exit 1
+}
+work=$(mktemp -d "$tmpbase/vendor-sidecars.XXXXXX") || {
+	printf '%s\n' 'vendor-sidecars: cannot create a scratch directory' >&2
+	exit 1
+}
+trap 'rm -rf -- "$work"' EXIT HUP INT TERM
+
+emitted=0
+already=0
+orphans=0
+missing_declaration=0
+missing=0
+
+report()
+{
+	printf '%s\n' "vendor-sidecars: $*" >&2
+}
+
+# The archive list is materialised into a file and the loop reads THAT,
+# instead of being fed by a pipe. `find | while ...' runs the loop in a
+# SUBSHELL, so every counter incremented inside it was discarded when the
+# pipeline finished. The first draft still printed one of those counters in
+# its final summary, so the tool reported "0 already present" after
+# verifying hundreds of sidecars. It is worth stating plainly: the SIDE
+# EFFECTS were fine -- files were written and verified, because those
+# happen in the filesystem, not in a variable -- and only the summary was
+# wrong. That is precisely the sort of thing a report must never be.
+list=$work/archives
+find "$root" -path "$root/.git" -prune -o -type f \
+	\( -name '*.tar.gz' -o -name '*.tar.xz' -o -name '*.tar.bz2' \
+	-o -name '*.tar.zst' -o -name '*.tar.lz' -o -name '*.tar.lzma' \
+	-o -name '*.tgz' -o -name '*.tbz2' -o -name '*.zip' -o -name '*.whl' \) \
+	-print | sort > "$list"
+
+while IFS= read -r archive; do
+	rel=${archive#"$root"/}
+	pkg=$(printf '%s' "$rel" | cut -d/ -f1)
+	base=${archive##*/}
+	recipe=$root/$pkg/recipe.sh
+	[ -f "$recipe" ] || continue
+
+	# Not build input: the recipe never names it. Leave it alone.
+	if ! grep -qF "$base" "$recipe" 2>/dev/null; then
+		report "notice: unreferenced archive, not pinned (not build input): $rel"
+		orphans=$((orphans + 1))
+		continue
+	fi
+
+	if [ -f "$archive.sha256" ]; then
+		# Present: verify it still matches the bytes, so a stale sidecar
+		# is caught here rather than at some future build.
+		if ! (cd "$(dirname "$archive")" && sha256sum -c "$(basename "$archive").sha256" >/dev/null 2>&1); then
+			report "ERROR: sidecar does not match the bytes: $rel"
+			report "       Do NOT regenerate it to make this pass."
+			exit 1
+		fi
+		already=$((already + 1))
+		continue
+	fi
+
+	actual=$(sha256sum "$archive" | cut -d' ' -f1)
+
+	# The independent source of truth: a 64-hex literal the recipe already
+	# declares, which came from upstream.
+	if ! grep -qE "\b$actual\b" "$recipe"; then
+		report "REFUSED: $rel"
+		report "    its bytes do not match any hash the recipe declares."
+		report "    A sidecar here would pin unreviewed bytes, so none is written."
+		report "    Resolve which side is wrong: re-fetch from upstream, or"
+		report "    correct the recipe's hash if it was transcribed badly."
+		missing_declaration=$((missing_declaration + 1))
+		continue
+	fi
+
+	if [ "$mode" = check ]; then
+		report "MISSING: $rel (bytes DO match the recipe's declared hash)"
+		missing=$((missing + 1))
+		continue
+	fi
+	if [ "$mode" = dry ]; then
+		printf '%s  %s\n' "$actual" "$base"
+		continue
+	fi
+
+	printf '%s  %s\n' "$actual" "$base" > "$archive.sha256"
+	# Prove the sidecar we just wrote actually works.
+	if ! (cd "$(dirname "$archive")" && sha256sum -c "$(basename "$archive").sha256" >/dev/null 2>&1); then
+		rm -f "$archive.sha256"
+		report "ERROR: emitted sidecar does not verify, removed: $rel"
+		exit 1
+	fi
+	emitted=$((emitted + 1))
+done < "$list"
+
+case $mode in
+check)
+	if [ "$missing" -gt 0 ]; then
+		report "$missing consumed archive(s) lack a sidecar (see the MISSING lines above)"
+		exit 1
+	fi
+	report "every consumed archive carries a sidecar ($already verified, $orphans unreferenced)"
+	;;
+dry)
+	report "dry run, nothing written ($missing would be written)"
+	;;
+*)
+	report "done: $emitted written, $already already present and verified"
+	report "      $orphans unreferenced archive(s) left alone, $missing_declaration refused"
+	;;
+esac

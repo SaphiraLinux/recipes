@@ -28,10 +28,13 @@ and hyphen only.
 Include the profile called
 .IR name :
 its entries are expanded in place, recursively, with reference-cycle
-detection. The historical
-.IB @akadata-stage4- name
+detection. The
+.IB @saphira-stage4- name
 spelling includes the profile called
-.IR name .
+.IR name
+(the historical
+.IB @akadata-stage4- name
+spelling is still accepted).
 .PP
 Duplicate packages across includes are installed once.
 .SS The profile invariant
@@ -47,6 +50,59 @@ install. Validate a profile by resolving it against the repository
 index and proving every transitive dependency is satisfiable \-
 before touching image assembly.
 .SH PROFILES
+.TP
+.B base-system
+Init-neutral Saphira system: the package and bootloader material every
+installed machine carries, and no init system at all. Compose it with
+.B init-openrc
+or
+.BR init-systemd .
+.TP
+.B init-openrc
+.TQ
+.B init-systemd
+The init system for a Saphira machine, and nothing else. Naming the init
+separately is what keeps
+.B base-system
+reusable: a base that named an init would force every caller to restate it.
+.TP
+.B saphira-openrc
+.TQ
+.B saphira-systemd
+Convenience compositions of
+.B base-system
+with one of the
+.B init-*
+profiles. They exist so an installer can name one thing; they declare no
+intention of their own and duplicate nothing.
+.TP
+.B saphira-installer
+The installer userspace: enough software to INSTALL a machine, and
+deliberately not enough to be one. It carries no kernel and no init
+system. The bootable installer payload is this profile plus a kernel plus
+an initramfs.
+.PP
+Note the naming distinction, because the two are one keystroke apart:
+.B base-system
+is a profile, and
+.B saphira-base
+is an APK. A profile is only ever referenced with a leading
+.BR @ ,
+so
+.B @base-system
+and
+.B saphira-base
+never collide in parsing, in documentation or in an installer's output.
+.PP
+Note also that
+.B openssh
+is a single package carrying both the client and
+.BR sshd .
+There is no
+.B openssh-client
+or
+.BR openssh-server ,
+and a profile naming either is naming something that does not exist.
 .TP
 .B base
 Minimal bootable skeleton: ABI marker, layout, shell and core tools.

@@ -1,0 +1,30 @@
+#!/bin/sh
+# Seed a clean minimal account database where none exists.
+#
+# Installing the shadow(8) suite creates no account files at all: useradd
+# and friends, and every package install script that reconciles declared
+# identities through ensure-identity.sh, all require passwd, group AND
+# shadow to already exist. This package is the missing clean starting
+# point: a root-only database with a locked password, byte-identical to
+# what the builder writes into its own clean roots.
+#
+# Create-if-missing, never repair: a present file is left entirely alone,
+# even one without a root row. This package seeds empty rooms; it does
+# not touch occupied ones, so installing it on a live system can never
+# clobber accounts. (apk fix will not restore these files; that is the
+# other side of the same guarantee.)
+#
+# Absolute paths only: hooks run under apk with a minimal PATH.
+[ -d /etc ] || /bin/mkdir -p /etc
+if [ ! -e /etc/passwd ]; then
+	/bin/printf 'root:x:0:0:root:/root:/bin/sh\n' > /etc/passwd
+	/bin/chmod 0644 /etc/passwd
+fi
+if [ ! -e /etc/group ]; then
+	/bin/printf 'root:x:0:\n' > /etc/group
+	/bin/chmod 0644 /etc/group
+fi
+if [ ! -e /etc/shadow ]; then
+	/bin/printf 'root:!:0:0:99999:7:::\n' > /etc/shadow
+	/bin/chmod 0600 /etc/shadow
+fi

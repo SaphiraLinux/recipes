@@ -1,0 +1,593 @@
+#!/bin/sh
+
+# saphira-mkinitramfs -- build, inspect and unpack a Saphira initramfs.
+#
+# One canonical payload, two uses: the media builder generates the INSTALLER
+# initramfs from the installer root, and the installer generates the
+# DESTINATION machine's initramfs from the newly installed root. Neither has
+# its own tooling.
+#
+# The --kernel argument is mandatory and is never defaulted from uname -r. The
+# installer runs inside its own environment, where the running kernel is the
+# installer's kernel and NOT the kernel of the machine being installed;
+# defaulting would silently produce an initramfs for the wrong kernel.
+#
+# Scratch lives under SAPHIRA_TMPDIR. Host /tmp is never Saphira scratch: it is
+# wiped on reboot, shared, and on a live system a small tmpfs. /build/tmp is
+# the default, and /imagebuilder is the media workspace when set.
+
+set -eu
+
+PROG=saphira-mkinitramfs
+HOOK_BUILD_DIR=${SAPHIRA_BUILD_HOOK_DIR:-/usr/lib/saphira/initramfs/build-hooks.d}
+CONF=${SAPHIRA_INITRAMFS_CONF:-/etc/saphira/initramfs.conf}
+# The package's own helpers are found RELATIVE TO THIS SCRIPT, not from a
+# hard-coded /usr. Installed that is the same path, but a tools root used for
+# testing, or a future relocation, would otherwise silently fall back to
+# whatever /usr happens to contain -- which is how a test ends up proving
+# something about the host instead of about the tree under test.
+self_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+_prefix=$(dirname -- "$self_dir")
+if [ -x "$_prefix/libexec/saphira/elf-closure" ]; then
+	_default_elf=$_prefix/libexec/saphira/elf-closure
+else
+	_default_elf=/usr/libexec/saphira/elf-closure
+fi
+if [ -f "$_prefix/lib/saphira/initramfs/init" ]; then
+	_default_init=$_prefix/lib/saphira/initramfs/init
+else
+	_default_init=/usr/lib/saphira/initramfs/init
+fi
+ELF_CLOSURE=${SAPHIRA_ELF_CLOSURE:-$_default_elf}
+INIT_SOURCE=${SAPHIRA_INIT_BINARY:-$_default_init}
+
+die() {
+	printf '%s: %s\n' "$PROG" "$*" >&2
+	exit 1
+}
+
+usage() {
+	cat >&2 <<USAGE
+usage:
+  $PROG build  --kernel VERSION --root DIR --output FILE [options]
+  $PROG list   ARCHIVE
+  $PROG unpack ARCHIVE DESTINATION
+  $PROG verify ARCHIVE [--kernel VERSION]
+
+build options:
+  --kernel VERSION   kernel release the initramfs is for (required)
+  --root DIR         root whose files are collected (required)
+  --output FILE      output path; atomically replaced on success only
+  --config FILE      configuration file (default $CONF)
+  --init FILE        static /init to embed (default $INIT_SOURCE)
+  --module-dir DIR   modules.dep base (default <root>/lib/modules)
+  --keep-work        retain the staging tree for diagnosis
+  --verbose          report what is being collected
+
+The previous output is never touched unless a complete archive has been built
+and verified. A failed build leaves it exactly as it was.
+USAGE
+	exit 2
+}
+
+saphira_tmpdir() {
+	printf '%s\n' "${SAPHIRA_TMPDIR:-/build/tmp}"
+}
+
+# --- argument handling ---------------------------------------------------
+
+KERNEL=
+ROOT=
+OUTPUT=
+CONFIG=$CONF
+INIT=$INIT_SOURCE
+MODULE_DIR=
+KEEP_WORK=0
+VERBOSE=0
+
+say() {
+	[ "$VERBOSE" -eq 1 ] || return 0
+	printf '%s: %s\n' "$PROG" "$*" >&2
+}
+
+set_build_args() {
+	while test $# -gt 0; do
+		case $1 in
+		--kernel)   KERNEL=${2:?--kernel needs a version}; shift 2 ;;
+		--kernel=*) KERNEL=${1#*=}; shift ;;
+		--root)     ROOT=${2:?--root needs a directory}; shift 2 ;;
+		--root=*)   ROOT=${1#*=}; shift ;;
+		--output)   OUTPUT=${2:?--output needs a path}; shift 2 ;;
+		--output=*) OUTPUT=${1#*=}; shift ;;
+		--config)   CONFIG=${2:?--config needs a path}; shift 2 ;;
+		--config=*) CONFIG=${1#*=}; shift ;;
+		--init)     INIT=${2:?--init needs a path}; shift 2 ;;
+		--init=*)   INIT=${1#*=}; shift ;;
+		--module-dir) MODULE_DIR=${2:?--module-dir needs a path}; shift 2 ;;
+		--module-dir=*) MODULE_DIR=${1#*=}; shift ;;
+		--keep-work) KEEP_WORK=1; shift ;;
+		--verbose)  VERBOSE=1; shift ;;
+		--) shift; break ;;
+		-*) usage ;;
+		*) usage ;;
+		esac
+	done
+}
+
+require_build_args() {
+	test -n "$KERNEL" || die '--kernel is required and is never guessed from uname -r'
+	test -n "$ROOT" || die '--root is required'
+	test -n "$OUTPUT" || die '--output is required'
+	test -d "$ROOT" || die "--root is not a directory: $ROOT"
+	test -f "$CONFIG" || die "configuration not found: $CONFIG"
+	test -f "$INIT" || die "init binary not found: $INIT"
+	test -x "$ELF_CLOSURE" || die "ELF closure helper not executable: $ELF_CLOSURE"
+	case $KERNEL in
+	*[!A-Za-z0-9._+-]* | '') die "invalid kernel version: $KERNEL" ;;
+	esac
+	[ -n "$MODULE_DIR" ] || MODULE_DIR=$ROOT/lib/modules
+}
+
+# --- staging -------------------------------------------------------------
+
+STAGE=
+WORK=
+
+cleanup() {
+	status=${1:-$?}
+	test "$KEEP_WORK" -eq 1 && test -n "$WORK" && {
+		printf '%s: staging tree retained: %s\n' "$PROG" "$WORK" >&2
+		return 0
+	}
+	test -n "$WORK" && rm -rf -- "$WORK"
+	exit "$status"
+}
+
+start_work() {
+	WORK=$(mktemp -d "$(saphira_tmpdir)/mkinitramfs.XXXXXX") ||
+		die 'cannot create a staging directory'
+	trap 'cleanup $?' EXIT HUP INT TERM
+	STAGE=$WORK/stage
+	mkdir -p "$STAGE"
+}
+
+# Copy a file from the target root into the staging tree, creating parents.
+# $1 absolute path inside the root, $2 optional explicit mode.
+stage_file() {
+	src=$ROOT$1
+	[ -f "$src" ] || die "requested file is missing from the root: $1"
+	dst=$STAGE$1
+	mkdir -p -- "$(dirname -- "$dst")"
+	cp -- "$src" "$dst" || die "cannot stage $1"
+	chmod 0644 -- "$dst"
+	[ -n "${2:-}" ] && chmod "$2" -- "$dst"
+	say "staged $1"
+	return 0
+}
+
+# A binary and its whole shared-library closure.
+stage_binary() {
+	src=$ROOT$1
+	[ -f "$src" ] || die "requested binary is missing from the root: $1"
+	dst=$STAGE$1
+	mkdir -p -- "$(dirname -- "$dst")"
+	cp -- "$src" "$dst" || die "cannot stage binary $1"
+	chmod 0755 -- "$dst"
+	say "staged binary $1"
+
+	# The interpreter and every library it needs, recursively. The helper is
+	# a package-internal C program precisely so this does not drag binutils
+	# into every installed machine.
+	if [ "$src" = "$INIT" ] || [ -x "$src" ]; then
+		"$ELF_CLOSURE" "$src" "$ROOT/lib" "$ROOT/usr/lib" 2>/dev/null |
+		while IFS= read -r lib; do
+			case $lib in
+			"$ROOT"/*) ;;
+			*) continue ;;
+			esac
+			rel=${lib#"$ROOT"}
+			[ -e "$STAGE$rel" ] && continue
+			mkdir -p -- "$(dirname -- "$STAGE$rel")"
+			cp -- "$lib" "$STAGE$rel" || die "cannot stage library $rel"
+			chmod 0644 -- "$STAGE$rel"
+			say "  library $rel"
+		done || die "cannot resolve the library closure of $1"
+	fi
+}
+
+# A runtime hook: an executable, plus its interpreter if it is a script. This
+# is why the base initramfs does not need bash: a script hook brings its own
+# shebang interpreter and that interpreter's closure, and nothing else.
+stage_hook() {
+	rel=$1
+	[ -f "$ROOT$rel" ] || die "requested hook is missing from the root: $rel"
+	dst=$STAGE$rel
+	mkdir -p -- "$(dirname -- "$dst")"
+	cp -- "$ROOT$rel" "$dst" || die "cannot stage hook $rel"
+	chmod 0755 -- "$dst"
+	say "staged hook $rel"
+
+	shebang=$(head -c 2 -- "$ROOT$rel" 2>/dev/null || :)
+	if [ "$shebang" = '#!' ]; then
+		interp=$(sed -n '1s/^#!//p' -- "$ROOT$rel" | tr -d '\r' | awk '{print $1}')
+		[ -n "$interp" ] || die "hook has a shebang but no interpreter: $rel"
+		case $interp in
+		/*) ;;
+		*) die "hook interpreter must be an absolute path: $interp ($rel)" ;;
+		esac
+		[ -f "$ROOT$interp" ] ||
+			die "hook interpreter is not available in the root: $interp (needed by $rel)"
+		say "  hook interpreter $interp"
+		stage_binary "$interp"
+	fi
+}
+
+# Module name, from a modules.dep path: strip any directory and the .ko and
+# its optional compression suffix, so "zfs.ko.xz" and "zfs" are one module.
+module_basename() {
+	n=0
+	b=${1##*/}
+	case $b in
+	*.ko) b=${b%.ko} ;;
+	*.ko.*) b=${b%%.ko.*} ;;
+	esac
+	printf '%s\n' "$b"
+}
+
+# Direct dependencies of one module, from modules.dep.
+# modules.dep lines are "path/to/mod.ko: dep1 dep2 ...".
+module_deps() {
+	awk -v want="$1" '
+		{
+			i = index($0, ":")
+			if (i == 0) next
+			path = substr($0, 1, i - 1)
+			if (base(path) != want) next
+			print substr($0, i + 1)
+			exit
+		}
+		function base(p,   n, arr) {
+			n = split(p, arr, "/")
+			p = arr[n]
+			sub(/\.ko\.[a-z0-9]+$/, "", p)
+			sub(/\.ko$/, "", p)
+			return p
+		}
+	' "$depfile"
+}
+
+# Soft dependencies of one module. These are advisory for load ORDER, not for
+# availability, but a softdep target that is absent makes the softdep silently
+# do nothing, so it belongs in the closure.
+module_softdeps() {
+	[ -f "$softfile" ] || return 0
+	awk -v want="$1" '
+		{
+			i = index($0, ":")
+			if (i == 0) next
+			line = substr($0, 1, i - 1)
+			rest = substr($0, i + 1)
+			n = split(line, word, " ")
+			first = ""
+			for (j = 1; j <= n; j++) if (word[j] != "") { first = word[j]; break }
+			if (first != want) next
+			# Drop the "pre:"/"post:" markers, keep the module names.
+			gsub(/(^|[ 	])(pre|post):/, " ", rest)
+			print rest
+			exit
+		}
+	' "$softfile"
+}
+
+# The file path of one module, relative to the kernel module directory.
+module_path() {
+	awk -v want="$1" '
+		{
+			i = index($0, ":")
+			if (i == 0) next
+			path = substr($0, 1, i - 1)
+			n = split(path, arr, "/")
+			b = arr[n]
+			sub(/\.ko\.[a-z0-9]+$/, "", b)
+			sub(/\.ko$/, "", b)
+			if (b == want) { print path; exit }
+		}
+	' "$depfile"
+}
+
+# A kernel module and its dependency and softdep closure.
+#
+# Breadth-first over modules.dep, because the closure is a graph and a
+# single-pass grep only ever finds direct dependencies. A module that is
+# already seen is not revisited, which is what terminates a diamond or a
+# dependency cycle.
+stage_module() {
+	name=$1
+	depfile=$MODULE_DIR/$KERNEL/modules.dep
+	softfile=$MODULE_DIR/$KERNEL/modules.softdep
+
+	[ -f "$depfile" ] ||
+		die "no modules.dep for kernel $KERNEL under $MODULE_DIR"
+
+	[ -n "$(module_path "$name")" ] ||
+		die "kernel module not found in $depfile: $name"
+
+	visited=
+	queue=$name
+	while [ -n "$queue" ]; do
+		cur=${queue%% *}
+		# Pop the head. "${queue#* }" is NOT enough: on a single-element queue
+		# there is no space to match, it returns the string UNCHANGED, and the
+		# loop re-reads the same element forever. The BFS therefore visited
+		# exactly one module and silently produced a closure with no
+		# dependencies -- which looks like a missing module rather than a broken
+		# walk. Clearing the queue explicitly is the fix.
+		case $queue in
+		*" "*) queue=${queue#* } ;;
+		*) queue= ;;
+		esac
+		[ -n "$cur" ] || break
+		case " $visited " in
+		*" $cur "*) continue ;;
+		esac
+		visited="$visited $cur"
+		# modules.dep and modules.softdep both yield PATH
+		# ("kernel/drivers/extra/mid.ko"), while the visited set and the
+		# lookups are keyed by bare module name. Appending the paths verbatim
+		# means every follow-up lookup misses -- the name never matches a bare
+		# module name -- so the walk stops after the first hop and the closure
+		# comes out with no dependencies at all. Reduce to names on the way in.
+		for dep in $(module_deps "$cur") $(module_softdeps "$cur"); do
+			dep=$(module_basename "$dep")
+			[ -n "$dep" ] || continue
+			# Append with a separator only when the queue is already
+			# non-empty. "queue=$queue $item" on an EMPTY queue yields a
+			# leading space, and the pop below then reads an empty first
+			# element and breaks out of the walk -- silently reducing the
+			# closure to the one module that was asked for.
+			if [ -z "$queue" ]; then
+				queue=$dep
+			else
+				queue="$queue $dep"
+			fi
+		done
+	done
+
+	for mod in $visited; do
+		path=$(module_path "$mod")
+		[ -n "$path" ] || continue
+		rel=/lib/modules/$KERNEL/$path
+		dst=$STAGE$rel
+		mkdir -p -- "$(dirname -- "$dst")"
+		cp -- "$MODULE_DIR/$KERNEL/$path" "$dst" ||
+			die "cannot stage module $rel"
+		chmod 0644 -- "$dst"
+		say "staged module $rel"
+	done
+}
+
+# --- build-time hooks ----------------------------------------------------
+
+# These run while the archive is being constructed. They live under /usr/lib,
+# on the BUILDING system, and are not shipped in the initramfs. Runtime hooks,
+# which ARE shipped and run at boot, live under /lib and are staged by the
+# configuration. Keeping the two in different directories is the whole point:
+# one set can exec a compiler, the other cannot, and mixing them would make an
+# initramfs depend on build-time software at boot.
+run_build_hooks() {
+	[ -d "$HOOK_BUILD_DIR" ] || {
+		say "no build hooks in $HOOK_BUILD_DIR"
+		return 0
+	}
+	for hook in $(ls -1 "$HOOK_BUILD_DIR" 2>/dev/null | LC_ALL=C sort); do
+		[ -x "$HOOK_BUILD_DIR/$hook" ] || continue
+		say "build hook $hook"
+		SAPHIRA_INITRAMFS_STAGE=$STAGE \
+		SAPHIRA_INITRAMFS_ROOT=$ROOT \
+		SAPHIRA_INITRAMFS_KERNEL=$KERNEL \
+		SAPHIRA_INITRAMFS_CONFIG=$CONFIG \
+			"$HOOK_BUILD_DIR/$hook" ||
+			die "build hook failed: $hook"
+	done
+}
+
+# --- archive creation ----------------------------------------------------
+
+# SOURCE_DATE_EPOCH pins every timestamp so an unchanged input tree produces a
+# byte-identical archive. The default matches the package builder's pinned
+# distribution epoch, so an initramfs and a package agree about "now".
+epoch() {
+	printf '%s\n' "${SAPHIRA_SOURCE_DATE_EPOCH:-${SOURCE_DATE_EPOCH:-1753401600}}"
+}
+
+make_archive() {
+	tree=$WORK/tree
+	mkdir -p "$tree"
+	# Ownership 0:0 and normalised modes and times, applied to a COPY of the
+	# staging tree, so the staged files keep their real modes for inspection.
+	#
+	# "$STAGE"/. and not "$STAGE": copying the directory itself into an
+	# existing tree nests it, and every member then lands under a stray
+	# top-level "stage/", which is a payload the kernel would ignore.
+	cp -a "$STAGE"/. "$tree"/ || die 'cannot assemble the normalisation tree'
+	chown -R 0:0 "$tree" 2>/dev/null || :
+	find "$tree" -print0 | xargs -0 touch -h -d "@$(epoch)" ||
+		die 'cannot normalise archive timestamps'
+	# A stable, sorted member list is what makes cpio newc reproducible: the
+	# format is order-sensitive, so the sort is not cosmetic.
+	#
+	# NUL-separated, because a member name may legally contain a newline and
+	# a newline-separated list would then be silently corrupt: cpio would take
+	# the fragments as separate names and fail on a path that does not exist,
+	# or worse, archive the wrong thing. sort -z and -print0/-0 are paired
+	# deliberately for that reason.
+	#
+	# The member list is sorted because cpio newc is order-sensitive: it is the
+	# sort, not the format, that makes two builds byte-identical.
+	#
+	# The member list MUST be relative. "find $tree -print0" yields absolute
+	# paths, and cpio stores exactly the names it is given, so every member
+	# would carry the build-host prefix -- the archive would then contain
+	# /build/... entries, which is precisely the leak the verifier refuses, and
+	# a kernel would find nothing where it expected /init. %P strips the
+	# starting point, so the names come out as "init", "etc/saphira/...".
+	( cd "$tree" && find . -mindepth 1 -printf '%P\0' | LC_ALL=C sort -z |
+		cpio --null --create --format=newc --quiet \
+			--owner=0:0 --reproducible ) \
+		>"$WORK/initramfs.cpio" || die 'cpio failed'
+}
+
+compress() {
+	# --long and a fixed level, no timestamps in the frame header: zstd's
+	# default is already deterministic for a given input and level, but the
+	# level is pinned so it cannot drift with a package upgrade.
+	zstd -q -f -19 --no-check -T1 -o "$WORK/initramfs.cpio.zst" \
+		"$WORK/initramfs.cpio" || die 'zstd failed'
+}
+
+verify_archive() {
+	# Structural verification before anything is published. list(1) on the
+	# cpio stream proves the archive parses and lets us assert the payload
+	# shape without trusting the writer.
+	cpio -it --quiet < "$WORK/initramfs.cpio" > "$WORK/listing" 2>/dev/null ||
+		die 'the generated cpio archive does not parse'
+	[ -s "$WORK/listing" ] || die 'the generated archive is empty'
+	grep -qx 'init' "$WORK/listing" ||
+		die 'the archive has no /init'
+	grep -qx 'etc/saphira/initramfs.conf' "$WORK/listing" ||
+		die 'the archive has no configuration'
+	# Nothing from the build host may leak into a boot payload.
+	if grep -qE '^(build|recipes|out|imagebuilder)(/|$)' "$WORK/listing"; then
+		printf '%s: archive contains a build-host path:\n' "$PROG" >&2
+		grep -E '^(build|recipes|out|imagebuilder)(/|$)' "$WORK/listing" |
+			sed 's/^/  /' >&2
+		die 'refusing to publish an archive with build-host paths'
+	fi
+}
+
+# --- commands ------------------------------------------------------------
+
+cmd_build() {
+	set_build_args "$@"
+	require_build_args
+	start_work
+	say "staging in $STAGE"
+	say "kernel $KERNEL, root $ROOT, config $CONFIG"
+
+	# /init first, and always: it is the one payload item that is not
+	# described by the configuration, because the configuration cannot
+	# describe the thing that reads it.
+	#
+	# It is staged from the PACKAGE, not from the target root. The root being
+	# populated is the machine being installed and has no initramfs-tools in
+	# it; the /init belongs to the installed package, and using the root's
+	# copy would mean the archive silently carried whatever happened to be
+	# there instead. It is static, so there is no closure to resolve.
+	[ -f "$INIT" ] || die "init binary not found: $INIT"
+	#
+	# It is staged at the ARCHIVE ROOT as /init, not at its packaged
+	# filesystem path. The kernel executes "/init" inside the unpacked
+	# initramfs; a member at usr/lib/saphira/initramfs/init would be found by
+	# nobody and the boot would fail with no diagnostic.
+	mkdir -p "$STAGE"
+	cp -- "$INIT" "$STAGE/init" || die 'cannot stage /init'
+	chmod 0755 "$STAGE/init"
+	say "staged /init from $INIT"
+	mkdir -p "$STAGE/etc/saphira"
+	cp -- "$CONFIG" "$STAGE/etc/saphira/initramfs.conf"
+	chmod 0644 "$STAGE/etc/saphira/initramfs.conf"
+	say "staged configuration"
+
+	# Then the configuration's own requests.
+	[ -f "$CONFIG" ] || die "configuration not found: $CONFIG"
+	while IFS= read -r line || test -n "$line"; do
+		case $line in
+		'' | '#'*) continue ;;
+		esac
+		set -- $line
+		verb=${1:-}
+		arg=${2:-}
+		case $verb in
+		bin)  stage_binary "$arg" ;;
+		file) stage_file "$arg" "${3:-0644}" ;;
+		hook) stage_hook "$arg" ;;
+		mod)  stage_module "$arg" ;;
+		dir)  [ -d "$ROOT$arg" ] || die "requested directory is missing: $arg"
+		      cp -a -- "$ROOT$arg" "$STAGE$arg" || die "cannot stage directory $arg"
+		      say "staged directory $arg" ;;
+		*) die "unknown configuration directive: $line" ;;
+		esac
+	done < "$CONFIG"
+
+	# Build hooks last, so they observe a fully staged tree and may add to
+	# it. Anything a hook adds still goes through the same normalisation.
+	run_build_hooks
+
+	make_archive
+	compress
+	verify_archive
+
+	# Atomic: the previous initramfs survives every failure above, and is
+	# replaced only once a complete, verified archive exists beside it.
+	mkdir -p -- "$(dirname -- "$OUTPUT")"
+	mv -f -- "$WORK/initramfs.cpio.zst" "$OUTPUT" ||
+		die "cannot install the output: $OUTPUT"
+	say "wrote $OUTPUT"
+}
+
+cmd_list() {
+	[ $# -eq 1 ] || usage
+	[ -f "$1" ] || die "archive not found: $1"
+	zstd -dc -- "$1" | cpio -it --quiet 2>/dev/null ||
+		die "cannot list $1"
+}
+
+cmd_unpack() {
+	[ $# -eq 2 ] || usage
+	[ -f "$1" ] || die "archive not found: $1"
+	[ -d "$2" ] || mkdir -p -- "$2" || die "cannot create $2"
+	zstd -dc -- "$1" | ( cd "$2" && cpio -idm --quiet --no-absolute-filenames ) ||
+		die "cannot unpack $1 into $2"
+}
+
+cmd_verify() {
+	archive=
+	kernel=
+	while test $# -gt 0; do
+		case $1 in
+		--kernel) kernel=${2:?--kernel needs a version}; shift 2 ;;
+		--kernel=*) kernel=${1#*=}; shift ;;
+		*) archive=$1; shift ;;
+		esac
+	done
+	[ -n "$archive" ] || usage
+	[ -f "$archive" ] || die "archive not found: $archive"
+	work=$(mktemp -d "$(saphira_tmpdir)/mkinitramfs-verify.XXXXXX") ||
+		die 'cannot create a verification directory'
+	trap 'rm -rf -- "$work"' EXIT HUP INT TERM
+	zstd -dc -- "$archive" | cpio -it --quiet > "$work/listing" 2>/dev/null ||
+		die "cannot read $archive"
+	[ -s "$work/listing" ] || die 'the archive is empty'
+	grep -qx 'init' "$work/listing" || die 'the archive has no /init'
+	grep -qx 'etc/saphira/initramfs.conf' "$work/listing" ||
+		die 'the archive has no configuration'
+	[ -n "$kernel" ] || {
+		printf 'verified: %s (%s entries)\n' "$archive" "$(wc -l < "$work/listing")"
+		return 0
+	}
+	grep -q "^lib/modules/$kernel/" "$work/listing" ||
+		die "the archive carries no modules for $kernel"
+	printf 'verified: %s (%s entries, kernel %s)\n' \
+		"$archive" "$(wc -l < "$work/listing")" "$kernel"
+}
+
+[ $# -ge 1 ] || usage
+command=$1
+shift
+case $command in
+build) cmd_build "$@" ;;
+list) cmd_list "$@" ;;
+unpack) cmd_unpack "$@" ;;
+verify) cmd_verify "$@" ;;
+*) usage ;;
+esac

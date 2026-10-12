@@ -1,0 +1,25 @@
+#!/sbin/openrc-run
+
+description="Slurm controller daemon"
+
+# slurmctld starts as root and assumes SlurmUser (slurm) itself, so it
+# must NOT be given command_user: that would run the pre-drop phase
+# unprivileged. -D keeps it in the foreground under supervise-daemon.
+command="/usr/sbin/slurmctld"
+command_args="-D"
+supervisor="supervise-daemon"
+# The controller cannot run without the live configuration that
+# saphira-cluster generates on the target.
+required_files="/etc/slurm/slurm.conf"
+
+depend()
+{
+	need localmount
+	use net logger dns
+}
+
+start_pre()
+{
+	checkpath -d -m 0755 -o slurm:slurm /var/spool/slurmctld
+	checkpath -d -m 0755 -o slurm:slurm /var/log/slurm
+}

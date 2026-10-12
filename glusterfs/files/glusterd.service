@@ -1,0 +1,33 @@
+[Unit]
+Description=GlusterFS management daemon
+Documentation=man:glusterd(8)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Mirrors files/glusterd.initd: glusterd forks and is told its own pid
+# file, so Type=forking with a matching PIDFile. The init script's
+# ${GLUSTERD_ARGS:--p /run/glusterd.pid} default becomes this ExecStart,
+# and GLUSTERD_ARGS can still override it via the environment.
+Environment=GLUSTERD_ARGS=--p /run/glusterd.pid
+Type=forking
+PIDFile=/run/glusterd.pid
+ExecStart=/usr/sbin/glusterd $GLUSTERD_ARGS
+RuntimeDirectory=glusterd
+# A peer node going down must not take the local daemon with it; this is
+# a clustered storage manager, not a single-purpose service.
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+
+# Deliberately NOT set: ProtectSystem=strict (glusterd writes
+# /var/lib/glusterfs), PrivateDevices (it mounts brick FUSE), or any
+# CapabilityBoundingSet (the brick mount and portmapper need
+# CAP_SYS_ADMIN and CAP_NET_ADMIN). Hardening this daemon without a real
+# storage test would be security theatre.
+
+PrivateTmp=yes
+ProtectHome=yes
+
+[Install]
+WantedBy=multi-user.target

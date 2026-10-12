@@ -1,0 +1,195 @@
+From 38378745c7ace0817a375d36e3f8f99dc04f0d55 Mon Sep 17 00:00:00 2001
+From: AKADATA LIMITED <linux@saphira.vm2.uk>
+Date: Sun, 11 Oct 2026 01:07:12 +0000
+Subject: [PATCH 2/4] ccram: early excision before the boot direct map
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Part of CCRAM — AKADATA LIMITED adaptation of Meta CRAM (see
+CRAM.PROVENANCE in linux-saphira-meta-cram; Saphira-original code,
+GPL-2.0-only).
+
+Carve the picked window with memblock_remove() plus the e820
+RAM->RESERVED retype (full window or refuse), from a setup_arch hook
+placed before init_mem_mapping() builds the boot direct map.  The
+window is therefore never boot-mapped, so the later CRAM hot-add maps
+virgin page-table slots instead of splitting stale 1G leaves (the
+phys_pud_init WARN is removed at its root; no generic mapping code
+touched, no diagnostic weakened).  Same excision primitive mem= has
+always used, scoped to one window.  Also carries the synthetic-nid
+helper used by validation in the next patch.
+---
+ arch/x86/kernel/setup.c |  10 ++++
+ mm/ccram_sysram.c       | 130 ++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 140 insertions(+)
+
+diff --git a/arch/x86/kernel/setup.c b/arch/x86/kernel/setup.c
+index 46882ce79..4b81c327e 100644
+--- a/arch/x86/kernel/setup.c
++++ b/arch/x86/kernel/setup.c
+@@ -6,6 +6,7 @@
+  * parts of early kernel initialization.
+  */
+ #include <linux/acpi.h>
++#include <linux/ccram_sysram.h>
+ #include <linux/console.h>
+ #include <linux/cpu.h>
+ #include <linux/crash_dump.h>
+@@ -1123,6 +1124,15 @@ void __init setup_arch(char **cmdline_p)
+ 	 */
+ 	x86_platform.realmode_reserve();
+ 
++	/*
++	 * CCRAM excision runs before the boot direct map is built, so the
++	 * carved window is never boot-mapped and the later CRAM hot-add
++	 * maps virgin page-table slots (no stale-leaf split, no WARN).
++	 * No-op without ccram=.  Post-initmem_init validation happens at
++	 * ccram_sysram_early_reserve() below.
++	 */
++	ccram_sysram_carve_early();
++
+ 	init_mem_mapping();
+ 
+ 	/*
+diff --git a/mm/ccram_sysram.c b/mm/ccram_sysram.c
+index 5f96b06d6..8a5823b01 100644
+--- a/mm/ccram_sysram.c
++++ b/mm/ccram_sysram.c
+@@ -157,3 +157,133 @@ static int __init ccram_pick_range(phys_addr_t want, phys_addr_t *start)
+ 	}
+ 	return -ENOSPC;
+ }
++
++/*
++ * Reserve a fresh nid for the carved range: first nid that is not even
++ * possible (firmware CPU/memory nodes are all possible already), so we
++ * can never collide with a real node id.  Allocates its NODE_DATA now,
++ * while __init allocators are alive: node_private_register() (called
++ * later by add_private_memory_driver_managed()) dereferences
++ * NODE_DATA(nid) before __try_online_node() runs, so this cannot wait
++ * for the hotplug path.
++ */
++static int __init ccram_reserve_nid(void)
++{
++	int nid;
++
++	for (nid = 0; nid < MAX_NUMNODES; nid++) {
++		if (!node_possible(nid))
++			break;
++	}
++	if (nid >= MAX_NUMNODES)
++		return -ENOSPC;
++	node_set(nid, node_possible_map);
++	alloc_offline_node_data(nid);
++	pr_info("ccram: reserved synthetic nid %d\n", nid);
++	return nid;
++}
++
++/**
++ * Parse the ccram= parameter into a block-aligned byte count.  Returns 0
++ * with *want filled, or -errno with ccram_fail_reason set.
++ */
++static int __init ccram_want_bytes(u64 *want)
++{
++	u64 total = memblock_phys_mem_size();
++	char *pct = strchr(ccram_param, '%');
++
++	if (pct) {
++		unsigned long pc = simple_strtoul(ccram_param, NULL, 10);
++
++		if (pc == 0 || pc >= 100) {
++			snprintf(ccram_fail_reason, sizeof(ccram_fail_reason),
++				 "bad percent '%s'", ccram_param);
++			return -EINVAL;
++		}
++		*want = total * pc / 100;
++	} else {
++		*want = memparse(ccram_param, NULL);
++	}
++	*want = ALIGN_DOWN(*want, ccram_block_align());
++	pr_info("ccram: request '%s' -> %llu bytes of %llu total (normal_min %lu)\n",
++		ccram_param, (unsigned long long)*want,
++		(unsigned long long)total, ccram_normal_min);
++	if (!*want) {
++		snprintf(ccram_fail_reason, sizeof(ccram_fail_reason),
++			 "request rounds to zero");
++		return -EINVAL;
++	}
++	return 0;
++}
++
++/**
++ * ccram_sysram_carve_early - pick and excise the CCRAM range.
++ * Called from setup_arch() BEFORE init_mem_mapping() builds the boot
++ * direct map.
++ *
++ * Why this early: init_mem_mapping() maps every memblock.memory range
++ * (init_range_memory_mapping over for_each_mem_pfn_range).  A range
++ * excised here is never boot-mapped, so the later CRAM hot-add maps
++ * virgin page-table slots.  Carving after the boot map left stale 1G
++ * PUD leaves behind; the hot-add then had to split them, tripping the
++ * phys_pud_init/pud_populate_safe WARN on every boot.  Excision before
++ * mapping removes that WARN at its root without touching any generic
++ * mapping code.  Same primitive mem= has always used, only scoped to
++ * one window.
++ *
++ * What is known here: memblock from the final e820, early_param parsed,
++ * early reservations (kernel image, trampoline) in place.  What is NOT
++ * known yet: anything reserved after this point (NODE_DATA,
++ * crashkernel, initrd, CMA).  Those are caught by
++ * ccram_sysram_early_reserve(), which re-validates after initmem_init()
++ * and fails closed.
++ */
++void __init ccram_sysram_carve_early(void)
++{
++	u64 want = 0;
++	phys_addr_t start = 0, end;
++	int ret;
++
++	if (!ccram_param[0])
++		return;
++	ret = ccram_want_bytes(&want);
++	if (ret)
++		goto fail;
++	ret = ccram_pick_range(want, &start);
++	if (ret) {
++		snprintf(ccram_fail_reason, sizeof(ccram_fail_reason),
++			 "no suitable range for %llu bytes (ret %d)",
++			 (unsigned long long)want, ret);
++		goto fail;
++	}
++	memblock_remove(start, want);
++#ifdef CONFIG_X86_64
++	/*
++	 * The buddy is not the only consumer of the firmware map:
++	 * e820__reserve_resources() (later in setup_arch) builds BUSY
++	 * "System RAM" iomem resources straight from e820, and a BUSY
++	 * entry over our window would make the later "System RAM (ccram)"
++	 * request fail with -EEXIST.  Retype the window to RESERVED (a
++	 * driver-memory type that stays non-busy for exclusive driver
++	 * use, same as persistent memory).  Must convert the full
++	 * window or refuse: a partial update would leave the map and
++	 * memblock disagreeing about what is RAM.
++	 */
++	if (e820__range_update(start, want, E820_TYPE_RAM,
++			       E820_TYPE_RESERVED) != want) {
++		snprintf(ccram_fail_reason, sizeof(ccram_fail_reason),
++			 "e820 window not fully RAM");
++		goto fail;
++	}
++#endif
++	ccram_start = start;
++	ccram_size = want;
++	ccram_carved = true;
++	end = start + want - 1;
++	pr_info("ccram: carved [%pa-%pa] (%llu bytes); hidden from buddy, never boot-mapped\n",
++		&start, &end, (unsigned long long)want);
++	return;
++fail:
++	ccram_failed = true;
++	pr_err("ccram: disabled: %s\n", ccram_fail_reason);
++}
+-- 
+2.55.0
+

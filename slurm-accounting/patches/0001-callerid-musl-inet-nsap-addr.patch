@@ -1,0 +1,60 @@
+--- a/src/common/callerid.c
++++ b/src/common/callerid.c
+@@ -84,6 +84,45 @@
+ 
+ strong_alias(callerid_get_own_netinfo, slurm_callerid_get_own_netinfo);
+ 
++/*
++ * musl libc omits the legacy BSD inet_nsap_addr() API. Slurm uses it
++ * here only to parse plain-hex /proc/net/tcp{,6} address fields into
++ * binary, ignoring its return value, so provide a static equivalent
++ * with identical behavior on that input domain (glibc's dotted-NSAP
++ * forms cannot occur: the sscanf above only captures [0-9A-Z]).
++ * Saphira/musl port patch.
++ */
++static unsigned int
++slurm_inet_nsap_addr(const char *cp, unsigned char *buf, int len)
++{
++	unsigned int bytes = 0;
++	int hi, lo;
++
++	while (*cp != '\0' && bytes < (unsigned int)len) {
++		if (*cp >= '0' && *cp <= '9')
++			hi = *cp - '0';
++		else if (*cp >= 'a' && *cp <= 'f')
++			hi = *cp - 'a' + 10;
++		else if (*cp >= 'A' && *cp <= 'F')
++			hi = *cp - 'A' + 10;
++		else
++			break;
++		cp++;
++		if (*cp >= '0' && *cp <= '9')
++			lo = *cp - '0';
++		else if (*cp >= 'a' && *cp <= 'f')
++			lo = *cp - 'a' + 10;
++		else if (*cp >= 'A' && *cp <= 'F')
++			lo = *cp - 'A' + 10;
++		else
++			break;
++		cp++;
++		buf[bytes++] = (unsigned char)((hi << 4) | lo);
++	}
++	return bytes;
++}
++
++
+ static int _match_inode(callerid_conn_t *conn_result, ino_t *inode_search,
+ 		callerid_conn_t *conn_row, ino_t inode_row, int af)
+ {
+@@ -166,9 +205,9 @@
+ 			continue;
+ 
+ 		/* Convert to usable forms */
+-		inet_nsap_addr(ip_dst_str, (unsigned char*)&conn_row.ip_dst,
++		slurm_inet_nsap_addr(ip_dst_str, (unsigned char*)&conn_row.ip_dst,
+ 				addrbytes);
+-		inet_nsap_addr(ip_src_str, (unsigned char*)&conn_row.ip_src,
++		slurm_inet_nsap_addr(ip_src_str, (unsigned char*)&conn_row.ip_src,
+ 				addrbytes);
+ 
+ 		/* Convert to network byte order. */

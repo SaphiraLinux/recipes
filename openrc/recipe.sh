@@ -2,7 +2,13 @@
 
 pkgname=openrc
 pkgver=0.62.1
-pkgrel=2
+pkgrel=3
+# r3: own /etc/inittab (moved out of saphira-baselayout, which wrongly
+# shipped this OpenRC sysvinit table on every host including systemd
+# machines). Byte-identical stock content; apk ownership semantics govern
+# both switch directions with no transition hooks: removing openrc
+# removes the stock file, a locally modified one follows native conffile
+# handling, and systemd systems never see it. Payload change.
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="OpenRC init system: dependency-based service management"
 license="BSD-2-Clause"
@@ -42,6 +48,11 @@ recipe_install()
 	# Saphira platform boot services, moved out of the init-neutral
 	# baselayout so removing this package removes every OpenRC trace.
 	install -d -m 0755 "$PKGDEST/etc/init.d" "$PKGDEST/etc/conf.d"
+	# The sysvinit table belongs to OpenRC (PID 1 selection), not the
+	# init-neutral baselayout: installing openrc provides it, removing
+	# openrc removes the stock file via apk ownership. Byte-identical
+	# to the former baselayout copy; never modified, never symlinked.
+	install -m 0644 "$RECIPE_DIR/files/inittab" "$PKGDEST/etc/inittab"
 	install -m 0755 "$RECIPE_DIR/files/openrc-boot/saphira-boot-ok" \
 		"$PKGDEST/etc/init.d/saphira-boot-ok"
 	install -m 0755 "$RECIPE_DIR/files/openrc-boot/net-online" \

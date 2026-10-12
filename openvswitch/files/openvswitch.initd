@@ -9,6 +9,11 @@ depend()
 	before net
 }
 
+start_pre()
+{
+	checkpath -d -o root:root -m 0755 /var/run/openvswitch
+}
+
 start()
 {
 	ebegin "Starting Open vSwitch"

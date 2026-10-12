@@ -20,6 +20,16 @@ die()
 	exit 1
 }
 
+# Saphira tool scratch lives under SAPHIRA_TMPDIR, never host /tmp.
+# RECIPE_RULES.md: "Host /tmp is never Saphira scratch: not for archives,
+# not for work, not for tests. Tool and test scratch lives under
+# SAPHIRA_TMPDIR (/build/tmp default)". /tmp is wiped on reboot, shared,
+# and invisible; on a live system it is also a small tmpfs.
+saphira_tmpdir()
+{
+	printf '%s\n' "${SAPHIRA_TMPDIR:-/build/tmp}"
+}
+
 test $# -eq 2 || usage
 target=$1
 profile=$2
@@ -97,6 +107,29 @@ if test -d "$accounts_dir"; then
 	fi
 fi
 
+# 3c. sysusers.d identities, replayed offline.
+#
+# A package whose accounts.d fragment carries the `sysusers' stanza
+# declares that its identities come from the sysusers.d confs it ships.
+# On a live system its post-install script runs /usr/bin/systemd-sysusers
+# over those confs. Offline there is no running systemd and no
+# systemd-sysusers to run, so without this step a systemd-target profile
+# assembled with NO identities at all -- the packages installed fine, they
+# simply had no users.
+#
+# The reconciler does the work, not this script: one helper, one policy.
+# Duplicating sysusers.d parsing here is exactly the divergence that caused
+# the original defect (ensure-identity.sh had no `sysusers' case at all,
+# so the loop above died on a systemd profile and a virtualisation-host
+# image could not be assembled).
+sysusers_dir=$target/usr/lib/sysusers.d
+if test -d "$sysusers_dir" && ls "$sysusers_dir"/*.conf >/dev/null 2>&1; then
+	SAPHIRA_ENSURE_ROOT="$target" \
+		"$target/usr/libexec/saphira/ensure-identity.sh" \
+		--sysusers-d "$sysusers_dir" ||
+		die 'package sysusers.d identity replay failed'
+fi
+
 # 4. CA bundle inside the target (mirrors the builder root-init).
 "$chroot_command" "$target" /usr/sbin/update-ca-certificates ||
 	die 'update-ca-certificates failed'
@@ -121,7 +154,7 @@ fi
 # come from the packages, the selection comes from the profile.
 services_file=$profile_root/$profile.services
 if test -f "$services_file"; then
-	units=$(mktemp /tmp/saphira-assemble.units.XXXXXX) ||
+	units=$(mktemp "$(saphira_tmpdir)/saphira-assemble.units.XXXXXX") ||
 		die 'cannot create units workspace'
 	trap 'rm -f -- "$units"' EXIT HUP INT TERM
 	while IFS= read -r entry || test -n "$entry"; do

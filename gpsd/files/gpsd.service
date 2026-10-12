@@ -1,0 +1,47 @@
+[Unit]
+Description=GPS daemon (gpsd)
+Documentation=man:gpsd(8)
+# gpsd reads /dev/gps0, which is a udev-created symlink, so it must not
+# race device discovery. Ordering after udev settle is what makes the
+# device path valid; a plain After=network.target does not.
+After=network.target systemd-udev-settle.service
+Wants=network.target
+
+[Service]
+# Mirrors files/gpsd.initd exactly. -N keeps gpsd in the foreground, so
+# Type=simple and there is no PIDFile to track.
+#
+# $OPTIONS and $DEVICES expand from /etc/conf.d/gpsd, the same names
+# gpsd.hotplug honors, and the init script substitutes them the same way.
+# Without the EnvironmentFile the ExecStart line would expand them empty
+# and gpsd would start with no device at all.
+EnvironmentFile=-/etc/conf.d/gpsd
+Type=simple
+ExecStart=/usr/sbin/gpsd -N -n $OPTIONS $DEVICES
+RuntimeDirectory=gpsd
+# GPS devices vanish on USB re-plug, so a lost daemon must come back.
+Restart=on-failure
+RestartSec=2
+
+# Hardening chosen for what gpsd actually does: it opens character
+# devices and creates its own socket directory.
+#
+# Deliberately NOT set: PrivateDevices. The entire purpose of this
+# daemon is to read /dev/gps*, /dev/ttyACM* and /dev/ttyUSB*, and
+# PrivateDevices=yes would hide every one of them.
+#
+# Deliberately NOT set: User=. The init script's comment says gpsd
+# "opens its devices as root and then drops to nobody by itself", but the
+# same command line passes -n, which is gpsd's do-not-drop-privileges
+# flag. The two claims contradict each other and the -n flag is the one
+# in the command line, so this unit starts it as root exactly as the
+# init script does rather than guessing. Resolving it needs a gpsd(8)
+# reading, not a systemd unit.
+
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=full
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

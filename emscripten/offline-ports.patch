@@ -4,7 +4,7 @@
      fullpath = fullname + '.' + ext
  
      def retrieve():
-+      utils.exit_with_error(f'port {name} is unavailable under the Akadata offline ports policy')
++      utils.exit_with_error(f'port {name} is unavailable under the Saphira offline ports policy')
        # retrieve from remote server
        logger.info(f'retrieving port: {name} from {url}')
  

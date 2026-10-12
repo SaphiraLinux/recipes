@@ -1,0 +1,42 @@
+[Unit]
+Description=LLDP daemon (link-layer discovery)
+Documentation=man:lldpd(8)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Mirrors files/lldpd.initd.
+#
+# Deliberately NOT set: User=. lldpd performs its own privilege
+# separation: the master starts as root, opens the raw sockets that need
+# CAP_NET_ADMIN and CAP_NET_RAW, then drops workers to _lldpd:147. Setting
+# User=_lldpd here would remove the privileges the master needs before it
+# can drop them, and lldpd expects to start privileged. This mirrors the
+# existing hostapd@.service precedent.
+#
+# The capabilities are therefore granted explicitly rather than left
+# implicit in a root process.
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+Type=simple
+# -d keeps the master in the foreground, so Type=simple and there is no
+# pidfile to track.
+ExecStart=/usr/sbin/lldpd -d
+# /run/lldpd is declared by files/accounts.d/lldpd; keep its mode.
+RuntimeDirectory=lldpd
+RuntimeDirectoryMode=0755
+Restart=on-failure
+RestartSec=2
+
+# Deliberately NOT set: ProtectSystem=strict (the master chroots and
+# writes inside /run/lldpd) or ProtectHome=read-only (some deployments
+# read description files from home directories).
+#
+# LLDP is a link-layer protocol, so AF_PACKET is required and is the
+# reason RestrictAddressFamilies includes it.
+NoNewPrivileges=yes
+ReadOnlyPaths=/etc/lldpd.conf /etc/lldpd.d
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_PACKET
+
+[Install]
+WantedBy=multi-user.target

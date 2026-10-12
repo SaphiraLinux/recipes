@@ -9,8 +9,8 @@ origin=util-linux
 repo=saphira
 url=https://github.com/util-linux/util-linux
 util_linux_sha256=be9ad9a276f4305ab7dd2f5225c8be1ff54352f565ff4dede9628c1aaa7dec57
-depends="zlib ncurses"
-makedepends="bison flex gcc gettext libxcrypt-dev saphira-kernel-headers meson ninja pkgconf zlib-dev ncurses-dev"
+depends="ncurses readline zlib"
+makedepends="bison flex gcc gettext libxcrypt-dev readline-dev saphira-kernel-headers meson ninja pkgconf zlib-dev ncurses-dev"
 subpackages="$pkgname-dev $pkgname-doc"
 recipe_build()
 {
@@ -28,7 +28,17 @@ recipe_build()
 		-Dlibutil=disabled \
 		-Dlibuser=disabled \
 		-Dlibutempter=disabled \
-		-Dreadline=disabled \
+		# readline is NOT optional here, and disabling it silently deletes
+		# two tools the pkgdesc advertises. In util-linux 2.41.1
+		# lib_readline = dependency('readline', required:
+		# get_option('readline')), so `-Dreadline=disabled` makes that a
+		# meson DISABLER, and meson silently skips every target that
+		# depends on a disabler. The only four such targets are fdisk,
+		# fdisk.static, sfdisk and sfdisk.static -- so fdisk and sfdisk
+		# were NOT BUILT AT ALL, and the `[ -e ]' guards in
+		# recipe_install hid the absence. saphira-image hard-requires
+		# sfdisk, so image creation could not have worked.
+		-Dreadline=enabled \
 		-Dbuild-python=disabled \
 	-Dbuild-plymouth-support=disabled \
 	-Dbuild-python=disabled \
@@ -68,6 +78,19 @@ recipe_install()
 	done
 	for tool in $sbin_tools; do
 		[ -e "$PKGDEST/usr/sbin/$tool" ] && mv "$PKGDEST/usr/sbin/$tool" "$PKGDEST/sbin/$tool"
+	done
+	# The fdisk family is a declared capability, not a hope. These four
+	# were silently absent because -Dreadline=disabled turned lib_readline
+	# into a meson disabler and meson skips disabler-dependent targets
+	# without a word. Refuse the build rather than publish a package whose
+	# pkgdesc lies, because saphira-image partitions disks with sfdisk and
+	# an image without it is unbuildable.
+	for tool in fdisk sfdisk; do
+		[ -x "$PKGDEST/sbin/$tool" ] || {
+			echo "ERROR: util-linux payload is missing /sbin/$tool" >&2
+			echo "       (fdisk/sfdisk depend on lib_readline; check -Dreadline)" >&2
+			return 1
+		}
 	done
 	# Match the proven r0 modes: upstream meson ships mount/umount
 	# setuid 4755 and wall setgid-tty 2755; Saphira's r0 shipped plain

@@ -5,7 +5,12 @@
 
 pkgname=mariadb-server
 pkgver=11.8.8
-pkgrel=3
+pkgrel=5
+# (r3 /var/run + tmpfiles.d + fhs.d runtime migration adopted from
+# hotfix/var-packaging-bug-var-run-isnot-run.)
+# r5: merge line (r4 non-usrmerged unit paths + r3 runtime migration
+# combined; merged payload differs from both parents). Payload
+# change, bumps.
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="MariaDB database server"
 license="GPL-2.0-or-later"
@@ -18,6 +23,7 @@ sha256=bd023a4959faf012db7f0ebfc0d276729e67e5443df193163f98d80fdfc524c9
 depends="
     libaio
     mariadb
+    saphira-base-accounts
 "
 
 makedepends="

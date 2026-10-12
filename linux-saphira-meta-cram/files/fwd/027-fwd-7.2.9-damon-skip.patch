@@ -1,0 +1,56 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Saphira forward-port <builder@saphira.vm2.uk>
+Date: Thu, 9 Oct 2026 12:00:00 +0000
+Subject: [FWD 7.2.9] mm/damon: skip private node memory
+
+Fwd-port of upstream ("mm/damon: skip private node memory in DAMON
+migration and pageout", Gregory Price, series position 027) onto Linux
+7.2.9.
+
+Why needed: 7.2.9 DAMON evolved (node_stat_add_folio accounting in
+the migrate path and shifted surroundings); only the migrate hunk
+needed context refresh, keeping the guard in the same position
+(after filter accounting, before LRU isolation). Include + pageout
+hunks verbatim upstream.
+
+Byte-identical upstream patch retained in series/ (recorded SKIP-FWD).
+Verifies with git apply --check (no fuzz).
+
+Signed-off-by: Saphira builder <builder@saphira.vm2.uk>
+---
+diff --git a/mm/damon/paddr.c b/mm/damon/paddr.c
+index b3507b1f6..8b0599508 100644
+--- a/mm/damon/paddr.c
++++ b/mm/damon/paddr.c
+@@ -12,6 +12,7 @@
+ #include <linux/swap.h>
+ #include <linux/memory-tiers.h>
+ #include <linux/mm_inline.h>
++#include <linux/node_private.h>
+ 
+ #include "../internal.h"
+ #include "ops-common.h"
+@@ -242,6 +243,10 @@ static unsigned long damon_pa_pageout(struct damon_region *r,
+ 			continue;
+ 		}
+ 
++		/* private node memory is not reclaimable by default */
++		if (folio_is_private_node(folio))
++			goto put_folio;
++
+ 		if (damos_pa_filter_out(s, folio))
+ 			goto put_folio;
+ 		else
+@@ -336,6 +341,10 @@ static unsigned long damon_pa_migrate(struct damon_region *r,
+ 		else
+ 			*sz_filter_passed += folio_size(folio) / addr_unit;
+ 
++		/* private nodes do not support migration by default */
++		if (folio_is_private_node(folio))
++			goto put_folio;
++
+ 		if (!folio_isolate_lru(folio))
+ 			goto put_folio;
+ 		node_stat_add_folio(folio, NR_ISOLATED_ANON +
+--
+2.55.0

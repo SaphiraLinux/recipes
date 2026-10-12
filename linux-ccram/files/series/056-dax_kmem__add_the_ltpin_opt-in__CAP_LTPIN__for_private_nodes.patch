@@ -1,0 +1,39 @@
+From 2200bbdcfdc0afcbaac3a0443e8eab9fc930b849 Mon Sep 17 00:00:00 2001
+From: Gregory Price <gourry@gourry.net>
+Date: Fri, 19 Jun 2026 18:54:03 -0700
+Subject: [PATCH] dax/kmem: add the ltpin opt-in (CAP_LTPIN) for private nodes
+
+Add "ltpin" opt-in setting for NODE_PRIVATE_CAP_LTPIN so long-term GUP
+pins (FOLL_LONGTERM) may target the node's folios.
+
+Long-term pins block migration and hot-unplug indefinitely, so they are
+refused on a private node unless it explicitly opts in.
+
+Signed-off-by: Gregory Price <gourry@gourry.net>
+---
+ drivers/dax/kmem.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/drivers/dax/kmem.c b/drivers/dax/kmem.c
+index 1cb3384c003..c33dac5939e 100644
+--- a/drivers/dax/kmem.c
++++ b/drivers/dax/kmem.c
+@@ -633,6 +633,7 @@ KMEM_PRIVATE_CAP_ATTR(user_numa, NODE_PRIVATE_CAP_USER_NUMA);
+ KMEM_PRIVATE_CAP_ATTR(hotunplug, NODE_PRIVATE_CAP_HOTUNPLUG);
+ KMEM_PRIVATE_CAP_ATTR(demotion, NODE_PRIVATE_CAP_DEMOTION);
+ KMEM_PRIVATE_CAP_ATTR(numa_balancing, NODE_PRIVATE_CAP_NUMA_BALANCING);
++KMEM_PRIVATE_CAP_ATTR(ltpin, NODE_PRIVATE_CAP_LTPIN);
+ 
+ /* Per-service opt-ins. Visibility toggled by 'private' control */
+ static struct attribute *dax_kmem_private_attrs[] = {
+@@ -641,6 +642,7 @@ static struct attribute *dax_kmem_private_attrs[] = {
+ 	&dev_attr_hotunplug.attr,
+ 	&dev_attr_demotion.attr,
+ 	&dev_attr_numa_balancing.attr,
++	&dev_attr_ltpin.attr,
+ 	NULL,
+ };
+ static const struct attribute_group dax_kmem_private_group = {
+-- 
+2.55.0
+

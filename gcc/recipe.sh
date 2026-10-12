@@ -2,7 +2,7 @@
 
 pkgname=gcc
 pkgver=${SAPHIRA_GCC_VERSION:-16.2.0}
-pkgrel=8
+pkgrel=9
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="GNU Compiler Collection ${pkgver} (C, C++, Fortran, ObjC/ObjC++, Modula-2, LTO; AKADATA branch-cost policy)"
 license='GPL-3.0-or-later WITH GCC Runtime Library Exception'
@@ -47,16 +47,21 @@ esac
 # branch misprediction cost COSTS_N_INSNS (2) -> (2) + 3) - verified
 # against this source; do not silently drop it on upgrades.
 depends="gcc-libs gmp mpfr mpc isl zlib zstd binutils"
-# gcc-dev kept until the live toolchain is r8+: r8 is the first revision
-# with headers in main, so building it still needs the r7 -dev headers
-# installed. Drop that line once r8+ is live.
+# gcc-dev is NOT a makedepends entry. r8 is the first revision with headers
+# in main, so the r8 bootstrap in makedepends already provides them; and r8
+# declares replaces="gcc-dev", so apk refuses to install the pair at all:
+#
+#   ERROR: unable to select packages:
+#     gcc-16.2.0-r8:
+#       breaks: gcc-dev-16.2.0-r7[gcc=16.2.0-r7]
+#
+# That is not a closure to trim, it is a build that cannot start.
 makedepends="
 	bison
 	binutils
 	flex
 	gawk
 	gcc
-	gcc-dev
 	gcc-libs
 	gmp-dev
 	isl-dev

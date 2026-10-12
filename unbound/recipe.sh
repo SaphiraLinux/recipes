@@ -30,4 +30,30 @@ recipe_build() {
 }
 recipe_install() {
 	make -C "$SRC" DESTDIR="$PKGDEST" install
+	# Service identity. --with-username=unbound above makes unbound(8)
+	# drop to this user; without the fragment the identity was unowned,
+	# so the configure flag proved an account the package never declared.
+	install -D -m 0644 "$RECIPE_DIR/files/accounts.d/unbound" \
+		"$PKGDEST/usr/share/saphira/accounts.d/unbound"
+	install -d -m 0755 "$PKGDEST/var/lib/unbound"
+	# Dual-init policy: both definitions ship unconditionally; neither is
+	# enabled or started at install.
+	install -D -m 0755 "$RECIPE_DIR/files/unbound.initd" \
+		"$PKGDEST/etc/init.d/unbound"
+	install -D -m 0644 "$RECIPE_DIR/files/unbound.service" \
+		"$PKGDEST/usr/lib/systemd/system/unbound.service"
+	for p in etc/init.d/unbound usr/lib/systemd/system/unbound.service \
+		usr/share/saphira/accounts.d/unbound; do
+		[ -e "$PKGDEST/$p" ] || {
+			echo "ERROR: unbound payload is missing $p" >&2
+			return 1
+		}
+	done
+	# --with-username=unbound and the fragment must name the same user,
+	# or the daemon drops to an account this package does not own.
+	grep -q -- '--with-username=unbound' "$RECIPE_DIR/recipe.sh" || {
+		echo "ERROR: unbound no longer configures --with-username=unbound" >&2
+		return 1
+	}
+
 }

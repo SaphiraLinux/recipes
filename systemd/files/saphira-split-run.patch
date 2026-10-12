@@ -160,7 +160,7 @@ removes /var/run -> /run transformations, never /run itself.
  
 --- a/tmpfiles.d/var.conf.in	2026-09-17 02:34:55.632959833 +0000
 +++ b/tmpfiles.d/var.conf.in	2026-09-17 02:35:03.011990786 +0000
-@@ -9,7 +9,8 @@
+@@ -10,7 +10,8 @@
  
  q /var 0755 - - -
  
@@ -168,5 +168,5 @@ removes /var/run -> /run transformations, never /run itself.
 +# Saphira split-/run layout: /var/run is a real directory shipped
 +# by saphira-baselayout, never an alias. No L line here.
  
- d /var/log 0755 - - -
+ d /var/log {{VAR_LOG_MODE}} - - -
  {% if ENABLE_UTMP %}

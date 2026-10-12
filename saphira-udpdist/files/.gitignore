@@ -1,0 +1,7 @@
+/src/udpdist
+/src/udp-send
+/src/udp-sink
+/src/*.o
+/tests/regress.sh.out
+__pycache__/
+*.pyc

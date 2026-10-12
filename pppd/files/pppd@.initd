@@ -1,0 +1,22 @@
+#!/sbin/openrc-run
+
+description="PPP link daemon for <peername>"
+
+# pppd is per-link, not per-host: one instance per peer, each holding a
+# PPP session over a serial line, PPPoE, or a tunnel. A plain
+# multi-user service would be wrong, so this is an instance script and
+# the unit is a template. The network layer (saphira-network, ip-up, or
+# an operator) starts the link that matters.
+#
+# pppd forks after the link comes up, so the PID file is per-interface
+# and cannot be known before then. That is why this is command_background
+# with a globbed pidfile rather than a fixed one.
+command="/usr/sbin/pppd"
+command_args="/etc/ppp/peers/${peername}"
+
+depend()
+{
+	need localmount
+	use net
+	after bootmisc
+}

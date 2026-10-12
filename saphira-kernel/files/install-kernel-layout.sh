@@ -69,6 +69,12 @@ install_prepared_tree()
 	rm -f "$dest/vmlinux" "$dest/vmlinux.o" "$dest/System.map" \
 		"$dest/modules.order" "$dest/modules.builtin" \
 		"$dest/modules.builtin.modinfo" "$dest/.config.old"
+	# link-vmlinux.sh scratch, left behind at the top of the build tree.
+	# The kernel build removes most of these itself, but the BTF
+	# id-resolution step leaves .tmp_vmlinux1.BTF_ids behind, and nothing
+	# pruned it: the prepared tree shipped it. A .tmp_* file is a build
+	# intermediate by name and by nature, so the whole family goes.
+	find "$dest" -maxdepth 1 -name '.tmp_vmlinux*' -delete
 	find "$dest" \( -name '*.orig' -o -name '*.rej' -o -name '*~' \) -delete
 	# Key material: the module signing private key is build-time only
 	# and must never ship (public regdb certs stay - transparency).
@@ -107,35 +113,47 @@ install_module_build_link()
 # symlink anywhere under ROOT pointing into /build.
 check_module_layout()
 {
-	[ "$#" -eq 4 ] || { kl_die "usage: check_module_layout ROOT KREL TREENAME EXPECTED_RELEASE"; return 1; }
+	# A RUNTIME kernel package: module tree present and self-consistent,
+	# and NO build tooling and NO build source.
+	#
+	# This used to verify the opposite. It required
+	# lib/modules/<rel>/build -> /usr/src/<tree> and walked that tree,
+	# checking Makefile, .config, Module.symvers, the generated UAPI
+	# syscall header, modpost and sign-file. Those assertions are what
+	# REQUIRED the prepared tree to be shipped: d2e581d added
+	# install_prepared_tree to satisfy them, which put 1648 MiB and
+	# 77,655 files of kernel source into a runtime APK.
+	#
+	# The gate is now inverted. A runtime package must not carry a build
+	# tree at all, so that is asserted rather than assumed -- silently
+	# shipping one again is exactly the regression this guards.
+	[ "$#" -eq 3 ] || { kl_die "usage: check_module_layout ROOT KREL EXPECTED_RELEASE"; return 1; }
 	root=$1
 	krel=$2
-	tree=$3
-	expected=$4
-	link=$root/lib/modules/$krel/build
-	[ -L "$link" ] || { kl_die "$link is not a symlink"; return 1; }
-	target=$(readlink "$link")
-	[ "$target" = "/usr/src/$tree" ] || { kl_die "$link -> $target (want /usr/src/$tree)"; return 1; }
-	# Absolute installed targets resolve under the verified root, so
-	# the same check validates a staged PKGDEST (root=$PKGDEST) and a
-	# live system (root=/).
-	case $target in
-		/*) resolved=${root%/}$target ;;
-		*) resolved=$(readlink -f "$link") ;;
-	esac
-	[ -d "$resolved" ] || { kl_die "$link resolves outside the tree: $resolved"; return 1; }
-	[ ! -L "$root/lib/modules/$krel/source" ] || { kl_die "$root/lib/modules/$krel/source must not exist"; return 1; }
-	got=$(make -s -C "$resolved" kernelrelease) || { kl_die "kernelrelease failed in $resolved"; return 1; }
-	[ "$got" = "$expected" ] || { kl_die "kernelrelease $got (want $expected)"; return 1; }
-	for artifact in Makefile .config Module.symvers \
-		include/generated/autoconf.h arch/x86/include/generated/asm/unistd_64.h; do
-		[ -f "$resolved/$artifact" ] || { kl_die "prepared-tree artifact missing: $artifact"; return 1; }
+	expected=$3
+	moddir=$root/lib/modules/$krel
+	[ -d "$moddir" ] || { kl_die "module directory missing: $moddir"; return 1; }
+	# A runtime rootfs has no build tree and no build pointer. Reject
+	# both, including a dangling link: shipping a link that can only dangle
+	# helps nobody and misleads whoever debugs the next thing.
+	[ ! -e "$root/usr/src" ] || { kl_die "runtime kernel must not ship /usr/src: found $root/usr/src"; return 1; }
+	for link in build source; do
+		[ ! -e "$moddir/$link" ] && [ ! -L "$moddir/$link" ] || {
+			kl_die "runtime kernel must not ship lib/modules/$krel/$link"
+			return 1
+		}
 	done
-	for tool in scripts/mod/modpost scripts/sign-file; do
-		[ -x "$resolved/$tool" ] || { kl_die "prepared-tree tool missing or not built: $tool"; return 1; }
+	# Nothing anywhere in the package may point at a build tree.
+	leaks=$(find "$root" -lname '/usr/src/*' -o -lname '/build/*' 2>/dev/null)
+	[ -z "$leaks" ] || { kl_die "runtime kernel ships build-tree pointers:${leaks}"; return 1; }
+	# Module metadata depmod produced must exist and cover the tree.
+	for meta in modules.dep modules.softdep modules.alias modules.order; do
+		[ -s "$moddir/$meta" ] || { kl_die "module metadata missing or empty: $moddir/$meta"; return 1; }
 	done
-	[ ! -e "$resolved/certs/module-signing.pem" ] || { kl_die "signing key leaked into $resolved/certs"; return 1; }
-	leaks=$(find "$root" -lname '/build/*' 2>/dev/null)
-	[ -z "$leaks" ] || { kl_die "installed symlinks point into /build:${leaks}"; return 1; }
-	printf 'kernel-layout: %s OK (build -> %s, release %s)\n' "$link" "$target" "$got"
+	nko=$(find "$moddir" -name '*.ko' 2>/dev/null | wc -l)
+	[ "$nko" -gt 0 ] || { kl_die "no modules installed under $moddir"; return 1; }
+	# The release the tree claims must be the release the caller expects.
+	# modules.dep paths carry no release, so the directory name is the
+	# assertion; depmod already ran against this exact KREL above.
+	printf 'kernel-layout: %s OK (%s modules, runtime package, no build tree)\n' "$moddir" "$nko"
 }

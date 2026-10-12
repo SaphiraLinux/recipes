@@ -1,0 +1,64 @@
+From saphira@vm2.uk Thu Sep 17 00:00:00 2026
+Subject: [PATCH] Saphira unmerged identity: bus default follows split-/run
+
+Saphira is deliberately unmerged (real /bin, /sbin, /lib beside /usr/*)
+with /var/run split from /run. Two gaps remain after the split-/run
+patch, both stemming from upstream's merged-alias assumption:
+
+- src/libsystemd/sd-bus/bus-internal.h: DEFAULT_SYSTEM_BUS_ADDRESS is
+  hardcoded to /run/dbus/system_bus_socket with a comment stating the
+  alias requirement outright. The daemon side already binds
+  /var/run/dbus/system_bus_socket (derived from localstatedir), so
+  every default client (logind, systemctl, busctl) looks in the wrong
+  place and logind restart-loops at boot. Point the default at the
+  daemon's address, derived the same way.
+- src/core/taint.c: add an always-on "saphira-unmerged" taint entry so
+  the status line names whose layout this is, instead of showing only
+  upstream's merged-world diagnostics. The existing unmerged-usr and
+  unmerged-bin checks are left intact (truthful signals); the stage
+  array grows by one to hold the new entry.
+
+Applies after saphira-split-run.patch (taint hunk contexts assume the
+var-run removal); both orders were verified with --dry-run.
+
+--- a/src/core/taint.c
++++ b/src/core/taint.c
+@@ -33,7 +33,7 @@
+ }
+ 
+ char** taint_strv(void) {
+-        const char *stage[11] = {};
++        const char *stage[12] = {};
+         size_t n = 0;
+ 
+         /* Returns a "taint string", e.g. "local-hwclock:var-run-bad". Only things that are detected at
+@@ -41,6 +41,11 @@
+          * configuration phase. */
+ 
+         _cleanup_free_ char *bin = NULL, *usr_sbin = NULL;
++        /* Saphira identity: this build targets the deliberate unmerged
++         * layout (real /bin, /sbin, /lib beside /usr/*, split /var/run).
++         * This flag always fires: it declares build policy, not a runtime
++         * anomaly, so the status line names whose layout this is. */
++        stage[n++] = "saphira-unmerged";
+ 
+         if (readlink_malloc("/bin", &bin) < 0 || !PATH_IN_SET(bin, "usr/bin", "/usr/bin"))
+                 stage[n++] = "unmerged-usr";
+--- a/src/libsystemd/sd-bus/bus-internal.h
++++ b/src/libsystemd/sd-bus/bus-internal.h
+@@ -12,9 +12,12 @@
+ #include "runtime-scope.h"
+ #include "socket-util.h"
+ 
+-/* Note that we use the new /run prefix here (instead of /var/run) since we require them to be aliases and
+- * that way we become independent of /var being mounted */
+-#define DEFAULT_SYSTEM_BUS_ADDRESS "unix:path=/run/dbus/system_bus_socket"
++/* Saphira split-layout: the system bus daemon binds
++ * /var/run/dbus/system_bus_socket (derived from localstatedir, the same
++ * way the daemon side derives it). The upstream /run default assumes a
++ * merged alias that does not exist here; default clients (logind,
++ * systemctl, busctl) would otherwise look in the wrong place. */
++#define DEFAULT_SYSTEM_BUS_ADDRESS "unix:path=/var/run/dbus/system_bus_socket"
+ #define DEFAULT_USER_BUS_ADDRESS_FMT "unix:path=%s/bus"
+ 
+ /* Private vtable flag: dispatch the method handler on its own fiber, so it can use suspending

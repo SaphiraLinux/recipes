@@ -45,6 +45,42 @@ are privileged admin boundaries (sudo), alongside
 A new build machine needs no tree surgery: install the controller
 and tooling from the repository, clone the recipes, enable the
 daemon.
+.SS Enablement is host state, and that is the whole failure mode
+The package deliberately does NOT enable or start its own service.
+A shipped unit or init script is inert until an operator or an image
+profile enables it, and which init is live is never inferred at
+install time. So enablement is per-host state, not payload, and a
+controller that was started by hand and never enabled returns from a
+reboot with nothing running and no error: the queue database is
+intact, so every query still answers, which is exactly what makes the
+outage silent.
+.PP
+A controller expected to survive reboots belongs in the
+.B default
+runlevel:
+.PP
+.RS
+sudo rc-update add saphira-build default
+.br
+sudo rc-service saphira-build start
+.RE
+.PP
+After a reboot, check rather than assume:
+.PP
+.RS
+rc-update show default | grep saphira-build
+.br
+rc-service saphira-build status
+.RE
+.PP
+An empty
+.B rc-update show default
+alongside a populated
+.I /var/lib/saphira-build/queue.db
+means the queue is intact and idle. It is not evidence that builds are
+running, and it is not evidence that they are hung; the queue is a
+record of attempts, so it answers just as well when nothing has run
+for days.
 .SS Controller self-refresh (Egg only)
 The controller host rebuilds the builder with itself, so deploying
 controller fixes needs one explicit refresh: install the tree tools

@@ -7,6 +7,7 @@ Wants=network-pre.target
 
 [Service]
 Type=oneshot
+ExecStartPre=+/bin/install -d -o root -g root -m 0755 /var/run/openvswitch
 ExecStartPre=/bin/sh -c 'test -e /etc/openvswitch/conf.db || ovsdb-tool create /etc/openvswitch/conf.db'
 ExecStart=/usr/share/openvswitch/scripts/ovs-ctl --system-id=random start
 ExecStop=/usr/share/openvswitch/scripts/ovs-ctl stop

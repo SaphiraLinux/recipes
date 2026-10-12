@@ -1,6 +1,6 @@
 #!/sbin/openrc-run
 
-description="Verify that configured Akadata networking is online"
+description="Verify that configured Saphira networking is online"
 
 depend()
 {

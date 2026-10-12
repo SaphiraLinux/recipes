@@ -1,0 +1,923 @@
+#!/bin/sh
+#
+# saphira-image-creator: build a bootable Saphira disk image.
+#
+# Architecture, and why:
+#
+#   THIS TOOL OWERS:      the target matrix, the partition plan, the
+#                          bootloader invocation, init-system preparation,
+#                          and measurement.
+#   saphira-install OWNS:  the mounted-target installation.
+#   saphira-assemble-rootfs OWNS: the rootfs assembly and the identity
+#                          replay.
+#   APK METADATA OWNS:    the dependency closure.
+#
+# So there is ONE assembler and ONE package/dependency truth, and this
+# tool contributes only the things that genuinely differ between a BIOS
+# and a UEFI disk and between an OpenRC and a systemd target. It never
+# enumerates a resolved closure, never unpacks an APK, and never
+# reimplements what saphira-install already does.
+#
+# Init selection is an EXPLICIT operator choice (--init=openrc|systemd),
+# never a detection. Packages ship BOTH init definitions; the image
+# creator decides which set becomes active in the generated image. Nothing
+# here infers the active init from installed files, and nothing teaches
+# APK installation to guess.
+#
+# usage: saphira-image build --target TARGET --output IMAGE [options]
+#        saphira-image list-targets
+#        saphira-image plan --target TARGET [--size SIZE]
+#        saphira-image report --target TARGET [--role ROLE]...
+
+set -eu
+
+PROG=saphira-image
+
+usage()
+{
+	cat >&2 <<USAGE
+usage:
+  $PROG build --target TARGET --output IMAGE [options]
+  $PROG list-targets
+  $PROG plan --target TARGET [--size SIZE]
+  $PROG report --target TARGET [--role ROLE]...
+
+build options:
+  --target NAME       bios-openrc | bios-systemd | uefi-openrc | uefi-systemd
+  --output PATH       image path; .raw or .qcow2
+  --size SIZE         minimum image size (default 2G)
+  --repository PATH   repository index/Packages.adb to install from
+  --hostname NAME     hostname written into the image (default saphira)
+  --root-password PW  set the root password in the image
+  --role NAME         add a role layer; repeatable
+  --role-file PATH    add intentions from a file; repeatable
+  --no-enable         do not enable the target's services in the image
+  --keep-work         retain the scratch workspace for diagnosis
+
+plan options:
+  --size SIZE         minimum image size used to size the partitions
+
+Saphira tool scratch lives under SAPHIRA_TMPDIR, never host /tmp.
+USAGE
+	exit 2
+}
+
+die()
+{
+	printf '%s: %s\n' "$PROG" "$*" >&2
+	exit 1
+}
+
+saphira_tmpdir()
+{
+	printf '%s\n' "${SAPHIRA_TMPDIR:-/build/tmp}"
+}
+
+# --- the tool directory, so the canonical path is found first ----------
+bindir=$(dirname -- "$0") || die 'cannot locate tool directory'
+install_command=${SAPHIRA_INSTALL:-$bindir/saphira-install}
+chroot_command=${SAPHIRA_CHROOT:-$bindir/saphira-chroot}
+
+# The canonical-path tools are required for `build' ONLY. `plan',
+# `report' and `list-targets' are static: a partition plan must be
+# inspectable on a machine that cannot build an image, which is exactly
+# where you want to check one.
+require_canonical_path()
+{
+	[ -x "$install_command" ] ||
+		die "saphira-install not found or not executable: $install_command
+       saphira-image-creator orchestrates the canonical installer and will
+       not substitute its own. Install saphira-install-tools."
+	[ -x "$chroot_command" ] ||
+		die "saphira-chroot not found or not executable: $chroot_command
+       Install saphira-install-tools."
+}
+
+# The target matrix and the profiles are installed as DATA under
+# /usr/share/saphira/image, NOT next to the executable. The first draft
+# derived both from dirname $0, which is /usr/bin once installed, so it
+# looked for /usr/bin/targets and /usr/bin/profiles and the installed tool
+# died immediately on its very first check -- while every in-tree test
+# still passed, because in the recipe directory files/targets really is a
+# sibling of files/saphira-image. Source-tree layout is therefore detected
+# explicitly and the installed datadir is the fallback. Environment
+# overrides still win over both.
+datadir=${SAPHIRA_IMAGE_DATADIR:-/usr/share/saphira/image}
+if [ -f "$bindir/targets" ]; then
+	targets_dir=${SAPHIRA_IMAGE_TARGETS:-$bindir/targets}
+	profiles_dir=${SAPHIRA_IMAGE_PROFILES:-$bindir/profiles}
+	services_dir=${SAPHIRA_IMAGE_SERVICES:-$bindir/services.d}
+else
+	targets_dir=${SAPHIRA_IMAGE_TARGETS:-$datadir/targets}
+	profiles_dir=${SAPHIRA_IMAGE_PROFILES:-$datadir/profiles}
+	services_dir=${SAPHIRA_IMAGE_SERVICES:-$datadir/services.d}
+fi
+# services.d is OPTIONAL data. Absence is the normal case and means every
+# service is named after its package, which is true of almost all of them.
+# It is only consulted when present, so a source tree that has not created
+# it yet behaves exactly as before.
+[ -d "$services_dir" ] || services_dir=""
+[ -f "$targets_dir" ] || die "target matrix is missing: $targets_dir
+       Expected it at $datadir/targets. The saphira-image-creator package
+       installs the matrix and the profiles as data; if you are running
+       from a source tree, point SAPHIRA_IMAGE_TARGETS at files/targets."
+[ -d "$profiles_dir" ] || die "profile directory is missing: $profiles_dir
+       Expected it at $datadir/profiles."
+
+# --- target matrix ----------------------------------------------------
+
+target_field()
+{
+	# $1 target, $2 field number (2=boot 3=init 4=profile)
+	awk -v t="$1" -v f="$2" '
+		{ line = $0; sub(/#.*$/, "", line) }
+		line ~ /^[[:space:]]*$/ { next }
+		{ if ($1 == t) { print $f; exit } }
+	' "$targets_dir"
+}
+
+list_targets()
+{
+	printf '%-16s %-6s %-9s %s\n' TARGET BOOT INIT PROFILE
+	awk '
+		{ line = $0; sub(/#.*$/, "", line) }
+		line ~ /^[[:space:]]*$/ { next }
+		{ printf "%-16s %-6s %-9s %s\n", $1, $2, $3, $4 }
+	' "$targets_dir"
+}
+
+resolve_target()
+{
+	name=$1
+	boot=$(target_field "$name" 2)
+	init=$(target_field "$name" 3)
+	profile=$(target_field "$name" 4)
+	[ -n "$boot" ] || die "unknown target: $name (try: $PROG list-targets)"
+	# Fail closed on an invalid combination rather than guessing. A
+	# matrix row that names a boot or init this tool cannot produce is a
+	# bug, and guessing produces an image that boots nothing.
+	case $boot in bios | uefi) ;; *) die "target $name has an unsupported boot: $boot" ;; esac
+	case $init in openrc | systemd) ;; *) die "target $name has an unsupported init: $init" ;; esac
+	[ -f "$profiles_dir/$profile" ] ||
+		die "target $name names a profile that does not exist: $profiles_dir/$profile"
+	TARGET=$name
+	BOOT=$boot
+	INIT=$init
+	PROFILE=$profile
+}
+
+# --- partition plan ---------------------------------------------------
+#
+# The two plans are genuinely different, and neither is derived from the
+# other by arithmetic:
+#
+#   bios  GRUB's core.img must land in a gap it can find at boot, which
+#         on GPT means a dedicated bios-boot partition rather than the
+#         post-MBR gap a DOS layout would use. No ESP: a BIOS system has
+#         no firmware to read one.
+#
+#   uefi  The firmware reads a FAT EFI System Partition. BIOS
+#         partitioning rules are explicitly NOT reused: a bios-boot
+#         partition is meaningless to UEFI firmware and a missing ESP
+#         means the firmware finds no bootloader at all.
+#
+# Sizes: ESP is 512 MiB, which is generous for a GRUB EFI payload and
+# leaves room for a future kernel-on-ESP layout. Root takes the rest,
+# minus a 1 MiB alignment slack so the first partition starts on a 1 MiB
+# boundary as both BIOS and UEFI firmware prefer.
+
+size_bytes()
+{
+	# Accept K/M/G/T (and bare bytes). Deliberately strict: a typo in a
+	# size silently producing a tiny or enormous image is worse than a
+	# refusal.
+	case $1 in
+		*[!0-9KkMmGgTt]) die "invalid size: $1 (examples: 2G, 512M)" ;;
+	esac
+	unit=X
+	case $1 in *K | *k) unit=K ;; *M | *m) unit=M ;; *G | *g) unit=G ;; *T | *t) unit=T ;; esac
+	value=${1%[KkMmGgTt]}
+	[ -n "$value" ] || die "invalid size: $1"
+	case $value in *[!0-9]*) die "invalid size: $1" ;; esac
+	case $unit in
+		X) printf '%s' "$value" ;;
+		K) printf '%s' "$((value * 1024))" ;;
+		M) printf '%s' "$((value * 1024 * 1024))" ;;
+		G) printf '%s' "$((value * 1024 * 1024 * 1024))" ;;
+		T) printf '%s' "$((value * 1024 * 1024 * 1024 * 1024))" ;;
+	esac
+}
+
+partition_plan()
+{
+	# Emits an sfdisk script on stdout. Partition numbering is fixed:
+	# p1 is the boot partition for the chosen boot method, p2 is root.
+	total=$(size_bytes "$SIZE")
+	total_sectors=$((total / 512))
+	# The first partition starts at sector 2048 (1 MiB), not 0, so the
+	# usable budget is total_sectors MINUS that offset.
+	#
+	# Getting this wrong is silent and severe: the first draft computed
+	# root_sectors as (total-1MiB)/512 minus the boot partition, i.e. as
+	# if the partitions began at sector 0, and so OVERFLOWED the disk. At
+	# 512M the UEFI plan consumed 150% of the image; even BIOS ran to
+	# 100.4%. `plan' printed plausible numbers either way, which is
+	# precisely the "valid-looking while wrong" failure this whole
+	# exercise is about. The plan is now checked against the requested
+	# size before it is emitted.
+	first_sector=2048
+	# The tail matters as much as the head. GPT keeps its backup
+	# partition-entry array and header in the final 33 sectors, so the
+	# last usable sector is total_sectors-34, and sfdisk does NOT shrink an
+	# explicitly sized partition to fit: handed a size that runs past that
+	# boundary it fails outright with
+	#     "The last usable GPT sector is N, but M is requested"
+	#     "Failed to add #2 partition: Invalid argument"
+	# An earlier draft carried a comment asserting the opposite ("sfdisk
+	# places the backup GPT in the final 33 sectors and shrinks the last
+	# partition to accommodate it") and removed the tail-reserve rule as
+	# if it were the bug. That claim is false, and every default-size plan
+	# died at the first sfdisk call: 2G produced root ending at 4194303 of
+	# a 4194304-sector image, one sector past the 4194270 limit. Reserve
+	# 1M at the tail, matching the 1M alignment used at the head.
+	gpt_tail=2048
+	available=$((total_sectors - first_sector - gpt_tail))
+	[ "$available" -ge 65536 ] ||
+		die "size $SIZE is too small: a bootable image needs at least 32M after the 1M alignment gap and 1M GPT tail reserve"
+
+	case $BOOT in
+	bios)
+		# 1 MiB bios-boot for core.img, then the rest as root.
+		bios_boot=2048
+		root_sectors=$(( available - bios_boot ))
+		[ "$root_sectors" -ge 65536 ] ||
+			die "size $SIZE is too small for a bios-boot partition and a usable root"
+		cat <<PLAN
+label: gpt
+# BIOS: GRUB core.img lives in a dedicated bios-boot partition, not in the
+# post-MBR gap. That is what a GPT layout requires; a DOS layout would put
+# it in the gap and a GPT one would not. No ESP: there is no firmware here
+# to read one.
+start=$first_sector, size=$bios_boot, type=21686148-6449-6E6F-744E-656564454649, name="bios-boot"
+start=$((first_sector + bios_boot)), size=$root_sectors, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name="root"
+PLAN
+		;;
+	uefi)
+		esp=524288   # 512 MiB in 512-byte sectors
+		root_sectors=$(( available - esp ))
+		[ "$root_sectors" -ge 65536 ] ||
+			die "size $SIZE is too small: a 512M ESP leaves no usable root"
+			cat <<PLAN
+label: gpt
+# UEFI: a FAT EFI System Partition the firmware can actually read. BIOS
+# rules are deliberately NOT reused here -- a bios-boot partition means
+# nothing to UEFI firmware, and without a real ESP the firmware finds no
+# bootloader at all.
+start=$first_sector, size=$esp, type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B, name="esp"
+start=$((first_sector + esp)), size=$root_sectors, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name="root"
+PLAN
+		;;
+	esac | assert_plan_fits "$total_sectors" "$first_sector"
+}
+
+# Refuse to emit a plan that does not fit the requested image. The first
+# draft overflowed silently at small sizes, and a plan is exactly the thing
+# an operator inspects before committing to a build, so it must be the one
+# place that is provably correct.
+assert_plan_fits()
+{
+	total_sectors=$1
+	first_sector=$2
+	# GPT's backup partition-entry array (32 sectors) plus backup header
+	# (1 sector) occupy the tail, so the last usable sector is 34 short of
+	# the end. Derived here rather than passed in because this function
+	# runs in a pipeline subshell and cannot see the caller's locals.
+	gpt_usable_last=$((total_sectors - 34))
+	consumed=0
+	# Buffer the whole plan and re-emit it. An earlier version validated
+	# straight off stdin and printed nothing, so every `plan' invocation
+	# returned only its header -- a validator that eats its own input is
+	# worse than no validator.
+	buffer=$PLAN_BUFFER
+	: > "$buffer"
+	while IFS= read -r line; do
+		printf '%s\n' "$line" >> "$buffer"
+		case $line in
+			start=*) ;;
+			*) continue ;;
+		esac
+		# sfdisk writes "start=N, size=N, ..." with a space after each
+		# comma, so the size field must have leading whitespace stripped
+		# before the "size=" prefix can be removed. Without that,
+		# ${rest#size=} does not match and the field kept its " size="
+		# prefix, which is not numeric, and every plan was rejected.
+		start=${line#start=}
+		start=${start%%,*}
+		rest=${line#*,}
+		# shellcheck disable=SC2086
+		set -- $rest
+		size=
+		for field in $rest; do
+			case $field in
+			size=*) size=${field#size=}; break ;;
+			esac
+		done
+		size=${size%%,*}
+		case $start$size in
+			'' | *[!0-9]*) die "internal: unparseable partition line: $line" ;;
+		esac
+		end=$((start + size))
+		[ "$end" -le "$total_sectors" ] ||
+			die "internal: partition plan overflows the image (ends at sector $end of $total_sectors)"
+		[ "$end" -gt "$consumed" ] && consumed=$end
+	done
+	[ "$consumed" -le "$total_sectors" ] ||
+		die "internal: partition plan overflows the image ($consumed > $total_sectors sectors)"
+	cat -- "$buffer"
+	# Filling the disk to the last sector is NOT legal, and an earlier
+	# draft carried a comment here claiming it was -- "sfdisk places the
+	# backup GPT in the final 33 sectors and shrinks the last partition to
+	# accommodate it" -- then removed the tail-reserve rule on that
+	# basis. Both halves of that are wrong. sfdisk never shrinks an
+	# explicitly sized partition; it rejects it. The overflow check above
+	# is necessary but NOT sufficient, because a plan can sit inside
+	# total_sectors and still cross the GPT backup-header boundary, so
+	# the real invariant is checked against the last usable sector.
+	[ "$consumed" -le "$gpt_usable_last" ] ||
+		die "internal: partition plan crosses the GPT backup header (ends at sector $consumed, last usable is $gpt_usable_last)"
+	return 0
+}
+
+root_device_for()
+{
+	# $1 loop device. p2 is root under both plans; p1 differs.
+	case $BOOT in
+	bios) printf '%sp2' "$1" ;;
+	uefi) printf '%sp2' "$1" ;;
+	esac
+}
+
+boot_device_for()
+{
+	case $BOOT in
+	bios) printf '%sp1' "$1" ;;
+	uefi) printf '%sp1' "$1" ;;
+	esac
+}
+
+# --- host tool presence ------------------------------------------------
+#
+# Checked up front and named individually, because a missing tool
+# discovered halfway through a build leaves a half-written image.
+
+require_host_tools()
+{
+	missing=
+	for tool in sfdisk losetup mkfs.ext4 grub-install; do
+		command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"
+	done
+	[ -z "$missing" ] || die "host tool(s) missing:$missing
+       saphira-image needs the partitioning and formatting tools on the
+       host that builds the image. On Saphira they come from util-linux
+       (sfdisk/losetup), e2fsprogs (mkfs.ext4), dosfstools (mkfs.vfat) and
+       grub (grub-install)."
+	case $BOOT in
+	uefi)
+		command -v mkfs.vfat >/dev/null 2>&1 ||
+			die "host tool missing: mkfs.vfat
+       A uefi target cannot be built without dosfstools: the firmware
+       requires a FAT EFI System Partition."
+		;;
+	esac
+	if command -v qemu-img >/dev/null 2>&1; then have_qemu_img=1; else have_qemu_img=0; fi
+}
+
+# --- init preparation --------------------------------------------------
+#
+# This is where --init earns its keep. Packages ship BOTH init
+# definitions (RECIPE_RULES.md dual-init policy); what differs is which
+# set is ENABLED in the generated image, and whether PID 1 is even
+# consistent with what is on disk.
+
+prepare_init()
+{
+	# $1 mountpoint
+	mnt=$1
+	case $INIT in
+	openrc)
+		# /etc/inittab is the mechanism that makes /sbin/init be
+		# openrc-init. The openrc package ships one pointing at
+		# /sbin/openrc; if the openrc package ever stops shipping it,
+		# fail rather than produce an image that cannot boot.
+		if [ ! -f "$mnt/etc/inittab" ]; then
+			cat > "$mnt/etc/inittab" <<'INITTAB'
+::sysinit:/sbin/openrc sysinit
+::sysinit:/sbin/openrc boot
+::wait:/sbin/openrc default
+::shutdown:/sbin/openrc shutdown
+INITTAB
+			chmod 0644 "$mnt/etc/inittab"
+		fi
+		if ! grep -q '/sbin/openrc' "$mnt/etc/inittab"; then
+			die "internal: /etc/inittab does not select openrc for an openrc target"
+		fi
+		# Default runlevel: the base image enables nothing beyond what
+		# the profile's own services ask for. `default` is the
+		# conventional multi-user level; a `nonetwork` host is a
+		# deliberate per-image change, not a default.
+		mkdir -p "$mnt/etc/runlevels/default"
+		;;
+	systemd)
+		# The sysvinit table must NOT be present on a systemd target:
+		# systemd does not read it, and leaving it behind is exactly
+		# the kind of init-ambiguity the dual-init policy exists to
+		# avoid. The openrc package owns that file, so removing it
+		# would be a package-ownership violation -- instead assert the
+		# openrc package is ABSENT, which is the real invariant.
+		if [ -f "$mnt/etc/inittab" ] && [ -d "$mnt/etc/init.d" ]; then
+			die "internal: image carries both an OpenRC init tree and" \
+			    "/etc/inittab but targets systemd; refusing to guess"
+		fi
+		# Default target for a server.
+		mkdir -p "$mnt/etc/systemd/system"
+		ln -sfn /lib/systemd/system/multi-user.target.wants \
+			"$mnt/etc/systemd/system/default.target"
+		;;
+	esac
+}
+
+# The init services a package provides, one base name per line.
+#
+# Almost every package names its service after itself, so the default is just
+# the package name. The exception is real and structural rather than cosmetic:
+# saphira-packager ships /etc/init.d/saphira-build, not
+# /etc/init.d/saphira-packager. With service-name == package-name assumed,
+# naming saphira-packager in a profile enabled nothing at all, silently - and
+# on the controller host that left the build daemon with no owner for its
+# runlevel state, so it was only ever started by hand and a reboot stopped it
+# without an error.
+#
+# A profile may not fix this by naming services, because a profile lists only
+# explicit package intentions (saphira-profiles(5)); enumerating a package's
+# services there would duplicate package knowledge in the image definition and
+# rot the moment a package changes. So the mapping is data beside the tool,
+# exactly like the profiles themselves, and only consulted when the directory
+# exists.
+service_names()
+{
+	printf '%s\n' "$1"
+	[ -n "$services_dir" ] || return 0
+	[ -f "$services_dir/$1" ] || return 0
+	awk '
+		{ line = $0; sub(/#.*$/, "", line); gsub(/^[ \t]+|[ \t]+$/, "", line) }
+		line == "" { next }
+		{ print line }
+	' "$services_dir/$1"
+}
+
+enable_services()
+{
+	# $1 mountpoint. $2 composed profile FILE (in scratch, not package data).
+	mnt=$1
+	profile_file=$2
+	[ "$ENABLE" = 1 ] || return 0
+	# Services are enabled OFFLINE, inside the image, through the
+	# target's own tool with --root. Nothing is ever started: an image
+	# has no running init, and "enable" is a persistent intent.
+	#
+	# The list comes from the profile's own intentions, filtered to
+	# packages that actually shipped a definition. Nothing is invented
+	# here: if a package ships no service, there is nothing to enable.
+	#
+	# The package list is materialised into a file FIRST, and the loop
+	# then reads that file instead of a pipe. A `| while ...' loop runs
+	# in a SUBSHELL: every assignment to `units' and `services' was
+	# discarded when the loop ended, and because the body only ever
+	# assigned variables -- it never printed anything -- the
+	# `done > enabled-units' redirection captured an EMPTY file. The
+	# consequence was that this function silently enabled NOTHING on
+	# either init system, and reported success. Reading from a file
+	# descriptor keeps the loop in the current shell.
+	units=
+	services=
+	pkglist=$work/enabled-packages
+	awk '
+		{ line = $0; sub(/#.*$/, "", line); gsub(/^[ \t]+|[ \t]+$/, "", line) }
+		line == "" { next }
+		{ print line }
+	' "$profile_file" | sort -u > "$pkglist"
+	# shellcheck disable=SC2013
+	while IFS= read -r pkg; do
+		[ -n "$pkg" ] || continue
+		for svc in $(service_names "$pkg"); do
+			[ -n "$svc" ] || continue
+			if [ -d "$mnt/usr/lib/systemd/system" ]; then
+				for unit in "$mnt/usr/lib/systemd/system/$svc".* \
+					"$mnt/etc/systemd/system/$svc".*; do
+					[ -e "$unit" ] || continue
+					base=${unit##*/}
+					case $base in
+					*.service | *.socket | *.timer | *.mount | *.path)
+						units="$units $base"
+						;;
+					esac
+				done
+			fi
+			if [ -d "$mnt/etc/init.d" ] && [ -f "$mnt/etc/init.d/$svc" ]; then
+				services="$services $svc"
+			fi
+		done
+	done < "$pkglist"
+
+	case $INIT in
+	systemd)
+		[ -n "$units" ] || return 0
+		[ -x "$mnt/usr/bin/systemctl" ] ||
+			die "systemd target but no systemctl in the image"
+		# shellcheck disable=SC2086
+		"$chroot_command" "$mnt" /usr/bin/systemctl --root=/ enable $units ||
+			die "systemctl --root enable failed: $units"
+		;;
+	openrc)
+		# rc-update against an offline target: write the runlevel
+		# symlink directly rather than starting rc-update, which
+		# expects a running init. That is the same persistent intent
+		# without needing a live PID 1.
+		rl=$mnt/etc/runlevels/default
+		mkdir -p "$rl"
+		for svc in $services; do
+			ln -sfn "/etc/init.d/$svc" "$rl/$svc"
+		done
+		;;
+	esac
+}
+
+# --- measurement -------------------------------------------------------
+#
+# Reported, never optimised against. A number is not a target: the ruling
+# is explicit that functionality is not removed merely to win a size
+# figure. The point is to make an unexpected dependency visible.
+
+report_closure()
+{
+	# $1 mountpoint
+	mnt=$1
+	printf '\n%s: image report for %s\n' "$PROG" "$TARGET"
+	printf '  target            : %s (boot=%s init=%s profile=%s)\n' "$TARGET" "$BOOT" "$INIT" "$PROFILE"
+	[ -n "${SIZE:-}" ] && printf '  requested size    : %s\n' "$SIZE"
+	count=$(find "$mnt" -xdev -type f 2>/dev/null | wc -l)
+	printf '  files in rootfs   : %s\n' "$count"
+	bytes=$(du -sk "$mnt" 2>/dev/null | cut -f1)
+	printf '  rootfs size       : %s KiB (%s MiB)\n' "${bytes:-0}" "$(( ${bytes:-0} / 1024 ))"
+	[ -n "${raw_output:-}" ] && [ -f "$raw_output" ] &&
+		printf '  image size        : %s\n' "$(size_bytes_any "$(file_bytes "$raw_output")")"
+	printf '  largest files     :\n'
+	# Largest first. Scoped to the payload roots so a mounted ESP or a
+	# loop device under the mountpoint cannot pollute the figure.
+	find "$mnt/usr" "$mnt/lib" "$mnt/etc" -xdev -type f -printf '%s %p\n' 2>/dev/null |
+		sort -rn | head -10 | while read -r size path; do
+		rel=${path#"$mnt"}
+		printf '    %8s  %s\n' "$(size_bytes_any "$size")" "$rel"
+	done
+	printf '  note: sizes are reported for visibility, not as a target.\n'
+	printf '        No functionality is removed to improve these numbers.\n'
+}
+
+# Scratch file for the plan buffer, created by the caller before
+# partition_plan runs.
+PLAN_BUFFER=
+
+size_bytes_any()
+{
+	# Byte count -> human readable. The first draft passed a PATH to this
+	# helper, which merely echoed its argument, so the reported image size
+	# was arithmetic on a pathname and the figure was meaningless. This
+	# is now strictly a formatter for a number.
+	bytes=$1
+	case $bytes in
+	'' | *[!0-9]*)
+		printf '%s' "$bytes"
+		return 0
+		;;
+	esac
+	if [ "$bytes" -ge 1048576 ]; then
+		printf '%s MiB' "$((bytes / 1048576))"
+	elif [ "$bytes" -ge 1024 ]; then
+		printf '%s KiB' "$((bytes / 1024))"
+	else
+		printf '%s B' "$bytes"
+	fi
+}
+
+file_bytes()
+{
+	# Actual on-disk size of a file. wc -c is POSIX, so this does not
+	# depend on GNU stat being present.
+	wc -c < "$1" | tr -d ' \t'
+}
+
+# --- subcommands ------------------------------------------------------
+
+cmd_plan()
+{
+	TARGET= SIZE=
+	while test $# -gt 0; do
+		case $1 in
+			--target) TARGET=${2:?missing TARGET}; shift 2 ;;
+			--target=*) TARGET=${1#*=}; shift ;;
+			--size) SIZE=${2:?missing SIZE}; shift 2 ;;
+			--size=*) SIZE=${1#*=}; shift ;;
+			*) usage ;;
+		esac
+	done
+	[ -n "$TARGET" ] || usage
+	resolve_target "$TARGET"
+	[ -n "$SIZE" ] || SIZE=2G
+	printf '# saphira-image plan: target=%s boot=%s init=%s profile=%s size=%s\n' \
+		"$TARGET" "$BOOT" "$INIT" "$PROFILE" "$SIZE"
+	PLAN_BUFFER=$(mktemp "${SAPHIRA_TMPDIR:-/build/tmp}/saphira-plan.XXXXXX") ||
+		die 'cannot create a scratch file for the partition plan'
+	trap 'rm -f -- "$PLAN_BUFFER"' EXIT HUP INT TERM
+	partition_plan
+}
+
+cmd_report()
+{
+	TARGET= SIZE= roles= role_files=
+	while test $# -gt 0; do
+		case $1 in
+			--target) TARGET=${2:?missing TARGET}; shift 2 ;;
+			--target=*) TARGET=${1#*=}; shift ;;
+			--role) roles="$roles ${2:?missing ROLE}"; shift 2 ;;
+			--role=*) roles="$roles ${1#*=}"; shift ;;
+			--role-file) role_files="$role_files ${2:?missing FILE}"; shift 2 ;;
+			--role-file=*) role_files="$role_files ${1#*=}"; shift ;;
+			--size) SIZE=${2:?missing SIZE}; shift 2 ;;
+			--size=*) SIZE=${1#*=}; shift ;;
+			*) usage ;;
+		esac
+	done
+	[ -n "$TARGET" ] || usage
+	resolve_target "$TARGET"
+	[ -n "$SIZE" ] || SIZE=2G
+	# Build a composed profile in scratch and measure its closure
+	# against the repository index WITHOUT building anything. This is a
+	# static resolution: it reads the index, it does not build.
+	tmpbase=$(saphira_tmpdir)
+	mkdir -p "$tmpbase" || die "cannot create scratch under $tmpbase"
+	work=$(mktemp -d "$tmpbase/saphira-report.XXXXXX") ||
+		die 'cannot create report workspace'
+	trap 'rm -rf -- "$work"' EXIT HUP INT TERM
+	composed=$work/profile
+	cat "$profiles_dir/$PROFILE" > "$composed"
+	for r in $roles; do
+		[ -f "$profiles_dir/$r" ] || die "no such role layer: $r"
+		printf '\n# role: %s\n' "$r" >> "$composed"
+		cat "$profiles_dir/$r" >> "$composed"
+	done
+	for f in $role_files; do
+		[ -f "$f" ] || die "no such role file: $f"
+		cat "$f" >> "$composed"
+	done
+	printf 'composed profile: %s\n' "$composed"
+	awk '
+		{ line = $0; sub(/#.*$/, "", line); gsub(/^[ \t]+|[ \t]+$/, "", line) }
+		line == "" { next }
+		{ print line }
+	' "$composed" | sort -u > "$work/pkgs"
+	printf 'declared intentions: %s\n' "$(wc -l < "$work/pkgs")"
+	cat "$work/pkgs" | sed 's/^/  /'
+	printf '\nTo measure the RESOLVED closure and the built image, run:\n'
+	printf '  %s build --target %s --output /path/image.raw --report\n' "$PROG" "$TARGET"
+	printf 'No package is built by this subcommand.\n'
+}
+
+cmd_build()
+{
+	TARGET= output= size= repository= hostname= root_password=
+	roles= role_files= enable=1 keep_work=0
+	while test $# -gt 0; do
+		case $1 in
+			--target) TARGET=${2:?missing TARGET}; shift 2 ;;
+			--target=*) TARGET=${1#*=}; shift ;;
+			--output) output=${2:?missing OUTPUT}; shift 2 ;;
+			--output=*) output=${1#*=}; shift ;;
+			--size) size=${2:?missing SIZE}; shift 2 ;;
+			--size=*) size=${1#*=}; shift ;;
+			--repository) repository=${2:?missing REPOSITORY}; shift 2 ;;
+			--repository=*) repository=${1#*=}; shift ;;
+			--hostname) hostname=${2:?missing HOSTNAME}; shift 2 ;;
+			--hostname=*) hostname=${1#*=}; shift ;;
+			--root-password) root_password=${2:?missing PASSWORD}; shift 2 ;;
+			--root-password=*) root_password=${1#*=}; shift ;;
+			--role) roles="$roles ${2:?missing ROLE}"; shift 2 ;;
+			--role=*) roles="$roles ${1#*=}" ; shift ;;
+			--role-file) role_files="$role_files ${2:?missing FILE}"; shift 2 ;;
+			--role-file=*) role_files="$role_files ${1#*=}" ; shift ;;
+			--no-enable) enable=0; shift ;;
+			--keep-work) keep_work=1; shift ;;
+			--report) : ;;   # accepted: the report is always printed
+			--) shift; break ;;
+			*) usage ;;
+		esac
+	done
+	[ -n "$TARGET" ] || usage
+	[ -n "$output" ] || usage
+	case $TARGET in *[!A-Za-z0-9._+-]* | '') die "invalid target name: $TARGET" ;; esac
+
+	resolve_target "$TARGET"
+	SIZE=${size:-2G}
+	# Validate the size once, up front.
+	size_bytes "$SIZE" >/dev/null
+	ENABLE=$enable
+	require_canonical_path
+	require_host_tools
+
+	case $output in
+	*.qcow2)
+		format=qcow2
+		raw_output=${output%.qcow2}.raw
+		[ "$have_qemu_img" -eq 1 ] ||
+			die "qcow2 requested but qemu-img is not on PATH (install qemu, or use a .raw output)"
+		;;
+	*) format=raw; raw_output=$output ;;
+	esac
+	test ! -e "$output" || die "output exists: $output (remove it first)"
+	test ! -e "$raw_output" || die "output exists: $raw_output (remove it first)"
+
+	test "$($(command -v id) -u)" -eq 0 || die 'root privileges are required (loop devices and mounts)'
+
+	tmpbase=$(saphira_tmpdir)
+	mkdir -p "$tmpbase" || die "cannot create scratch under $tmpbase"
+	work=$(mktemp -d "$tmpbase/saphira-image.XXXXXX") ||
+		die 'cannot create image workspace'
+	mnt=$work/mnt
+	mkdir -p "$mnt" || die 'cannot create mountpoint'
+	loop=
+	mounted=
+	esp_mounted=
+
+	cleanup()
+	{
+		status=${1:-$?}
+		set +e
+		# Unmount deepest-first. An ESP mount under the root is the
+		# thing most likely to be left behind, and leaving it mounted
+		# would wedge the next run's losetup.
+		[ -n "$esp_mounted" ] && umount -R -- "$mnt/boot/efi" >/dev/null 2>&1
+		[ -n "$mounted" ] && umount -R -- "$mnt" >/dev/null 2>&1 || umount -l -- "$mnt" >/dev/null 2>&1
+		if [ -n "$loop" ]; then
+			# No `--` separator: this losetup parses it as the device
+			# name (yields detach of literal /dev/--). Device paths
+			# from --show never start with `-`, so bare is safe.
+			losetup -d "$loop" >/dev/null 2>&1
+		fi
+		if [ "$status" -ne 0 ]; then
+			# A half-written disk is never left behind: only outputs
+			# this run created are removed (pre-existing paths were
+			# refused above).
+			rm -f -- "$raw_output"
+			[ "$raw_output" = "$output" ] || rm -f -- "$output"
+		fi
+		if [ "$keep_work" -eq 1 ] && [ "$status" -ne 0 ]; then
+			printf '%s: workspace retained for diagnosis: %s\n' "$PROG" "$work" >&2
+		else
+			rm -rf -- "$work"
+		fi
+		exit "$status"
+	}
+	trap 'cleanup $?' EXIT
+	trap 'cleanup 129' HUP
+	trap 'cleanup 130' INT
+	trap 'cleanup 143' TERM
+
+	printf '%s: target=%s (boot=%s init=%s) profile=%s\n' "$PROG" "$TARGET" "$BOOT" "$INIT" "$PROFILE"
+	printf '%s: creating %s raw disk\n' "$PROG" "$SIZE"
+	truncate -s "$SIZE" "$raw_output" || die 'cannot allocate raw image'
+
+	# Partition. The plan is generated, never hand-written per target.
+	plan=$work/plan.sfdisk
+	PLAN_BUFFER=$work/plan.buffer
+	partition_plan > "$plan" || die 'cannot generate the partition plan'
+	loop=$(losetup --find --show --partscan -- "$raw_output") ||
+		die 'cannot attach loop device'
+	sfdisk --label gpt "$loop" < "$plan" || die 'partitioning failed'
+	# udev may need a moment to publish the partition nodes.
+	for _ in 1 2 3 4 5 6 7 8 9 10; do
+		rootdev=$(root_device_for "$loop")
+		[ -b "$rootdev" ] && break
+		sleep 0.2
+	done
+	rootdev=$(root_device_for "$loop")
+	bootdev=$(boot_device_for "$loop")
+	[ -b "$rootdev" ] || die "root partition device did not appear: $rootdev"
+	[ -b "$bootdev" ] || die "boot partition device did not appear: $bootdev"
+
+	mkfs.ext4 -q -L saphira-root "$rootdev" || die 'cannot format root partition'
+	mount -o noatime "$rootdev" "$mnt" || die 'cannot mount root'
+	mounted=1
+
+	if [ "$BOOT" = uefi ]; then
+		# The ESP is a real, separate, FAT filesystem that the firmware
+		# reads. It is mounted at the FHS path and grub-install writes
+		# its payload there.
+		mkfs.vfat -F 32 -n SaphiraESP "$bootdev" ||
+			die 'cannot format the EFI System Partition'
+		mkdir -p "$mnt/boot/efi"
+		mount "$bootdev" "$mnt/boot/efi" || die 'cannot mount the ESP'
+		esp_mounted=1
+	fi
+
+	# The canonical path: saphira-install -> saphira-assemble-rootfs.
+	# Composed profile carries the minimal intentions plus any roles.
+	composed=$work/profile
+	cat "$profiles_dir/$PROFILE" > "$composed"
+	for r in $roles; do
+		[ -f "$profiles_dir/$r" ] || die "no such role layer: $r"
+		printf '\n# role: %s\n' "$r" >> "$composed"
+		cat "$profiles_dir/$r" >> "$composed"
+	done
+	for f in $role_files; do
+		[ -f "$f" ] || die "no such role file: $f"
+		cat "$f" >> "$composed"
+	done
+	# The profile is named by BASENAME only, and saphira-install resolves it
+	# under ITS OWN profile root (SAPHIRA_PROFILE_ROOT, default
+	# /usr/share/saphira/profiles) -- a different namespace from this
+	# package's /usr/share/saphira/image/profiles. The composed profile
+	# (minimal intentions plus any role layers) is therefore staged into a
+	# WRITABLE scratch profile root, and that root is handed to the
+	# installer.
+	#
+	# The first draft instead copied it into
+	# "${SAPHIRA_IMAGE_PROFILES:-$profiles_dir}", which is the
+	# package-owned profile directory. That was wrong twice over: the
+	# directory is read-only on a real installation, so the build could
+	# not work at all, and writing there would make a per-image
+	# intention part of a package's own payload -- mutating
+	# package-owned data, which is never the right way to express it.
+	profile_name=$(basename "$composed")
+	profile_root=$work/profiles
+	mkdir -p "$profile_root" || die 'cannot create the scratch profile root'
+	cp "$composed" "$profile_root/$profile_name" ||
+		die 'cannot stage the composed profile'
+
+	# Assemble. saphira-install owns this entirely: it invokes
+	# saphira-assemble-rootfs, which owns rootfs assembly and the
+	# accounts.d / sysusers.d identity replay. Nothing here unpacks an
+	# APK or writes a package list of its own.
+	SAPHIRA_REPOSITORY="$repository" \
+		SAPHIRA_PROFILE_ROOT="$profile_root" \
+		SAPHIRA_HOSTNAME="${hostname:-saphira}" \
+		SAPHIRA_ROOT_PASSWORD="$root_password" \
+		"$install_command" --target "$mnt" --profile "$profile_name" ||
+		die 'installation into image failed'
+
+	# Init preparation, AFTER assembly so the packages are present.
+	prepare_init "$mnt"
+	enable_services "$mnt" "$profile_root/$profile_name"
+
+	# Bootloader, from INSIDE the target: core image, modules and the
+	# platform payload all come from the same grub package, so a host and
+	# target version mismatch is impossible.
+	grub_args=
+	[ "$BOOT" = bios ] && grub_args="--target=i386-pc --recheck"
+	[ "$BOOT" = uefi ] && grub_args="--target=x86_64-efi --efi-directory=/boot/efi --removable --recheck"
+	# shellcheck disable=SC2086
+	"$chroot_command" "$mnt" /usr/sbin/grub-install $grub_args "$loop" ||
+		die "grub-install failed ($BOOT)"
+	"$chroot_command" "$mnt" /usr/sbin/grub-mkconfig -o /boot/grub/grub.cfg ||
+		die 'grub-mkconfig failed'
+	test -s "$mnt/boot/grub/grub.cfg" || die 'grub.cfg is empty'
+	grep -q 'vmlinuz' "$mnt/boot/grub/grub.cfg" ||
+		die 'grub.cfg has no kernel entry: the image would not boot'
+
+	report_closure "$mnt"
+
+	umount -R -- "$mnt" || die 'cannot unmount the image'
+	mounted= esp_mounted=
+	losetup -d "$loop" || die 'cannot detach loop device'
+	loop=
+
+	if [ "$format" = qcow2 ]; then
+		qemu-img convert -p -O qcow2 -- "$raw_output" "$output" ||
+			die 'qcow2 conversion failed'
+		rm -f -- "$raw_output"
+	fi
+	printf '%s: %s ready (target=%s)\n' "$PROG" "$output" "$TARGET"
+	cleanup 0
+}
+
+# --- dispatch ---------------------------------------------------------
+
+test "${1:-}" = "" && usage
+action=$1
+shift
+case $action in
+build) cmd_build "$@" ;;
+plan) cmd_plan "$@" ;;
+report) cmd_report "$@" ;;
+list-targets) list_targets ;;
+-h | --help | help) usage ;;
+*) printf '%s: unknown action: %s\n' "$PROG" "$action" >&2; usage ;;
+esac

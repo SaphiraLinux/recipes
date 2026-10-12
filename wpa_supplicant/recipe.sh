@@ -1,8 +1,11 @@
 #!/bin/sh
 
 pkgname=wpa_supplicant
-pkgver=2.11
-pkgrel=2
+pkgver=2.12
+pkgrel=1
+# 2.12: rebase from 2.11 (upstream 2026-08-07, same release train as
+# hostapd 2.12). Options unchanged (LIBNL32/READLINE on, D-Bus off).
+# New upstream version: pkgrel resets.
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='WPA/WPA2/IEEE 802.1X supplicant (wpa_supplicant, wpa_cli, wpa_passphrase)'
 license='BSD-3-Clause'
@@ -10,7 +13,7 @@ origin=wpa_supplicant
 repo=saphira
 url=https://w1.fi/wpa_supplicant/
 source=https://w1.fi/releases/wpa_supplicant-${pkgver}.tar.gz
-sha256=912ea06f74e30a8e36fbb68064d6cdff218d8d591db0fc5d75dee6c81ac7fc0a
+sha256=08e23937e16d0155e55cab2b51f51fbe10d80a1aa91c4e15442645059b737ef6
 
 depends="libnl openssl readline"
 makedepends="

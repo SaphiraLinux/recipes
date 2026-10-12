@@ -4,7 +4,9 @@ set -u
 
 usage()
 {
-	printf 'usage: saphira-chroot TARGET [COMMAND...]\n' >&2
+	printf 'usage: saphira-chroot [--bind SRC:DST] [--bind-ro SRC:DST]... TARGET [COMMAND...]\n' >&2
+	printf '%s\n' '  --bind SRC:DST      bind-mount host SRC at DST inside the target' >&2
+	printf '%s\n' '  --bind-ro SRC:DST   the same, read-only inside the target' >&2
 	exit 2
 }
 
@@ -16,12 +18,144 @@ die()
 
 id_command=${SAPHIRA_ID:-id}
 test "$($id_command -u)" -eq 0 || die 'root privileges are required'
+
+# Options are parsed before the target and re-emitted verbatim to the inner
+# (namespaced) invocation, so validation runs identically in both halves
+# instead of the two halves disagreeing about what was asked for.
+bind_args=
+while test $# -gt 0; do
+	case $1 in
+	--bind | --bind-ro)
+		test $# -ge 2 || die "$1 requires a SRC:DST argument"
+		# Newline-separated, never space-separated: a specification is two
+		# literal pathnames and a pathname may contain a space. Every
+		# consumer below splits on newline only, with globbing disabled.
+		bind_args="$bind_args$1
+$2
+"
+		shift 2
+		;;
+	--) shift; break ;;
+	-*) usage ;;
+	*) break ;;
+	esac
+done
 test $# -ge 1 || usage
 
 target=$1
 shift
 test -d "$target" || die "target is not a directory: $target"
 target=$(readlink -f -- "$target") || die "cannot resolve target: $target"
+
+# --- bind specifications ------------------------------------------------
+#
+# Deliberately narrow. A bind is a way to let the installer see something it
+# legitimately owns -- a destination root, a repository tree -- and nothing
+# else. Every escape below is refused rather than normalised, because the
+# failure this guards against is a mount that outlives the command and
+# exposes host state through the target.
+
+# The mountpoints this tool establishes itself. A caller-supplied bind that
+# lands on one of these is ambiguous: two owners, two teardown orders, and
+# the loser's expectation is silently wrong. $1 is the destination as seen
+# from inside the target, i.e. still leading-slash rooted.
+owned_mountpoint()
+{
+	case $1 in
+	/dev | /dev/pts | /proc | /sys | /run) return 0 ;;
+	# The resolver's own bind target is resolved per-invocation, so the
+	# literal etc/resolv.conf location is refused here as well.
+	/etc/resolv.conf) return 0 ;;
+	esac
+	return 1
+}
+
+# No globbing. A spec is two literal pathnames, and a shell that expanded
+# either of them would bind something the caller never named.
+has_glob()
+{
+	case $1 in
+	*'*' | *'?'* | *'['* | *']'*) return 0 ;;
+	esac
+	return 1
+}
+
+validate_bind()
+{
+	spec=$1
+	# SRC:DST uses a single colon as the separator, and a colon cannot
+	# appear in either pathname, so exactly one is required.
+	case $spec in
+	*:*) : ;;
+	*) die "malformed bind specification (expected SRC:DST): $spec" ;;
+	esac
+	src=${spec%%:*}
+	dst=${spec#*:}
+	case $spec in
+	*:*:*) die "malformed bind specification (exactly one ':' is allowed): $spec" ;;
+	esac
+
+	test -n "$src" || die "bind source is empty: $spec"
+	test -n "$dst" || die "bind destination is empty: $spec"
+	has_glob "$src" && die "bind source may not contain glob characters: $src"
+	has_glob "$dst" && die "bind destination may not contain glob characters: $dst"
+
+	test -e "$src" || die "bind source does not exist: $src"
+	src=$(readlink -f -- "$src") || die "cannot resolve bind source: $src"
+
+	# DST is a path INSIDE the target. It may be written absolutely
+	# ("/mnt/src") or relative ("mnt/src"); both name the same place, because
+	# that is how a caller naturally thinks and how chroot itself and
+	# container volume syntax both behave. Normalising here means the escape
+	# check below has one shape to reason about.
+	case $dst in
+	/*) dst_joined="$target$dst" ;;
+	*) dst_joined="$target/$dst" ;;
+	esac
+	dst_resolved=$(readlink -m -- "$dst_joined") ||
+		die "cannot resolve bind destination: $dst"
+	# Re-check after normalisation: "$dst" may look harmless and still climb
+	# out with embedded .. components.
+	case $dst_resolved in
+	"$target"/*) : ;;
+	*) die "bind destination escapes the target: $dst" ;;
+	esac
+	# Refuse the target root itself: mounting over it would hide the very
+	# tree the shell check below just validated.
+	test "$dst_resolved" != "$target" ||
+		die "bind destination may not be the target root: $dst"
+	# Collisions are judged on the path as seen from inside the target, so
+	# the comparison is against the same shape a caller wrote.
+	dst_inside=${dst_resolved#"$target"}
+	owned_mountpoint "$dst_inside" &&
+		die "bind destination collides with a mountpoint saphira-chroot owns: $dst"
+	# /etc itself is a directory the target must keep; binding over it hides
+	# passwd, shadow and the very repositories file the installer needs.
+	case $dst_inside in
+	/etc | /etc/*) die "bind destination may not be inside /etc: $dst" ;;
+	esac
+
+	# The mountpoint is created only now, once the destination is proven to
+	# stay inside the target.
+	install -d -m 0755 -- "$dst_resolved" 2>/dev/null ||
+		die "cannot create bind mountpoint inside the target: $dst"
+}
+
+# Validate in the outer half too, so a bad specification is refused before
+# any namespace is created and before anything is mounted.
+old_ifs=$IFS
+IFS='
+'
+set -f
+for spec in $bind_args; do
+	case $spec in
+	--bind | --bind-ro) continue ;;
+	esac
+	validate_bind "$spec"
+done
+set +f
+IFS=$old_ifs
+
 shell_path=$target/bin/sh
 test -e "$shell_path" || test -L "$shell_path" ||
 	die 'target does not contain /bin/sh'
@@ -33,9 +167,17 @@ if test -L "$shell_path"; then
 	esac
 fi
 shell=$(readlink -f -- "$shell_path") || die 'target /bin/sh is unusable'
+# The prefix is built explicitly because "$target"/* is wrong when the target
+# IS "/": that spelling becomes "//*", which matches no absolute path at all,
+# so chrooting into the current root was refused as though the shell had
+# escaped a target it was in fact inside. Everything inside "/" is inside it.
+case $target in
+/) inside_prefix=/ ;;
+*) inside_prefix=$target/ ;;
+esac
 case $shell in
-	"$target"/*) ;;
-	*) die 'target /bin/sh resolves outside the target' ;;
+"$inside_prefix"*) : ;;
+*) die 'target /bin/sh resolves outside the target' ;;
 esac
 test -x "$shell" || die 'target /bin/sh is not executable'
 
@@ -65,7 +207,39 @@ if test "${SAPHIRA_CHROOT_INNER:-0}" != 1; then
 	"$chroot_command" "$target" /bin/sh -c ':' >/dev/null 2>&1 ||
 		die 'target /bin/sh cannot be executed'
 	export SAPHIRA_CHROOT_INNER=1
-	exec "$unshare_command" --mount --fork -- "$0" "$target" "$@"
+	# Nesting. When this tool runs inside a Saphira chroot environment, that
+	# environment already owns a private mount namespace which is itself
+	# discarded when the outer invocation exits. Asking the kernel for a
+	# SECOND namespace there fails outright -- util-linux's unshare reports
+	# "cannot change root filesystem propagation: Invalid argument" -- so a
+	# nested call proceeds in the namespace it already has.
+	#
+	# This is not a workaround for the installer. A real installer booted
+	# from an initramfs is already the installer environment and never
+	# chroots into itself; what actually nests is the destination operation
+	# (update-ca-certificates, chpasswd, systemctl --root) that
+	# saphira-assemble-rootfs performs against a target it is installing.
+	# Skipping the second namespace keeps that work inside the disposable
+	# one and still tears it down, which is the whole point of having it.
+	#
+	# The marker is set explicitly rather than inferred from mountinfo, so
+	# the fast path can only trigger when this tool can prove it is nested.
+	if test "${SAPHIRA_CHROOT_ACTIVE:-0}" = 1; then
+		:
+	else
+		# bind_args is re-emitted so the inner half sees the same request
+		# and re-proves it. Passing them through argv rather than an
+		# environment variable keeps the specification free of quoting
+		# ambiguity. IFS is newline-only for the expansion so a pathname
+		# containing a space survives; exec does not return, so IFS is never
+		# restored.
+		old_ifs=$IFS
+		IFS='
+'
+		set -f
+		# shellcheck disable=SC2086
+		exec "$unshare_command" --mount --fork -- "$0" $bind_args "$target" "$@"
+	fi
 fi
 
 mounted=
@@ -114,7 +288,15 @@ mount_owned()
 	"$mount_command" "$@" "$destination" || return 1
 }
 
-"$mount_command" --make-rprivate / || die 'cannot make mount propagation private'
+# Skipped when nested. Making the root private is what stops this tool's mount
+# events reaching the HOST namespace; nested inside a Saphira chroot the
+# namespace is already private and already disposable, and "/" is not a mount
+# point at all once you are in a chroot, so the call fails with
+# "not mount point or bad option" and there is nothing left for it to protect.
+if test "${SAPHIRA_CHROOT_ACTIVE:-0}" != 1; then
+	"$mount_command" --make-rprivate / ||
+		die 'cannot make mount propagation private'
+fi
 install -d -m 0755 "$target/dev" "$target/dev/pts" "$target/proc" \
 	"$target/sys" "$target/run" "$target/etc"
 
@@ -148,14 +330,73 @@ if test ! -e "$dns_target"; then
 fi
 mount_owned "$dns_target" --bind /etc/resolv.conf || die 'cannot provide target DNS'
 
+# --- caller-requested binds ---------------------------------------------
+# Established last, after this tool's own mounts, so a caller bind can never
+# be shadowed by one of them. Every mount goes through mount_owned, so it
+# joins the same list and is torn down by the same cleanup, on success,
+# failure and signal alike. Nothing is mounted that cleanup does not know
+# about.
+establish_binds()
+{
+	# Paired (mode, specification) arguments. Globals are _b_-prefixed so a
+	# caller's positional parameters cannot be clobbered, which matters
+	# because the command to run is still in the caller's "$@".
+	test $# -ge 2 || return 0
+	while test $# -ge 2; do
+		_b_mode=$1
+		_b_spec=$2
+		shift 2
+		_b_src=${_b_spec%%:*}
+		_b_dst=${_b_spec#*:}
+		_b_src=$(readlink -f -- "$_b_src") ||
+			die "cannot resolve bind source: $_b_src"
+		case $_b_dst in
+		/*) _b_joined="$target$_b_dst" ;;
+		*) _b_joined="$target/$_b_dst" ;;
+		esac
+		_b_dst_resolved=$(readlink -m -- "$_b_joined") ||
+			die "cannot resolve bind destination: $_b_dst"
+		case $_b_mode in
+		--bind-ro)
+			# A read-only bind needs ro on the initial mount: remounting
+			# afterwards would briefly expose it writable.
+			mount_owned "$_b_dst_resolved" -o bind,ro "$_b_src" ||
+				die "cannot bind $_b_spec read-only"
+			;;
+		--bind)
+			mount_owned "$_b_dst_resolved" --bind "$_b_src" ||
+				die "cannot bind $_b_spec"
+			;;
+		*)
+			die "internal: unknown bind mode: $_b_mode"
+			;;
+		esac
+	done
+	test $# -eq 0 || die 'internal: unpaired bind arguments'
+	return 0
+}
+
+if test -n "$bind_args"; then
+	old_ifs=$IFS
+	IFS='
+'
+	set -f
+	# shellcheck disable=SC2086
+	establish_binds $bind_args
+	set +f
+	IFS=$old_ifs
+fi
+
 term=${TERM:-dumb}
 if test $# -gt 0; then
 	"$env_command" -i HOME=/root USER=root LOGNAME=root SHELL=/bin/sh \
+		SAPHIRA_CHROOT_ACTIVE=1 \
 		"TERM=$term" PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
 		"$chroot_command" "$target" "$@"
 	status=$?
 else
 	"$env_command" -i HOME=/root USER=root LOGNAME=root SHELL=/bin/sh \
+		SAPHIRA_CHROOT_ACTIVE=1 \
 		"TERM=$term" PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
 		"$chroot_command" "$target" /bin/sh -l
 	status=$?

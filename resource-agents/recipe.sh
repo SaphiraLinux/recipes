@@ -79,10 +79,37 @@ recipe_build()
 recipe_install()
 {
 	make -C "$BUILDDIR/ldirectord" DESTDIR="$PKGDEST" install
-	# Dual-init policy: ldirectord is a genuine long-running daemon and
-	# already ships its OpenRC form (upstream installs the ldirectord
-	# script itself as /etc/init.d/ldirectord); the systemd counterpart
-	# ships from files/.  Neither wraps the other, nothing auto-enabled.
+	# Dual-init policy: ldirectord is a genuine long-running daemon, so
+	# it ships both definitions and neither is enabled or started at
+	# install.
+	#
+	# The previous note here claimed OpenRC compliance by asserting that
+	# "upstream installs the ldirectord script itself as
+	# /etc/init.d/ldirectord". Upstream ships an LSB sysvinit script --
+	# chkconfig, "### BEGIN INIT INFO", no depend(), no supervisor=,
+	# zero OpenRC markers -- so `rc-service ldirectord` could not have
+	# worked without the LSB compatibility shim. The comment claimed
+	# compliance while violating it. files/ldirectord.initd is the real
+	# OpenRC definition.
+	install -D -m 0755 "$RECIPE_DIR/files/ldirectord.initd" \
+		"$PKGDEST/etc/init.d/ldirectord"
 	install -D -m 0644 "$RECIPE_DIR/files/ldirectord.service" \
 		"$PKGDEST/usr/lib/systemd/system/ldirectord.service"
+	# An example, never a live config: a virtual IP table is a site
+	# decision, and shipping a default would silently blackhole traffic
+	# on a host that enabled the service.
+	install -D -m 0644 "$RECIPE_DIR/files/ldirectord.cf.example" \
+		"$PKGDEST/etc/ha.d/ldirectord.cf.example"
+	install -d -m 0755 "$PKGDEST/etc/ha.d"
+	# Both definitions must name the same absolute configuration path.
+	for f in ldirectord.initd ldirectord.service; do
+		[ -f "$PKGDEST/etc/init.d/$f" ] || [ -f "$PKGDEST/usr/lib/systemd/system/$f" ] || {
+			echo "ERROR: ldirectord payload is missing $f" >&2
+			return 1
+		}
+	done
+	grep -q '/etc/ha.d/ldirectord.cf' "$RECIPE_DIR/files/ldirectord.service" || {
+		echo "ERROR: ldirectord.service must use the absolute config path" >&2
+		return 1
+	}
 }

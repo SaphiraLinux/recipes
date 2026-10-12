@@ -1,0 +1,10 @@
+# Saphira Linux valid login shells (saphira-pambase).
+# pam_shells fails closed when this file is missing ("must have
+# /etc/shells" in the module source), so it ships from the same
+# package that owns the login stacks. One owner only: when a new
+# shell recipe lands (zsh, fish, ...), its path is appended here,
+# never in a second file. /sbin/nologin stays OUT deliberately:
+# service accounts must never pass pam_shells.
+
+/bin/sh
+/bin/bash

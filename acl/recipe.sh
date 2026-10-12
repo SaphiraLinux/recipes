@@ -2,7 +2,7 @@
 
 pkgname=acl
 pkgver=2.4.0
-pkgrel=2
+pkgrel=3
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="Access Control List filesystem support"
 license="LGPL-2.1-or-later"

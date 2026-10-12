@@ -1,0 +1,6 @@
+# Init services provided by the saphira-packager package.
+#
+# The controller's build daemon is named saphira-build, not saphira-packager,
+# so the package-name == service-name assumption would enable nothing for this
+# package. Naming saphira-packager in a profile now enables saphira-build.
+saphira-build

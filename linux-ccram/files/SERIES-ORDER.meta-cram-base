@@ -1,0 +1,122 @@
+SKIP-UPSTREAM series/001-mm_vmstat__fold_stranded_per-cpu_node_stats_when_a_node_come.patch # already in 7.2.9, verified by reverse-check
+UPSTREAM series/002-mm__constify_oom_control__scan_control__and_alloc_context_no.patch
+SKIP-UPSTREAM series/003-mm_mm_init__handle_alloc_percpu_failure_in_free_area_init_co.patch # already in 7.2.9, verified by reverse-check
+UPSTREAM series/004-mm_memory__add_memory_block_aligned_range___helper_.patch
+UPSTREAM series/005-mm_memory_hotplug__add_mhp_online_type_to_str___and_export_s.patch
+UPSTREAM series/006-mm_memory_hotplug__pass_online_type_to_online_memory_block__.patch
+UPSTREAM series/007-mm_memory_hotplug__export_mhp_get_default_online_type_.patch
+UPSTREAM series/008-mm_memory_hotplug__add___add_memory_driver_managed___with_on.patch
+UPSTREAM series/009-mm_memory_hotplug__add_offline_and_remove_memory_ranges___.patch
+UPSTREAM series/010-dax_kmem__resolve_default_online_type_at_probe_time_.patch
+UPSTREAM series/011-dax_kmem__extract_hotplug_hotremove_helper_functions_.patch
+UPSTREAM series/012-dax_kmem__add_sysfs_interface_for_atomic_whole-device_hotplu.patch
+UPSTREAM series/013-selftests_dax__add_dax_kmem_hotplug_sysfs_regression_test_.patch
+SKIP-FWD series/014-mm__refactor_find_next_best_node_to_find_next_best_node_in_.patch # superseded by fwd/014-fwd-7.2.9-find_next_best_node_in.patch
+FWD fwd/014-fwd-7.2.9-find_next_best_node_in.patch
+UPSTREAM series/015-mm_page_alloc__refactor_build_node_zonelist___out_of_build_z.patch
+SKIP-FWD series/016-mm_page_alloc__let_the_bulk_and_folio_allocators_carry_alloc.patch # superseded by fwd/016-fwd-7.2.9-carry-alloc-flags.patch
+FWD fwd/016-fwd-7.2.9-carry-alloc-flags.patch
+FWD fwd/016b-fwd-7.2.9-frozen-callsites.patch
+SKIP-FWD series/017-numa__introduce_N_MEMORY_PRIVATE_.patch # superseded by fwd/017-fwd-7.2.9-n-memory-private.patch
+FWD fwd/017-fwd-7.2.9-n-memory-private.patch
+SKIP-FWD series/018-mm__add_ZONELIST_PRIVATE__NOFALLBACK__for_N_MEMORY_PRIVATE_n.patch # superseded by fwd/018-fwd-7.2.9-zonelist-private.patch
+FWD fwd/018-fwd-7.2.9-zonelist-private.patch
+FWD fwd/018b-fwd-7.2.9-alloc-flags-order.patch
+UPSTREAM series/019-cpuset__exclude_private_nodes_from_cpuset.mems__default-open.patch
+UPSTREAM series/020-mm_memory_hotplug__disallow_migration-driven_private_node_ho.patch
+UPSTREAM series/021-mm_mempolicy__skip_private_node_folios_when_queueing_for_mig.patch
+UPSTREAM series/022-mm_migrate__disallow_userland_driven_migration_for_private_n.patch
+UPSTREAM series/023-mm_madvise__disallow_madvise_operations_on_private_node_foli.patch
+UPSTREAM series/024-mm_compaction__disallow_compaction_on_private_nodes_.patch
+UPSTREAM series/025-mm_page_alloc__clear_private_node_watermarks_and_system_rese.patch
+UPSTREAM series/026-mm_mempolicy__disallow_NUMA_Balancing_prot_none_on_private_n.patch
+SKIP-FWD series/027-mm_damon__skip_private_node_memory_in_DAMON_migration_and_pa.patch # superseded by fwd/027-fwd-7.2.9-damon-skip.patch
+FWD fwd/027-fwd-7.2.9-damon-skip.patch
+UPSTREAM series/028-mm_ksm__skip_KSM_for_managed-memory_folios_.patch
+UPSTREAM series/029-mm_khugepaged__skip_private_node_folios_when_trying_to_colla.patch
+UPSTREAM series/030-mm_vmscan__disallow_reclaim_of_private_node_memory_.patch
+UPSTREAM series/031-mm_gup__disallow_longterm_pin_of_private_node_folios_.patch
+SKIP-FWD series/032-proc__include_N_MEMORY_PRIVATE_nodes_in_numa_maps_output_.patch # patch(1) context ambiguity, see fwd/032
+FWD fwd/032a-fwd-7.2.9-numa-maps-pmd.patch
+FWD fwd/032b-fwd-7.2.9-numa-maps-pte.patch
+SKIP-FWD series/033-mm_memcontrol__account_private-node_memory_in_per-node_stats.patch # superseded by fwd/033-fwd-7.2.9-memcontrol-reportable.patch
+FWD fwd/033-fwd-7.2.9-memcontrol-reportable.patch
+UPSTREAM series/034-proc_kcore__include_private-node_RAM_in_the_kcore_RAM_map_.patch
+UPSTREAM series/035-mm_mempolicy__add_MPOL_F_PRIVATE_and_zonelist_selection_.patch
+UPSTREAM series/036-mm_mempolicy__apply_policy_at_the_kernel_zone_for_private-no.patch
+UPSTREAM series/037-mm_mempolicy__add_in-kernel_MPOL_BIND_interfaces_for_drivers.patch
+UPSTREAM series/038-mm_memory_hotplug__support_N_MEMORY_PRIVATE_node_hotplug_.patch
+SKIP-FWD series/039-mm__add_NODE_PRIVATE_CAP_RECLAIM_for_opted-in_private_node_r.patch # superseded by fwd/039-fwd-7.2.9-cap-reclaim.patch
+FWD fwd/039-fwd-7.2.9-cap-reclaim.patch
+UPSTREAM series/040-mm__add_NODE_PRIVATE_CAP_USER_NUMA_for_userland_numa_control.patch
+UPSTREAM series/041-mm__add_NODE_PRIVATE_CAP_HOTUNPLUG_for_opted-in_private_node.patch
+UPSTREAM series/042-mm__add_NODE_PRIVATE_CAP_DEMOTION_for_private-node_tiering_d.patch
+UPSTREAM series/043-mm__add_NODE_PRIVATE_CAP_NUMA_BALANCING_for_private-node_NUM.patch
+UPSTREAM series/044-mm__add_NODE_PRIVATE_CAP_LTPIN_for_private_node_folio_pinnin.patch
+UPSTREAM series/045-mm_khugepaged__base_private_node_collapse_eligiblity_on_acto.patch
+UPSTREAM series/046-Documentation_mm__describe_private__N_MEMORY_PRIVATE__memory.patch
+SKIP-FWD series/047-mm_mempolicy__add_mpol_set_shared_policy_range___.patch # superseded by fwd/047-fwd-7.2.9-shared-policy-range.patch
+FWD fwd/047-fwd-7.2.9-shared-policy-range.patch
+UPSTREAM series/048-KVM__guest_memfd__bind_backing_memory_to_a_NUMA_node_at_crea.patch
+UPSTREAM series/049-KVM__selftests__add_a_guest_memfd_FLAG_BIND_NODE_test_.patch
+UPSTREAM series/050-dax_kmem__add_dax_file__to_expose_an_anonymous-fault_char_de.patch
+UPSTREAM series/051-dax_kmem__add_private__to_online_memory_as_an_N_MEMORY_PRIVA.patch
+UPSTREAM series/052-dax_kmem__add_the_reclaim_opt-in__CAP_RECLAIM__for_private_n.patch
+UPSTREAM series/053-dax_kmem__add_the_user_numa_opt-in__CAP_USER_NUMA__for_priva.patch
+UPSTREAM series/054-dax_kmem__add_the_hotunplug_opt-in__CAP_HOTUNPLUG__for_priva.patch
+UPSTREAM series/055-dax_kmem__add_the_demotion_and_numa_balancing_opt-ins_for_pr.patch
+UPSTREAM series/056-dax_kmem__add_the_ltpin_opt-in__CAP_LTPIN__for_private_nodes.patch
+UPSTREAM series/057-dax_kmem__add_dax_adistance_to_make_private_node_adistance_c.patch
+UPSTREAM series/058-selftests_dax__add_the_private-node_test_harness_.patch
+UPSTREAM series/059-selftests_dax__add_private-node_capability_hotplug_ABI_test_.patch
+UPSTREAM series/060-selftests_dax__add_dax_dax_file_test_on_a_public_kmem_node_.patch
+UPSTREAM series/061-selftests_dax__add_private-node_placement_isolation_test_.patch
+UPSTREAM series/062-selftests_dax__add_private-node_longterm-pin__CAP_LTPIN__tes.patch
+UPSTREAM series/063-selftests_dax__add_private-node_pressure_isolation_test_.patch
+UPSTREAM series/064-selftests_dax__add_private-node_reclaim_test_.patch
+UPSTREAM series/065-selftests_dax__add_private-node_compaction_tests_.patch
+UPSTREAM series/066-selftests_dax__add_private-node_cpuset_default-open_test_.patch
+UPSTREAM series/067-selftests_dax__add_private-node_mbind___test_.patch
+UPSTREAM series/068-selftests_dax__add_private-node_set_mempolicy___test_.patch
+UPSTREAM series/069-selftests_dax__add_private-node_mempolicy_rebind_test_.patch
+UPSTREAM series/070-selftests_dax__add_private-node_move_pages___test_.patch
+UPSTREAM series/071-selftests_dax__add_private-node_migrate_pages___test_.patch
+UPSTREAM series/072-selftests_dax__add_private-node_demotion__CAP_DEMOTION__test.patch
+UPSTREAM series/073-selftests_dax__add_private-node_hotplug_transition_test_.patch
+UPSTREAM series/074-selftests_dax__add_private-node_observability_test_.patch
+UPSTREAM series/075-selftests_dax__add_private-node_THP_collapse_test_.patch
+UPSTREAM series/076-selftests_dax__add_private-node_page-table_placement_test_.patch
+UPSTREAM series/077-selftests_dax__add_dax_adistance_tests_.patch
+UPSTREAM series/078-Documentation_dax__dax_kmem_private-node_ABIs_.patch
+UPSTREAM series/079-Documentation_dax__document_adistance_attribute_.patch
+UPSTREAM series/080-Documentation_mm__add_testing_section_for_N_MEMORY_PRIVATE_n.patch
+UPSTREAM series/081-sched_numa__export_a_promotion_rate-limit_check_for_device-d.patch
+SKIP-FWD series/082-mm__add_NODE_PRIVATE_POLICY_WRITE_FENCE_for_read-only_privat.patch # superseded by fwd/082-fwd-7.2.9-write-fence-policy.patch
+FWD fwd/082-fwd-7.2.9-write-fence-policy.patch
+UPSTREAM series/083-mm_cram__core_compressed-RAM_tier_API_.patch
+SKIP-FWD series/084-mm__force_copy-on-write_for_anon_folios_on_a_write-fenced_no.patch # superseded by fwd/084-fwd-7.2.9-writefence-cow.patch
+FWD fwd/084-fwd-7.2.9-writefence-cow.patch
+SKIP-FWD series/085-mm_migrate__re-install_migrated_write-fenced_folios_read-onl.patch # superseded by fwd/085-fwd-7.2.9-migration-remap.patch
+FWD fwd/085-fwd-7.2.9-migration-remap.patch
+SKIP-FWD series/086-mm_cram__demote_anonymous_folios_onto_the_CRAM_tier_.patch # superseded by fwd/086-fwd-7.2.9-cram-demote-anon.patch
+FWD fwd/086-fwd-7.2.9-cram-demote-anon.patch
+SKIP-FWD series/087-mm__map_write-fenced_folios_read-only_at_fault_time_.patch # superseded by fwd/087-fwd-7.2.9-fault-readonly.patch
+FWD fwd/087-fwd-7.2.9-fault-readonly.patch
+SKIP-FWD series/088-mm_mprotect__keep_write-fenced_folios_read-only_across_mprot.patch # superseded by fwd/088-fwd-7.2.9-mprotect-wrfence.patch
+FWD fwd/088-fwd-7.2.9-mprotect-wrfence.patch
+SKIP-FWD series/089-mm_migrate__keep_write-fenced_file_folios_read-only_on_migra.patch # superseded by fwd/089-fwd-7.2.9-migrate-wrfence.patch
+FWD fwd/089-fwd-7.2.9-migrate-wrfence.patch
+UPSTREAM series/090-mm_cram__promote_a_resident_file_folio_off_the_tier_on_write.patch
+UPSTREAM series/091-mm_filemap__serve_reads_of_resident_file_folios_in_place_.patch
+UPSTREAM series/092-mm__drop_resident_file_folios_on_truncate__backstop_dirtying.patch
+UPSTREAM series/093-mm_cram__demote_clean_file_folios_onto_the_CRAM_tier_.patch
+UPSTREAM series/094-dax_kmem__register_compressed-RAM_regions_as_a_CRAM_node_.patch
+UPSTREAM series/095-mm_cram__add_the__TEST__debugfs_control_interface_.patch
+UPSTREAM series/096-selftests_dax__add_the_CRAM_tier_tests_.patch
+UPSTREAM series/097-selftests_dax__add_CRAM_file-tier_latency_probe___fs-matrix_.patch
+UPSTREAM series/098-selftests_dax__carry_the_generic_tiering_perf_tooling_.patch
+UPSTREAM series/099-dax_kmem__expose_adistance_on_all_kmem_nodes__not_just_priva.patch
+UPSTREAM series/100-selftests_dax__rework_demotion_subtest_2_to_actually_exercis.patch
+UPSTREAM series/101-selftests_dax__fix_tier_latency_refault_to_measure_REAL_swap.patch
+UPSTREAM series/102-mm_filemap__drop_CRAM_folios_on_write_2__overwrite_instead_o.patch
+UPSTREAM series/103-selftests_dax__add_CRAM_write_2_-drop_adversarial_test_.patch

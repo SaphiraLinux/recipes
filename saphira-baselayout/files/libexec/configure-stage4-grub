@@ -11,7 +11,7 @@ test -s "$config" || {
 	printf 'configure-grub: missing accepted GRUB configuration\n' >&2
 	exit 1
 }
-grep -Fq 'Akadata Linux Stage4 (network validation, no kernel ip=)' "$config" &&
+grep -Fq 'Saphira Linux Stage4 (network validation, no kernel ip=)' "$config" &&
 	exit 0
 
 temporary=$config.stage4
@@ -20,7 +20,7 @@ cp "$config" "$temporary"
 	printf '\n'
 	sed -n '/^menuentry /,/^}/p' "$config" |
 sed \
-	-e '1s|^menuentry .*|menuentry "Akadata Linux Stage4 (network validation, no kernel ip=)" {|' \
+	-e '1s|^menuentry .*|menuentry "Saphira Linux Stage4 (network validation, no kernel ip=)" {|' \
 	-e '/^[[:space:]]*linux /s/ ip=[^[:space:]]*//'
 } >> "$temporary"
 grep -Fq 'network validation, no kernel ip=' "$temporary"

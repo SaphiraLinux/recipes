@@ -2,7 +2,7 @@
 
 pkgname=llvm
 pkgver=22.1.8
-pkgrel=2
+pkgrel=3
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="Low Level Virtual Machine: compiler infrastructure (LLVM core)"
 license="Apache-2.0 WITH LLVM-exception"
@@ -33,8 +33,23 @@ makedepends="
     zstd-dev
 "
 
-# Proven v0 flags: X86-only backend, shared libLLVM dylib, Saphira musl
+# Proven v0 flags: X86 + BPF backends, shared libLLVM dylib, Saphira musl
 # triple, system zlib/zstd/ffi/libxml2, no docs/tests/benchmarks.
+#
+# BPF joins X86 because systemd's BPF framework compiles its own BPF
+# programs at build time, and the compiler it uses for that is clang, whose
+# target list comes from HERE rather than from the clang recipe: clang is
+# configured with -DLLVM_DIR against this installed LLVM. With X86 alone,
+# `clang -target bpf` fails with "No available targets are compatible with
+# triple \"bpf\"", and systemd's meson refuses outright:
+#
+#   if bpf_framework.enabled() and not clang_supports_bpf
+#           error('bpf-framework was enabled but clang does not support bpf')
+#
+# BPF is a code-generation backend for a freestanding target; adding it
+# brings no new runtime or library dependency, only codegen tables. It does
+# mean clang must be rebuilt after this, since the BPF target only becomes
+# reachable through the libLLVM it links.
 recipe_build()
 {
 	cmake -G Ninja "$SRC/llvm" -B "$BUILDDIR" \
@@ -45,7 +60,7 @@ recipe_build()
 		-DCMAKE_CXX_FLAGS="${CXXFLAGS-}" \
 		-DCMAKE_EXE_LINKER_FLAGS="${LDFLAGS-}" \
 		-DCMAKE_SHARED_LINKER_FLAGS="${LDFLAGS-}" \
-		-DLLVM_TARGETS_TO_BUILD=X86 \
+		-DLLVM_TARGETS_TO_BUILD="X86;BPF" \
 		-DLLVM_ENABLE_PROJECTS= \
 		-DLLVM_ENABLE_RUNTIMES= \
 		-DLLVM_BUILD_LLVM_DYLIB=ON \

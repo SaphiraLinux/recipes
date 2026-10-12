@@ -1,0 +1,21 @@
+#!/sbin/openrc-run
+
+description="Connection tracking daemon (conntrackd)"
+
+# conntrackd is the userspace half of the netfilter connection tracking
+# table: it replicates entries to peers and maintains a table userspace
+# can query. It is easy to miss because the package pkgdesc reads
+# "userspace tools (conntrack, conntrackd)" and recipe_install is a bare
+# make install.
+#
+# -f keeps it in the foreground under supervise-daemon.
+command="/usr/sbin/conntrackd"
+command_args="-f"
+supervisor="supervise-daemon"
+
+depend()
+{
+	need localmount
+	use net
+	after firewall
+}

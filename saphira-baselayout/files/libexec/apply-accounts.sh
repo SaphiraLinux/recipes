@@ -175,7 +175,12 @@ else
 		"$ROOTFS/root/.profile"
 fi
 chmod 0700 "$ROOTFS/root"
-ln -sfn ../usr/bin/passwd "$ROOTFS/bin/passwd"
+# No /bin/passwd back-link: passwd is shadow's /usr/bin program and
+# nothing on Saphira calls /bin/passwd. Planting one would make the
+# distinct /bin tree depend on /usr, so a /usr-less emergency boot has a
+# dangling /bin/passwd, and it normalises the merged-world model in the
+# one script that assembles the root filesystem. The fix for a path
+# problem is the path, never a usrmerge symlink.
 install -d -m 0700 "$ROOTFS/var/lib/saphira-firstboot"
 if test -f "$ROOT/stage4/config/network.d/00-loopback.conf"; then
 	install -D -m 0644 "$ROOT/stage4/config/network.d/00-loopback.conf" \

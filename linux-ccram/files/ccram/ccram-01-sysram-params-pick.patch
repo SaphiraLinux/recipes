@@ -1,0 +1,254 @@
+From 50bd32edeacaa2e77936147cc2364dd32e604418 Mon Sep 17 00:00:00 2001
+From: AKADATA LIMITED <linux@saphira.vm2.uk>
+Date: Sun, 11 Oct 2026 01:07:05 +0000
+Subject: [PATCH 1/4] ccram: params, pick and normal-min floor framework
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Part of CCRAM — AKADATA LIMITED adaptation of Meta CRAM.  CCRAM is
+based on Meta's CRAM work (Gregory Price; see CRAM.PROVENANCE in
+linux-saphira-meta-cram) and extends/adapts it for Saphira Linux.
+Meta's CRAM mechanism is used as-is; this series is Saphira-original
+integration code.  Licence: GPL-2.0-only.
+
+This patch: Kconfig option, build glue, entry-point declarations,
+ccram=/ccram.normal_min= parsing, top-down reservation-aware range
+pick with the hard normal-RAM floor, and the fail-closed reason
+framework.  No callers yet; excision, validation and registration
+follow as separate patches.
+---
+ include/linux/ccram_sysram.h |  15 ++++
+ mm/Kconfig                   |  14 +++
+ mm/Makefile                  |   1 +
+ mm/ccram_sysram.c            | 159 +++++++++++++++++++++++++++++++++++
+ 4 files changed, 189 insertions(+)
+ create mode 100644 include/linux/ccram_sysram.h
+ create mode 100644 mm/ccram_sysram.c
+
+diff --git a/include/linux/ccram_sysram.h b/include/linux/ccram_sysram.h
+new file mode 100644
+index 000000000..205ab9d64
+--- /dev/null
++++ b/include/linux/ccram_sysram.h
+@@ -0,0 +1,15 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/* CCRAM — AKADATA LIMITED adaptation of Meta CRAM (Saphira-original
++ * integration; Meta's CRAM mechanism used as-is).  Licence: GPL-2.0-only. */
++#ifndef _LINUX_CCRAM_SYSRAM_H
++#define _LINUX_CCRAM_SYSRAM_H
++
++#ifdef CONFIG_CCRAM_SYSRAM
++void ccram_sysram_carve_early(void);
++void ccram_sysram_early_reserve(void);
++#else
++static inline void ccram_sysram_carve_early(void) { }
++static inline void ccram_sysram_early_reserve(void) { }
++#endif
++
++#endif /* _LINUX_CCRAM_SYSRAM_H */
+diff --git a/mm/Kconfig b/mm/Kconfig
+index ffae41418..e13459e3c 100644
+--- a/mm/Kconfig
++++ b/mm/Kconfig
+@@ -712,6 +712,20 @@ config CRAM
+ 
+ 	  If unsure, say N.
+ 
++config CCRAM_SYSRAM
++	bool "CCRAM sysram private-node backend (experimental, Phase 1)"
++	depends on CRAM && NUMA && MEMORY_HOTPLUG && X86_64
++	help
++	  Carve ordinary physical RAM at boot (ccram= size/percent) and
++	  expose it as an N_MEMORY_PRIVATE node with CRAM tier semantics
++	  at 1:1 (uncompressed).  This is a functional private-memory
++	  backend only; it is NOT compressed RAM (see Phase 2, mm/ccram.c).
++	  The carved range is hidden from the buddy allocator before use
++	  and registered through the generic private-node API; CXL and
++	  other drivers are untouched.
++
++	  If unsure, say N.
++
+ config ARCH_ENABLE_HUGEPAGE_MIGRATION
+ 	bool
+ 
+diff --git a/mm/Makefile b/mm/Makefile
+index 792f68cea..5cb091aae 100644
+--- a/mm/Makefile
++++ b/mm/Makefile
+@@ -97,6 +97,7 @@ obj-$(CONFIG_FAIL_PAGE_ALLOC) += fail_page_alloc.o
+ obj-$(CONFIG_MEMTEST)		+= memtest.o
+ obj-$(CONFIG_MIGRATION) += migrate.o
+ obj-$(CONFIG_CRAM) += cram.o
++obj-$(CONFIG_CCRAM_SYSRAM) += ccram_sysram.o
+ obj-$(CONFIG_NUMA) += memory-tiers.o
+ obj-$(CONFIG_DEVICE_MIGRATION) += migrate_device.o
+ obj-$(CONFIG_TRANSPARENT_HUGEPAGE) += huge_memory.o khugepaged.o
+diff --git a/mm/ccram_sysram.c b/mm/ccram_sysram.c
+new file mode 100644
+index 000000000..5f96b06d6
+--- /dev/null
++++ b/mm/ccram_sysram.c
+@@ -0,0 +1,159 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * mm/ccram_sysram.c - CCRAM Phase 1: ordinary-DRAM private-node backend.
++ *
++ * CCRAM — AKADATA LIMITED adaptation of Meta CRAM.  CCRAM is based on
++ * Meta's CRAM work (Gregory Price; see CRAM.PROVENANCE in
++ * linux-saphira-meta-cram) and extends/adapts it for Saphira Linux and
++ * AKADATA LIMITED's tiered-memory experiments.  Meta's CRAM mechanism
++ * (mm/cram.c, N_MEMORY_PRIVATE, tiering, demotion) is used as-is; this
++ * file is Saphira-original integration code.  Licence: GPL-2.0-only.
++ *
++ * Carves a high, aligned physical range out of the boot memory map before
++ * the buddy allocator ever sees it, then exposes that range as an
++ * N_MEMORY_PRIVATE node with CRAM tier semantics at 1:1 (uncompressed).
++ *
++ * This is a functional private-memory backend ONLY.  It is not compressed
++ * RAM: 16 GiB of CCRAM-SYSRAM consumes 16 GiB of physical DRAM.  The
++ * compression tier is Phase 2 (mm/ccram.c).  Do not present this as
++ * anything else.
++ *
++ * Ownership lifecycle (see CCRAM-GATE1-OWNERSHIP.md):
++ *  - setup_arch, BEFORE init_mem_mapping(): parse ccram=, pick the
++ *    highest suitable range against current reservations,
++ *    memblock_remove() it and retype the window in e820 (RAM->RESERVED).
++ *    The window is therefore never boot-mapped, so the later CRAM
++ *    hot-add maps virgin page-table slots (no stale-leaf split, no
++ *    WARN).  Same excision primitive mem= has always used, scoped to
++ *    one window.
++ *  - setup_arch, after initmem_init() (NUMA final, all late reservations
++ *    placed): re-validate the window for overlaps (NODE_DATA,
++ *    crashkernel, initrd, CMA) and fail closed on any; reserve the
++ *    synthetic nid (firmware nids known now, no collision) and commit.
++ *  - late_initcall: cram_register() the stashed range.  CRAM owns the
++ *    node_private registration, hotplug, movable online and kswapd from
++ *    there (caps = CRAM_NP_CAPS: RECLAIM|HOTUNPLUG|WRITE_FENCE).
++ */
++
++#include <linux/memblock.h>
++#include <linux/ccram_sysram.h>
++#include <linux/align.h>
++#include <linux/kstrtox.h>
++#include <linux/sprintf.h>
++#include <linux/uaccess.h>
++#ifdef CONFIG_X86_64
++#include <asm/e820/api.h>
++#endif
++#include <linux/range.h>
++#include <linux/nodemask.h>
++#include <linux/numa.h>
++#include <linux/cram.h>
++#include <linux/debugfs.h>
++#include <linux/init.h>
++#include <linux/kernel.h>
++#include <linux/mm.h>
++#include <linux/mmzone.h>
++#include <linux/module.h>
++#include <linux/string.h>
++#include <linux/memory.h>
++#include <linux/memory_hotplug.h>
++
++#define CCRAM_DEFAULT_NORMAL_MIN	(4UL << 30)
++
++/* Boot parameters, stashed by early_param (pre-setup_arch). */
++static char ccram_param[64] __initdata = "";
++static unsigned long ccram_normal_min = CCRAM_DEFAULT_NORMAL_MIN;
++
++/* Carve-out state.  Plain statics: consumed by late_initcall, long after
++ * __initdata is gone.  (A few scalars; not worth a slab object.) */
++static phys_addr_t ccram_start;
++static phys_addr_t ccram_size;
++static int ccram_nid = NUMA_NO_NODE;
++static bool ccram_carved;
++static bool ccram_failed;
++static char ccram_fail_reason[128];
++
++static struct cram_ops ccram_ops = {
++	.owner = NULL,	/* built-in driver */
++	.trim = NULL,	/* CRAM zeroes freed folios itself; correct for DRAM */
++};
++
++static int __init ccram_parse_param(char *s)
++{
++	if (strlen(s) >= sizeof(ccram_param))
++		return 0;
++	strcpy(ccram_param, s);
++	return 0;
++}
++early_param("ccram", ccram_parse_param);
++
++static int __init ccram_parse_normal_min(char *s)
++{
++	ccram_normal_min = memparse(s, NULL);
++	return 0;
++}
++early_param("ccram.normal_min", ccram_parse_normal_min);
++
++/* Granularity the hotplug layer can online (memory blocks). */
++static unsigned long __init ccram_block_align(void)
++{
++	unsigned long block = memory_block_size_bytes();
++
++	if (!block)
++		block = MIN_MEMORY_BLOCK_SIZE;
++	return block;
++}
++
++/*
++ * Pick the highest memblock.memory window that fits @want bytes after
++ * alignment.  Reserved sub-ranges (NODE_DATA at the top, firmware tables,
++ * kernel image) are stepped around, not through: each region is scanned
++ * top-down in alignment steps and the first fully-reservation-free window
++ * wins.  Anything that cannot be proven free fails closed here, never
++ * silently.  Returns 0 with *start filled, or -errno.
++ */
++static int __init ccram_pick_range(phys_addr_t want, phys_addr_t *start)
++{
++	phys_addr_t align = ccram_block_align();
++	u64 total = memblock_phys_mem_size();
++	int i;
++
++	if (!want || want > total)
++		return -EINVAL;
++	if (align == 0 || (want & (align - 1)))
++		return -EINVAL;
++	/* Hard floor: never starve normal DRAM. */
++	if (total - want < ccram_normal_min) {
++		pr_err("ccram: request %llu would leave %llu < normal_min %lu; refusing\n",
++		       (unsigned long long)want,
++		       (unsigned long long)(total - want), ccram_normal_min);
++		return -ENOSPC;
++	}
++	for (i = (int)memblock.memory.cnt - 1; i >= 0; i--) {
++		phys_addr_t base = memblock.memory.regions[i].base;
++		phys_addr_t end = base + memblock.memory.regions[i].size;
++		phys_addr_t cand;
++
++		if (memblock.memory.regions[i].size < want)
++			continue;
++		/* Top-down scan in alignment steps; no unsigned wrap:
++		 * cand only moves down while at least one step fits. */
++		cand = ALIGN_DOWN(end - want, align);
++		while (cand >= base) {
++			if (!memblock_overlaps_region(&memblock.reserved,
++						      cand, want)) {
++				*start = cand;
++				if (cand + want != end) {
++					phys_addr_t send = cand + want - 1;
++					pr_info("ccram: top window busy, picked [%pa-%pa] below reservations\n",
++						&cand, &send);
++				}
++				return 0;
++			}
++			if (cand == base || cand - base < align)
++				break;
++			cand -= align;
++		}
++	}
++	return -ENOSPC;
++}
+-- 
+2.55.0
+

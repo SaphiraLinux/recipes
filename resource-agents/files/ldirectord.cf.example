@@ -1,0 +1,68 @@
+# ldirectord example configuration -- IPv6 first.
+#
+# Copy to /etc/ha.d/ldirectord.cf and edit. Nothing starts until this file
+# exists: saphira ships only this example, because a virtual IP table is a
+# site decision and a wrong one silently blackholes traffic.
+#
+# Saphira Linux is IPv6-first: IPv6 is promoted as the way forward, so the
+# primary example below is a DUAL-STACK vip6 with both IPv6 and IPv4 real
+# servers, not two separate services. ldirectord programs one IPVS virtual
+# service per (address family, protocol) and dispatches to whichever real
+# server family answers, which is what makes a single vip6 with mixed
+# real servers the useful default rather than a curiosity.
+#
+# ipvsadm must be installed: ldirectord refuses to start without it.
+#
+# ADDRESS SYNTAX
+#
+#   IPv6 addresses MUST be bracketed when a port follows:
+#       virtual6=[2001:db8::1]:80      correct
+#       virtual6=2001:db8::1:80        WRONG - the trailing :80 is read
+#                                      as part of the address
+#   IPv4-mapped and IPv4-compatible forms are accepted and must also be
+#   bracketed:
+#       real6=[::ffff:192.0.2.11]:80
+#   The bare `virtual6=ADDR:PORT' and `real6=ADDR:PORT' spellings still
+#   work for plain hex addresses, and the bracketed form is unambiguous
+#   for every case, so prefer brackets everywhere.
+#
+#   A v6 service is declared with the `virtual6' keyword, NOT `virtual'.
+#   Using `virtual' with a v6 address is rejected with a config error,
+#   and vice versa: the two keywords exist so the address family is
+#   explicit and cannot be guessed wrong.
+
+ldirectord=ldirectord
+log_level=info
+
+# --- the useful default: one dual-stack vip6 --------------------------
+virtual6=[2001:db8:1::100]:80
+	real6=[2001:db8:1::11]:80 gate
+	real6=[2001:db8:1::12]:80 gate
+	# Mixed families under one vip6 are supported: an IPv4 real server
+	# behind a v6 virtual address lets a v4-only backend join the pool.
+	#real=[192.0.2.11]:80 gate
+	#real=[192.0.2.12]:80 gate
+
+# --- a v6 virtual service on its own ----------------------------------
+#virtual6=[2001:db8:1::101]:443
+#	real6=[2001:db8:1::11]:443 gate
+#	real6=[2001:db8:1::12]:443 gate
+#	check_port=22
+#	persistent=true
+#	protocol=tcp
+#	scheduler=rr
+#	netmask=ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+
+# --- a v4-only virtual service, still supported -----------------------
+#virtual=192.0.2.100:80
+#	real=192.0.2.11:80 gate
+#	real=192.0.2.12:80 gate
+
+# --- a firewall-mark (fwm) service -------------------------------------
+# fwmark services take a mark rather than an address, and the mark is
+# suffixed -6 when the service is IPv6, which ldirectord derives from the
+# address family. Note there is no v6 spelling for a mark, so the family
+# comes from the keyword used.
+#virtual6=NONE:80
+#	fwm=6
+#	real6=[2001:db8:1::11]:80 gate

@@ -64,10 +64,17 @@ makedepends="
 "
 
 # No tcmalloc packaged (upstream defaults it on - must opt out or
-# configure hard-fails); no SELinux on Saphira; no systemd units (the
-# USE_SYSTEMD conditional keys off /usr/lib/systemd/system, absent in
-# the sandbox - OpenRC scripts ship in files/ instead). Upstream sysv
-# init scripts are parked out of /etc/init.d; ours take their place.
+# configure hard-fails); no SELinux on Saphira. Upstream sysv init
+# scripts are parked out of /etc/init.d; ours take their place.
+#
+# Dual-init: files/*.initd and files/*.service ship unconditionally and
+# neither is enabled or started at install. This note previously read
+# "no systemd units (the USE_SYSTEMD conditional keys off
+# /usr/lib/systemd/system, absent in the sandbox)". That was a
+# build-environment fact masquerading as product policy: the absence of
+# /usr/lib/systemd/system inside a build root says nothing about the
+# target, and unit files are inert where systemd is not installed, so
+# nothing needed suppressing. The house units now ship.
 # Everything else at upstream defaults: geo-replication, events, fuse
 # client + notifications, libxml2 output, OCF agents, C++ gfapi.
 gluster_options="
@@ -105,6 +112,10 @@ recipe_install()
 	make DESTDIR="$PKGDEST" install
 	install -D -m 0755 "$RECIPE_DIR/files/glusterd.initd" \
 		"$PKGDEST/etc/init.d/glusterd"
+	install -D -m 0644 "$RECIPE_DIR/files/glusterd.service" \
+		"$PKGDEST/usr/lib/systemd/system/glusterd.service"
 	install -D -m 0755 "$RECIPE_DIR/files/glustereventsd.initd" \
 		"$PKGDEST/etc/init.d/glustereventsd"
+	install -D -m 0644 "$RECIPE_DIR/files/glustereventsd.service" \
+		"$PKGDEST/usr/lib/systemd/system/glustereventsd.service"
 }

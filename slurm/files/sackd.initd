@@ -1,0 +1,22 @@
+#!/sbin/openrc-run
+
+description="Slurm auth and cred kiosk daemon"
+
+# sackd starts as root and assumes SlurmUser (slurm) itself, so it
+# must NOT be given command_user. -D keeps it in the foreground under
+# supervise-daemon.
+command="/usr/sbin/sackd"
+command_args="-D"
+supervisor="supervise-daemon"
+
+depend()
+{
+	need localmount
+	use net logger dns
+}
+
+start_pre()
+{
+	checkpath -d -m 0755 -o slurm:slurm /var/run/sackd
+	checkpath -d -m 0755 -o slurm:slurm /var/log/slurm
+}

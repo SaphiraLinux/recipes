@@ -1,0 +1,306 @@
+.TH SAPHIRA-IMAGE 8 "2026-09-26" "Saphira Linux" "System Administration"
+.SH NAME
+saphira\-image \- build a bootable Saphira disk image
+.SH SYNOPSIS
+.B saphira\-image
+.B build
+.B \-\-target
+.I TARGET
+.B \-\-output
+.I IMAGE
+.RI [ options ]
+.br
+.B saphira\-image
+.B list\-targets
+.br
+.B saphira\-image
+.B plan
+.B \-\-target
+.I TARGET
+.RI [ \-\-size
+.IR SIZE ]
+.br
+.B saphira\-image
+.B report
+.B \-\-target
+.I TARGET
+.RI [ \-\-role
+.IR ROLE ]
+...
+.SH DESCRIPTION
+.B saphira\-image
+partitions a disk image, installs Saphira into it through the canonical
+installer, prepares the requested init system, installs a bootloader, and
+reports what went in.
+.PP
+It supports four targets, covering both init systems and both boot
+methods:
+.PP
+.RS
+.TS
+l l l.
+bios\-openrc     BIOS,   OpenRC
+bios\-systemd    BIOS,   systemd
+uefi\-openrc     UEFI,   OpenRC
+uefi\-systemd    UEFI,   systemd
+.TE
+.RE
+.PP
+A target is a row in
+.IR files/targets ,
+not an implementation. Assembly is common; only the partition plan, the
+bootloader invocation and the init preparation differ.
+.SH USAGE
+The tool is a one-shot administrative command and never runs as a service.
+It needs root, because it creates loop devices and mounts filesystems, and
+it must run on a host that has the partitioning and formatting tools
+available: util-linux for sfdisk and losetup, e2fsprogs for mkfs.ext4,
+dosfstools for mkfs.vfat, and grub for grub-install. qemu is needed only for
+a .qcow2 output.
+.PP
+.BR saphira\-image " plan" ", " list\-targets " and " report
+are static: they need neither root nor the assembler, so a partition plan
+can be inspected on a machine that could not build an image.
+.SH ARCHITECTURE
+Ownership is split deliberately, so that there is exactly one assembler
+and exactly one source of dependency truth:
+.TP
+.B saphira\-image
+the target matrix, the partition plan, the bootloader invocation, init
+preparation, and measurement.
+.TP
+.BR saphira\-install (8)
+the mounted\-target installation.
+.TP
+.BR saphira\-assemble\-rootfs (8)
+rootfs assembly and the
+.B accounts.d
+/
+.B sysusers.d
+identity replay.
+.TP
+APK metadata
+the dependency closure. This tool never enumerates a resolved closure.
+.PP
+This tool never unpacks an APK, never writes a package list of its own,
+and will not substitute its own installer for
+.BR saphira\-install .
+.SH INIT SELECTION
+The init system is an explicit operator choice carried by the target. It
+is never detected.
+.PP
+Packages ship BOTH init definitions unconditionally; unit files are inert
+where systemd is not installed and OpenRC scripts are inert where it is.
+What differs between an
+.B \-openrc
+and a
+.B \-systemd
+image is which set is
+.IR enabled ,
+and whether the boot path is consistent with what is on disk. Nothing
+here infers an active init from installed files, and nothing teaches APK
+installation to guess.
+.PP
+For an OpenRC target,
+.B /etc/inittab
+is checked to select
+.BR /sbin/openrc ,
+and enabled services are written as
+.I /etc/runlevels/default
+symlinks rather than by invoking
+.BR rc\-update ,
+which expects a running init.
+.PP
+For a systemd target,
+.B default.target
+points at
+.BR multi\-user.target ,
+and services are enabled offline with
+.BR "systemctl \-\-root=/ enable" .
+Nothing is ever started: an image has no running init, and enabling is a
+persistent intent.
+.SH PARTITION PLANS
+The two plans are genuinely different and neither is derived from the
+other by arithmetic.
+.TP
+.B bios
+GRUB's
+.I core.img
+must land somewhere the BIOS can find at boot. On a GPT layout that
+means a dedicated
+.B bios\-boot
+partition, not the post\-MBR gap a DOS layout would use. There is no ESP:
+a BIOS system has no firmware to read one.
+.TP
+.B uefi
+The firmware reads a FAT EFI System Partition. BIOS partitioning rules
+are deliberately not reused: a
+.B bios\-boot
+partition means nothing to UEFI firmware, and without a real ESP the
+firmware finds no bootloader at all. The ESP is formatted FAT32, mounted at
+.IR /boot/efi ,
+and
+.B grub\-install
+writes its payload there.
+.PP
+The first partition begins at sector 2048 for 1 MiB alignment, and
+.B saphira\-image
+refuses to emit a plan whose last sector exceeds the requested image
+size. The plan is generated, never hand-written per target, and
+.B saphira\-image plan
+prints it for inspection without building anything.
+.SH PROFILES AND ROLES
+A profile lists
+.I intentions
+only. Dependency closure belongs to APK metadata and is never duplicated
+into an image definition.
+.PP
+The minimal profiles carry exactly what a bootable, manageable machine
+needs, and each entry is justified in the profile file itself. Role
+layers add intentions on top. A role is profile data, not a meta\-package:
+no new package name is invented for a role, and the package manager still
+owns the closure.
+.SH MEASUREMENT
+.B saphira\-image report
+and the end of every build report the package count, rootfs size, image
+size and the largest packages in the payload. These figures are reported
+for visibility, not as a target. No functionality is removed to improve
+them.
+.SH OPTIONS
+.TP
+.BI \-\-target " NAME"
+One of the four targets.
+.TP
+.BI \-\-output " PATH"
+Image path. A
+.B .raw
+suffix produces a raw image; a
+.B .qcow2
+suffix produces a compressed one and requires
+.BR qemu\-img .
+An existing path is refused rather than overwritten.
+.TP
+.BI \-\-size " SIZE"
+Minimum image size, accepting
+.BR K ,
+.BR M ,
+.BR G ,
+.BR T .
+Defaults to 2G.
+.TP
+.BI \-\-repository " PATH"
+Repository index to install from. Defaults to the host repository.
+.TP
+.BI \-\-hostname " NAME"
+Hostname written into the image. Defaults to
+.BR saphira .
+.TP
+.BI \-\-root\-password " PW"
+Root password set inside the image.
+.TP
+.BI \-\-role " NAME"
+Add a role layer. Repeatable.
+.TP
+.BI \-\-role\-file " PATH"
+Add intentions from a file. Repeatable.
+.TP
+.B \-\-no\-enable
+Install the profile but enable none of its services.
+.TP
+.B \-\-keep\-work
+Retain the scratch workspace when a build fails, for diagnosis.
+.SH EXIT STATUS
+Zero on success. Non\-zero on any refusal. A failed build removes the
+partial image it created; a pre\-existing output path is never touched.
+.SH ENVIRONMENT
+.TP
+.B SAPHIRA_TMPDIR
+Scratch location. Defaults to
+.BR /build/tmp .
+Saphira tool scratch never uses host
+.BR /tmp .
+.TP
+.B SAPHIRA_INSTALL
+Override the
+.B saphira\-install
+path.
+.TP
+.B SAPHIRA_CHROOT
+Override the
+.B saphira\-chroot
+path.
+.SH FILES
+.TP
+.I /usr/bin/saphira-image
+the tool.
+.TP
+.I /usr/share/saphira/image/targets
+the target matrix: one row per supported boot target, each naming a boot
+method, an init system and a profile. This is data, so adding a target is a
+line rather than a new implementation.
+.TP
+.I /usr/share/saphira/image/profiles/
+minimal profiles and role layers. A profile lists
+.I intentions
+only; dependency closure belongs to APK metadata.
+.TP
+.I /usr/share/saphira/image/services.d/
+OPTIONAL package-to-service mapping, one file per package, one init
+service or unit base name per line. A package normally names its service
+after itself, so an absent directory means every service is called after
+its package. The exception is real:
+.BR saphira\-packager " ships " saphira\-build ,
+not
+.BR saphira\-packager ,
+so assuming the two names match enabled nothing at all, silently. The
+mapping is data beside the profiles rather than something a profile
+names, because a profile lists package
+.I intentions
+only
+.RB ( saphira-profiles (5));
+enumerating a package's services in a profile would duplicate package
+knowledge in the image definition and rot whenever the package changes.
+.TP
+.I /etc/saphira/
+controller configuration, owned by saphira-packager.
+.SH NOTES
+Neither
+.B saphira\-install
+nor
+.B saphira\-assemble\-rootfs
+is modified by this package, and neither is duplicated here. If the
+canonical path cannot express something the image needs, the correct change
+is to those tools and not a second assembler here.
+.PP
+Packages continue to ship BOTH init definitions. The image creator chooses
+which set is enabled; it does not change what a package ships, and no
+package is rebuilt for a different init.
+.PP
+The reported sizes are measurements, not targets. Removing functionality to
+improve them would be the wrong trade for a server image.
+.SH EXAMPLES
+Inspect a partition plan without building anything:
+.PP
+.RS
+.nf
+saphira\-image plan \-\-target uefi\-systemd \-\-size 8G
+.fi
+.RE
+.PP
+Build a minimal UEFI/systemd server image:
+.PP
+.RS
+.nf
+saphira\-image build \-\-target uefi\-systemd \-\-size 8G \\
+    \-\-output saphira-server.qcow2 \-\-hostname srv1 \\
+    \-\-role role\-networking
+.fi
+.RE
+.SH AUTHOR
+AKADATA LIMITED, for Saphira Linux.
+.SH SEE ALSO
+.BR saphira\-install (8),
+.BR saphira\-assemble\-rootfs (8),
+.BR saphira\-profiles (5),
+.BR sfdisk (8),
+.BR grub\-install (8)

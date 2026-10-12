@@ -1,0 +1,14 @@
+--- a/arch/x86/Makefile
++++ b/arch/x86/Makefile
+@@ -167,10 +167,10 @@
+ ifdef CONFIG_X86_NATIVE_CPU
+         KBUILD_CFLAGS += -march=native
+         KBUILD_RUSTFLAGS += -Ctarget-cpu=native
+ else
+-        KBUILD_CFLAGS += -march=x86-64 -mtune=generic
+-        KBUILD_RUSTFLAGS += -Ctarget-cpu=x86-64 -Ztune-cpu=generic
++        KBUILD_CFLAGS += -march=x86-64-v3 -mtune=generic
++        KBUILD_RUSTFLAGS += -Ctarget-cpu=x86-64-v3 -Ztune-cpu=generic
+ endif
+ 
+         KBUILD_CFLAGS += -mno-red-zone

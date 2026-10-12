@@ -1,5 +1,5 @@
 # Dovecot SQL auth for mailDragon.
-# Source: akadata-mailserver dovecot-sql.conf.ext; MariaDB replaced by
+# Source: generation-zero mailserver dovecot-sql.conf.ext; MariaDB replaced by
 # the packaged sqlite database.  Passwords are doveadm pw SHA512-CRYPT.
 driver = sqlite
 connect = /var/lib/maildragon/mailserver.sqlite

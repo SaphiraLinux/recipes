@@ -1,11 +1,11 @@
-@akadata-stage4-base
+@saphira-stage4-base
 libmnl
 iproute2
 iputils
 dhcpcd
 nftables
 chrony
-bind-tools
+bind
 netcat-openbsd
 tmux
 psmisc

@@ -1792,6 +1792,36 @@ rows = sorted(r[0] for r in conn.execute("SELECT nvr FROM packages WHERE name IN
 assert rows == ["healkeep-1-r1"], rows
 PY
 printf '%s\n' 'heal mode (empty-stage refusal, out-of-band removal reconciliation, no publish): OK'
+# Sysusers-native fragment gate: a package whose fragment declares only the
+# sysusers stanza (no users/groups/files) ships its fragment and records
+# sysusers:true in its receipt. The staged gate must accept that pairing:
+# the stanza IS the declaration, and makepkg generates the sysusers-running
+# callers from it. Refusing it blocked every sysusers-native publication
+# (proven: systemd-261.2-r16 refused as "ships an accounts.d fragment but
+# its build receipt declares nothing").
+mkdir -p "$stage/sysusvc/pkg/usr/bin" "$stage/sysusvc/pkg/usr/share/saphira/accounts.d"
+printf '%s\n' sysusvc > "$stage/sysusvc/pkg/usr/bin/sysusvc"
+printf '%s\n' '# native accounts live in sysusers.d' 'sysusers' > "$stage/sysusvc/pkg/usr/share/saphira/accounts.d/sysusvc"
+printf '%s\n' '{"arch":"x86_64","build_time":22,"license":"MIT","name":"sysusvc","origin":"sysusvc","outputs":[{"dependencies":[],"description":"sysusvc","name":"sysusvc","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r0"}' > "$stage/sysusvc/manifest.json"
+SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
+SAPHIRA_BUILD_ROOT=$stage SAPHIRA_INCOMING_DIR=$artifacts \
+SAPHIRA_PACKAGE_TMP=$test_root/makepkg-tmp SAPHIRA_FAKEROOT_BOOTSTRAP=1 \
+SAPHIRA_BOOTSTRAP_TARGET=fakeroot "$makepkg" sysusvc >"$test_root/sysusvc-build.out" 2>"$test_root/sysusvc-build.err"
+sysupub=$incoming/sysupub-ready
+mkdir "$sysupub"
+cp "$artifacts/x86_64/sysusvc-1-r0.apk" "$sysupub/"
+printf '%s\n' sysusvc > "$sysupub/target"
+printf '%s\n' '{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}' > "$sysupub/package-seed.json"
+sysusha=$(sha256sum "$sysupub/sysusvc-1-r0.apk" | awk '{ print $1 }')
+printf '%s\n' '{"schema":"saphira-build-artifacts/v1","target":"sysusvc","constructors":[{"constructor":"makepkg","producer":"sysusvc","artifacts":[{"name":"sysusvc","artifact":"sysusvc-1-r0.apk","sha256":"'"$sysusha"'","backend":"userns-maproot","accounts":{"users":[],"groups":[],"dirs":[],"files":[],"legacy":{"users":[],"groups":[]},"sysusers":true}}]}],"package_seed":{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}}' > "$sysupub/artifact-manifest.json"
+(CDPATH= cd -- "$sysupub" && sha256sum sysusvc-1-r0.apk > manifest.sha256)
+# Selective sign: an earlier section deliberately leaves a colliding
+# youngsterpub-ready transaction proving the ownership-collision refusal,
+# so a bare sign here would trip over that intentional leftover.
+SAPHIRA_ACCOUNTS_TSV=$test_root/accounts.tsv run_signer sysusvc > "$test_root/sysupub.out" 2> "$test_root/sysupub.err"
+test -f "$repo/sysusvc-1-r0.apk"
+grep 'staged gate:' "$test_root/sysupub.out" >/dev/null
+printf '%s\n' 'sysusers-native gate: ok (stanza-only fragment with sysusers receipt publishes)'
 
 # Capability coherence at the publish gate: a caps-carrying package
 # publishes (receipt, payload, and gate agree); a shipped fragment

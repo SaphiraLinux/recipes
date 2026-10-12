@@ -1,0 +1,791 @@
+From fdee910fb7714ed3f8fd83b670b2618df26840a5 Mon Sep 17 00:00:00 2001
+From: Gregory Price <gourry@gourry.net>
+Date: Wed, 15 Jul 2026 07:13:39 -0700
+Subject: [PATCH] selftests/dax: carry the generic tiering perf tooling
+
+Same microbench / latency-probe / collect_stats / dcperf tooling as base_nodes,
+so every branch in the matrix has an identical perf+analysis environment
+regardless of which feature layer is under test.
+---
+ tools/testing/selftests/dax/Makefile          |   7 +
+ tools/testing/selftests/dax/collect_stats.sh  | 144 ++++++++++++
+ tools/testing/selftests/dax/dax_microbench.sh |  86 +++++++
+ .../selftests/dax/dax_microbench_tool.c       | 212 ++++++++++++++++++
+ .../testing/selftests/dax/dcperf_taobench.sh  |  67 ++++++
+ tools/testing/selftests/dax/tier_latency.sh   |  67 ++++++
+ .../testing/selftests/dax/tier_latency_tool.c | 134 +++++++++++
+ 7 files changed, 717 insertions(+)
+ create mode 100755 tools/testing/selftests/dax/collect_stats.sh
+ create mode 100755 tools/testing/selftests/dax/dax_microbench.sh
+ create mode 100644 tools/testing/selftests/dax/dax_microbench_tool.c
+ create mode 100755 tools/testing/selftests/dax/dcperf_taobench.sh
+ create mode 100755 tools/testing/selftests/dax/tier_latency.sh
+ create mode 100644 tools/testing/selftests/dax/tier_latency_tool.c
+
+diff --git a/tools/testing/selftests/dax/Makefile b/tools/testing/selftests/dax/Makefile
+index 761781a720e..f3d06522978 100644
+--- a/tools/testing/selftests/dax/Makefile
++++ b/tools/testing/selftests/dax/Makefile
+@@ -59,6 +59,13 @@ TEST_PROGS += cram_hot.sh
+ TEST_PROGS += cram_trim.sh
+ TEST_PROGS += cram_control.sh
+ 
++# generic tiering perf tooling (uniform across the matrix)
++TEST_GEN_FILES += dax_microbench_tool
++TEST_GEN_FILES += tier_latency_tool
++TEST_PROGS += dax_microbench.sh
++TEST_PROGS += tier_latency.sh
++TEST_FILES += collect_stats.sh dcperf_taobench.sh
++
+ include ../lib.mk
+ 
+ $(OUTPUT)/cram_pressure_tool: LDLIBS += -lpthread
+diff --git a/tools/testing/selftests/dax/collect_stats.sh b/tools/testing/selftests/dax/collect_stats.sh
+new file mode 100755
+index 00000000000..f455e70298b
+--- /dev/null
++++ b/tools/testing/selftests/dax/collect_stats.sh
+@@ -0,0 +1,144 @@
++#!/bin/bash
++# SPDX-License-Identifier: GPL-2.0
++#
++# collect_stats.sh - snapshot and diff the memory-tiering counters that the
++# CRAM / private-node test plan cares about.  Portable (no Meta
++# infra); safe to run in a VM or on a host.  Used by the perf runners to bracket
++# a benchmark and by the analysis step to produce per-cell deltas.
++#
++# Usage:
++#   collect_stats.sh snapshot <name> [dir]   # dump all counters into dir/<name>
++#   collect_stats.sh delta   <before> <after># numeric diff of two snapshots
++#   collect_stats.sh report  <snapshot>      # print the headline counters
++#
++# A "snapshot" is a directory of raw counter files.  delta/report parse the
++# vmstat-style "key value" files within, so they work offline on saved runs.
++#
++# Sources captured (each optional - absent files are simply skipped):
++#   /proc/vmstat /proc/meminfo /proc/pressure/{cpu,memory,io} /proc/swaps
++#   per-node /sys/devices/system/node/node*/{vmstat,meminfo,numastat}
++#   numastat(8) if present
++#   /sys/kernel/debug/cram/{demote_count,promote_count,promote_fail,nodes}
++#   /sys/kernel/debug/zswap/*
++#   a memcg dir via $CS_MEMCG (memory.stat/numa_stat/pressure/current/swap.current)
++
++set -u
++
++# Counters surfaced by "report" and diffed loudly by "delta" (from plan section 5).
++CS_KEYS="
++pgdemote_kswapd pgdemote_direct pgdemote_khugepaged
++pgdemote_swap_fallback
++pgpromote_success pgpromote_candidate
++pgscan_kswapd pgscan_direct pgsteal_kswapd pgsteal_direct
++workingset_refault_anon workingset_refault_file
++pswpin pswpout zswpin zswpout zswpwb
++allocstall_normal allocstall_movable allocstall_dma32
++pgmigrate_success pgmigrate_fail
++numa_hint_faults numa_pages_migrated
++"
++
++cs_ts() { cat /proc/uptime 2>/dev/null | cut -d' ' -f1; }   # monotonic, no wall clock needed
++
++cs_snapshot() {
++	local name="$1" dir="${2:-/tmp/cram_stats}"
++	local out="$dir/$name"
++	mkdir -p "$out" || { echo "collect_stats: cannot mkdir $out" >&2; return 1; }
++
++	cs_ts > "$out/uptime"
++	for f in /proc/vmstat /proc/meminfo /proc/swaps \
++		 /proc/pressure/cpu /proc/pressure/memory /proc/pressure/io; do
++		[ -r "$f" ] && cp "$f" "$out/$(echo "${f#/proc/}" | tr / _)" 2>/dev/null
++	done
++
++	# Per-node counters.
++	local n nid
++	for n in /sys/devices/system/node/node[0-9]*; do
++		[ -d "$n" ] || continue
++		nid=$(basename "$n")
++		[ -r "$n/vmstat" ]   && cp "$n/vmstat"   "$out/${nid}_vmstat"   2>/dev/null
++		[ -r "$n/meminfo" ]  && cp "$n/meminfo"  "$out/${nid}_meminfo"  2>/dev/null
++		[ -r "$n/numastat" ] && cp "$n/numastat" "$out/${nid}_numastat" 2>/dev/null
++	done
++	command -v numastat >/dev/null 2>&1 && numastat -m > "$out/numastat_m" 2>/dev/null
++
++	# CRAM debugfs (only present on cram builds with a cram node).
++	local c=/sys/kernel/debug/cram
++	if [ -d "$c" ]; then
++		local f
++		for f in demote_count promote_count promote_fail nodes; do
++			[ -r "$c/$f" ] && cp "$c/$f" "$out/cram_$f" 2>/dev/null
++		done
++	fi
++
++	# zswap debugfs.
++	if [ -d /sys/kernel/debug/zswap ]; then
++		local f b
++		for f in /sys/kernel/debug/zswap/*; do
++			[ -r "$f" ] || continue
++			b=$(basename "$f")
++			printf '%s %s\n' "$b" "$(cat "$f" 2>/dev/null)" >> "$out/zswap"
++		done
++	fi
++
++	# Optional memcg.
++	if [ -n "${CS_MEMCG:-}" ] && [ -d "$CS_MEMCG" ]; then
++		local f
++		for f in memory.stat memory.numa_stat memory.pressure \
++			 memory.current memory.swap.current; do
++			[ -r "$CS_MEMCG/$f" ] && cp "$CS_MEMCG/$f" "$out/memcg_$f" 2>/dev/null
++		done
++	fi
++
++	echo "$out"
++}
++
++# Print "key<TAB>after-before" for CS_KEYS present in both /proc/vmstat dumps,
++# plus cram debugfs and swap deltas.
++cs_delta() {
++	local before="$1" after="$2" k bv av
++	[ -d "$before" ] && [ -d "$after" ] || {
++		echo "collect_stats: delta needs two snapshot dirs" >&2; return 1; }
++
++	local bt at
++	bt=$(cat "$before/uptime" 2>/dev/null); at=$(cat "$after/uptime" 2>/dev/null)
++	[ -n "$bt" ] && [ -n "$at" ] &&
++		printf 'elapsed_s\t%s\n' "$(awk "BEGIN{printf \"%.2f\", $at-$bt}")"
++
++	for k in $CS_KEYS; do
++		bv=$(awk -v k="$k" '$1==k{print $2}' "$before/vmstat" 2>/dev/null)
++		av=$(awk -v k="$k" '$1==k{print $2}' "$after/vmstat" 2>/dev/null)
++		[ -n "$bv" ] && [ -n "$av" ] || continue
++		[ "$av" = "$bv" ] && continue
++		printf '%s\t%s\n' "$k" "$((av - bv))"
++	done
++
++	# CRAM debugfs single-value counters.
++	for k in demote_count promote_count promote_fail; do
++		bv=$(cat "$before/cram_$k" 2>/dev/null); av=$(cat "$after/cram_$k" 2>/dev/null)
++		[ -n "$bv" ] && [ -n "$av" ] && [ "$av" != "$bv" ] &&
++			printf 'cram_%s\t%s\n' "$k" "$((av - bv))"
++	done
++}
++
++# Human-readable one-shot of the headline counters in a single snapshot.
++cs_report() {
++	local snap="$1" k v
++	[ -d "$snap" ] || { echo "collect_stats: no snapshot $snap" >&2; return 1; }
++	for k in $CS_KEYS; do
++		v=$(awk -v k="$k" '$1==k{print $2}' "$snap/vmstat" 2>/dev/null)
++		[ -n "$v" ] && printf '%-26s %s\n' "$k" "$v"
++	done
++	for k in demote_count promote_count promote_fail; do
++		v=$(cat "$snap/cram_$k" 2>/dev/null)
++		[ -n "$v" ] && printf '%-26s %s\n' "cram_$k" "$v"
++	done
++	[ -r "$snap/cram_nodes" ] && { echo "-- cram nodes --"; cat "$snap/cram_nodes"; }
++}
++
++case "${1:-}" in
++	snapshot) shift; cs_snapshot "$@" ;;
++	delta)    shift; cs_delta "$@" ;;
++	report)   shift; cs_report "$@" ;;
++	*) echo "usage: $0 {snapshot <name> [dir] | delta <before> <after> | report <snap>}" >&2
++	   exit 2 ;;
++esac
+diff --git a/tools/testing/selftests/dax/dax_microbench.sh b/tools/testing/selftests/dax/dax_microbench.sh
+new file mode 100755
+index 00000000000..34ff4a46ac3
+--- /dev/null
++++ b/tools/testing/selftests/dax/dax_microbench.sh
+@@ -0,0 +1,86 @@
++#!/bin/bash
++# SPDX-License-Identifier: GPL-2.0
++#
++# Tiering microbenchmark runner (perf, not a pass/fail regression).
++#
++# Drives dax_microbench_tool with a hot working set sized above the top tier so
++# the kernel demotes to the lower tier (a kmem-bound dax node) and then to swap,
++# and reports per-cell throughput / latency / demotion+swap vmstat deltas.  The 4
++# cells are {anon,file} x {ro,rw}; each is a KTAP "test" that passes if it ran.
++#
++# Requires: a kmem-bound dax node (demotion target) + swap on.  Provision e.g.:
++#   memmap=4G!8G ; daxctl reconfigure-device -N -m system-ram dax0.0
++#   daxctl online-memory dax0.0   (online_movable) ; swapon <dev>
++#
++# Env: DAX_MB_SECS (per-cell, default 60), DAX_MB_SIZE_MB (default overflows
++#      node0+dax into swap), DAX_MB_PATTERN (rand|seq, default rand),
++#      DAX_MB_FS_DIR (real FS dir for the file cells; file cells SKIP if unset).
++
++DIR="$(dirname "$(readlink -f "$0")")"
++# shellcheck disable=SC1091
++. "$DIR"/../kselftest/ktap_helpers.sh
++
++TOOL="$DIR/dax_microbench_tool"
++DAX_BASE=/sys/bus/dax/devices
++SECS=${DAX_MB_SECS:-60}
++PATTERN=${DAX_MB_PATTERN:-rand}
++FS_DIR=${DAX_MB_FS_DIR:-}
++
++node_free_mb() { awk '/MemFree/{print int($4/1024)}' "/sys/devices/system/node/node$1/meminfo"; }
++
++is_kmem_dax() {
++	local drv
++	[ -e "$DAX_BASE/$1/state" ] || return 1
++	drv=$(readlink "$DAX_BASE/$1/driver" 2>/dev/null)
++	[ "$(basename "${drv:-}")" = kmem ]
++}
++find_kmem_dax_node() {
++	local d
++	for d in "$DAX_BASE"/dax*; do
++		is_kmem_dax "$(basename "$d")" || continue
++		cat "$d"/target_node 2>/dev/null && return 0
++	done
++	return 1
++}
++
++ktap_print_header
++ktap_set_plan 4
++
++[ -x "$TOOL" ] || { ktap_skip_all "dax_microbench_tool not built"; exit "$KSFT_SKIP"; }
++[ "$(awk '/SwapTotal/{print $2}' /proc/meminfo)" -gt 0 ] || {
++	ktap_skip_all "no swap configured"; exit "$KSFT_SKIP"; }
++
++DAX_NODE=$(find_kmem_dax_node)
++[ -n "$DAX_NODE" ] || { ktap_skip_all "no kmem-bound dax node (demotion target)"; exit "$KSFT_SKIP"; }
++
++N0_FREE=$(node_free_mb 0)
++DAX_FREE=$(node_free_mb "$DAX_NODE")
++SIZE=${DAX_MB_SIZE_MB:-$(( N0_FREE + DAX_FREE + 1024 ))}
++
++BIND=""
++command -v numactl >/dev/null 2>&1 && BIND="numactl --cpunodebind=0 --membind=0"
++
++ktap_print_msg "tier: node0(free ${N0_FREE}MB) -> dax node${DAX_NODE}(free ${DAX_FREE}MB) -> swap"
++ktap_print_msg "workingset=${SIZE}MB pattern=${PATTERN} secs=${SECS} bind='${BIND:-none}'"
++
++run_cell() { # <label> <mode> <rw> [path]
++	local label=$1 mode=$2 rw=$3 path=$4
++	echo "# --- cell: $label ---"
++	if $BIND "$TOOL" "$mode" "$rw" "$SIZE" "$SECS" "$PATTERN" $path; then
++		ktap_test_pass "$label"
++	else
++		ktap_test_fail "$label (tool rc=$?)"
++	fi
++}
++
++run_cell "anon-ro" anon ro
++run_cell "anon-rw" anon rw
++if [ -n "$FS_DIR" ] && [ -d "$FS_DIR" ]; then
++	run_cell "file-ro" file ro "$FS_DIR/dax_mb.dat"
++	run_cell "file-rw" file rw "$FS_DIR/dax_mb.dat"
++else
++	ktap_test_skip "file-ro (set DAX_MB_FS_DIR to a real FS)"
++	ktap_test_skip "file-rw (set DAX_MB_FS_DIR to a real FS)"
++fi
++
++ktap_finished
+diff --git a/tools/testing/selftests/dax/dax_microbench_tool.c b/tools/testing/selftests/dax/dax_microbench_tool.c
+new file mode 100644
+index 00000000000..b3783bad9c1
+--- /dev/null
++++ b/tools/testing/selftests/dax/dax_microbench_tool.c
+@@ -0,0 +1,212 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Tiering microbenchmark for the dax / private-node / cram test matrix.
++ *
++ * Drives a hot working set larger than the top tier so the kernel must demote
++ * to the lower tier (a dax/kmem node, cram, or swap) and reports the OS
++ * overhead of doing so: access throughput, per-access latency percentiles, and
++ * the demotion / swap / refault vmstat deltas across the run.
++ *
++ * The driving .sh owns provisioning: it binds the workload to the top tier
++ * (cpuset.mems / mbind) and sizes @total_MB above that tier's capacity so the
++ * access loop forces demotion.  This tool just runs the loop and reports facts
++ * on stdout as `RESULT key=value` lines, exiting 0 (KSFT_SKIP=4 on setup error).
++ *
++ *   anon <ro|rw> <total_MB> <secs> <seq|rand>
++ *   file <ro|rw> <total_MB> <secs> <seq|rand> <path>
++ *
++ * ro = read each page (readable working set), rw = write each page (writable).
++ * seq = sequential sweep, rand = uniform random page pick.
++ */
++#define _GNU_SOURCE
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <fcntl.h>
++#include <unistd.h>
++#include <errno.h>
++#include <time.h>
++#include <sys/mman.h>
++
++#define KSFT_SKIP 4
++
++/* vmstat counters snapshotted around the run and reported as deltas. */
++static const char * const kCounters[] = {
++	"pgdemote_kswapd", "pgdemote_direct", "pgdemote_khugepaged",
++	"pgdemote_swap_fallback", "pswpin", "pswpout", "pgpromote_success",
++	"workingset_refault_anon", "workingset_refault_file",
++	"pgscan_kswapd", "pgscan_direct",
++};
++#define NCOUNTERS (sizeof(kCounters) / sizeof(kCounters[0]))
++
++static void read_vmstat(unsigned long long *out)
++{
++	FILE *f = fopen("/proc/vmstat", "r");
++	char key[64];
++	unsigned long long val;
++	size_t i;
++
++	for (i = 0; i < NCOUNTERS; i++)
++		out[i] = 0;
++	if (!f)
++		return;
++	while (fscanf(f, "%63s %llu", key, &val) == 2)
++		for (i = 0; i < NCOUNTERS; i++)
++			if (!strcmp(key, kCounters[i]))
++				out[i] = val;
++	fclose(f);
++}
++
++static unsigned int rng = 2463534242u;
++static inline unsigned int xs(void)
++{
++	rng ^= rng << 13;
++	rng ^= rng >> 17;
++	rng ^= rng << 5;
++	return rng;
++}
++
++static inline unsigned long long ns_now(void)
++{
++	struct timespec t;
++
++	clock_gettime(CLOCK_MONOTONIC, &t);
++	return (unsigned long long)t.tv_sec * 1000000000ull + t.tv_nsec;
++}
++
++static int cmp_ull(const void *a, const void *b)
++{
++	unsigned long long x = *(const unsigned long long *)a;
++	unsigned long long y = *(const unsigned long long *)b;
++
++	return (x > y) - (x < y);
++}
++
++/* time 1-in-SAMPLE_EVERY accesses into a capped buffer for percentiles */
++#define SAMPLE_EVERY	256
++#define SAMPLE_CAP	(1u << 20)
++static unsigned long long *samples;
++static unsigned long nsamples;
++
++int main(int argc, char **argv)
++{
++	const char *mode, *rw, *pat, *path = NULL;
++	unsigned long long total, npages, secs, i, touches = 0, acc = 0;
++	unsigned long long t0, tend, elapsed_ns, sctr = 0;
++	unsigned long long before[NCOUNTERS], after[NCOUNTERS];
++	long ps = sysconf(_SC_PAGESIZE);
++	int is_file, is_rw, is_rand, fd = -1;
++	char *p;
++	size_t k;
++
++	if (argc < 6) {
++		fprintf(stderr, "usage: %s anon|file ro|rw <total_MB> <secs> seq|rand [path]\n",
++			argv[0]);
++		return KSFT_SKIP;
++	}
++	mode = argv[1]; rw = argv[2];
++	total = strtoull(argv[3], NULL, 0) << 20;
++	secs = strtoull(argv[4], NULL, 0);
++	pat = argv[5];
++	is_file = !strcmp(mode, "file");
++	is_rw = !strcmp(rw, "rw");
++	is_rand = !strcmp(pat, "rand");
++	if (is_file) {
++		if (argc < 7) {
++			fprintf(stderr, "file mode needs <path>\n");
++			return KSFT_SKIP;
++		}
++		path = argv[6];
++	}
++	if (!total || !secs) {
++		fprintf(stderr, "bad size/secs\n");
++		return KSFT_SKIP;
++	}
++	npages = total / ps;
++
++	if (is_file) {
++		fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0644);
++		if (fd < 0 || ftruncate(fd, total)) {
++			perror("file setup");
++			return KSFT_SKIP;
++		}
++		p = mmap(NULL, total, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
++	} else {
++		p = mmap(NULL, total, PROT_READ | PROT_WRITE,
++			 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
++	}
++	if (p == MAP_FAILED) {
++		perror("mmap");
++		return KSFT_SKIP;
++	}
++
++	samples = calloc(SAMPLE_CAP, sizeof(*samples));
++	if (!samples) {
++		fprintf(stderr, "no mem for samples\n");
++		return KSFT_SKIP;
++	}
++
++	/* prefault the whole region once so steady-state (not first-touch) is measured */
++	for (i = 0; i < total; i += ps)
++		p[i] = (char)i;
++
++	read_vmstat(before);
++	t0 = ns_now();
++	tend = t0 + secs * 1000000000ull;
++
++	for (;;) {
++		unsigned long long idx = is_rand ? (xs() % npages) : (acc % npages);
++		char *addr = p + idx * ps;
++		int measure = (++sctr % SAMPLE_EVERY) == 0 && nsamples < SAMPLE_CAP;
++		unsigned long long s = 0;
++
++		if (measure)
++			s = ns_now();
++		if (is_rw)
++			(*addr)++;
++		else
++			acc += (unsigned char)*addr;
++		if (measure)
++			samples[nsamples++] = ns_now() - s;
++
++		touches++;
++		if ((touches & 0xffff) == 0 && ns_now() >= tend)
++			break;
++	}
++
++	tend = ns_now();
++	read_vmstat(after);
++	elapsed_ns = tend - t0;
++
++	/* throughput */
++	{
++		double sec = elapsed_ns / 1e9;
++		double tps = touches / sec;
++
++		printf("RESULT mode=%s rw=%s pattern=%s total_MB=%llu secs=%.1f\n",
++		       mode, rw, pat, total >> 20, sec);
++		printf("RESULT touches=%llu touches_per_s=%.0f MBps=%.1f\n",
++		       touches, tps, tps * ps / 1e6);
++	}
++
++	/* latency percentiles (ns) */
++	if (nsamples) {
++		qsort(samples, nsamples, sizeof(*samples), cmp_ull);
++		printf("RESULT lat_samples=%lu p50_ns=%llu p90_ns=%llu p99_ns=%llu max_ns=%llu\n",
++		       nsamples,
++		       samples[nsamples * 50 / 100],
++		       samples[nsamples * 90 / 100],
++		       samples[nsamples * 99 / 100],
++		       samples[nsamples - 1]);
++	}
++
++	/* vmstat deltas */
++	for (k = 0; k < NCOUNTERS; k++)
++		printf("RESULT %s=%llu\n", kCounters[k], after[k] - before[k]);
++
++	if (is_file && fd >= 0) {
++		close(fd);
++		unlink(path);
++	}
++	return 0;
++}
+diff --git a/tools/testing/selftests/dax/dcperf_taobench.sh b/tools/testing/selftests/dax/dcperf_taobench.sh
+new file mode 100755
+index 00000000000..228521ac621
+--- /dev/null
++++ b/tools/testing/selftests/dax/dcperf_taobench.sh
+@@ -0,0 +1,67 @@
++#!/bin/bash
++# SPDX-License-Identifier: GPL-2.0
++#
++# dcperf_taobench.sh - DCPerf / TaoBench tier-overflow runner (Meta-infra lane).
++#
++# NOT portable: requires the Benchpress harness (`fbpkg fetch cea.chips.benchpress`)
++# and is excluded from any sanitized/published suite (see plan section 7).  Wraps
++# a single TaoBench run confined below the top tier so the resident set overflows
++# node0 into the demote tier, brackets it with collect_stats, and scrapes QPS.
++#
++# TaoBench is memory-capacity-bound (hit-ratio ~0.9, resident set ~all hot), so a
++# footprint above node0 capacity cleanly exercises demote -> (dax/cram/swap).
++#
++# Env:
++#   BP_DIR      benchpress checkout/fetch dir (has ./benchpress)   [required]
++#   MEMSIZE     TaoBench footprint GB (set ABOVE node0 capacity)   [default 30]
++#   TEST_TIME   seconds                                            [default 720]
++#   MEM_MAX     cgroup2 memory.max to force node0->tier demotion   [optional]
++#   OUT         results/snapshots dir                              [default /tmp/dcperf]
++#
++# Prereqs the caller must have set (plan 4b.3): iommu=pt boot arg,
++# ulimit -n 1000000, chef-off/turbo-on, swap ON.
++
++set -u
++DIR="$(dirname "$(readlink -f "$0")")"
++CS="$DIR/collect_stats.sh"
++
++BP_DIR=${BP_DIR:?set BP_DIR to the benchpress dir}
++MEMSIZE=${MEMSIZE:-30}
++TEST_TIME=${TEST_TIME:-720}
++WARMUP=$(( 10 * MEMSIZE )); [ "$WARMUP" -lt 1200 ] && WARMUP=1200
++OUT=${OUT:-/tmp/dcperf}
++mkdir -p "$OUT"
++
++[ -x "$BP_DIR/benchpress" ] || { echo "no benchpress at $BP_DIR" >&2; exit 4; }
++[ "$(awk '/SwapTotal/{print $2}' /proc/meminfo)" -gt 0 ] || { echo "swap must be ON" >&2; exit 4; }
++
++run() { echo "+ $*"; "$@"; }
++
++# Optional cgroup2 confinement so node0 overflows into the tier.
++SCOPE=()
++if [ -n "${MEM_MAX:-}" ]; then
++	SCOPE=(systemd-run --scope -p MemoryMax="$MEM_MAX" -p MemorySwapMax=max)
++fi
++
++bash "$CS" snapshot before "$OUT/snap" >/dev/null
++
++# bind_mem=0 is mandatory for CXL: the default binds each instance to local DRAM
++# and never touches the tier.
++run "${SCOPE[@]}" "$BP_DIR/benchpress" run tao_bench_standalone \
++	-i "{\"memsize\":$MEMSIZE,\"bind_mem\":0,\"warmup_time\":$WARMUP,\"test_time\":$TEST_TIME}" \
++	-k perf | tee "$OUT/taobench.log"
++
++bash "$CS" snapshot after "$OUT/snap" >/dev/null
++
++echo "=== tier counter deltas over the run ==="
++bash "$CS" delta "$OUT/snap/before" "$OUT/snap/after" | tee "$OUT/deltas.txt"
++
++echo "=== topline QPS ==="
++m=$(ls -t benchmark_metrics_*/tao_bench_*_metrics_*_iter_None.json 2>/dev/null | head -1)
++if [ -n "$m" ] && command -v jq >/dev/null 2>&1; then
++	jq '{total_qps:.metrics.total_qps, fast_qps:.metrics.fast_qps,
++	     slow_qps:.metrics.slow_qps, hit_ratio:.metrics.hit_ratio,
++	     score:.metrics.score}' "$m" | tee "$OUT/qps.json"
++else
++	echo "metrics json not found or jq missing (looked for benchmark_metrics_*/...)" >&2
++fi
+diff --git a/tools/testing/selftests/dax/tier_latency.sh b/tools/testing/selftests/dax/tier_latency.sh
+new file mode 100755
+index 00000000000..29585d42008
+--- /dev/null
++++ b/tools/testing/selftests/dax/tier_latency.sh
+@@ -0,0 +1,67 @@
++#!/bin/bash
++# SPDX-License-Identifier: GPL-2.0
++#
++# Tier latency probe runner (perf, not a pass/fail regression).
++#
++# Characterises the tiers before the throughput microbench:
++#   - access  latency per memory node (DRAM node0 vs CXL/dax nodes) via
++#     pointer-chase, printing the DRAM-vs-tier gap
++#   - re-fault latency with zswap OFF (= swap fault) and ON (= zswap fault)
++# Each probe is a KTAP "test" that passes if it ran.
++#
++# Env: LAT_MB (access buf, default 256), LAT_STEPS_M (default 100),
++#      LAT_REFAULT_MB (default 128).
++
++DIR="$(dirname "$(readlink -f "$0")")"
++# shellcheck disable=SC1091
++. "$DIR"/../kselftest/ktap_helpers.sh
++
++TOOL="$DIR/tier_latency_tool"
++MB=${LAT_MB:-256}
++STEPS=${LAT_STEPS_M:-100}
++RMB=${LAT_REFAULT_MB:-128}
++ZSWAP=/sys/module/zswap/parameters/enabled
++
++mem_nodes() { for d in /sys/devices/system/node/node[0-9]*; do
++	[ "$(awk '/MemTotal/{print $4}' "$d/meminfo")" -gt 0 ] && basename "$d" | tr -dc 0-9 && echo; done; }
++
++ktap_print_header
++NODES=$(mem_nodes)
++NNODE=$(echo "$NODES" | wc -w)
++ktap_set_plan $((NNODE + 2))
++
++[ -x "$TOOL" ] || { ktap_skip_all "tier_latency_tool not built"; exit "$KSFT_SKIP"; }
++command -v numactl >/dev/null 2>&1 || ktap_print_msg "numactl absent: access probe not node-bound"
++
++# --- access latency per node ---
++for n in $NODES; do
++	echo "# --- access: node$n ---"
++	BIND=""; command -v numactl >/dev/null 2>&1 && BIND="numactl --cpunodebind=0 --membind=$n"
++	if $BIND "$TOOL" access "$MB" "$STEPS"; then
++		ktap_test_pass "access node$n"
++	else
++		ktap_test_fail "access node$n (rc=$?)"
++	fi
++done
++
++# --- refault latency: swap vs zswap ---
++if [ "$(awk '/SwapTotal/{print $2}' /proc/meminfo)" -gt 0 ]; then
++	saved=""; [ -w "$ZSWAP" ] && saved=$(cat "$ZSWAP")
++	[ -w "$ZSWAP" ] && echo N > "$ZSWAP"
++	echo "# --- refault: zswap OFF (swap) ---"
++	"$TOOL" refault "$RMB" && ktap_test_pass "refault swap" || ktap_test_fail "refault swap (rc=$?)"
++
++	if [ -w "$ZSWAP" ]; then
++		echo Y > "$ZSWAP"
++		echo "# --- refault: zswap ON ---"
++		"$TOOL" refault "$RMB" && ktap_test_pass "refault zswap" || ktap_test_fail "refault zswap (rc=$?)"
++		echo "$saved" > "$ZSWAP"
++	else
++		ktap_test_skip "refault zswap (zswap knob not writable)"
++	fi
++else
++	ktap_test_skip "refault swap (no swap)"
++	ktap_test_skip "refault zswap (no swap)"
++fi
++
++ktap_finished
+diff --git a/tools/testing/selftests/dax/tier_latency_tool.c b/tools/testing/selftests/dax/tier_latency_tool.c
+new file mode 100644
+index 00000000000..87e6f526683
+--- /dev/null
++++ b/tools/testing/selftests/dax/tier_latency_tool.c
+@@ -0,0 +1,134 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Tier latency probes for the dax / private-node / cram test matrix.
++ *
++ * Reports raw access + fault latencies so the tiers can be characterised
++ * before the throughput microbench runs.  The driving .sh owns node binding
++ * (numactl) and swap/zswap setup; this tool just measures and prints
++ * `RESULT key=value` lines, exiting 0 (KSFT_SKIP=4 on setup error).
++ *
++ *   access  <MB> <steps_M>   pointer-chase latency over a buffer the caller has
++ *                            bound to a node -> DRAM vs CXL access latency
++ *   refault <MB>             prefault anon, MADV_PAGEOUT it, then time each
++ *                            page re-fault -> swap / zswap fault latency
++ *                            (run with zswap off = swap, on = zswap)
++ */
++#define _GNU_SOURCE
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++#include <errno.h>
++#include <time.h>
++#include <sys/mman.h>
++
++#define KSFT_SKIP 4
++#define LINE 64		/* cache-line stride to defeat prefetch */
++
++static unsigned int rng = 88172645u;
++static inline unsigned int xs(void)
++{
++	rng ^= rng << 13; rng ^= rng >> 17; rng ^= rng << 5;
++	return rng;
++}
++static inline unsigned long long ns_now(void)
++{
++	struct timespec t;
++	clock_gettime(CLOCK_MONOTONIC, &t);
++	return (unsigned long long)t.tv_sec * 1000000000ull + t.tv_nsec;
++}
++static int cmp_ull(const void *a, const void *b)
++{
++	unsigned long long x = *(const unsigned long long *)a, y = *(const unsigned long long *)b;
++	return (x > y) - (x < y);
++}
++static void pct(unsigned long long *s, unsigned long n)
++{
++	if (!n)
++		return;
++	qsort(s, n, sizeof(*s), cmp_ull);
++	printf("RESULT samples=%lu p50_ns=%llu p90_ns=%llu p99_ns=%llu max_ns=%llu\n",
++	       n, s[n * 50 / 100], s[n * 90 / 100], s[n * 99 / 100], s[n - 1]);
++}
++
++static int do_access(unsigned long long mb, unsigned long long steps)
++{
++	unsigned long long bytes = mb << 20, nlines = bytes / LINE, i;
++	unsigned long long off = 0, sink = 0, t0, dt;
++	unsigned long long *perm;
++	char *buf;
++
++	buf = mmap(NULL, bytes, PROT_READ | PROT_WRITE,
++		   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
++	if (buf == MAP_FAILED) { perror("mmap"); return KSFT_SKIP; }
++	perm = malloc(nlines * sizeof(*perm));
++	if (!perm) { fprintf(stderr, "no mem for perm\n"); return KSFT_SKIP; }
++
++	for (i = 0; i < nlines; i++)
++		perm[i] = i;
++	/* Sattolo: single cycle through all lines */
++	for (i = nlines - 1; i > 0; i--) {
++		unsigned long long j = xs() % i;
++		unsigned long long tmp = perm[i]; perm[i] = perm[j]; perm[j] = tmp;
++	}
++	for (i = 0; i < nlines; i++)
++		*(unsigned long long *)(buf + perm[i] * LINE) = perm[(i + 1) % nlines] * LINE;
++	free(perm);
++
++	/* warm the chain into the bound node, then measure */
++	for (i = 0; i < nlines; i++)
++		off = *(unsigned long long *)(buf + off);
++
++	t0 = ns_now();
++	for (i = 0; i < steps; i++)
++		off = *(unsigned long long *)(buf + off);
++	dt = ns_now() - t0;
++	sink = off;
++
++	printf("RESULT probe=access MB=%llu steps=%llu mean_ns=%.2f (sink=%llu)\n",
++	       mb, steps, (double)dt / steps, sink);
++	return 0;
++}
++
++static int do_refault(unsigned long long mb)
++{
++	long ps = sysconf(_SC_PAGESIZE);
++	unsigned long long bytes = mb << 20, npages = bytes / ps, i, n = 0;
++	unsigned long long *lat;
++	volatile char sink = 0;
++	char *buf;
++
++	if (!(sysconf(_SC_PHYS_PAGES) > 0)) { /* nop */ }
++	buf = mmap(NULL, bytes, PROT_READ | PROT_WRITE,
++		   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
++	if (buf == MAP_FAILED) { perror("mmap"); return KSFT_SKIP; }
++	lat = malloc(npages * sizeof(*lat));
++	if (!lat) { fprintf(stderr, "no mem for lat\n"); return KSFT_SKIP; }
++
++	for (i = 0; i < bytes; i += ps)		/* prefault */
++		buf[i] = (char)i;
++	if (madvise(buf, bytes, MADV_PAGEOUT)) {
++		perror("madvise(PAGEOUT)");
++		return KSFT_SKIP;		/* no swap -> can't evict */
++	}
++	/* time each page's re-fault (swap-in / zswap-in) */
++	for (i = 0; i < npages; i++) {
++		unsigned long long t0 = ns_now();
++		sink += buf[i * ps];
++		lat[n++] = ns_now() - t0;
++	}
++	printf("RESULT probe=refault MB=%llu pages=%llu (sink=%d)\n", mb, npages, sink);
++	pct(lat, n);
++	free(lat);
++	return 0;
++}
++
++int main(int argc, char **argv)
++{
++	if (argc >= 4 && !strcmp(argv[1], "access"))
++		return do_access(strtoull(argv[2], NULL, 0), strtoull(argv[3], NULL, 0) * 1000000ull);
++	if (argc >= 3 && !strcmp(argv[1], "refault"))
++		return do_refault(strtoull(argv[2], NULL, 0));
++	fprintf(stderr, "usage: %s access <MB> <steps_M> | refault <MB>\n", argv[0]);
++	return KSFT_SKIP;
++}
+-- 
+2.55.0
+

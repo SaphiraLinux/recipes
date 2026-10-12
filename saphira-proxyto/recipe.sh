@@ -2,15 +2,24 @@
 
 pkgname=saphira-proxyto
 pkgver=0.1.0
-pkgrel=4
+pkgrel=8
+# r8: source home moves to the SaphiraLinux/saphira-proxyto repo tag
+# v0.1.0 (vendored tag bytes; stray ELF dropped). Inputs proven
+# byte-identical to r7's vendored tree, but r7 is published so the
+# mechanism change takes a new revision per the immutability rule.
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='PROXY-protocol front proxy for non-aware applications (geomyidae)'
 license='BUSL-1.1'
 origin=saphira-proxyto
 repo=saphira
-url=https://saphira.vm2.uk/
-# Local source (no upstream, no git yet): payload lives in files/
-# (single-file C service, man page, instance configs).
+url=https://github.com/SaphiraLinux/saphira-proxyto
+# Source home is the SaphiraLinux/saphira-proxyto repository, tag
+# v0.1.0. The tag tarball is vendored in files/ (private repo: the
+# builder cannot fetch it; re-verify the pin against codeload if the
+# repo ever goes public). Packaging integration (units, instance
+# config, identity, licence copy) stays in files/.
+source=https://github.com/SaphiraLinux/saphira-proxyto/archive/refs/tags/v0.1.0.tar.gz
+sha256=fc401949c504a26305a2e67e48e13f8b819d73008e51af0f55d14f0ae10e6a17
 
 depends=""
 makedepends="
@@ -21,10 +30,12 @@ subpackages="$pkgname-doc"
 
 recipe_build()
 {
-	# Local source builds out-of-tree so files/ stays pristine.
+	# The worker flattens a single top-level archive dir into $SRC,
+	# so the tree root lands directly in $SRC (same as saphira-garden
+	# learned the hard way). Source builds out-of-tree.
 	rm -rf "$BUILDDIR/build"
 	mkdir -p "$BUILDDIR/build"
-	cp -r "$RECIPE_DIR/files/Makefile" "$RECIPE_DIR/files/src" "$BUILDDIR/build/"
+	cp -r "$SRC/Makefile" "$SRC/src" "$BUILDDIR/build/"
 	# Saphira baseline per target arch (x86-64-v3 today; extend here
 	# when new SAPHIRA_ARCH values land - fail closed otherwise).
 	case "${SAPHIRA_ARCH:-x86_64}" in
@@ -40,7 +51,7 @@ recipe_build()
 recipe_install()
 {
 	install -D -m 0755 "$BUILDDIR/build/proxyto" "$PKGDEST/usr/bin/proxyto"
-	install -D -m 0644 "$RECIPE_DIR/files/man/proxyto.1" "$PKGDEST/usr/share/man/man1/proxyto.1"
+	install -D -m 0644 "$SRC/man/proxyto.1" "$PKGDEST/usr/share/man/man1/proxyto.1"
 	install -D -m 0644 "$RECIPE_DIR/files/etc/saphira/proxyto/geomyidae.conf" \
 		"$PKGDEST/etc/saphira/proxyto/geomyidae.conf"
 	install -D -m 0755 "$RECIPE_DIR/files/proxyto.initd" \

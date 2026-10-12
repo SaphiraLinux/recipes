@@ -1,0 +1,115 @@
+ldirectord: accept IPv4-mapped IPv6 literals consistently (IPv6-first)
+
+Saphira is IPv6-first, and this file was not internally consistent about
+IPv6 address syntax. The configuration-file parsers accept a dot inside a
+bracketed address -- `[0-9A-Fa-f:.]' -- but eleven places used the dotless
+class `[0-9A-Fa-f:]', which cannot match an IPv4-mapped or
+IPv4-compatible IPv6 literal.
+
+Eleven occurrences, in three groups and two very different failure modes.
+
+GROUP 1 -- the parsers for `ipvsadm -Ln' output (8 places, in
+ld_read_ipvsadm and ld_read_ipvsadm_thresholds). Reproduced against
+ldirectord's own real-server regex:
+
+    192.0.2.11:80            MATCH
+    [2001:db8::1]:80         MATCH
+    [::1]:80                 MATCH
+    [::ffff:192.0.2.11]:80   NO MATCH
+
+The consequence is quiet and cumulative. Such a real server parses
+correctly out of ldirectord.cf, but when ipvsadm echoes it back the parse
+falls through to the `else' arm and logs "Unknown line read from ipvsadm"
+at debug level 2 only. The server is therefore absent from %oldsrv,
+ldirectord never concludes it is already configured, and it re-adds the
+same real server on every sync interval, forever. No error appears above
+debug level 2, so the only symptom is repeated churn in the IPVS table --
+and the service may well still forward traffic throughout, while
+ldirectord believes it is misconfigured and rewrites the table under it.
+
+GROUP 2 -- _ld_read_config_virtual_resolve (1 place). This one is worse
+than churn: it is the VIRTUAL service path, and the fallthrough is
+`split /:/, $ip_port'. Reproduced:
+
+    [2001:db8::1]:80         -> server='[2001:db8::1]'  port=80
+    [::ffff:192.0.2.100]:80  -> server='['             port=(empty)
+
+An IPv4-mapped virtual address is not merely unparsed, it is MANGLED: the
+address is split on every colon, yielding the single-character server "["
+and an empty port. ldirectord then programs a garbage IPVS virtual
+service. This is the most severe IPv6 defect found in the package, and it
+is reachable from ordinary configuration.
+
+GROUP 3 -- the real-server config dispatch that distinguishes an IPv6
+literal from an IPv4 one (2 places, in ld_read_config). An
+IPv4-mapped address there is classified with the wrong address family
+and then rejected as a malformed IPv6 literal.
+
+This patch makes the character class uniform. Adding a dot to a hex
+character class cannot make it match anything that was not already a
+valid IPv6 literal, so IPv4, pure IPv6 and IPv4-mapped forms all parse,
+and every site now agrees with the config-side parsers that were already
+correct.
+
+--- a/ldirectord/ldirectord.in
++++ b/ldirectord/ldirectord.in
+@@ -1366,9 +1366,9 @@
+ 				$virtual_port = $2;
+ 			} elsif ($vattr =~ /^(\d+)/){
+ 				$fwm = $1;
+-			} elsif ($vattr =~ /^\[([0-9A-Fa-f:]+)\]:([0-9A-Za-z-_]+)/ && $af == AF_INET) {
++			} elsif ($vattr =~ /^\[([0-9A-Fa-f:.]+)\]:([0-9A-Za-z-_]+)/ && $af == AF_INET) {
+ 				&config_error($line, "cannot specify an IPv6 address here. please use \"virtual6\" instead.");
+-			} elsif ($vattr =~ /^\[([0-9A-Fa-f:]+)\]:([0-9A-Za-z-_]+)/ && $af == AF_INET6) {
++			} elsif ($vattr =~ /^\[([0-9A-Fa-f:.]+)\]:([0-9A-Za-z-_]+)/ && $af == AF_INET6) {
+ 				my $v6addr = $1;
+ 				my $v6port = $2;
+ 				if (!inet_pton(AF_INET6,$v6addr)) {
+@@ -1851,7 +1851,7 @@
+ 
+ 	if($ip_port){
+ 		$ip_port=&ld_gethostservbyname($ip_port, $vsrv->{protocol}, $af);
+-		if ($ip_port =~ /(\[[0-9A-Fa-f:]+\]):(\d+)/) {
++		if ($ip_port =~ /(\[[0-9A-Fa-f:.]+\]):(\d+)/) {
+ 			$vsrv->{server} = $1;
+ 			$vsrv->{port} = $2;
+ 		} elsif($ip_port){
+@@ -2522,16 +2522,16 @@
+ 		if (not defined $line) {
+ 			last;
+ 		}
+-		if ($line =~ /^(\w+)\s+(\d+\.\d+\.\d+\.\d+\:\d+|\[[0-9A-Fa-f:]+\]:\d+|\d+)( IPv6)?\s+(\w+)\s+persistent\s+(\d+)\s+mask\s+(.*)/) {
++		if ($line =~ /^(\w+)\s+(\d+\.\d+\.\d+\.\d+\:\d+|\[[0-9A-Fa-f:.]+\]:\d+|\d+)( IPv6)?\s+(\w+)\s+persistent\s+(\d+)\s+mask\s+(.*)/) {
+ 			$real_service = &gen_real_service_str($2, $1, $3);
+ 			$oldsrv{"$real_service"} = {"real"=>{}, "scheduler"=>$4, "persistent"=>$5, "netmask"=>$6};
+-		} elsif ($line =~ /^(\w+)\s+(\d+\.\d+\.\d+\.\d+\:\d+|\[[0-9A-Fa-f:]+\]:\d+|\d+)( IPv6)?\s+(\w+)\s+persistent\s+(\d+)/) {
++		} elsif ($line =~ /^(\w+)\s+(\d+\.\d+\.\d+\.\d+\:\d+|\[[0-9A-Fa-f:.]+\]:\d+|\d+)( IPv6)?\s+(\w+)\s+persistent\s+(\d+)/) {
+ 			$real_service = &gen_real_service_str($2, $1, $3);
+ 			$oldsrv{"$real_service"} = {"real"=>{}, "scheduler"=>$4, "persistent"=>$5};
+-		} elsif ($line =~ /^(\w+)\s+(\d+\.\d+\.\d+\.\d+\:\d+|\[[0-9A-Fa-f:]+\]:\d+|\d+)( IPv6)?\s+(\w+)/) {
++		} elsif ($line =~ /^(\w+)\s+(\d+\.\d+\.\d+\.\d+\:\d+|\[[0-9A-Fa-f:.]+\]:\d+|\d+)( IPv6)?\s+(\w+)/) {
+ 			$real_service = &gen_real_service_str($2, $1, $3);
+ 			$oldsrv{"$real_service"} = {"real"=>{}, "scheduler"=>$4};
+-		} elsif ($line =~ /^  ->\s+(\d+\.\d+\.\d+\.\d+\:\d+|\[[0-9A-Fa-f:]+\]:\d+)\s+(\w+)\s+(\d+)/) {
++		} elsif ($line =~ /^  ->\s+(\d+\.\d+\.\d+\.\d+\:\d+|\[[0-9A-Fa-f:.]+\]:\d+)\s+(\w+)\s+(\d+)/) {
+ 			if (not defined( $real_service)) {
+ 				&ld_debug(2, "Real server read from ipvsadm " .
+ 					  "doesn't seem to be inside a " .
+@@ -2600,13 +2600,13 @@
+ 			last;
+ 		}
+ 		#here we just want to know the real service
+-		if ($line =~ /^(\w+)\s+(\d+\.\d+\.\d+\.\d+\:\d+|\[[0-9A-Fa-f:]+\]:\d+|\d+)( IPv6)?\s+(\w+)\s+persistent\s+(\d+)\s+mask\s+(.*)/) {
++		if ($line =~ /^(\w+)\s+(\d+\.\d+\.\d+\.\d+\:\d+|\[[0-9A-Fa-f:.]+\]:\d+|\d+)( IPv6)?\s+(\w+)\s+persistent\s+(\d+)\s+mask\s+(.*)/) {
+ 			$real_service = &gen_real_service_str($2, $1, $3);
+-		} elsif ($line =~ /^(\w+)\s+(\d+\.\d+\.\d+\.\d+\:\d+|\[[0-9A-Fa-f:]+\]:\d+|\d+)( IPv6)?\s+(\w+)\s+persistent\s+(\d+)/) {
++		} elsif ($line =~ /^(\w+)\s+(\d+\.\d+\.\d+\.\d+\:\d+|\[[0-9A-Fa-f:.]+\]:\d+|\d+)( IPv6)?\s+(\w+)\s+persistent\s+(\d+)/) {
+ 			$real_service = &gen_real_service_str($2, $1, $3);
+-		} elsif ($line =~ /^(\w+)\s+(\d+\.\d+\.\d+\.\d+\:\d+|\[[0-9A-Fa-f:]+\]:\d+|\d+)( IPv6)?\s+(\w+)/) {
++		} elsif ($line =~ /^(\w+)\s+(\d+\.\d+\.\d+\.\d+\:\d+|\[[0-9A-Fa-f:.]+\]:\d+|\d+)( IPv6)?\s+(\w+)/) {
+ 			$real_service = &gen_real_service_str($2, $1, $3);
+-		} elsif ($line =~ /^  ->\s+(\d+\.\d+\.\d+\.\d+\:\d+|\[[0-9A-Fa-f:]+\]:\d+)\s+(\d+)\s+(\d+)\s+(\d+)/) {
++		} elsif ($line =~ /^  ->\s+(\d+\.\d+\.\d+\.\d+\:\d+|\[[0-9A-Fa-f:.]+\]:\d+)\s+(\d+)\s+(\d+)\s+(\d+)/) {
+ 			if (not defined( $real_service)) {
+ 				&ld_debug(2, "Real server read from ipvsadm " .
+ 					  "doesn't seem to be inside a " .

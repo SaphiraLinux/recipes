@@ -1,0 +1,41 @@
+[Unit]
+Description=libvirt virtualization storage driver (virtstoraged)
+Documentation=man:virtstoraged(8)
+After=network-online.target nftables.service
+Wants=network-online.target
+
+[Service]
+# Mirrors files/virtstoraged.initd.
+#
+# Type=notify: libvirt's modular daemons are sd_notify-native, so this is
+# the knowable-correct answer and systemd tracks the real readiness point
+# rather than guessing from process start.
+#
+# Deliberately NOT set: User=. This package configures
+# -Dqemu_user=root -Dqemu_group=root.
+Type=notify
+NotifyAccess=main
+ExecStart=/usr/sbin/virtstoraged
+# /run/libvirt holds one socket per driver plus the sandbox and qemu
+# directories.
+RuntimeDirectory=libvirt
+RuntimeDirectoryMode=0755
+Restart=on-failure
+	RestartSec=5
+
+# Deliberately NOT set: NoNewPrivileges (QEMU cgroup delegation),
+# ProtectSystem=strict (virtqemud mounts images), or ProtectHome
+# (read-only, and the storage pool can be anywhere the operator chooses).
+#
+# This build configures -Dpolkit=disabled -Dselinux=disabled
+# -Dapparmor=disabled, so there is NO access control on virtqemud at all.
+# That is a separate concern from dual-init and is recorded in
+# daemon-inventory.map rather than silently hardened here.
+ProtectHome=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ReadWritePaths=/run/libvirt /var/lib/libvirt
+RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

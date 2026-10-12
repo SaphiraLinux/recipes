@@ -132,7 +132,7 @@ CONFIG_BPF_JIT=y
 CONFIG_BPF_JIT_DEFAULT_ON=y
 CONFIG_BPF_UNPRIV_DEFAULT_OFF=y
 # CONFIG_BPF_PRELOAD is not set
-# CONFIG_BPF_LSM is not set
+CONFIG_BPF_LSM=y
 # end of BPF subsystem
 
 CONFIG_PREEMPT_BUILD=y
@@ -247,7 +247,18 @@ CONFIG_NET_NS=y
 # CONFIG_CHECKPOINT_RESTORE is not set
 # CONFIG_SCHED_AUTOGROUP is not set
 CONFIG_RELAY=y
-# CONFIG_BLK_DEV_INITRD is not set
+# Initramfs support is a CAPABILITY, not a requirement. Everything an ext4 root
+# needs is already built in (EXT4_FS, VIRTIO_BLK, NVME, SCSI, EFI, EFI_STUB) and
+# default-grub boots with rootfstype=ext4 and no initrd, so a plain Saphira
+# machine still boots without one. What this buys is the ability to generate an
+# initramfs at all, which the installer needs: it must boot with no root, see
+# the destination disk, and mount something the running kernel was not built to
+# reach. RD_ZSTD is the decompressor saphira-mkinitramfs produces (cpio newc,
+# zstd); it is defined in usr/Kconfig, which init/Kconfig only sources when
+# BLK_DEV_INITRD is set, so the two belong together.
+CONFIG_BLK_DEV_INITRD=y
+CONFIG_RD_GZIP=y
+CONFIG_RD_ZSTD=y
 # CONFIG_BOOT_CONFIG is not set
 CONFIG_CMDLINE_LOG_WRAP_IDEAL_LEN=1021
 CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y
@@ -1872,7 +1883,7 @@ CONFIG_CFG80211=m
 # CONFIG_NL80211_TESTMODE is not set
 # CONFIG_CFG80211_DEVELOPER_WARNINGS is not set
 CONFIG_CFG80211_CERTIFICATION_ONUS=y
-CONFIG_CFG80211_REQUIRE_SIGNED_REGDB=y
+# CONFIG_CFG80211_REQUIRE_SIGNED_REGDB is not set
 # CONFIG_CFG80211_USE_KERNEL_REGDB_KEYS is not set
 CONFIG_CFG80211_EXTRA_REGDB_KEYDIR="certs/regdb"
 # CONFIG_CFG80211_REG_CELLULAR_HINTS is not set
@@ -1964,7 +1975,9 @@ CONFIG_HOTPLUG_PCI=y
 #
 # PCI controller drivers
 #
-# CONFIG_VMD is not set
+# VMD is the Intel volume-management-device remap that hides NVMe behind RST
+# mode on N100 and similar boards: without it such a root disk is unreachable.
+CONFIG_VMD=y
 
 #
 # Cadence-based PCIe controllers
@@ -4018,7 +4031,12 @@ CONFIG_DRM_PANEL_ORIENTATION_QUIRKS=y
 #
 # Frame buffer Devices
 #
-# CONFIG_FB is not set
+# The EFI framebuffer plus fbcon is the local console on UEFI targets, where
+# no VGA text mode exists (OVMF/QXL VMs, physical UEFI boxes). BIOS targets
+# keep their VGA text console unchanged. Serial and netconsole are unaffected.
+CONFIG_FB=y
+CONFIG_FB_EFI=y
+CONFIG_FRAMEBUFFER_CONSOLE=y
 # end of Frame buffer Devices
 
 #
@@ -5490,10 +5508,10 @@ CONFIG_PROC_MEM_FORCE_PTRACE=y
 # CONFIG_MSEAL_SYSTEM_MAPPINGS is not set
 CONFIG_SECURITY=y
 CONFIG_HAS_SECURITY_AUDIT=y
-# CONFIG_SECURITYFS is not set
+CONFIG_SECURITYFS=y
 CONFIG_SECURITY_NETWORK=y
+CONFIG_SECURITY_PATH=y
 # CONFIG_SECURITY_NETWORK_XFRM is not set
-# CONFIG_SECURITY_PATH is not set
 # CONFIG_INTEL_TXT is not set
 CONFIG_LSM_MMAP_MIN_ADDR=65536
 # CONFIG_STATIC_USERMODEHELPER is not set
@@ -5957,10 +5975,26 @@ CONFIG_DEBUG_MISC=y
 # Compile-time checks and compiler options
 #
 CONFIG_AS_HAS_NON_CONST_ULEB128=y
+# PRODUCTION DEBUG POLICY. This is a public distribution, so the kernel ships
+# no compiler debug database.
+#
+# 8056167 turned on DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT + DEBUG_INFO_BTF to get
+# vmlinux BTF for the BPF work, and shipped the consequence. olddefconfig then
+# DERIVES CONFIG_DEBUG_INFO_BTF_MODULES=y from DEBUG_INFO_BTF=y, so the derived
+# setting appears in no file anyone reviews, and every one of the 218 runtime
+# .ko files came out carrying a DWARF database. Measured: identical block/bfq.ko
+# is 198,560 bytes with DEBUG_INFO_NONE and 2,022,008 bytes with debug info;
+# nouveau.ko reached 232 MB and i915.ko 175 MB. /lib/modules went from 42.7 MiB
+# to 745.4 MiB and saphira-kernel from a 32 MiB APK to 600 MiB, for no user-
+# visible gain: a runtime system never reads a module's DWARF.
+#
+# This also makes the derivation above unreachable rather than merely unused,
+# so a future config edit cannot silently reintroduce it.
 CONFIG_DEBUG_INFO_NONE=y
 # CONFIG_DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT is not set
 # CONFIG_DEBUG_INFO_DWARF4 is not set
 # CONFIG_DEBUG_INFO_DWARF5 is not set
+# CONFIG_DEBUG_INFO_BTF is not set
 CONFIG_FRAME_WARN=2048
 # CONFIG_STRIP_ASM_SYMS is not set
 # CONFIG_READABLE_ASM is not set

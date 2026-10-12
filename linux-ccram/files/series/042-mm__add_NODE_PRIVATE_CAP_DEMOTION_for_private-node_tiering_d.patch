@@ -1,0 +1,235 @@
+From 3ec2a897c0f9a29e243db6117ba95f7b628b1f07 Mon Sep 17 00:00:00 2001
+From: Gregory Price <gourry@gourry.net>
+Date: Tue, 30 Jun 2026 22:58:52 -0700
+Subject: [PATCH] mm: add NODE_PRIVATE_CAP_DEMOTION for private-node tiering
+ demotion
+
+A private node is invisible to the tiering/demotion hierarchy by default:
+memory-tiers.c never includes it, so reclaim never demotes onto it.
+
+Add NODE_PRIVATE_CAP_DEMOTION to opt a private node into demotion.
+
+When set, memory-tiers adds the node to the demotion set and reclaim's
+demote path may target it (allocating from the private zonelist).
+
+Demotion is driven by reclaim, so CAP_DEMOTION requires CAP_RECLAIM.
+Otherwise the node can either fill up and drive odd system-wide OOM
+behavior, or demotion doesn't work (nothing can demote from the node).
+
+Signed-off-by: Gregory Price <gourry@gourry.net>
+---
+ drivers/base/node.c          |  5 +++++
+ include/linux/node_private.h | 30 +++++++++++++++++++++++++++++
+ mm/memory-tiers.c            | 37 +++++++++++++++++++++++++++---------
+ mm/vmscan.c                  |  4 ++++
+ 4 files changed, 67 insertions(+), 9 deletions(-)
+
+diff --git a/drivers/base/node.c b/drivers/base/node.c
+index 94cd51f51b7..3d61ca1b805 100644
+--- a/drivers/base/node.c
++++ b/drivers/base/node.c
+@@ -896,6 +896,11 @@ int node_private_register(int nid, struct node_private *np)
+ 	if (!np || !node_possible(nid))
+ 		return -EINVAL;
+ 
++	/* Demotion is driven by reclaim, so it requires reclaim. */
++	if ((np->caps & NODE_PRIVATE_CAP_DEMOTION) &&
++	    !(np->caps & NODE_PRIVATE_CAP_RECLAIM))
++		return -EINVAL;
++
+ 	mutex_lock(&node_private_lock);
+ 	mem_hotplug_begin();
+ 
+diff --git a/include/linux/node_private.h b/include/linux/node_private.h
+index 7b617b1fa9c..87b03444b2c 100644
+--- a/include/linux/node_private.h
++++ b/include/linux/node_private.h
+@@ -15,6 +15,7 @@ struct page;
+ #define NODE_PRIVATE_CAP_RECLAIM	(1UL << 0)	/* allow mm reclaim */
+ #define NODE_PRIVATE_CAP_USER_NUMA	(1UL << 1)	/* allow mempolicy */
+ #define NODE_PRIVATE_CAP_HOTUNPLUG	(1UL << 2)	/* allow hot-unplug */
++#define NODE_PRIVATE_CAP_DEMOTION	(1UL << 3)	/* allow tiering demotion */
+ 
+ /**
+  * struct node_private - Per-node container for N_MEMORY_PRIVATE nodes
+@@ -118,6 +119,30 @@ static inline bool node_allows_hotunplug(int nid)
+ 	return ret;
+ }
+ 
++/**
++ * node_allows_demotion - may kernel tiering demote to this node?
++ * @nid: the node to test
++ *
++ * Governs whether a private node participates in the demotion hierarchy.
++ * Demotion accumulates pages on the node, so CAP_DEMOTION requires CAP_RECLAIM
++ * (enforced at registration) as a safety valve.
++ *
++ * return: true for normal nodes and private nodes opted into CAP_DEMOTION.
++ */
++static inline bool node_allows_demotion(int nid)
++{
++	struct node_private *np;
++	bool ret;
++
++	if (!node_state(nid, N_MEMORY_PRIVATE))
++		return true;
++	rcu_read_lock();
++	np = rcu_dereference(NODE_DATA(nid)->node_private);
++	ret = np && (np->caps & NODE_PRIVATE_CAP_DEMOTION);
++	rcu_read_unlock();
++	return ret;
++}
++
+ #else /* !CONFIG_NUMA */
+ 
+ static inline bool folio_is_private_node(struct folio *folio)
+@@ -150,6 +175,11 @@ static inline bool node_allows_hotunplug(int nid)
+ 	return true;
+ }
+ 
++static inline bool node_allows_demotion(int nid)
++{
++	return true;
++}
++
+ #endif /* CONFIG_NUMA */
+ 
+ #if defined(CONFIG_NUMA) && defined(CONFIG_MEMORY_HOTPLUG)
+diff --git a/mm/memory-tiers.c b/mm/memory-tiers.c
+index 25e121851b5..c673080d153 100644
+--- a/mm/memory-tiers.c
++++ b/mm/memory-tiers.c
+@@ -7,6 +7,7 @@
+ #include <linux/memory-tiers.h>
+ #include <linux/notifier.h>
+ #include <linux/sched/sysctl.h>
++#include <linux/node_private.h>
+ 
+ #include "internal.h"
+ 
+@@ -317,6 +318,21 @@ void node_get_allowed_targets(pg_data_t *pgdat, nodemask_t *targets)
+ 	rcu_read_unlock();
+ }
+ 
++/* Tiering set: N_MEMORY | (N_MEMORY_PRIVATE w/ CAP_DEMOTION) */
++static nodemask_t tierable_nodes;
++
++static void update_tierable_nodes(void)
++{
++	int node;
++
++	lockdep_assert_held_once(&memory_tier_lock);
++
++	tierable_nodes = node_states[N_MEMORY];
++	for_each_node_state(node, N_MEMORY_PRIVATE)
++		if (node_allows_demotion(node))
++			node_set(node, tierable_nodes);
++}
++
+ /**
+  * next_demotion_node() - Get the next node in the demotion path
+  * @node: The starting node to lookup the next node
+@@ -330,7 +346,7 @@ void node_get_allowed_targets(pg_data_t *pgdat, nodemask_t *targets)
+ int next_demotion_node(int node, const nodemask_t *allowed_mask)
+ {
+ 	struct demotion_nodes *nd;
+-	nodemask_t mask;
++	nodemask_t mask, tierable;
+ 
+ 	if (!node_demotion)
+ 		return NUMA_NO_NODE;
+@@ -370,7 +386,8 @@ int next_demotion_node(int node, const nodemask_t *allowed_mask)
+ 	 * closest demotion target.
+ 	 */
+ 	nodes_complement(mask, *allowed_mask);
+-	return find_next_best_node_in(node, &mask, &node_states[N_MEMORY]);
++	tierable = tierable_nodes;
++	return find_next_best_node_in(node, &mask, &tierable);
+ }
+ 
+ static void disable_all_demotion_targets(void)
+@@ -378,7 +395,7 @@ static void disable_all_demotion_targets(void)
+ 	struct memory_tier *memtier;
+ 	int node;
+ 
+-	for_each_node_state(node, N_MEMORY) {
++	for_each_node_mask(node, tierable_nodes) {
+ 		node_demotion[node].preferred = NODE_MASK_NONE;
+ 		/*
+ 		 * We are holding memory_tier_lock, it is safe
+@@ -401,7 +418,7 @@ static void dump_demotion_targets(void)
+ {
+ 	int node;
+ 
+-	for_each_node_state(node, N_MEMORY) {
++	for_each_node_mask(node, tierable_nodes) {
+ 		struct memory_tier *memtier = __node_get_memory_tier(node);
+ 		nodemask_t preferred = node_demotion[node].preferred;
+ 
+@@ -435,9 +452,10 @@ static void establish_demotion_targets(void)
+ 	if (!node_demotion)
+ 		return;
+ 
++	update_tierable_nodes();
+ 	disable_all_demotion_targets();
+ 
+-	for_each_node_state(node, N_MEMORY) {
++	for_each_node_mask(node, tierable_nodes) {
+ 		best_distance = -1;
+ 		nd = &node_demotion[node];
+ 
+@@ -455,7 +473,7 @@ static void establish_demotion_targets(void)
+ 		 * nodelist to skip list so that we find the best node from the
+ 		 * memtier nodelist.
+ 		 */
+-		nodes_andnot(tier_nodes, node_states[N_MEMORY], tier_nodes);
++		nodes_andnot(tier_nodes, tierable_nodes, tier_nodes);
+ 
+ 		/*
+ 		 * Find all the nodes in the memory tier node list of same best distance.
+@@ -464,7 +482,7 @@ static void establish_demotion_targets(void)
+ 		 */
+ 		do {
+ 			target = find_next_best_node_in(node, &tier_nodes,
+-							&node_states[N_MEMORY]);
++							&tierable_nodes);
+ 			if (target == NUMA_NO_NODE)
+ 				break;
+ 
+@@ -503,7 +521,7 @@ static void establish_demotion_targets(void)
+ 	 * allocation to a set of nodes that is closer the above selected
+ 	 * preferred node.
+ 	 */
+-	lower_tier = node_states[N_MEMORY];
++	lower_tier = tierable_nodes;
+ 	list_for_each_entry(memtier, &memory_tiers, list) {
+ 		/*
+ 		 * Keep removing current tier from lower_tier nodes,
+@@ -550,7 +568,8 @@ static struct memory_tier *set_node_memory_tier(int node)
+ 
+ 	lockdep_assert_held_once(&memory_tier_lock);
+ 
+-	if (!node_state(node, N_MEMORY))
++	/* Include N_MEMORY and N_MEMORY_PRIVATE with CAP_DEMOTION */
++	if (!node_state(node, N_MEMORY) && !node_allows_demotion(node))
+ 		return ERR_PTR(-EINVAL);
+ 
+ 	mt_calc_adistance(node, &adist);
+diff --git a/mm/vmscan.c b/mm/vmscan.c
+index 0f9f07da04f..57b6b1766dc 100644
+--- a/mm/vmscan.c
++++ b/mm/vmscan.c
+@@ -973,6 +973,10 @@ static struct folio *alloc_demote_folio(struct folio *src,
+ 
+ 	mtc = (struct migration_target_control *)private;
+ 
++	if (mtc->nmask &&
++	    nodes_intersects(*mtc->nmask, node_states[N_MEMORY_PRIVATE]))
++		mtc->alloc_flags = ALLOC_ZONELIST_PRIVATE;
++
+ 	/*
+ 	 * make sure we allocate from the target node first also trying to
+ 	 * demote or reclaim pages from the target node via kswapd if we are
+-- 
+2.55.0
+

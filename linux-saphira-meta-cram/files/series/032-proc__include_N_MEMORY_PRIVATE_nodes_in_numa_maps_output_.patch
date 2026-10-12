@@ -1,0 +1,55 @@
+From 4ba9ca930c950de44eab2e0c892d4a9752ab01c4 Mon Sep 17 00:00:00 2001
+From: Gregory Price <gourry@gourry.net>
+Date: Wed, 22 Apr 2026 17:22:01 -0700
+Subject: [PATCH] proc: include N_MEMORY_PRIVATE nodes in numa_maps output
+
+numa_maps collects per-node page counts in the page-table walkers
+and emits them in show_numa_map.  All three filtered by N_MEMORY,
+so pages on N_MEMORY_PRIVATE nodes were never gathered/printed.
+
+Accept N_MEMORY_PRIVATE pages in both walkers and emit private nodes
+in show_numa_map, so private-node mappings are visible in numa_maps.
+
+Signed-off-by: Gregory Price <gourry@gourry.net>
+---
+ fs/proc/task_mmu.c | 10 ++++++++--
+ 1 file changed, 8 insertions(+), 2 deletions(-)
+
+diff --git a/fs/proc/task_mmu.c b/fs/proc/task_mmu.c
+index 817e3e0f919..e116cd5f157 100644
+--- a/fs/proc/task_mmu.c
++++ b/fs/proc/task_mmu.c
+@@ -3389,7 +3389,8 @@ static struct page *can_gather_numa_stats(pte_t pte, struct vm_area_struct *vma,
+ 		return NULL;
+ 
+ 	nid = page_to_nid(page);
+-	if (!node_isset(nid, node_states[N_MEMORY]))
++	if (!node_isset(nid, node_states[N_MEMORY]) &&
++	    !node_isset(nid, node_states[N_MEMORY_PRIVATE]))
+ 		return NULL;
+ 
+ 	return page;
+@@ -3414,7 +3415,8 @@ static struct page *can_gather_numa_stats_pmd(pmd_t pmd,
+ 		return NULL;
+ 
+ 	nid = page_to_nid(page);
+-	if (!node_isset(nid, node_states[N_MEMORY]))
++	if (!node_isset(nid, node_states[N_MEMORY]) &&
++	    !node_isset(nid, node_states[N_MEMORY_PRIVATE]))
+ 		return NULL;
+ 
+ 	return page;
+@@ -3602,6 +3604,10 @@ static int show_numa_map(struct seq_file *m, void *v)
+ 		if (md->node[nid])
+ 			seq_printf(m, " N%d=%lu", nid, md->node[nid]);
+ 
++	for_each_node_state(nid, N_MEMORY_PRIVATE)
++		if (md->node[nid])
++			seq_printf(m, " N%d=%lu", nid, md->node[nid]);
++
+ 	seq_printf(m, " kernelpagesize_kB=%lu", vma_kernel_pagesize(vma) >> 10);
+ out:
+ 	seq_putc(m, '\n');
+-- 
+2.55.0
+

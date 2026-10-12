@@ -426,7 +426,27 @@ class Planner:
             metadata = sandbox_metadata(recipe_path, self.config)
             if metadata.get("disabled") == "yes":
                 reason = metadata.get("disabled_reason") or "no reason given"
-                die(f"recipe disabled: {candidate} ({reason})")
+                # Same deliberate-lab-build escape hatch buildpkg has, and
+                # scoped identically: it applies ONLY to the package named on
+                # the command line. A disabled recipe reached as a genuine
+                # dependency still dies here, so this cannot pull a disabled
+                # package into someone else's closure.
+                #
+                # It has to be honoured on this path at all because a package
+                # with a subpackage resolves its own subpackage output back
+                # through _load_producer, so the target package reappears as
+                # its own "producer" and would otherwise refuse itself.
+                if (
+                    candidate == self.target
+                    and os.environ.get("SAPHIRA_ALLOW_DISABLED") == "1"
+                ):
+                    print(
+                        f"resolvepkg: WARNING: resolving DISABLED recipe by explicit "
+                        f"request: {candidate} ({reason})",
+                        file=sys.stderr,
+                    )
+                else:
+                    die(f"recipe disabled: {candidate} ({reason})")
             producer = metadata["pkgname"]
             if producer != candidate:
                 die(f"recipe directory and pkgname differ: {candidate} != {producer}")

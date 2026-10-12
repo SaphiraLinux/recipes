@@ -11,6 +11,10 @@
 pkgname=perf
 pkgver=7.2.2
 pkgrel=1
+# LEGACY IDENTITY, DISABLED: superseded by per-$kver saphira-perf-*
+# recipes. Stays only as reference; must never build or publish again.
+disabled=yes
+disabled_reason='superseded by per-kver saphira-perf-7.1.5/-7.2.2/-7.2.3/-7.3-rc1 (independently available identities)'
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="Kernel performance counters (matches kernel 7.2.2)"
 license="GPL-2.0-only"
@@ -28,6 +32,7 @@ makedepends="
     elfutils-dev
     flex
     gcc
+    gettext
     make
     python3
     zlib-dev

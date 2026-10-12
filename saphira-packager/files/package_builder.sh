@@ -39,7 +39,11 @@ SAPHIRA_INCOMING_DIR=${SAPHIRA_INCOMING_DIR:-/out/stage4/incoming}
 # (space-separated NVRs or nvr.apk filenames, e.g. "acl-2.3.2-r1").
 # Archive generations are never pruned.
 SAPHIRA_RETAIN_GENERATIONS=${SAPHIRA_RETAIN_GENERATIONS:-2}
-SAPHIRA_RETAIN_NVR=${SAPHIRA_RETAIN_NVR:-}
+# The build seed pins the saphira-kernel-headers 7.1.5 line
+# (saphira-kernel-headers~7.1.5): retention's newest-2 rule would
+# otherwise prune every 7.1.5 NVR and break all base rebuilds. Hold
+# the satisfying NVR explicitly; move the hold if the line bumps.
+SAPHIRA_RETAIN_NVR=${SAPHIRA_RETAIN_NVR:-saphira-kernel-headers-7.1.5-r2}
 SAPHIRA_SIGN_KEY=${SAPHIRA_SIGN_KEY:-/root/apk-signing/akadata-repository.rsa}
 SAPHIRA_TRUST_KEY=${SAPHIRA_TRUST_KEY:-/etc/apk/keys/akadata-repository.rsa.pub}
 # Canonical host-side module signing key. The builder exposes it read-only
@@ -70,7 +74,15 @@ SAPHIRA_SOURCE_DATE_EPOCH=${SAPHIRA_SOURCE_DATE_EPOCH:-1753401600}
 # headers and static objects; saphira-kernel-headers the kernel UAPI;
 # libxcrypt and flex the runtimes the old host-file manifest used to
 # carry (libcrypt.so.2, libfl.so.2). Nothing is copied from the host.
-SAPHIRA_BUILD_SEED=${SAPHIRA_BUILD_SEED:-saphira-baselayout saphira-base-abi apk-tools bash libcap coreutils curl diffutils findutils pcre2 mawk grep gzip patch sed tar acl attr xz bzip2 lz4 zstd ca-certificates python3 ccache which musl musl-dev saphira-kernel-headers libxcrypt flex}
+# Genesis UAPI baseline: the kernel-headers seed entry is pinned to an
+# exact NVR (currently the 7.1.5 line, proven by bootstrap manifests to
+# be what both Genesis compiler stages consumed). An unpinned bare name
+# floats to newest and silently re-baselines every toolchain build --
+# that drift is how 7.2.2/7.2.3 headers contaminated later builds. The
+# builder additionally asserts the seed root's linux/version.h matches
+# the pinned line and fails closed otherwise; see seed UAPI gate below.
+# Never pin UAPI through /etc/apk/world (host state, not build policy).
+SAPHIRA_BUILD_SEED=${SAPHIRA_BUILD_SEED:-saphira-baselayout saphira-base-abi apk-tools bash libcap coreutils curl diffutils findutils pcre2 mawk grep gzip patch sed tar acl attr xz bzip2 lz4 zstd ca-certificates python3 ccache which musl musl-dev saphira-kernel-headers~7.1.5 libxcrypt flex}
 SAPHIRA_HOST_RESOLV_CONF=${SAPHIRA_HOST_RESOLV_CONF:-/etc/resolv.conf}
 SAPHIRA_HOST_HOSTS_FILE=${SAPHIRA_HOST_HOSTS_FILE:-/etc/hosts}
 SAPHIRA_ROOT_RECIPE_MOUNT=${SAPHIRA_ROOT_RECIPE_MOUNT:-/recipes}

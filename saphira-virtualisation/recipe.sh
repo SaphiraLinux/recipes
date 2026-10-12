@@ -2,10 +2,13 @@
 
 pkgname=saphira-virtualisation
 pkgver=0.1
-pkgrel=2
-# x86_64, not noarch: see saphira-base recipe.sh (repo has no
-# noarch/ payload subdir yet; same fix applies here).
-pkgarch=${SAPHIRA_ARCH:-x86_64}
+pkgrel=3
+# noarch: pure meta/profile package (no payload of its own beyond group
+# docs). Arch-specific members in depends= do not make the group itself
+# arch-specific; noarch groups publish arch: noarch inside the per-arch
+# repo dir (proven by python-jinja2 and kin), so no noarch/ subdir is
+# needed. Payload change (arch field), hence the revision bump.
+pkgarch=noarch
 pkgdesc='Saphira virtualisation group (QEMU host emulation plus libvirt management)'
 license='BUSL-1.1'
 origin=saphira-virtualisation

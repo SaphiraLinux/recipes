@@ -1,0 +1,19 @@
+# saphira-image-creator target matrix.
+#
+# ONE row per supported boot target. Assembly is COMMON; only the partition
+# plan, the bootloader invocation and the init preparation differ. That is
+# why this is data rather than four scripts: a target is a row, not an
+# implementation.
+#
+#   <name> <boot: bios|uefi> <init: openrc|systemd> <profile>
+#
+# Adding a target is a line here, not a new tool.
+#
+# The profile names INTENTIONS only. Dependency closure belongs to APK
+# metadata (depends), never to an image definition, exactly as
+# saphira-profiles(5) already requires of saphira-install-tools profiles.
+# This file never re-enumerates a resolved closure.
+bios-openrc     bios  openrc   minimal-openrc
+bios-systemd    bios  systemd  minimal-systemd
+uefi-openrc     uefi  openrc   minimal-openrc
+uefi-systemd    uefi  systemd  minimal-systemd

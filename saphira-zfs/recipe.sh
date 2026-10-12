@@ -25,7 +25,7 @@ makedepends="
 	util-linux-dev
 	zlib-dev
 	openssl-dev
-	saphira-kernel-headers=7.2.2
+	saphira-kernel-headers~7.2.2
 	make
 	pkgconf
 	python3

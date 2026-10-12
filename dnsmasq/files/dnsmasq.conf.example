@@ -1,0 +1,45 @@
+# dnsmasq example configuration.
+#
+# Copy to /etc/dnsmasq.conf and edit. Nothing starts until this file
+# exists: dnsmasq with no configuration serves nothing useful, and a
+# guessed resolver configuration silently breaks name resolution for
+# every client that trusts it.
+#
+# Saphira is IPv6-first: AAAA records are served by default and the
+# example enables IPv6 explicitly, because the property has to be stated
+# rather than inherited from a default that may change.
+
+# Upstream resolvers. IPv6 first.
+no-resolv
+server=2001:db8::1
+server=2001:db8::2
+#server=192.0.2.53
+
+listen-address=::
+bind-interfaces
+
+# Cache size in entries. Larger means more memory and fewer upstream
+# lookups; 1000 is plenty for a small server.
+cache-size=1000
+
+# Never forward queries for private or local ranges to upstream: that
+# leaks internal names and is a classic open-resolver misconfiguration.
+local=/local/
+domain-needed
+bogus-priv
+
+# Answers AAAA even when no global IPv6 connectivity is present, so a
+# dual-stack host keeps working when IPv6 is being repaired.
+#answer-ipv6-without-aaaa=0
+
+# Log queries for diagnosis; drop to 0 once working.
+#log-queries
+#log-facility=/var/log/dnsmasq.log
+
+# --- DHCP (uncomment together) ---------------------------------------
+# Saphira has a dedicated DHCP server (kea); this block is here for the
+# small or embedded case. Never enable it alongside kea on the same
+# interface: two DHCP servers on one link is an outage.
+#dhcp-range=2001:db8:1::100,2001:db8:1::1ff,ra-only,64,12h
+#dhcp-range=192.0.2.100,192.0.2.199,12h
+#dhcp-option=6,2001:db8:1::1

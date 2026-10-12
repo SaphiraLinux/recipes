@@ -89,6 +89,26 @@ already=0
 promoted_nvrs=()
 db_lock_held=""
 chmod g+rws -- "$to_dir" 2>/dev/null || true
+
+# Take the writer lock BEFORE the first byte of the destination repository
+# is touched.
+#
+# The lock used to be taken at line ~142, after the APK copies (cp/mv) and
+# after index regeneration had already rewritten the live repository. A
+# concurrent sign-apk-repo on the same generation could therefore interleave
+# mkndx over a mutating directory, install an index that does not match the
+# file set, and commit a repository.db derived from a different index --
+# and two concurrent promote-repo runs to the same destination raced with
+# no serialisation at all. The header comment already claimed "same
+# repository.db.lock ... same transaction rules"; the ordering now matches
+# the claim.
+if [ -f "$to_dir/repository.db" ]; then
+	if ! mkdir "$to_dir/repository.db.lock" 2>/dev/null; then
+		die "repository writer lock already held: $to_dir/repository.db.lock"
+	fi
+	db_lock_held=$to_dir
+fi
+
 mkdir -p -- "${SAPHIRA_TMPDIR:-/build/tmp}"
 workspace=$(mktemp -d "${SAPHIRA_TMPDIR:-/build/tmp}/promote-repo.XXXXXX")
 trap 'if [ -n "$db_lock_held" ]; then rmdir -- "$db_lock_held/repository.db.lock" 2>/dev/null || true; fi; rm -rf -- "$workspace"' EXIT HUP INT TERM
@@ -139,12 +159,12 @@ if [ "$promoted" -gt 0 ]; then
 	# recompute, tombstone advances, loud notices). No database yet
 	# means explicit migration is still pending — say so, never invent.
 	if [ -f "$to_dir/repository.db" ]; then
-		if ! mkdir "$to_dir/repository.db.lock" 2>/dev/null; then
-			die "repository writer lock already held: $to_dir/repository.db.lock"
-		fi
-		db_lock_held=$to_dir
+		# The lock was taken before the first copy, above; assert it is
+		# still ours rather than acquiring it a second time.
+		[ -n "$db_lock_held" ] || die "internal: writer lock was not held before mutation"
 		"$SAPHIRA_PYTHON" - "$repo_db_lib" "$SAPHIRA_APK" "$to_dir" \
 			"${promoted_nvrs[@]}" <<'PY' || die "repository.db promotion sync failed for $to (see above)"
+import json
 import os
 import sys
 import tempfile
@@ -163,21 +183,52 @@ try:
 except rdb.RepoDbError as exc:
     print(f"promote-repo: {exc}", file=sys.stderr)
     raise SystemExit(2)
+# Route through the SAME publish gate sign-apk-repo uses, instead of
+# hand-building the staged map and calling apply_staged directly.
+#
+# apply_staged is the transaction, not the gate. Calling it directly meant
+# promote-repo performed NO r0 check, NO file-ownership collision check,
+# NO account union/reservation/file-reference check and NO build-chain
+# integrity check. So `promote-repo ... somepkg-1.2.3-r0' installed an r0
+# into the live view -- directly violating "no r0 package is allowed in the
+# live generation repository" -- and a package colliding on a path with one
+# already live could be published over it.
+#
+# The gate needs the same staged-accounts receipt file sign-apk-repo builds
+# (filename -> {name, version, accounts}), which is derived here from the
+# promoted APK payloads rather than from a build transaction's
+# artifact-manifest.json, because a promotion has no build manifest.
 staged = {}
 carriers = []
 for nvr in nvrs:
     dumped = rdb.dump_package(apk, os.path.join(to_dir, nvr + ".apk"))
     filename = nvr + ".apk"
-    staged[filename] = {"name": dumped["name"], "version": dumped["version"],
-                        "files": sorted(dumped["files"]),
-                        "replaces": sorted(dumped["replaces"]), "accounts": None}
     if any(f.startswith(rdb.FRAGMENT_PREFIX) for f in dumped["files"]):
         carriers.append(filename)
 with tempfile.TemporaryDirectory(prefix="promote-repo-extract-", dir=_promote_tmp_base) as tmp:
     decls = rdb.extract_declarations(apk, to_dir, carriers, tmp)
-for filename, item in staged.items():
-    item["accounts"] = decls.get(filename, {"users": [], "groups": [], "dirs": []})
-notices = []
+receipts = {}
+for nvr in nvrs:
+    filename = nvr + ".apk"
+    dumped = rdb.dump_package(apk, os.path.join(to_dir, filename))
+    receipts[filename] = {
+        "name": dumped["name"],
+        "version": dumped["version"],
+        "accounts": decls.get(filename, {"users": [], "groups": [], "dirs": [], "files": []}),
+    }
+receipts_path = os.path.join(_promote_tmp_base, "staged-accounts.json")
+with open(receipts_path, "w", encoding="utf-8") as stream:
+    json.dump(receipts, stream, sort_keys=True, separators=(",", ":"))
+    stream.write("\n")
+tsv_path = os.environ.get("SAPHIRA_ACCOUNTS_TSV", "/usr/share/saphira/accounts.tsv")
+package_paths = [os.path.join(to_dir, nvr + ".apk") for nvr in nvrs]
+try:
+    staged, notices = rdb.gate_staged(conn, apk, receipts_path,
+                                      set(receipts), package_paths, tsv_path)
+except rdb.RepoDbError as exc:
+    conn.rollback()
+    print(f"promote-repo: publish gate refused the promotion: {exc}", file=sys.stderr)
+    raise SystemExit(1)
 conn.execute("BEGIN IMMEDIATE")
 try:
     rdb.apply_staged(conn, apk, to_dir, staged, rdb.utcnow(), notices)

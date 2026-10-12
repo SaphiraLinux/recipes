@@ -1,0 +1,23 @@
+#!/sbin/openrc-run
+
+description="Dynamic system tuning daemon"
+
+# tuned applies a selected profile (sysctl, CPU governor, IO scheduler,
+# hugepages) and keeps monitoring for drift. -l keeps it in the
+# foreground under supervise-daemon.
+#
+# tuned is python3 + pygobject and talks to the system bus for most of
+# its work, so it needs a message bus running. On Saphira that is the
+# dbus package's service, which is why this cannot be a standalone
+# definition: without a bus, tuned cannot start at all.
+command="/usr/sbin/tuned-daemon"
+command_args="-l"
+supervisor="supervise-daemon"
+pidfile="/run/tuned/tuned.pid"
+
+depend()
+{
+	need localmount
+	use dbus
+	after bootmisc
+}

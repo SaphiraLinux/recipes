@@ -1,0 +1,35 @@
+# Init-neutral Saphira system base.
+#
+# Intentions ONLY: the package manager owns dependency closure. Never
+# enumerate resolved dependencies here; prove the closure with the
+# repository index instead (see saphira-profiles(5)).
+#
+# There is deliberately NO init system in this profile. saphira-base is
+# init-neutral, so the same base serves an OpenRC machine and a systemd one
+# and the difference is stated once, in init-openrc or init-systemd. A base
+# that named an init would force every other profile to restate it.
+#
+# The profile is named base-system, not saphira-base, because saphira-base is
+# an APK. @base-system (this file) and saphira-base (a package) would
+# otherwise be two things one keystroke apart, in documentation, in logs and
+# in an installer UI. Compose it with @saphira-openrc or @saphira-systemd.
+saphira-base
+saphira-kernel
+# Boot infrastructure is an explicit intention: an installed machine
+# carries its own bootloader, both to boot now and to survive a later
+# kernel upgrade.
+grub
+# Filesystem and boot-partition tooling. A machine has to be able to make
+# and check the filesystems it lives on.
+e2fsprogs
+dosfstools
+efibootmgr
+# Access: a machine with no remote access is not manageable, and a
+# headless server with no editor is not Saphira. openssh is ONE package
+# here, carrying both the client and sshd; there is no openssh-server.
+openssh
+vim
+# Networking: enough to configure an interface and resolve a name.
+iproute2
+ca-certificates
+tzdata

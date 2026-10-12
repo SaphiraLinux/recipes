@@ -10,7 +10,7 @@ gredist \- Protocol 47/GRE distributor
 \fIconfig_path\fR [\fB--syslog\fR]
 .SH DESCRIPTION
 .B saphira-gredist
-is a small userspace control service that distributes raw Protocol 47/GRE traffic from a single frontend address to a pool of backends. Userspace owns configuration, membership, health and HRW distribution; kernel handles high-rate packet I/O via raw sockets and optional nft fast-path.
+is a small userspace control service that distributes raw Protocol 47/GRE traffic from a single frontend address to a pool of backends. Userspace owns configuration, membership, health and HRW distribution; the kernel handles packet I/O via raw sockets and builds the outer IP header on send. There is no nft fast path.
 .PP
 Each service is named by its config file:
 .B /etc/saphira/gredist/\fIservice_name\fR.conf
@@ -34,11 +34,11 @@ backend=2a02:8012:bc57:100::10
 .PP
 Comments start with \fB#\fR or \fB;\fR. Exactly one frontend, at least one backend. Families are not tied.
 .SH GRE HANDLING
-Parsing follows Linux \fBnet/ipv4/gre_demux.c:gre_parse_header\fR: validate outer IP, check \fBGRE_VERSION\fR and \fBGRE_ROUTING\fR, compute \fBgre_calc_hlen\fR from CSUM/KEY/SEQ, fail closed on truncated or malformed, support keyless and keyed (key is visible tunnel identifier). Fragments, oversized (>9000) and queue pressure are counted as drops.
+Parsing follows Linux \fBnet/ipv4/gre_demux.c:gre_parse_header\fR: validate outer IP, check \fBGRE_VERSION\fR and \fBGRE_ROUTING\fR, compute \fBgre_calc_hlen\fR from CSUM/KEY/SEQ, fail closed on truncated or malformed, support keyless and keyed (key is visible tunnel identifier). Fragments (IPv4 frag_off, IPv6 next header 44), oversized (>9000) and queue pressure are counted as drops. An IPv6 packet carrying extension headers before GRE is not parsed and is counted as malformed.
 .SH DISTRIBUTION
-Rendezvous/HRW hashing on outer source address plus GRE key when present. Score = splitmix64(fnv1a(backend) XOR flow_hash). Removal moves only affected flows; rejoin is deterministic.
+Rendezvous/HRW hashing on outer source address plus GRE key when present. Score = splitmix64(fnv1a(backend) XOR flow_hash), which depends on the backend's identity and the flow and not on its position in the config. Removal moves only affected flows; reordering the config moves none; rejoin is deterministic.
 .SH HEALTH
-ICMP ping per backend every 2s; 2 consecutive fails -> down, 2 successes -> up. Logs transitions. No healthy backend -> drop.
+ICMP ping per backend every 2s; 2 consecutive fails -> down, 2 successes -> up. Logs transitions. No healthy backend -> drop. Probes run as detached children and are reaped by the event loop, so an unresponsive peer does not stall forwarding.
 .SH SIGNALS
 .B SIGHUP
 reload config,
@@ -50,7 +50,9 @@ exit.
 .B /etc/saphira/gredist/*.conf
 .br
 .B /var/run/saphira/gredist/
+.SH COUNTERS
+Counters are in memory only and reset on restart. \fBSIGUSR1\fR reports rx, forwarded and the drops: malformed, truncated, frag, vers, no_backend, queue, oversized, not_for_us. Every accepted packet is accounted for in exactly one of them.
 .SH SEE ALSO
-.B ip-gre(8), nft(8)
+.B ip-gre(8)
 .SH LICENSE
 BUSL-1.1, Copyright (C) 2026 Saphira Linux. See LICENSE.

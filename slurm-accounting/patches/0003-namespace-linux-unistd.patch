@@ -1,0 +1,14 @@
+--- a/src/plugins/namespace/linux/namespace_linux.c
++++ b/src/plugins/namespace/linux/namespace_linux.c
+@@ -43,7 +43,10 @@
+ #include <sys/stat.h>
+ #include <sys/syscall.h>
+ #include <sys/types.h>
+-#include <sys/unistd.h>
++/* sys/unistd.h is glibc-only; musl provides everything through
++ * unistd.h, and this TU uses nothing exclusive to the former.
++ * Saphira/musl port patch. */
++#include <unistd.h>
+ #include <sys/wait.h>
+ 
+ #include "src/common/slurm_xlator.h"

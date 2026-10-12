@@ -1,0 +1,145 @@
+From 187826d736bc58faa4e7930b89eb31ff9cfc69e6 Mon Sep 17 00:00:00 2001
+From: Gregory Price <gourry@gourry.net>
+Date: Wed, 15 Jul 2026 15:15:49 -0700
+Subject: [PATCH] selftests/dax: fix tier_latency refault to measure REAL
+ swap/zswap-in
+
+The refault probe had three defects that made swap/zswap-in latency
+meaningless:
+
+1. All-zero prefault: buf[i]=(char)i with i stepping by PAGE_SIZE is
+   always 0, so every page was zero-filled -> swap/zswap special-case
+   zero pages and the probe measured zero-page handling, not real IO.
+   Fill every byte with non-zero, ~2:1-compressible content instead.
+
+2. MADV_PAGEOUT alone doesn't evict: with no memory pressure the pages
+   linger in the swap cache (frame not freed), so re-access is a cache
+   hit (~4us) rather than a real swap-in. Force true frame-eviction via
+   the caller's cgroup memory.reclaim (swap-cache pages count against
+   memory.current, so reclaiming that many bytes frees them). Works for
+   disk swap; zswap already frees the frame on store.
+
+3. pagemap alone can't tell swap-cache-resident from on-disk (bit62 is
+   set for both), so it over-reports 'real' faults. Keep the pagemap
+   filter but rely on vmstat pswpin/zswpin as the ground truth (the
+   driver checks those).
+
+Verified on a real CXL host (v7.1-fbk guest): disk swap-in p50 59us /
+p99 145us, zswap-in p50 26us / p99 44us, both with 100% confirmed real
+faults (pswpin/zswpin == working set).
+---
+ .../testing/selftests/dax/tier_latency_tool.c | 86 +++++++++++++++++--
+ 1 file changed, 78 insertions(+), 8 deletions(-)
+
+diff --git a/tools/testing/selftests/dax/tier_latency_tool.c b/tools/testing/selftests/dax/tier_latency_tool.c
+index 87e6f526683..6c0f544379e 100644
+--- a/tools/testing/selftests/dax/tier_latency_tool.c
++++ b/tools/testing/selftests/dax/tier_latency_tool.c
+@@ -21,6 +21,8 @@
+ #include <errno.h>
+ #include <time.h>
+ #include <sys/mman.h>
++#include <fcntl.h>
++#include <stdint.h>
+ 
+ #define KSFT_SKIP 4
+ #define LINE 64		/* cache-line stride to defeat prefetch */
+@@ -105,19 +107,87 @@ static int do_refault(unsigned long long mb)
+ 	lat = malloc(npages * sizeof(*lat));
+ 	if (!lat) { fprintf(stderr, "no mem for lat\n"); return KSFT_SKIP; }
+ 
+-	for (i = 0; i < bytes; i += ps)		/* prefault */
+-		buf[i] = (char)i;
++	/*
++	 * Prefault EVERY byte with realistic, non-zero, ~2:1-compressible content
++	 * (first half of each page varies, second half zero).  An all-zero page is
++	 * degenerate: swap/zswap special-case it, so the refault would measure
++	 * zero-page handling instead of real swap-in vs zswap-in latency.
++	 */
++	for (i = 0; i < bytes; i++)
++		buf[i] = ((i & (ps - 1)) < (unsigned long long)ps / 2)
++			 ? (char)(0x9e3779b97f4a7c15ULL * (i + 1) >> 32)
++			 : 0;
+ 	if (madvise(buf, bytes, MADV_PAGEOUT)) {
+ 		perror("madvise(PAGEOUT)");
+ 		return KSFT_SKIP;		/* no swap -> can't evict */
+ 	}
+-	/* time each page's re-fault (swap-in / zswap-in) */
+-	for (i = 0; i < npages; i++) {
+-		unsigned long long t0 = ns_now();
+-		sink += buf[i * ps];
+-		lat[n++] = ns_now() - t0;
++	/*
++	 * MADV_PAGEOUT frees the frame for zswap (compressed) but leaves disk-swapped
++	 * pages in the swap cache (frame not freed w/o pressure) -> re-access would be
++	 * a cache hit, not a real swap-in.  Force true frame-eviction via our cgroup's
++	 * memory.reclaim (swap-cache pages count against memory.current, so reclaiming
++	 * that many bytes must free them).  Requires being run inside a cgroup2 memcg.
++	 */
++	{
++		FILE *cf = fopen("/proc/self/cgroup", "r");
++		char line[256];
++
++		if (cf) {
++			if (fgets(line, sizeof(line), cf)) {
++				char *p = strstr(line, "::");   /* "0::/lat\n" */
++				char *nl;
++
++				if (p && (p += 2) && *p == '/') {
++					char path[512], nbuf[64];
++					int rfd;
++
++					nl = strchr(p, '\n'); if (nl) *nl = 0;
++					snprintf(path, sizeof(path),
++						 "/sys/fs/cgroup%s/memory.reclaim",
++						 strcmp(p, "/") ? p : "");
++					rfd = open(path, O_WRONLY);
++					if (rfd >= 0) {
++						int k = snprintf(nbuf, sizeof(nbuf), "%llu\n", bytes);
++						if (write(rfd, nbuf, k) < 0) { /* best-effort */ }
++						close(rfd);
++					}
++				}
++			}
++			fclose(cf);
++		}
++	}
++	/*
++	 * Self-validating timing: consult /proc/self/pagemap per page and time ONLY
++	 * pages that are actually swapped out (bit62), skipping any still resident
++	 * (bit63 = a swap-cache hit, NOT a real fault).  Reports the confirmed-real
++	 * fraction so a bad measurement (cache hits) is visible instead of silent.
++	 * Pair with page-cluster=0 so each fault is a single real page-in (no
++	 * readahead pulling neighbours back in and inflating the "cached" count).
++	 */
++	{
++		int pmfd = open("/proc/self/pagemap", O_RDONLY);
++		unsigned long long cached = 0, absent = 0;
++
++		if (pmfd < 0) { perror("open pagemap"); return KSFT_SKIP; }
++		for (i = 0; i < npages; i++) {
++			unsigned long long ent = 0, t0;
++			off_t off = ((unsigned long long)(uintptr_t)(buf + i * ps) / ps)
++				    * (off_t)sizeof(ent);
++
++			if (pread(pmfd, &ent, sizeof(ent), off) != (ssize_t)sizeof(ent))
++				continue;
++			if (ent & (1ULL << 63)) {	/* present -> swap-cache hit */
++				cached++; sink += buf[i * ps]; continue;
++			}
++			if (!(ent & (1ULL << 62))) { absent++; continue; }  /* not swapped */
++			t0 = ns_now();
++			sink += buf[i * ps];		/* real swap-in / zswap-in */
++			lat[n++] = ns_now() - t0;
++		}
++		close(pmfd);
++		printf("RESULT probe=refault MB=%llu real_faults=%llu cached_hits=%llu absent=%llu real_pct=%.1f (sink=%d)\n",
++		       mb, n, cached, absent, npages ? 100.0 * n / npages : 0.0, sink);
+ 	}
+-	printf("RESULT probe=refault MB=%llu pages=%llu (sink=%d)\n", mb, npages, sink);
+ 	pct(lat, n);
+ 	free(lat);
+ 	return 0;
+-- 
+2.55.0
+

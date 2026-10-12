@@ -1,0 +1,75 @@
+From 5d6b217c7998d4308a98f4cc4dbd7e66696bbb92 Mon Sep 17 00:00:00 2001
+From: Gregory Price <gourry@gourry.net>
+Date: Thu, 9 Jul 2026 00:12:17 -0700
+Subject: [PATCH] mm: map write-fenced folios read-only at fault time
+
+A folio on a write-fenced node must be mapped read-only so that a write faults
+and promotes it off-node instead of landing on the read-only device.
+
+set_pte_range() and do_set_pmd(), the file fault-in paths, force the PTE/PMD
+read-only for a write-fenced folio -- even when the VMA's vm_page_prot carries
+the write bit (a shared writable mapping without write-notify), which mk_pte() /
+folio_mk_pmd() would otherwise copy in.  A subsequent write re-faults and
+promotes.
+
+Inert until file folios are placed on such a node.
+
+Signed-off-by: Gregory Price <gourry@gourry.net>
+Assisted-by: Claude:claude-opus-4-8
+---
+ mm/memory.c | 22 +++++++++++++++++++++-
+ 1 file changed, 21 insertions(+), 1 deletion(-)
+
+diff --git a/mm/memory.c b/mm/memory.c
+index 5a809404832..da7a2b567d1 100644
+--- a/mm/memory.c
++++ b/mm/memory.c
+@@ -5623,6 +5623,16 @@ vm_fault_t do_set_pmd(struct vm_fault *vmf, struct folio *folio, struct page *pa
+ 	if (write)
+ 		entry = maybe_pmd_mkwrite(pmd_mkdirty(entry), vma);
+ 
++	/*
++	 * Write-fenced node, e.g. a resident CRAM file THP: map read-only.  Force it
++	 * even for a shared writable VMA whose vm_page_prot carries the write bit that
++	 * folio_mk_pmd() copied above.  This is the read-fault case: a shared WRITE
++	 * fault promotes the folio off-node at the filemap_fault() FGP_WRITE acquire
++	 * gate before it reaches here.  Mirrors set_pte_range().
++	 */
++	if (unlikely(node_write_fenced(folio_nid(folio))))
++		entry = pmd_wrprotect(entry);
++
+ 	add_mm_counter(vma->vm_mm, mm_counter_file(folio), HPAGE_PMD_NR);
+ 	folio_add_file_rmap_pmd(folio, page, vma);
+ 
+@@ -5664,6 +5674,7 @@ void set_pte_range(struct vm_fault *vmf, struct folio *folio,
+ 	struct vm_area_struct *vma = vmf->vma;
+ 	bool write = vmf->flags & FAULT_FLAG_WRITE;
+ 	bool prefault = !in_range(vmf->address, addr, nr * PAGE_SIZE);
++	bool wrfence = node_write_fenced(folio_nid(folio));
+ 	pte_t entry;
+ 
+ 	flush_icache_pages(vma, page, nr);
+@@ -5674,10 +5685,19 @@ void set_pte_range(struct vm_fault *vmf, struct folio *folio,
+ 	else
+ 		entry = pte_sw_mkyoung(entry);
+ 
+-	if (write)
++	if (write && !wrfence)
+ 		entry = maybe_mkwrite(pte_mkdirty(entry), vma);
+ 	else if (pte_write(entry) && folio_test_dirty(folio))
+ 		entry = pte_mkdirty(entry);
++
++	/*
++	 * Write-fenced node, e.g. a resident CRAM tier: map read-only so a write
++	 * re-faults and promotes the folio off-node.  Force it even for a shared
++	 * writable VMA whose vm_page_prot already carries the write bit that mk_pte()
++	 * copied above.  Mirrors remove_migration_pte().
++	 */
++	if (unlikely(wrfence))
++		entry = pte_wrprotect(entry);
+ 	if (unlikely(vmf_orig_pte_uffd_wp(vmf)))
+ 		entry = pte_mkuffd(entry);
+ 	/* copy-on-write page */
+-- 
+2.55.0
+

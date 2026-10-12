@@ -1,6 +1,6 @@
 #!/sbin/openrc-run
 
-description="Configure Akadata user-space networking"
+description="Configure Saphira user-space networking"
 command=/sbin/saphira-network-config
 command_args=${network_args:-}
 
@@ -13,14 +13,14 @@ depend()
 
 start()
 {
-	ebegin "Configuring Akadata networking"
+	ebegin "Configuring Saphira networking"
 	"$command" start $command_args
 	eend $?
 }
 
 stop()
 {
-	ebegin "Stopping Akadata networking"
+	ebegin "Stopping Saphira networking"
 	"$command" stop $command_args
 	eend $?
 }

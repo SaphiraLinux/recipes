@@ -1,0 +1,39 @@
+[Unit]
+Description=Standard cron daemon (the sole cron on Saphira)
+Documentation=man:crond(8)
+After=local-fs.target
+# cronie replaces dcron and is the only cron on the host, so nothing may
+# start before local filesystems are in place: a missed run at boot is a
+# silently skipped job.
+After=local-fs.target
+
+[Service]
+# Mirrors files/crond.initd: crond -f stays in the foreground, so
+# Type=simple and the process systemd supervises IS the daemon.
+Type=simple
+ExecStart=/usr/sbin/crond -f
+PIDFile=/run/crond.pid
+
+# The crontab spool is primary state. It must exist with 0700 before
+# crond starts, and must never be world-readable: a readable crontab is a
+# readable root cron job.
+StateDirectory=cron/cron/crontabs
+StateDirectoryMode=0700
+
+# Cron dying silently is a classic SRE incident and jobs simply never run
+# again, with nothing in the logs. Restart it.
+Restart=on-failure
+RestartSec=2
+
+# Deliberately NOT set: User=. Upstream crond drops privileges itself and
+# the shipped /etc/pam.d/crond leaf is for the `crontab' command, not for
+# the daemon, so pinning the daemon's user here would fight upstream
+# behaviour. PrivateDevices is also left off: cron jobs are arbitrary
+# user programs and restricting devices would break them.
+
+ProtectSystem=full
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

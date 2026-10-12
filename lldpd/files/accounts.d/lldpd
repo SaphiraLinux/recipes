@@ -1,7 +1,15 @@
 # lldpd privilege-separation identity (canonical, fixed): user and
-# group _lldpd, UID/GID 124. Matches the configure --with-privsep-*
-# user/group and the default chroot/run directory. UID 124 sits in the
+# group _lldpd, UID/GID 147. Matches the configure --with-privsep-*
+# user/group and the default chroot/run directory. UID 147 sits in the
 # preferred 0..199 packaged range - never reuse it for another identity.
-user _lldpd 124 _lldpd /var/run/lldpd /sbin/nologin
-group _lldpd 124
+#
+# 147, not the 124 this fragment originally declared: 124 is hostapd's,
+# hostapd is published, and one package owns each declared identity. lldpd
+# was never published, so the move costs no migration and needs no legacy
+# sidecar. 147 is the first free ID above the highest claimed identity
+# (146 openldap) and clear of systemd's block (127-131, 144, 145).
+# Home/dir is /var/run/lldpd (the daemon defaults were always /var/run
+# via GNU runstatedir; only the fragment was wrong).
+user _lldpd 147 _lldpd /var/run/lldpd /sbin/nologin
+group _lldpd 147
 dir /var/run/lldpd 0755 _lldpd _lldpd

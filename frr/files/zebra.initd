@@ -1,0 +1,23 @@
+#!/sbin/openrc-run
+
+description="FRRouting zebra (FRR core: shared routing table and API)"
+
+# zebra is the core of the FRR suite: bgpd, ospfd, ospf6d, ripd and the
+# rest are useless, and exit, without it. Start it first.
+#
+# FRR drops to the frr user itself (configured with --enable-user=frr
+# --enable-group=frr), and -d keeps it in the foreground under
+# supervise-daemon. The zserv API socket lives in the /var/run/frr
+# directory declared by files/accounts.d/frr, which also creates the
+# frr:frr state directories at install time.
+command="/usr/sbin/zebra"
+command_args="-d -f /etc/frr/zebra.conf -i /var/run/frr/zebra.pid -z /var/run/frr/zserv.api"
+supervisor="supervise-daemon"
+pidfile="/var/run/frr/zebra.pid"
+
+depend()
+{
+	need localmount
+	use net
+	after firewall
+}

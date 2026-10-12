@@ -1,0 +1,27 @@
+# Build-time hooks, NN-name executables, run in lexical order by
+# saphira-mkinitramfs while it CONSTRUCTS an archive.
+#
+# These are NOT shipped in the initramfs and do NOT run at boot. They run on
+# the BUILDING system, from a package that may legitimately depend on
+# compilers and other build-time software. Runtime hooks, which are shipped
+# and executed by /init, live under /lib/saphira/initramfs/ and are named in
+# the configuration instead.
+#
+# The distinction is a directory boundary on purpose. One directory doing both
+# jobs would mean an initramfs could end up depending, at boot, on software
+# that only exists because a build happened to need it.
+#
+# Environment provided to every hook:
+#
+#   SAPHIRA_INITRAMFS_STAGE    staging tree being assembled; add files here
+#   SAPHIRA_INITRAMFS_ROOT     the root the payload is collected from
+#   SAPHIRA_INITRAMFS_KERNEL   the --kernel value
+#   SAPHIRA_INITRAMFS_CONFIG   the configuration file in use
+#
+# Whatever a hook adds to the stage is normalised for ownership, modes and
+# timestamps along with everything else, so a hook does not need to care.
+#
+# A non-zero exit fails the build. The previous initramfs is never touched by
+# a failed build.
+#
+# No hooks ship in this package: the base initramfs needs none.

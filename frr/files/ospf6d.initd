@@ -1,0 +1,18 @@
+#!/sbin/openrc-run
+
+description="FRRouting OSPFv3 daemon"
+
+# Every FRR protocol daemon talks to zebra over the zserv API socket in
+# /var/run/frr, so zebra must be up first.
+command="/usr/sbin/ospf6d"
+command_args="-d -f /etc/frr/ospf6d.conf -i /var/run/frr/ospf6d.pid -z /var/run/frr/zserv.api"
+supervisor="supervise-daemon"
+pidfile="/var/run/frr/ospf6d.pid"
+
+depend()
+{
+	need localmount
+	use net
+	need zebra
+	after firewall
+}

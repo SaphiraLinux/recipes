@@ -1,0 +1,36 @@
+[Unit]
+Description=Saphira Garden network access controller and walled garden
+Documentation=man:saphira-garden(8)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStartPre=/usr/sbin/saphira-garden -t -c /etc/saphira/garden/garden.toml
+ExecStart=/usr/sbin/saphira-garden -f -c /etc/saphira/garden/garden.toml
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=30
+RuntimeDirectory=saphira-garden
+RuntimeDirectoryMode=0750
+StateDirectory=saphira-garden
+StateDirectoryMode=0750
+# The daemon opens /dev/net/tun and its AF_PACKET access socket during
+# startup, then drops to the saphira-garden account permanently and runs
+# with no capabilities at all. It only needs to be root for that short
+# startup phase.
+User=root
+# Do not add AmbientCapabilities or file capabilities: the already-open
+# descriptors stay valid across setuid(), so a capability set is not needed.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/run/saphira-garden /var/lib/saphira-garden
+DeviceAllow=char-tun rw
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK AF_PACKET
+
+[Install]
+WantedBy=multi-user.target

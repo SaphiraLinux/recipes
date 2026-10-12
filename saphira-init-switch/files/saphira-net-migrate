@@ -1,0 +1,1051 @@
+#!/bin/sh
+# saphira-net-migrate - translate network configuration across an
+# OpenRC <-> systemd init swap.
+#
+#   saphira-net-migrate --to openrc [--apply]    # *.network -> /etc/network.d/*.conf
+#   saphira-net-migrate --to systemd [--apply]   # /etc/network.d/*.conf -> *.network
+#
+# Dry-run by default. --apply stages everything in a temp dir first and
+# only writes after every source parsed cleanly; the destination is
+# backed up (cp -a) before install. The source tree is never deleted.
+#
+# Identity rule: the MAC is the NIC, interface names are per-init
+# labels (eth0 <-> enp1s0, wlan0 <-> wlp2s0u5 are expected cases).
+# Every emitted stanza carries a Source-MAC comment; systemd output
+# matches PermanentMACAddress=, never Name=.
+#
+# OVS rule: topology stays in /etc/openvswitch/conf.db and is never
+# translated. L3 configuration on an OVS interface translates normally
+# as TYPE=physical with an OVS-Device provenance comment.
+#
+# Loss classes: essential L3 that cannot be represented aborts with
+# zero destination writes. Non-essential settings (MTU, extra
+# addresses/routes, AcceptRA) are carried as comments and shouted
+# about in the report.
+#
+# Environment (testability + live overrides):
+#   SAPHIRA_NETMIGRATE_SYSTEMD_DIR  default /etc/systemd/network
+#   SAPHIRA_NETMIGRATE_CONF_DIR     default /etc/network.d
+#   SAPHIRA_NETMIGRATE_SYSFS        default /sys/class/net
+#   SAPHIRA_NETMIGRATE_TS           default date +%Y%m%d-%H%M%S
+
+set -eu
+
+PROG=saphira-net-migrate
+SYSTEMD_NETWORK_DIR=${SAPHIRA_NETMIGRATE_SYSTEMD_DIR:-/etc/systemd/network}
+NETWORKD_CONF_DIR=${SAPHIRA_NETMIGRATE_CONF_DIR:-/etc/network.d}
+SYSFS=${SAPHIRA_NETMIGRATE_SYSFS:-/sys/class/net}
+TS=${SAPHIRA_NETMIGRATE_TS:-$(date +%Y%m%d-%H%M%S)}
+
+TO=""
+APPLY=0
+
+usage()
+{
+	printf 'usage: %s --to openrc|systemd [--apply]\n' "$PROG" >&2
+	exit 2
+}
+
+while [ "$#" -gt 0 ]; do
+	case $1 in
+		--to)
+			[ "$#" -ge 2 ] || usage
+			TO=$2
+			shift 2
+			;;
+		--to=*)
+			TO=${1#--to=}
+			shift
+			;;
+		--apply)
+			APPLY=1
+			shift
+			;;
+		-h | --help)
+			printf 'usage: %s --to openrc|systemd [--apply]\n' "$PROG"
+			exit 0
+			;;
+		*)
+			usage
+			;;
+	esac
+done
+
+case $TO in
+	openrc | systemd) ;;
+	*) usage ;;
+esac
+
+# ---------------------------------------------------------------- reports
+
+REPORT_OK=""
+REPORT_WARN=""
+REPORT_ABORT=""
+ABORT=0
+MIGRATED=0
+
+note_ok() { REPORT_OK=${REPORT_OK:+$REPORT_OK
+}$1; }
+note_warn() { REPORT_WARN=${REPORT_WARN:+$REPORT_WARN
+}$1; }
+note_abort()
+{
+	ABORT=1
+	REPORT_ABORT=${REPORT_ABORT:+$REPORT_ABORT
+}$1
+}
+
+# ------------------------------------------------------- live MAC table
+# MACTABLE lines: "<ifindex> <name> <lowercase-mac>"
+
+MACTABLE=$(ip -o link show 2>/dev/null | awk '{
+	idx=$1; sub(/:$/, "", idx)
+	name=$2; sub(/:$/, "", name)
+	mac=""
+	for (i=1; i<=NF; i++) {
+		if ($i == "link/ether" || $i == "link/infiniband") mac=$(i+1)
+	}
+	if (mac != "") print idx" "name" "tolower(mac)
+}' || true)
+
+mac_of_name()
+{
+	printf '%s\n' "$MACTABLE" | awk -v n="$1" '$2 == n { print $3; exit }'
+}
+
+name_of_mac()
+{
+	printf '%s\n' "$MACTABLE" | awk -v m="$(printf '%s' "$1" | tr 'A-F' 'a-f')" '$3 == m { print $2; exit }'
+}
+
+ifindex_of_mac()
+{
+	printf '%s\n' "$MACTABLE" | awk -v m="$(printf '%s' "$1" | tr 'A-F' 'a-f')" '$3 == m { print $1; exit }'
+}
+
+# Physical NICs (have a device symlink) of one class, ordered by ifindex.
+# $1 = wired | wireless. Prints "ifindex name mac" lines.
+physical_nics()
+{
+	class=$1
+	out=""
+	while read -r idx name mac; do
+		[ -n "${idx:-}" ] || continue
+		if [ -e "$SYSFS/$name/device" ]; then
+			case $name in
+				wl*) this=wireless ;;
+				*) this=wired ;;
+			esac
+			if [ "$this" = "$class" ]; then
+				out=${out}${idx}' '"${name}"' '"${mac}
+"
+			fi
+		fi
+	done <<EOF
+$MACTABLE
+EOF
+	printf '%s' "$out" | sort -n
+}
+
+is_physical()
+{
+	test -e "$SYSFS/$1/device"
+}
+
+is_ovs_device()
+{
+	name=$1
+	command -v ovs-vsctl >/dev/null 2>&1 || return 1
+	if ovs-vsctl --timeout=5 br-exists "$name" >/dev/null 2>&1; then
+		return 0
+	fi
+	ovs-vsctl --timeout=5 get Port "$name" name >/dev/null 2>&1
+}
+
+sanitise_name()
+{
+	printf '%s' "$1" | tr -c 'A-Za-z0-9_.-' '_'
+}
+
+# ------------------------------------------------------- .network parser
+# Globals per unit: U_MATCH_NAME U_MATCH_MACS U_ADDRS U_GWS U_ROUTES
+# U_DNS U_DOMAINS U_DHCP U_MTU U_ACCEPT_RA U_DROPPED U_ABORT_HERE.
+# List values are newline-separated. Routes are "dest|gw".
+
+parse_network_unit()
+{
+	unit=$1
+	U_MATCH_NAME=""
+	U_MATCH_MACS=""
+	U_ADDRS=""
+	U_GWS=""
+	U_ROUTES=""
+	U_DNS=""
+	U_DOMAINS=""
+	U_DHCP=""
+	U_MTU=""
+	U_ACCEPT_RA=""
+	U_DROPPED=""
+	U_ABORT_HERE=0
+	U_SECTION=""
+
+	unit_abort()
+	{
+		U_ABORT_HERE=1
+		note_abort "$unit: $1"
+	}
+
+	# Unit plus its drop-ins, lexical order (systemd semantics).
+	# shellcheck disable=SC2045
+	dropins=$(ls "$unit".d/*.conf 2>/dev/null | LC_ALL=C sort || true)
+	for f in "$unit" $dropins; do
+		[ -f "$f" ] || continue
+		while IFS= read -r line || [ -n "$line" ]; do
+			# Strip leading/trailing whitespace.
+			trimmed=$(printf '%s' "$line" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+			case $trimmed in
+				'' | '#'*) continue ;;
+				';'*) continue ;;
+			esac
+			case $trimmed in
+				\[*\])
+					U_SECTION=$(printf '%s' "$trimmed" | sed -e 's/^\[//' -e 's/\]$//')
+					case $U_SECTION in
+						VLAN | Bond | Bridge | BridgeVLAN | BridgeFDB | WiFi | IPv6SendRA | NetDev | DHCPServer)
+							unit_abort "unsupported section [$U_SECTION] (not representable in /etc/network.d)"
+							;;
+					esac
+					continue
+					;;
+			esac
+			key=${trimmed%%=*}
+			val=${trimmed#*=}
+			key=$(printf '%s' "$key" | sed -e 's/[[:space:]]*$//')
+			val=$(printf '%s' "$val" | sed -e 's/^[[:space:]]*//')
+			case $U_SECTION in
+				Match)
+					case $key in
+						Name) U_MATCH_NAME=$val ;;
+						MACAddress | PermanentMACAddress)
+							U_MATCH_MACS=${U_MATCH_MACS:+$U_MATCH_MACS
+}$val
+							;;
+						Path | Driver | Type | Property | Host | Virtualization | KernelCommandLine | KernelVersion | Credential | Architecture | Firmware)
+							unit_abort "unsupported [Match] key $key= (only Name=/MACAddress=/PermanentMACAddress= translate)"
+							;;
+						*) unit_abort "unknown [Match] key $key=" ;;
+					esac
+					;;
+				Network)
+					case $key in
+						Address)
+							U_ADDRS=${U_ADDRS:+$U_ADDRS
+}$val
+							;;
+						Gateway)
+							U_GWS=${U_GWS:+$U_GWS
+}$val
+							;;
+						DNS)
+							U_DNS=${U_DNS:+$U_DNS
+}$val
+							;;
+						Domains)
+							U_DOMAINS=${U_DOMAINS:+$U_DOMAINS
+}$val
+							;;
+						DHCP) U_DHCP=$val ;;
+						IPv6AcceptRA)
+							U_ACCEPT_RA=$val
+							U_DROPPED=${U_DROPPED:+$U_DROPPED
+}"IPv6AcceptRA=$val"
+							;;
+						VLAN | Bridge | Bond | Tunnel | VRF | Xfrm)
+							unit_abort "unsupported [Network] key $key= (virtual-device topology is out of scope)"
+							;;
+						GatewayOnLink | IgnoreCarrierLoss | KeepConfiguration | RequiredForOnline | ActivationPolicy | RequiredFamilyForOnline)
+							U_DROPPED=${U_DROPPED:+$U_DROPPED
+}"$key=$val"
+							;;
+						LinkLocalAddressing | MulticastDNS | DNSOverTLS | DNSSEC | LLDP | EmitLLDP | BindCarrier | ReconfigureVLANs | AddressState)
+							U_DROPPED=${U_DROPPED:+$U_DROPPED
+}"$key=$val"
+							;;
+						*) unit_abort "unknown [Network] key $key=" ;;
+					esac
+					;;
+				Address)
+					case $key in
+						Address)
+							U_ADDRS=${U_ADDRS:+$U_ADDRS
+}$val
+							;;
+						*) unit_abort "unsupported [Address] key $key= (only Address= translates)" ;;
+					esac
+					;;
+				Route)
+					case $key in
+						Destination) U_ROUTE_DEST=$val ;;
+						Gateway) U_ROUTE_GW=$val ;;
+						Metric | Scope | Table | PreferredSource | GatewayOnLink)
+							U_DROPPED=${U_DROPPED:+$U_DROPPED
+}"Route:$key=$val"
+							;;
+						*) unit_abort "unsupported [Route] key $key=" ;;
+					esac
+					# Flush a complete Destination+Gateway pair. A bare
+					# Gateway= (no Destination) is a default route.
+					if [ -n "${U_ROUTE_GW:-}" ]; then
+						dest=${U_ROUTE_DEST:-default}
+						U_ROUTES=${U_ROUTES:+$U_ROUTES
+}"$dest|$U_ROUTE_GW"
+						U_ROUTE_DEST=""
+						U_ROUTE_GW=""
+					fi
+					;;
+				Link)
+					case $key in
+						MTUBytes)
+							U_MTU=$val
+							U_DROPPED=${U_DROPPED:+$U_DROPPED
+}"MTUBytes=$val"
+							;;
+						MACAddress)
+							unit_abort "unsupported [Link] MACAddress= (MAC assignment is out of scope)"
+							;;
+						*) unit_abort "unsupported [Link] key $key=" ;;
+					esac
+					;;
+				DHCPv4 | DHCPv6)
+					U_DROPPED=${U_DROPPED:+$U_DROPPED
+}"$U_SECTION:$key=$val"
+					;;
+				IPv6AcceptRA | DHCPServer | IPv6SendRA)
+					unit_abort "unsupported section [$U_SECTION]"
+					;;
+				'')
+					unit_abort "key=value outside any section: $trimmed"
+					;;
+				*)
+					unit_abort "unsupported section [$U_SECTION]"
+					;;
+			esac
+		done <"$f"
+	done
+	# Trailing bare Gateway= in a [Route] without Destination.
+	if [ -n "${U_ROUTE_GW:-}" ]; then
+		dest=${U_ROUTE_DEST:-default}
+		U_ROUTES=${U_ROUTES:+$U_ROUTES
+}"$dest|$U_ROUTE_GW"
+	fi
+}
+
+family_of()
+{
+	case $1 in
+		*:*) printf 'v6' ;;
+		*) printf 'v4' ;;
+	esac
+}
+
+addr_part()
+{
+	printf '%s' "$1" | sed -e 's#/.*##'
+}
+
+# ------------------------------------------------------- .conf helpers
+
+# Emit INTERFACE for an already-present .conf whose CIDRs overlap the
+# unit addresses (evidence class: existing). Prints name or nothing.
+existing_conf_match()
+{
+	addrs=$1
+	for conf in "$NETWORKD_CONF_DIR"/*.conf; do
+		[ -f "$conf" ] || continue
+		case $conf in
+			*.example) continue ;;
+		esac
+		while IFS= read -r a || [ -n "$a" ]; do
+			[ -n "$a" ] || continue
+			if grep -q -F -e "=$a" -e "=$a " -e " $a" -e " $a " "$conf" 2>/dev/null; then
+				iface=$(sed -n -e 's/^INTERFACE=//p' "$conf" | head -1)
+				if [ -n "$iface" ]; then
+					printf '%s' "$iface"
+					return 0
+				fi
+			fi
+		done <<EOF
+$addrs
+EOF
+	done
+	return 1
+}
+
+# Destination OpenRC name for a MAC. Prints "<name>|<evidence>".
+openrc_name_for()
+{
+	mac=$1
+	addrs=$2
+	# (a) existing stanza already claims these addresses.
+	if got=$(existing_conf_match "$addrs"); then
+		printf '%s|existing' "$got"
+		return 0
+	fi
+	# Live name tells the class; virtual devices keep their name.
+	live=$(name_of_mac "$mac")
+	if [ -n "$live" ]; then
+		case $live in
+			lo)
+				printf 'lo|loopback'
+				return 0
+				;;
+		esac
+		if ! is_physical "$live"; then
+			printf '%s|virtual' "$live"
+			return 0
+		fi
+	fi
+	# (c) positional within class, ordered by ifindex.
+	case $live in
+		wl*) class=wireless prefix=wlan ;;
+		*) class=wired prefix=eth ;;
+	esac
+	n=0
+	found=""
+	# Table MACs are lowercase; unit MACs keep their source case.
+	wantmac=$(printf '%s' "$mac" | tr 'A-F' 'a-f')
+	while IFS= read -r row; do
+		[ -n "$row" ] || continue
+		set -- $row
+		if [ "$3" = "$wantmac" ]; then
+			found=$n
+			break
+		fi
+		n=$((n + 1))
+	done <<EOF
+$(physical_nics "$class")
+EOF
+	if [ -n "$found" ]; then
+		printf '%s%d|positional' "$prefix" "$found"
+	else
+		# MAC never seen live (stale unit, or target-only hardware):
+		# fall back to first free slot of the class.
+		printf '%s%d|positional-unseen' "$prefix" "$n"
+	fi
+}
+
+# ------------------------------------------------------- emitters
+
+STAGE=""
+
+emit_conf()
+{
+	unit=$1
+	base=$(basename "$unit" .network)
+
+	# Anchor on MAC. Loopback (Name=lo, no MAC row) is the one
+	# rename-proof name and passes through directly.
+	mac=$(printf '%s\n' "$U_MATCH_MACS" | head -1)
+	src_desc=""
+	lo_unit=0
+	if [ -n "$mac" ]; then
+		src_desc="PermanentMACAddress=$mac"
+	elif [ "$U_MATCH_NAME" = lo ]; then
+		src_desc="Name=lo"
+		lo_unit=1
+	else
+		[ -n "$U_MATCH_NAME" ] || {
+			note_abort "$base: no [Match] Name= and no MACAddress= (cannot anchor NIC identity)"
+			return 0
+		}
+		src_desc="Name=$U_MATCH_NAME"
+		mac=$(mac_of_name "$U_MATCH_NAME") || mac=""
+		if [ -z "$mac" ]; then
+			note_warn "$base: interface $U_MATCH_NAME not present (stale unit?) - skipped"
+			return 0
+		fi
+	fi
+
+	if [ "$lo_unit" -eq 1 ]; then
+		iface=lo
+		evidence=loopback
+	else
+		named=$(openrc_name_for "$mac" "$U_ADDRS")
+		iface=${named%%|*}
+		evidence=${named##*|}
+	fi
+
+	# Split addresses per family; first is primary, rest warn-carry.
+	# (Heredoc-fed: a pipeline-fed loop would run in a subshell and,
+	# worse, fail the assignment under set -e when one family is empty.)
+	v4_addrs=""
+	v6_addrs=""
+	while IFS= read -r a; do
+		[ -n "$a" ] || continue
+		if [ "$(family_of "$a")" = v4 ]; then
+			v4_addrs=${v4_addrs:+$v4_addrs
+}$a
+		else
+			v6_addrs=${v6_addrs:+$v6_addrs
+}$a
+		fi
+	done <<EOF
+$U_ADDRS
+EOF
+	v4_primary=$(printf '%s\n' "$v4_addrs" | head -1)
+	v6_primary=$(printf '%s\n' "$v6_addrs" | head -1)
+	# Heredoc-fed loops: pipeline-fed loops run in a subshell and
+	# would lose the note_warn state.
+	while IFS= read -r a; do
+		[ -n "$a" ] || continue
+		note_warn "$base: extra IPv4 $a carried as comment (one CIDR per family)"
+	done <<EOF
+$(printf '%s\n' "$v4_addrs" | tail -n +2)
+EOF
+	while IFS= read -r a; do
+		[ -n "$a" ] || continue
+		note_warn "$base: extra IPv6 $a carried as comment (one CIDR per family)"
+	done <<EOF
+$(printf '%s\n' "$v6_addrs" | tail -n +2)
+EOF
+
+	# Modes from DHCP=.
+	v4_mode=off
+	v6_mode=off
+	case $U_DHCP in
+		yes)
+			v4_mode=dhcp
+			v6_mode=dhcp
+			;;
+		ipv4) v4_mode=dhcp ;;
+		ipv6) v6_mode=dhcp ;;
+		no | '') ;;
+		*)
+			note_abort "$base: unsupported DHCP=$U_DHCP"
+			return 0
+			;;
+	esac
+	if [ -n "$v4_primary" ]; then v4_mode=static; fi
+	if [ -n "$v6_primary" ]; then v6_mode=static; fi
+
+	# Gateways: default routes per family (collect_gateways fills
+	# GW4/GW6/GW_EXTRA). Delta-check: an earlier unit's abort must
+	# not suppress this unit (all problems are reported together).
+	ab_before=$ABORT
+	collect_gateways
+	if [ "$ABORT" != "$ab_before" ]; then return 0; fi
+	v4_gw=$GW4
+	v6_gw=$GW6
+	if [ -n "$GW_EXTRA" ]; then note_warn "$base: non-default routes carried as comments: $(printf '%s' "$GW_EXTRA" | tr '\n' ' ')"; fi
+
+	# DNS: union, single search domain.
+	dns=$(printf '%s' "$U_DNS" | tr '\n' ' ' | sed -e 's/  */ /g' -e 's/^ //' -e 's/ $//')
+	domains=$(printf '%s\n' "$U_DOMAINS" | sort -u | grep -c . || true)
+	if [ "${domains:-0}" -gt 1 ]; then
+		note_abort "$base: multiple DNS search domains (single DNS_SEARCH only)"
+		return 0
+	fi
+	search=$(printf '%s\n' "$U_DOMAINS" | head -1)
+
+	# Units with no L3 at all (plain L2 attachment, e.g. OVS port
+	# units) carry nothing to translate; topology is out of scope.
+	if [ -z "$v4_primary$v6_primary$dns$search" ] && [ "$v4_mode" = off ] && [ "$v6_mode" = off ] && [ -z "$v4_gw$v6_gw$GW_EXTRA" ]; then
+		note_warn "$base: no L3 configuration (L2 attachment only) - skipped"
+		return 0
+	fi
+
+	# OVS provenance (best effort).
+	ovs_note=""
+	live=$(name_of_mac "$mac")
+	if [ -n "$live" ] && is_ovs_device "$live"; then
+		ovs_note=yes
+	fi
+
+	if [ "$iface" = lo ]; then
+		out=$STAGE/00-loopback.conf
+	else
+		out=$STAGE/10-$(sanitise_name "$iface").conf
+	fi
+
+	{
+		printf '# Generated by %s from %s (match %s)\n' "$PROG" "$base.network" "$src_desc"
+		if [ "$lo_unit" -eq 1 ]; then
+			printf '# Source-Interface=lo (loopback: the rename-proof exception)\n'
+		else
+			printf '# Source-MAC=%s\n' "$mac"
+		fi
+		printf '# Evidence: %s\n' "$evidence"
+		if [ -n "$ovs_note" ]; then printf '# OVS-Device: yes - topology owned by /etc/openvswitch/conf.db, L3 translated here\n'; fi
+		printf 'TYPE=physical\n'
+		printf 'INTERFACE=%s\n' "$iface"
+		printf 'IPV4_MODE=%s\n' "$v4_mode"
+		printf 'IPV4_CIDR=%s\n' "$v4_primary"
+		printf 'IPV4_GATEWAY=%s\n' "$v4_gw"
+		printf 'IPV4_METRIC=\n'
+		printf 'IPV6_MODE=%s\n' "$v6_mode"
+		printf 'IPV6_CIDR=%s\n' "$v6_primary"
+		printf 'IPV6_GATEWAY=%s\n' "$v6_gw"
+		printf 'IPV6_METRIC=\n'
+		printf 'DNS_SERVERS=%s\n' "$dns"
+		printf "DNS_SEARCH='%s'\n" "$search"
+		printf '%s\n' "$v4_addrs" | tail -n +2 | while IFS= read -r a; do
+			if [ -n "$a" ]; then printf '# Extra-Address=%s\n' "$a"; fi
+		done
+		printf '%s\n' "$v6_addrs" | tail -n +2 | while IFS= read -r a; do
+			if [ -n "$a" ]; then printf '# Extra-Address=%s\n' "$a"; fi
+		done
+		if [ -n "$GW_EXTRA" ]; then printf '%s\n' "$GW_EXTRA" | while IFS= read -r r; do
+			if [ -n "$r" ]; then printf '# Extra-Route=%s\n' "$r"; fi
+		done; fi
+		if [ -n "$U_MTU" ]; then
+			printf '# Dropped-MTUBytes=%s (no .conf knob; set MTU out of band)\n' "$U_MTU"
+			note_warn "$base: MTUBytes=$U_MTU not representable (carried as comment)"
+		fi
+		if [ -n "$U_ACCEPT_RA" ]; then
+			printf '# Dropped-IPv6AcceptRA=%s (no .conf knob)\n' "$U_ACCEPT_RA"
+			note_warn "$base: IPv6AcceptRA=$U_ACCEPT_RA not representable (carried as comment)"
+		fi
+		if [ -n "$U_DROPPED" ]; then
+			printf '%s' "$U_DROPPED" | while IFS= read -r d; do
+				[ -n "$d" ] || continue
+				# MTU/AcceptRA already have dedicated lines above.
+				case $d in
+					MTUBytes=* | IPv6AcceptRA=*) continue ;;
+				esac
+				printf '# Dropped-%s\n' "$d"
+			done
+			note_warn "$base: non-essential settings carried as comments only"
+		fi
+	} >"$out"
+
+	MIGRATED=$((MIGRATED + 1))
+	ovstag=""
+	if [ -n "$ovs_note" ]; then ovstag=", ovs-device"; fi
+	if [ "$lo_unit" -eq 1 ]; then
+		note_ok "$base.network -> $(basename "$out") [loopback]"
+	else
+		note_ok "$base.network -> $(basename "$out") [$iface, evidence: $evidence, mac $mac$ovstag]"
+	fi
+}
+
+# Gateways need the route file parsed outside a pipeline (set -e +
+# command substitution subshells cannot feed note_abort back out).
+# We therefore compute v4_gw/v6_gw/extra-routes inline here via temp
+# files and feed the results to emit_conf through globals.
+collect_gateways()
+{
+	GW4=""
+	GW6=""
+	GW_EXTRA=""
+	tmp=$(mktemp "${TMPDIR:-/tmp}"/saphira-net-migrate.XXXXXX)
+	{
+		printf '%s\n' "$U_GWS" | while IFS= read -r g; do
+			if [ -n "$g" ]; then printf 'default %s\n' "$g"; fi
+		done
+		printf '%s\n' "$U_ROUTES" | while IFS= read -r r; do
+			[ -n "$r" ] || continue
+			case $r in
+				*\|*)
+					dest=${r%%|*}
+					gw=${r##*|}
+					;;
+				*)
+					dest=default
+					gw=$r
+					;;
+			esac
+			case $dest in
+				default | 0.0.0.0/0 | ::/0) printf 'default %s\n' "$gw" ;;
+				*) printf 'extra %s %s\n' "$dest" "$gw" ;;
+			esac
+		done
+	} >"$tmp"
+	while read -r kind a b; do
+		[ -n "${kind:-}" ] || continue
+		if [ "$kind" = extra ]; then
+			GW_EXTRA=${GW_EXTRA:+$GW_EXTRA
+}"$a via $b"
+			continue
+		fi
+		if [ "$(family_of "$a")" = v4 ]; then
+			if [ -n "$GW4" ] && [ "$GW4" != "$a" ]; then
+				note_abort "ambiguous IPv4 default gateways ($GW4 vs $a)"
+				continue
+			fi
+			GW4=$a
+		else
+			if [ -n "$GW6" ] && [ "$GW6" != "$a" ]; then
+				note_abort "ambiguous IPv6 default gateways ($GW6 vs $a)"
+				continue
+			fi
+			GW6=$a
+		fi
+	done <"$tmp"
+	rm -f "$tmp"
+}
+
+# ------------------------------------------------------- .conf parser
+# Globals per file: C_TYPE C_IFACE C_V4MODE C_V4CIDR C_V4GW C_V6MODE
+# C_V6CIDR C_V6GW C_DNS C_SEARCH C_MAC C_EXTRA_ADDR C_EXTRA_ROUTE
+# C_MTU C_ACCEPT_RA C_OVSKEYS.
+
+parse_conf_file()
+{
+	conf=$1
+	base=$(basename "$conf")
+	C_TYPE=""
+	C_IFACE=""
+	C_V4MODE=off
+	C_V4CIDR=""
+	C_V4GW=""
+	C_V6MODE=off
+	C_V6CIDR=""
+	C_V6GW=""
+	C_DNS=""
+	C_SEARCH=""
+	C_MAC=""
+	C_EXTRA_ADDR=""
+	C_EXTRA_ROUTE=""
+	C_MTU=""
+	C_ACCEPT_RA=""
+	C_OVSKEYS=""
+	C_ABORT_HERE=0
+
+	conf_abort()
+	{
+		C_ABORT_HERE=1
+		note_abort "$base: $1"
+	}
+
+	while IFS= read -r line || [ -n "$line" ]; do
+		case $line in
+			'#'*)
+				case $line in
+					'# Source-MAC='*) C_MAC=${line#'# Source-MAC='} ;;
+					'# Extra-Address='*)
+						C_EXTRA_ADDR=${C_EXTRA_ADDR:+$C_EXTRA_ADDR
+}${line#'# Extra-Address='}
+						;;
+					'# Extra-Route='*)
+						C_EXTRA_ROUTE=${C_EXTRA_ROUTE:+$C_EXTRA_ROUTE
+}${line#'# Extra-Route='}
+						;;
+					'# Dropped-MTUBytes='*) C_MTU=${line#'# Dropped-MTUBytes='} ;;
+					'# Dropped-IPv6AcceptRA='*)
+						C_ACCEPT_RA=${line#'# Dropped-IPv6AcceptRA='}
+						C_ACCEPT_RA=${C_ACCEPT_RA%% *}
+						;;
+					'# OVS-'*) C_OVSKEYS=${C_OVSKEYS:+$C_OVSKEYS
+}$line
+						;;
+				esac
+				continue
+				;;
+			'' | TYPE=* | INTERFACE=* | IPV4_* | IPV6_* | DNS_*) ;;
+			*=*)
+				conf_abort "unknown key ${line%%=*} (not a translatable .conf stanza)"
+				continue
+				;;
+			*) continue ;;
+		esac
+		key=${line%%=*}
+		val=${line#*=}
+		case $key in
+			TYPE) C_TYPE=$val ;;
+			INTERFACE) C_IFACE=$val ;;
+			IPV4_MODE | IPV6_MODE | IPV4_CIDR | IPV6_CIDR | IPV4_GATEWAY | IPV6_GATEWAY)
+				case $key in
+					IPV4_MODE) C_V4MODE=$val ;;
+					IPV6_MODE) C_V6MODE=$val ;;
+					IPV4_CIDR) C_V4CIDR=$val ;;
+					IPV6_CIDR) C_V6CIDR=$val ;;
+					IPV4_GATEWAY) C_V4GW=$val ;;
+					IPV6_GATEWAY) C_V6GW=$val ;;
+				esac
+				;;
+			IPV4_METRIC | IPV6_METRIC)
+				if [ -n "$val" ]; then note_warn "$base: $key=$val not carried (metrics are static-route only)"; fi
+				;;
+			DNS_SERVERS) C_DNS=$(printf '%s' "$val" | tr -d '\\') ;;
+			DNS_SEARCH)
+				val=$(printf '%s' "$val" | tr -d "'\"")
+				if [ -n "$val" ]; then C_SEARCH=$val; fi
+				;;
+		esac
+	done <"$conf"
+
+	case $C_TYPE in
+		physical | ovs-bridge | ovs-port | ovs-internal) ;;
+		'')
+			conf_abort "missing TYPE="
+			;;
+		*)
+			conf_abort "unsupported TYPE=$C_TYPE"
+			;;
+	esac
+	[ -n "$C_IFACE" ] || conf_abort "missing INTERFACE="
+	case $C_V4MODE in
+		off | static | dhcp) ;;
+		*) conf_abort "unsupported IPV4_MODE=$C_V4MODE" ;;
+	esac
+	case $C_V6MODE in
+		off | static | dhcp) ;;
+		*) conf_abort "unsupported IPV6_MODE=$C_V6MODE" ;;
+	esac
+}
+
+# ------------------------------------------------------- .network emitter
+
+emit_network()
+{
+	conf=$1
+	base=$(basename "$conf" .conf)
+
+	# Anchor on MAC: provenance comment first, live table second.
+	# Loopback is the one rename-proof name (never has a MAC row);
+	# it matches Name=lo with an explanatory comment.
+	mac=$C_MAC
+	is_lo=0
+	if [ "$C_IFACE" = lo ]; then
+		is_lo=1
+	fi
+	if [ -z "$mac" ] && [ "$is_lo" -eq 0 ]; then
+		mac=$(mac_of_name "$C_IFACE") || mac=""
+	fi
+	if [ -z "$mac" ] && [ "$is_lo" -eq 0 ]; then
+		note_warn "$base: $C_IFACE has no Source-MAC and is not present (stale?) - skipped"
+		return 0
+	fi
+
+	# DHCP mapping.
+	dhcp=no
+	if [ "$C_V4MODE" = dhcp ] && [ "$C_V6MODE" = dhcp ]; then
+		dhcp=yes
+	elif [ "$C_V4MODE" = dhcp ]; then
+		dhcp=ipv4
+	elif [ "$C_V6MODE" = dhcp ]; then
+		dhcp=ipv6
+	fi
+
+	out=$STAGE/10-$(sanitise_name "$C_IFACE").network
+	{
+		printf '# Generated by %s from %s\n' "$PROG" "$base.conf"
+		if [ "$is_lo" -eq 1 ]; then
+			printf '# Source-Interface=lo (loopback: the rename-proof exception)\n'
+		else
+			printf '# Source-MAC=%s\n' "$mac"
+			printf '# Source-Interface=%s\n' "$C_IFACE"
+		fi
+		if [ -n "$C_OVSKEYS" ]; then
+			printf '# OVS topology keys retained for provenance (topology lives in OVSDB):\n'
+			printf '%s\n' "$C_OVSKEYS" | while IFS= read -r k; do
+				if [ -n "$k" ]; then printf '#   %s\n' "$k"; fi
+			done
+		fi
+		printf '\n[Match]\n'
+		if [ "$is_lo" -eq 1 ]; then
+			printf 'Name=lo\n'
+		else
+			printf 'PermanentMACAddress=%s\n' "$mac"
+		fi
+		printf '\n[Network]\n'
+		if [ -n "$C_V4CIDR" ]; then printf 'Address=%s\n' "$C_V4CIDR"; fi
+		if [ -n "$C_V4GW" ]; then printf 'Gateway=%s\n' "$C_V4GW"; fi
+		if [ -n "$C_V6CIDR" ]; then printf 'Address=%s\n' "$C_V6CIDR"; fi
+		if [ -n "$C_V6GW" ]; then printf 'Gateway=%s\n' "$C_V6GW"; fi
+		if [ -n "$C_EXTRA_ADDR" ]; then printf '%s\n' "$C_EXTRA_ADDR" | while IFS= read -r a; do
+			if [ -n "$a" ]; then printf 'Address=%s\n' "$a"; fi
+		done; fi
+		if [ -n "$dhcp" ] && [ "$dhcp" != no ]; then printf 'DHCP=%s\n' "$dhcp"; fi
+		if [ -n "$C_DNS" ]; then for s in $C_DNS; do printf 'DNS=%s\n' "$s"; done; fi
+		if [ -n "$C_SEARCH" ]; then printf 'Domains=%s\n' "$C_SEARCH"; fi
+		if [ -n "$C_EXTRA_ROUTE" ]; then printf '%s\n' "$C_EXTRA_ROUTE" | while IFS= read -r r; do
+			if [ -z "$r" ]; then continue; fi
+			dest=${r%% via *}
+			gw=${r##* via }
+			printf '\n[Route]\nDestination=%s\nGateway=%s\n' "$dest" "$gw"
+		done; fi
+		if [ -n "$C_ACCEPT_RA" ]; then printf 'IPv6AcceptRA=%s\n' "$C_ACCEPT_RA"; fi
+		if [ -n "$C_MTU" ]; then printf '\n[Link]\nMTUBytes=%s\n' "${C_MTU%% *}"; fi
+	} >"$out"
+
+	MIGRATED=$((MIGRATED + 1))
+	if [ "$is_lo" -eq 1 ]; then
+		note_ok "$base.conf -> $(basename "$out") [loopback]"
+	else
+		note_ok "$base.conf -> $(basename "$out") [mac $mac]"
+	fi
+}
+
+# ------------------------------------------------------- stale audit
+# Pre-existing destination-side configs referencing absent interfaces.
+# Runs read-only, before any write, and never faults just-written files.
+
+stale_audit_openrc()
+{
+	for conf in "$NETWORKD_CONF_DIR"/*.conf; do
+		[ -f "$conf" ] || continue
+		case $conf in
+			*.example) continue ;;
+		esac
+		base=$(basename "$conf")
+		# Skip files we are about to replace.
+		if [ -f "$STAGE/$base" ]; then continue; fi
+		iface=$(sed -n -e 's/^INTERFACE=//p' "$conf" | head -1)
+		[ -n "${iface:-}" ] || continue
+		# Loopback always exists; it simply has no MAC table row.
+		if [ "$iface" = lo ]; then continue; fi
+		macmt=$(sed -n -e 's/^# Source-MAC=//p' "$conf" | head -1)
+		if [ -n "${macmt:-}" ]; then
+			if name_of_mac "$macmt" | grep -q . 2>/dev/null; then continue; fi
+		else
+			if mac_of_name "$iface" | grep -q . 2>/dev/null; then continue; fi
+		fi
+		note_warn "stale: $base references absent interface $iface (phantom config, left untouched)"
+	done
+}
+
+# ------------------------------------------------------- main driver
+
+STAGE=$(mktemp -d "${TMPDIR:-/tmp}"/saphira-net-migrate.XXXXXX)
+trap 'rm -rf "$STAGE"' EXIT HUP INT TERM
+
+# .netdev files concerning migrated interfaces abort; unrelated ones
+# are reported and retained.
+netdev_scan()
+{
+	[ -d "$SYSTEMD_NETWORK_DIR" ] || return 0
+	for nd in "$SYSTEMD_NETWORK_DIR"/*.netdev; do
+		[ -f "$nd" ] || continue
+		ndname=$(sed -n -e 's/^[[:space:]]*Name=//p' "$nd" | head -1)
+		note_warn "$(basename "$nd"): .netdev files are out of scope (topology) - retained, never translated"
+		[ -n "${ndname:-}" ] || continue
+		ndmac=$(mac_of_name "$ndname") || ndmac=""
+		# shellcheck disable=SC2154
+		if [ -n "${MIGMACS:-}" ] && printf '%s\n' "$MIGMACS" | grep -q -F -x "$ndmac" 2>/dev/null; then
+			note_abort "$(basename "$nd"): .netdev defines migrated interface $ndname (virtual-device topology is out of scope)"
+		fi
+	done
+}
+
+if [ "$TO" = openrc ]; then
+	MIGMACS=""
+	CLEAN_UNITS=""
+	if [ -d "$SYSTEMD_NETWORK_DIR" ]; then
+		# First pass: parse everything, collect MACs for .netdev
+		# scan, remember clean units (pass two must not re-report
+		# the same errors).
+		# shellcheck disable=SC2045
+		units=$(ls "$SYSTEMD_NETWORK_DIR"/*.network 2>/dev/null | LC_ALL=C sort || true)
+		for unit in $units; do
+			[ -f "$unit" ] || continue
+			parse_network_unit "$unit"
+			if [ "$U_ABORT_HERE" -eq 0 ]; then
+				CLEAN_UNITS=${CLEAN_UNITS:+$CLEAN_UNITS
+}$unit
+				m=$(printf '%s\n' "$U_MATCH_MACS" | head -1)
+				if [ -z "$m" ] && [ -n "$U_MATCH_NAME" ]; then
+					m=$(mac_of_name "$U_MATCH_NAME") || m=""
+				fi
+				if [ -n "$m" ]; then MIGMACS=${MIGMACS:+$MIGMACS
+}$m; fi
+			fi
+		done
+		netdev_scan
+		# Second pass: emit clean units only.
+		while IFS= read -r unit; do
+			[ -n "$unit" ] || continue
+			parse_network_unit "$unit"
+			emit_conf "$unit"
+		done <<EOF
+$CLEAN_UNITS
+EOF
+	fi
+	stale_audit_openrc
+	DEST=$NETWORKD_CONF_DIR
+else
+	if [ -d "$NETWORKD_CONF_DIR" ]; then
+		# shellcheck disable=SC2045
+		confs=$(ls "$NETWORKD_CONF_DIR"/*.conf 2>/dev/null | LC_ALL=C sort || true)
+		for conf in $confs; do
+			[ -f "$conf" ] || continue
+			case $conf in
+				*.example) continue ;;
+			esac
+			parse_conf_file "$conf"
+			if [ "$C_ABORT_HERE" -eq 1 ]; then continue; fi
+			emit_network "$conf"
+		done
+	fi
+	DEST=$SYSTEMD_NETWORK_DIR
+fi
+
+# ------------------------------------------------------- report + apply
+
+print_report()
+{
+	printf 'Saphira network migration: --to %s (%s)\n' "$TO" "$([ "$APPLY" -eq 1 ] && printf 'apply' || printf 'dry-run')"
+	if [ -n "$REPORT_OK" ]; then
+		printf '\n  migrated:\n'
+		printf '%s\n' "$REPORT_OK" | sed -e 's/^/    /'
+	fi
+	if [ -n "$REPORT_WARN" ]; then
+		printf '\n  warnings:\n'
+		printf '%s\n' "$REPORT_WARN" | sed -e 's/^/    /'
+	fi
+	if [ -n "$REPORT_ABORT" ]; then
+		printf '\n  ERRORS (nothing written):\n'
+		printf '%s\n' "$REPORT_ABORT" | sed -e 's/^/    /'
+	fi
+}
+
+print_checklist()
+{
+	printf '\n  before reboot:\n'
+	if [ "$TO" = openrc ]; then
+		printf '    rc-update add network default\n'
+		if printf '%s\n' "$REPORT_OK" | grep -q -i 'ovs' 2>/dev/null; then
+			printf '    rc-update add openvswitch default  (starts before net via existing depend metadata)\n'
+		fi
+		printf '    verify: rc-status; ip addr; ip route\n'
+	else
+		printf '    systemctl enable systemd-networkd\n'
+		if printf '%s\n' "$REPORT_OK" | grep -q -i 'ovs' 2>/dev/null; then
+			printf '    systemctl enable openvswitch  (if OVS topology present)\n'
+		fi
+		printf '    verify: networkctl status; ip addr; ip route\n'
+	fi
+}
+
+if [ "$ABORT" -eq 1 ]; then
+	print_report
+	printf '\nFAILED: resolve the errors above; destination untouched.\n'
+	exit 1
+fi
+
+if [ "$MIGRATED" -eq 0 ]; then
+	print_report
+	printf '\nFAILED: nothing migratable (no usable source configuration found).\n'
+	exit 1
+fi
+
+if [ "$APPLY" -eq 1 ]; then
+	mkdir -p "$DEST"
+	backup=$DEST.pre-migrate-$TS
+	if [ -e "$backup" ]; then
+		printf 'backup %s already exists; refusing to overwrite\n' "$backup" >&2
+		exit 1
+	fi
+	cp -a "$DEST" "$backup"
+	for f in "$STAGE"/*; do
+		[ -f "$f" ] || continue
+		cp "$f" "$DEST/$(basename "$f")"
+	done
+	print_report
+	print_checklist
+	printf '\nAPPLIED: %d file(s) written to %s (backup at %s).\n' "$MIGRATED" "$DEST" "$backup"
+else
+	print_report
+	print_checklist
+	printf '\nDRY-RUN: %d file(s) staged, nothing written (re-run with --apply).\n' "$MIGRATED"
+fi

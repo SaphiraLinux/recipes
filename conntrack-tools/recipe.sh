@@ -20,5 +20,13 @@ recipe_build() {
 	make -j${JOBS:-$(nproc)}
 }
 recipe_install() {
-	make -C "$SRC" DESTDIR="$PKGDEST" install
+	make -C "$SRC" DESTDIR="$PKGDEST" install	# Dual-init policy: both definitions ship unconditionally; neither is
+	# enabled or started at install.
+	install -D -m 0755 "$RECIPE_DIR/files/conntrackd.initd" \
+		"$PKGDEST/etc/init.d/conntrackd"
+	install -D -m 0644 "$RECIPE_DIR/files/conntrackd.service" \
+		"$PKGDEST/usr/lib/systemd/system/conntrackd.service"
+	[ -e "$PKGDEST/etc/init.d/conntrackd" ] || { echo "ERROR: conntrack-tools payload is missing etc/init.d/conntrackd" >&2; return 1; }
+	[ -e "$PKGDEST/usr/lib/systemd/system/conntrackd.service" ] || { echo "ERROR: conntrack-tools payload is missing usr/lib/systemd/system/conntrackd.service" >&2; return 1; }
+
 }

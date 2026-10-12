@@ -1,0 +1,48 @@
+# daemon-inventory map: which packages ship a long-running daemon, and
+# therefore owe Saphira BOTH init definitions.
+#
+# Policy encoded (see RECIPE_RULES.md "Dual init system policy"):
+# every package that installs a long-running daemon/service ships
+#   openrc:   /etc/init.d/<servicename>
+#   systemd:  /usr/lib/systemd/system/<name>.service
+# unconditionally; unit files are inert when systemd is not installed.
+# Nothing is auto-enabled and nothing is auto-started.
+#
+# Daemon-ness is decided by what a recipe INSTALLS, never by package name.
+# A name-based test cannot tell lldpd the daemon from clamdscan the
+# scanner, and "server-ish" is not "daemon". Packages shipping only
+# utilities, libraries, clients or cluster helpers are exempt by
+# construction: they have no entry here and are not flagged.
+#
+# Entries are only needed for the two cases mechanical detection cannot
+# resolve:
+#
+#   <pkg> daemon            # ships a daemon; BOTH formats are required.
+#                          # Used when the recipe installs a service file
+#                          # through an upstream build system rather than
+#                          # a literal $PKGDEST path, and for daemons that
+#                          # currently ship neither format (the gap this
+#                          # map exists to make visible and then close).
+#   <pkg> exempt <reason>  # ships a daemon-shaped binary that is not a
+#                          # system service; a deliberate, reviewed absence.
+#
+# A package that installs /etc/init.d/ or /usr/lib/systemd/system/
+# directly needs NO entry: daemon-init.sh detects it from the recipe. This
+# map only records what detection cannot see.
+#
+# Enforced by saphira-packager/tests/daemon-init.sh: a `daemon` entry with
+# only one format fails; a one-sided package absent from this map fails;
+# an `exempt` entry needs a reason; an entry for a package with no recipe
+# fails; a package listed here that turns out to install both formats
+# anyway is reported so the stale entry can be dropped.
+
+# --- init systems themselves: they cannot ship a unit for themselves ----
+openrc exempt # this IS the OpenRC init system; /usr/lib/systemd/system is systemd-owned and systemd is not installed on an OpenRC host. Ships Saphira platform services (network, net-online, saphira-boot-ok) in init.d form by nature.
+
+# --- inetd-class transports: per-connection, not a system service -------
+ucspi-tcp exempt # tcpserver is an inetd-class transport spawned per connection, not a system service; the listener definitions (ports, rules, certs) belong to the SMTP-listener phase. Recipe comment agrees.
+
+# --- genuine daemons shipping NEITHER format today ----------------------
+# Each of these installs a long-running process and owns a service
+# identity or state directory, so "no service file" is a real gap, not an
+# exemption. The validator requires both formats once the gap is closed.

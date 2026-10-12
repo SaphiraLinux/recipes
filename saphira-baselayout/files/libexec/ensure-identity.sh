@@ -134,14 +134,154 @@ die()
 	if [ "${CHECK:-0}" -eq 1 ]; then exit 2; else exit 1; fi
 }
 
+# --- sysusers.d replay (offline equivalent of systemd-sysusers) --------
+#
+# Deliberately NARROW: only the two line types Saphira actually ships with
+# pinned IDs, and only when the ID is explicit. A line with a dynamic or
+# name-resolved ID is reported and skipped rather than guessed, because
+# allocating an ID is precisely the decision this whole mechanism exists to
+# avoid making by accident.
+#
+# sysusers.d grammar handled:
+#   u<id> <name> ["GECOS"]      user with an explicit UID
+#   g<id> <name> ["GECOS"]      group with an explicit GID
+#   u <name> <id> ["GECOS"]     user, ID second
+#   g <name> <id> ["GECOS"]     group, ID second
+# Everything else (m, f, l, s, b, t, p, a, n, r, c, U, G and the extension
+# types) is skipped: it declares a membership, a file, a sub-ID range, a
+# container or a cache, none of which is a Unix identity this helper owns.
+#
+# Home directories are NOT created. systemd-sysusers would create them, but
+# doing so offline would materialise /home trees for identities that may
+# never log in, and accounts.tsv/firstboot is where home creation belongs
+# on Saphira.
+
+sysusers_notes=0
+
+skip_sysusers_line()
+{
+	sysusers_notes=$((sysusers_notes + 1))
+	printf 'ensure-identity: notice: %s: skipping non-identity sysusers line: %s\n' \
+		"${1##*/}" "$2" >&2
+}
+
+apply_sysusers_d()
+{
+	[ -d "$FRAGMENT" ] || die "sysusers.d directory is missing: $FRAGMENT"
+	for f in "$PASSWD" "$GROUPF" "$SHADOW"; do
+		test -f "$f" || die "account database is missing: $f"
+	done
+	conffile=
+	for candidate in "$FRAGMENT"/*.conf; do
+		[ -f "$candidate" ] || continue
+		conffile=$candidate
+		lineno=0
+		while IFS= read -r line || [ -n "$line" ]; do
+			lineno=$((lineno + 1))
+			case $line in
+				''|'#'*) continue ;;
+			esac
+			# strip an inline comment, then split
+			line=${line%%#*}
+			# shellcheck disable=SC2086
+			set -- $line
+			[ $# -ge 2 ] || continue
+			kind=$1
+			case $kind in
+				u*|g*)
+					case $kind in
+						u|g)
+							# name-first form: u NAME ID ...
+							name=$2
+							id=$3
+							;;
+						u!|g!)
+							# The '!' form means systemd-sysusers would ALLOCATE
+							# an ID. Saphira pins them, so the ID is the
+							# second field. This branch used to assign
+							# nothing, so every pinned systemd identity
+							# (u! systemd-oom 130 ...) was skipped as
+							# 'incomplete'.
+							name=$2
+							id=$3
+							;;
+						u[0-9]*|g[0-9]*)
+							# id-first form: u123 NAME ...
+							rest=${kind#?}
+							rest=${rest#!}
+							name=$2
+							id=$rest
+							;;
+					esac
+					;;
+				*)
+					skip_sysusers_line "$conffile" "line $lineno: $line"
+					continue
+					;;
+			esac
+			[ -n "${name:-}" ] && [ -n "${id:-}" ] || {
+				skip_sysusers_line "$conffile" "line $lineno: incomplete identity"
+				continue
+			}
+			case $id in
+				''|*[!0-9]*)
+					# A dynamic or name-resolved ID. Never guess: a
+					# wrong allocation is a permanent, silent
+					# identity conflict.
+					skip_sysusers_line "$conffile" "line $lineno: non-numeric ID '$id' for $name"
+					continue
+					;;
+			esac
+			case $kind in
+				g*)
+					ensure_group "$name" "$id"
+					;;
+				*)
+					# A `u' line creates the user AND a group of the
+					# same name, which is what makes it usable as a
+					# primary group. Without this, ensure_user fails
+					# with 'primary group is not declared, present, or
+					# base-seeded' -- the pinned-ID case had never been
+					# exercised.
+					#
+					# /var/empty is the platform's established
+					# no-home idiom (ensure_home returns early for it).
+					# Home directories are firstboot's job on Saphira;
+					# creating them here would materialise /home
+					# trees for identities that may never log in.
+					ensure_group "$name" "$id"
+					ensure_user "$name" "$id" "$name" "/var/empty" "/sbin/nologin"
+					;;
+			esac
+			unset name id kind
+		done < "$candidate"
+	done
+	if [ "$sysusers_notes" -gt 0 ]; then
+		printf 'ensure-identity: notice: %s sysusers.d line(s) skipped; only explicitly pinned u/g identities are replayed offline\n' \
+			"$sysusers_notes" >&2
+	fi
+	return 0
+}
+
+# --sysusers-d replays a sysusers.d directory instead of a fragment. It is
+# the OFFLINE half of the accounts.d `sysusers' stanza: on a live system
+# the package's post-install script runs /usr/bin/systemd-sysusers over its
+# own shipped confs, but an image has no running systemd and no
+# systemd-sysusers to run, so the same declarations are applied here.
+#
+# It lives in the reconciler rather than in saphira-assemble-rootfs on
+# purpose: one helper, one policy, and saphira-assemble-rootfs already
+# drives this script for the fragment case. Duplicating the parsing into
+# the assembler is exactly the divergence that produced the original bug.
 MODE=ensure
 CHECK=0
 case ${1:-} in
 	--disable) MODE=disable; shift ;;
+	--sysusers-d) MODE=sysusers; shift ;;
 	--check) MODE=ensure; CHECK=1; shift ;;
-	-*) die "usage: ensure-identity.sh [--disable|--check] FRAGMENT" ;;
+	-*) die "usage: ensure-identity.sh [--disable|--sysusers-d|--check] FRAGMENT|DIR" ;;
 esac
-FRAGMENT=${1:?usage: ensure-identity.sh [--disable|--check] FRAGMENT}
+FRAGMENT=${1:?usage: ensure-identity.sh [--disable|--sysusers-d|--check] FRAGMENT|DIR}
 
 DRIFT=0
 CHECK_DONE=
@@ -151,7 +291,12 @@ drift()
 	printf 'ensure-identity: drift: %s\n' "$*"
 }
 
-test -f "$FRAGMENT" || die "fragment is missing: $FRAGMENT"
+# The argument is a DIRECTORY in sysusers mode and a FILE otherwise.
+if [ "$MODE" = sysusers ]; then
+	test -d "$FRAGMENT" || die "sysusers.d directory is missing: $FRAGMENT"
+else
+	test -f "$FRAGMENT" || die "fragment is missing: $FRAGMENT"
+fi
 for f in "$PASSWD" "$GROUPF" "$SHADOW"; do
 	test -f "$f" || die "account database is missing: $f"
 done
@@ -1046,6 +1191,15 @@ ensure_home()
 	ensure_leaf "$home" 755 "$uid" "$(group_gid "$primary")"
 }
 
+# Dispatched HERE, after ensure_group/ensure_user/ensure_leaf are all
+# defined. A shell function must exist before it is invoked, and applying
+# this at the argument-parsing point (which sits above the function
+# definitions) failed with "ensure_user: command not found".
+if [ "$MODE" = sysusers ]; then
+	apply_sysusers_d
+	exit $?
+fi
+
 # --- disable mode (--disable): sanitize without deleting ---
 #
 # Phase 1 (disable_validate) is pure reads: every stanza is shape-
@@ -1162,17 +1316,19 @@ disable_validate()
 			file)
 				[ $# -eq 5 ] || die "fragment line $lineno: file needs 4 fields"
 				;;
-		# The sysusers stanza selects the caller's native mechanism
-		# (the generated caller runs systemd-sysusers after the
-		# reconciler): it declares no user/group/dir/file, so the
-		# helper skips it in every pass. Arity enforced so malformed
-		# fragments still fail closed.
-		sysusers)
-			[ $# -eq 1 ] || die "fragment line $lineno: sysusers takes no fields"
-			;;
-		dir) continue ;;
-		*) die "fragment line $lineno: unknown stanza: $1" ;;
-	esac
+			# sysusers is an account-creation mechanism with no removal
+			# concept, exactly like file and dir: shape-checked here so a
+			# malformed stanza still fails closed, then skipped. Disable
+			# mode never renumbers or removes anything. The stanza selects
+			# the caller's native mechanism (the generated caller runs
+			# systemd-sysusers after the reconciler): it declares no
+			# user/group/dir/file.
+			sysusers)
+				[ $# -eq 1 ] || die "fragment line $lineno: sysusers takes no arguments"
+				;;
+			dir) continue ;;
+			*) die "fragment line $lineno: unknown stanza: $1" ;;
+		esac
 	done < "$FRAGMENT"
 	lineno=0
 	while IFS= read -r line || [ -n "$line" ]; do
@@ -1382,13 +1538,18 @@ while IFS= read -r line || [ -n "$line" ]; do
 		file)
 			continue
 			;;
-		# The sysusers stanza selects the caller's native mechanism
-		# (the generated caller runs systemd-sysusers after the
-		# reconciler): it declares no user/group/dir/file, so the
-		# helper skips it in every pass. Arity enforced so malformed
-		# fragments still fail closed.
+		# The sysusers stanza declares that this package's OWN identities
+		# come from the sysusers.d confs it ships, not from user/group
+		# stanzas here. There is nothing for the reconciler to create: the
+		# authoritative declarations are the package's own sysusers.d
+		# files, which the package's post-install script replays through
+		# systemd-sysusers on a live system. The stanza selects the
+		# caller's native mechanism: it declares no user/group/dir/file,
+		# so the helper skips it in every pass. Arity enforced so
+		# malformed fragments still fail closed.
 		sysusers)
-			[ $# -eq 1 ] || die "fragment line $lineno: sysusers takes no fields"
+			[ $# -eq 1 ] || die "fragment line $lineno: sysusers takes no arguments"
+			continue
 			;;
 		*)
 			die "fragment line $lineno: unknown stanza: $1"

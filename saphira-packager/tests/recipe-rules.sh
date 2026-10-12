@@ -78,19 +78,20 @@ done
 	exit 1
 }
 
-# lldpd owns its privilege-separation identity (_lldpd:124,
-# convergent with nothing - it must be a fresh reservation).
+# lldpd owns its privilege-separation identity (_lldpd:147,
+# convergent with nothing - it must be a fresh reservation; it was 124
+# until 124 was found to be hostapd's).
 lldpd_fragment=$source_root/lldpd/files/accounts.d/lldpd
 [ -f "$lldpd_fragment" ] || {
 	printf '%s\n' 'lldpd fragment is missing (_lldpd identity unowned)' >&2
 	exit 1
 }
-grep -Eq '^user _lldpd 124 _lldpd /var/run/lldpd /sbin/nologin$' "$lldpd_fragment" || {
-	printf '%s\n' 'lldpd fragment does not declare user _lldpd 124' >&2
+grep -Eq '^user _lldpd 147 _lldpd /var/run/lldpd /sbin/nologin$' "$lldpd_fragment" || {
+	printf '%s\n' 'lldpd fragment does not declare user _lldpd 147' >&2
 	exit 1
 }
-grep -Eq '^group _lldpd 124$' "$lldpd_fragment" || {
-	printf '%s\n' 'lldpd fragment does not declare group _lldpd 124' >&2
+grep -Eq '^group _lldpd 147$' "$lldpd_fragment" || {
+	printf '%s\n' 'lldpd fragment does not declare group _lldpd 147' >&2
 	exit 1
 }
 
@@ -350,6 +351,226 @@ done
 	exit 1
 }
 rm -rf "$sys_tmp"
+
+# --- profile pinning: two halves, deliberately checked separately ------------
+#
+# Saphira as a whole must NOT prevent a consumer from pinning. Someone
+# deliberately holding an older kernel line, or keeping a system steady while
+# a new one is validated, needs to be able to write package=version, and the
+# mechanism must be there for them. So the profile expander keeps '=' legal.
+#
+# What we do is different, and is the half that is enforced here: OUR OWN
+# profiles name bare packages and never pin. A pin in our profiles is a
+# standing liability. It does not remove a bad outcome, it relocates the
+# failure: when the pinned NVR is retired from the live index the entry
+# becomes unresolvable, the package manager falls back, and the system lands
+# on something nobody chose while the pin still reads as an intentional
+# selection. That happened to saphira-kernel here.
+#
+# Checked in both directions, because each half has been got wrong once:
+# removing the capability from the expander would only stop OTHER people
+# pinning, and adding a pin to our profiles would reintroduce the fallback.
+pin_refused=0
+for expander in saphira-install-tools/files/saphira-bootstrap; do
+	f="$source_root/$expander"
+	[ -f "$f" ] || continue
+	grep -q 'A-Za-z0-9._+=-' "$f" || {
+		printf '%s\n' "profile expander refuses '=': consumers must be able to pin a version" >&2
+		pin_refused=1
+	}
+done
+[ "$pin_refused" -eq 0 ] || exit 1
+
+pinned=""
+for f in "$source_root"/saphira-install-tools/files/profiles/* \
+	"$source_root"/saphira-image-creator/files/profiles/*; do
+	[ -f "$f" ] || continue
+	grep -nE '^[[:space:]]*[A-Za-z0-9._+-]+=[^=]' "$f" 2>/dev/null |
+		while IFS= read -r hit; do
+			printf 'our profile pins a version (we never do package=rver): %s: %s\n' \
+				"${f#"$source_root"/}" "$hit" >&2
+			echo x
+		done | grep -q x && pinned=1
+done
+[ -z "$pinned" ] || exit 1
+
+# Incident: linux2024 (OVMF/UEFI + QXL) showed a black screen after GRUB
+# loaded 7.3-rc1, while BIOS/VGA hosts booted the same kernel. Root cause
+# was a gap, not drift: no vendored config ever carried the EFI framebuffer
+# console (VGA_CONSOLE covers BIOS only; UEFI has no VGA text mode), and
+# nothing asserted the no-initramfs builtin set, so `make olddefconfig`
+# could silently demote a required =y. The build gate below must stay wired
+# into saphira-kernel recipe_build() right after olddefconfig.
+kernel_recipe=$source_root/saphira-kernel/recipe.sh
+grep -Fq 'check_no_initramfs_builtins' "$kernel_recipe" || {
+	printf '%s\n' 'saphira-kernel recipe no longer invokes the no-initramfs builtin gate (UEFI console / builtin policy regresses silently)' >&2
+	exit 1
+}
+[ -f "$source_root/saphira-kernel/files/check-no-initramfs-builtins.sh" ] || {
+	printf '%s\n' 'no-initramfs builtin gate script missing from saphira-kernel/files' >&2
+	exit 1
+}
+
+# Incident: systemd-262-r2 shipped upstream's merged-/usr helper defaults
+# (split-usr removal) on a non-usrmerged system: no /sbin/init, and every
+# mount unit failed on missing /usr/bin/mount, ending in an emergency mode
+# whose /usr/sbin/sulogin was equally absent. The recipe pins Saphira's
+# real helper paths via upstream's -D*-path options. Neither may silently
+# revert to merged defaults.
+systemd_recipe=$source_root/systemd/recipe.sh
+for path_flag in \
+	'-Dmount-path=/bin/mount' \
+	'-Dumount-path=/bin/umount' \
+	'-Dsulogin-path=/sbin/sulogin' \
+	'-Dagetty-path=/sbin/agetty' \
+	'-Dswapon-path=/sbin/swapon' \
+	'-Dswapoff-path=/sbin/swapoff' \
+	'-Dnologin-path=/sbin/nologin' \
+	'-Dkmod-path=/usr/bin/kmod' \
+	'-Dsplit-bin=true'; do
+	grep -Fq -- "$path_flag" "$systemd_recipe" || {
+		printf '%s\n' "systemd recipe lost split-layout helper pin: $path_flag" >&2
+		exit 1
+	}
+done
+# Feature-policy pins (audit 2026-10-09): gnutls/bzip2 are type=feature
+# (auto) and must stay explicitly disabled so no future transitive -dev
+# can flip them on by detection. utmp needs no pin (upstream forces it
+# off under -Dlibc=musl); the recipe comment records that decision.
+for feature_flag in \
+	'-Dgnutls=disabled' \
+	'-Dbzip2=disabled'; do
+	grep -Fq -- "$feature_flag" "$systemd_recipe" || {
+		printf '%s\n' "systemd recipe lost feature-policy pin: $feature_flag" >&2
+		exit 1
+	}
+done
+# r4 native PID1: the recipe must place a real /sbin/init (copy, never a
+# symlink to the merged layout) and must remove upstream's merged-usr
+# usr/sbin/init link. The fail-closed install assertions guard the rest.
+for pid1_fragment in \
+	'"$PKGDEST/sbin/init"' \
+	'rm -f -- "$PKGDEST/usr/sbin/init"'; do
+	grep -Fq -- "$pid1_fragment" "$systemd_recipe" || {
+		printf '%s\n' "systemd recipe lost native-PID1 install step: $pid1_fragment" >&2
+		exit 1
+	}
+done
+# The default-grub init= line (0ece176) remains only as belt-and-braces:
+# it rested on the bad assumption that the 261 /sbin/init symlink would
+# survive upgrade, which a clean package transition disproves. r4 ships a
+# real /sbin/init, so the kernel's ordinary search is the supported path -
+# acceptance boots must omit init= to prove it. The line stays (removing
+# it is baselayout scope) but nothing may depend on it.
+grep -Fq 'init=/usr/lib/systemd/systemd' "$source_root/saphira-baselayout/files/default-grub" || {
+	printf '%s\n' 'default-grub lost init= belt-and-braces (r4 /sbin/init is the supported path; test boots must omit init=)' >&2
+	exit 1
+}
+
+# nginx /var/run contract (r11): a /usr/sbin service keeps runtime state
+# under /var/run, never /run; /run and /var/run are separate real trees,
+# neither a symlink. RuntimeDirectory= is unusable (systemd always
+# creates it under /run), so the unit creates the dir with a privileged
+# ExecStartPre before nginx -t runs. None of these may silently revert.
+nginx_unit=$source_root/nginx/files/nginx.service
+grep -Fq 'ExecStartPre=+/bin/install -d -o nginx -g nginx -m 0755 /var/run/nginx' "$nginx_unit" || {
+	printf '%s\n' 'nginx.service lost privileged /var/run/nginx ExecStartPre' >&2
+	exit 1
+}
+grep -Fq 'RuntimeDirectory=' "$nginx_unit" && {
+	printf '%s\n' 'nginx.service must not use RuntimeDirectory= (wrong tree: always /run)' >&2
+	exit 1
+}
+nginx_recipe=$source_root/nginx/recipe.sh
+for pid_flag in \
+	'--pid-path=/var/run/nginx/nginx.pid' \
+	'--lock-path=/var/run/nginx/nginx.lock'; do
+	grep -Fq -- "$pid_flag" "$nginx_recipe" || {
+		printf '%s\n' "nginx recipe lost /var/run pid-path pin: $pid_flag" >&2
+		exit 1
+	}
+done
+
+# /etc/inittab belongs to OpenRC, not baselayout and not systemd: the
+# OpenRC sysvinit table must never ship on systemd machines via the
+# always-installed baselayout, and systemd must never own it. apk
+# ownership then governs both switch directions with no hooks.
+grep -Fq 'files/inittab' "$source_root/saphira-baselayout/recipe.sh" && {
+	printf '%s\n' 'saphira-baselayout must not install etc/inittab (OpenRC-owned)' >&2
+	exit 1
+}
+[ -e "$source_root/saphira-baselayout/files/inittab" ] && {
+	printf '%s\n' 'saphira-baselayout/files/inittab must not exist (moved to openrc)' >&2
+	exit 1
+}
+grep -Fq '"$RECIPE_DIR/files/inittab" "$PKGDEST/etc/inittab"' "$source_root/openrc/recipe.sh" || {
+	printf '%s\n' 'openrc recipe lost etc/inittab install (OpenRC-owned sysvinit table)' >&2
+	exit 1
+}
+[ -f "$source_root/openrc/files/inittab" ] || {
+	printf '%s\n' 'openrc/files/inittab stock file missing' >&2
+	exit 1
+}
+
+# openvswitch /var/run contract (r6): same root-/bin-vs-usr-/usr rule as
+# nginx - the suite runs from /usr, so /var/run/openvswitch, root-owned.
+# No RuntimeDirectory= (wrong tree). The fhs.d migration declaration
+# ships (merge line: the fhs.d migration/reconciliation machinery
+# survives, so the r4 fragment is carried again alongside the r5
+# /var/run commitment).
+ovs_unit=$source_root/openvswitch/files/openvswitch.service
+grep -Fq 'ExecStartPre=+/bin/install -d -o root -g root -m 0755 /var/run/openvswitch' "$ovs_unit" || {
+	printf '%s\n' 'openvswitch.service lost privileged /var/run/openvswitch ExecStartPre' >&2
+	exit 1
+}
+grep -Fq 'RuntimeDirectory=' "$ovs_unit" && {
+	printf '%s\n' 'openvswitch.service must not use RuntimeDirectory= (wrong tree: always /run)' >&2
+	exit 1
+}
+ovs_recipe=$source_root/openvswitch/recipe.sh
+grep -Fq -- '--with-rundir=/var/run/openvswitch' "$ovs_recipe" || {
+	printf '%s\n' 'openvswitch recipe lost /var/run rundir pin' >&2
+	exit 1
+}
+grep -Fq 'saphira/fhs.d/openvswitch' "$ovs_recipe" || {
+	printf '%s\n' 'openvswitch recipe lost fhs.d migration declaration install' >&2
+	exit 1
+}
+[ -f "$source_root/openvswitch/files/fhs.d/openvswitch" ] || {
+	printf '%s\n' 'openvswitch/files/fhs.d/openvswitch fragment missing' >&2
+	exit 1
+}
+
+# Regulatory freedom (article): every versioned kernel recipe must flip
+# the cfg80211 gatekeeper Kconfig defaults, carry both symbols as
+# explicit "is not set", and prove the final .config post-olddefconfig
+# via the gate (the original defect was silent re-enabling at build).
+for kver in 7.1.5 7.2.2 7.2.3 7.3-rc1; do
+	k_recipe=$source_root/saphira-kernel-$kver/recipe.sh
+	grep -Fq 'cfg80211-regdb-freedom.patch' "$k_recipe" || {
+		printf '%s\n' "saphira-kernel-$kver lost regdb Kconfig patch" >&2
+		exit 1
+	}
+	grep -Fq 'check_regdb_freedom' "$k_recipe" || {
+		printf '%s\n' "saphira-kernel-$kver lost regdb-freedom gate call" >&2
+		exit 1
+	}
+	grep -qxF '# CONFIG_CFG80211_REQUIRE_SIGNED_REGDB is not set' \
+		"$source_root/saphira-kernel-$kver/files/config-$kver-akadata" || {
+		printf '%s\n' "saphira-kernel-$kver config re-enabled signed-regdb" >&2
+		exit 1
+	}
+	grep -qxF '# CONFIG_CFG80211_USE_KERNEL_REGDB_KEYS is not set' \
+		"$source_root/saphira-kernel-$kver/files/config-$kver-akadata" || {
+		printf '%s\n' "saphira-kernel-$kver config re-enabled kernel regdb keys" >&2
+		exit 1
+	}
+	grep -qxF 'CONFIG_DRM_FBDEV_EMULATION=y' \
+		"$source_root/saphira-kernel-$kver/files/config-$kver-akadata" || {
+		printf '%s\n' "saphira-kernel-$kver config lost KMS fbdev emulation (blind physical console)" >&2
+		exit 1
+	}
+done
 
 # FHS migration declarations (hotfix/var-packaging-bug-var-run-isnot-run):
 # every files/fhs.d/* fragment must parse under makepkg's strict

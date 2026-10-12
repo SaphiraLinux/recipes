@@ -1,0 +1,18 @@
+#!/sbin/openrc-run
+
+description="PPPoE relay"
+
+# pppoe-relay is a long-running PPPoE daemon. It requires the rp-pppoe pppd
+# plugin, which this package installs under /usr/lib/pppd/<version>/; if
+# that plugin is missing the daemon cannot start, so the check is explicit
+# rather than an opaque pppd failure.
+command="/usr/sbin/pppoe-relay"
+command_args="/etc/ppp/pppoe-server-options"
+supervisor="supervise-daemon"
+
+depend()
+{
+	need localmount
+	use net
+	after bootmisc
+}

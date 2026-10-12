@@ -1,0 +1,5 @@
+# tmpfiles.d entry for the openvswitch service; /var/run is the persistent
+# runtime tree for /usr services (never confused with /run, and never
+# symlinked to it). Boot-layer redundancy behind the unit's ExecStartPre
+# and OpenRC's start_pre, which both create the dir at service start.
+d /var/run/openvswitch 0755 root root -

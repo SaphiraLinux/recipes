@@ -1,0 +1,48 @@
+Prefer libxcrypt explicitly, because the generic -lcrypt name is musl's.
+
+The generic crypt namespace belongs to musl, deliberately: musl-dev ships an
+EMPTY libcrypt.a for build-system compatibility and crypt()/crypt_r() live in
+musl's libc, so an ordinary -lcrypt resolves crypt() out of libc, and libxcrypt
+deliberately provides no generic libcrypt.so.
+
+The generated AC_CHECK_LIB(crypt, crypt, [LIBCRYPT=-lcrypt]) above is therefore
+a trap: it SUCCEEDS, because musl's empty archive satisfies it and the symbol
+comes from libc, so LIBCRYPT silently becomes -lcrypt and shadow is built against
+musl's crypt while appearing correctly configured. It is not merely a policy
+preference: lib/salt.c calls crypt_gensalt(), which musl does not provide, so
+the generic route cannot give shadow a working build at all.
+
+This is deliberately NOT written as a probe with a fallback. libxcrypt-dev is
+already a hard makedepends, so the choice is to require it or to allow shadow to
+quietly build without yescrypt; requiring it means a missing libxcrypt fails the
+final link loudly instead. LIYESCRYPT is set alongside LIBCRYPT so the build's
+own notion of "extended features available" agrees with what is linked.
+
+This patches the GENERATED configure. The release tarball ships a
+pre-generated configure and the recipe uses it as shipped rather than re-running
+autotools, so patching configure.ac alone has no effect: that was tried first,
+applied cleanly, and the build still linked -lcrypt. The recipe also puts
+libxcrypt's include directory ahead of the generic one, so <crypt.h> is the
+extended API that declares crypt_gensalt.
+
+--- a/configure	2026-09-26 06:47:54.365904376 +0000
++++ b/configure	2026-09-26 06:47:54.380625945 +0000
+@@ -16421,6 +16421,18 @@
+   as_fn_error $? "crypt() not found" "$LINENO" 5
+ fi
+ 
++# Saphira: the generic -lcrypt name is musl's. musl-dev ships an EMPTY
++# libcrypt.a for build-system compatibility and crypt()/crypt_r() live in
++# musl's libc, so the check above SUCCEEDS while quietly selecting musl's
++# crypt(). Prefer the explicit libxcrypt, which is a hard makedepends entry
++# and therefore not a fallback but a requirement: lib/salt.c calls
++# crypt_gensalt(), which musl does not provide at all, so a missing
++# libxcrypt must fail the link loudly rather than silently drop yescrypt.
++# LIYESCRYPT is set alongside it so the build's own notion of "extended
++# features available" agrees with the library actually linked.
++LIBCRYPT=-lxcrypt
++
++
+ 
+ 
+ { printf "%s\n" "$as_me:${as_lineno-$LINENO}: checking for crypt in -lcrypt" >&5

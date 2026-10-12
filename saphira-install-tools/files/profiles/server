@@ -1,7 +1,5 @@
-@akadata-stage4-network
+@saphira-stage4-network
 ncurses-dev
-openssh-client
-openssh-server
 curl
 vim
 nginx

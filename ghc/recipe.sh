@@ -53,6 +53,7 @@ makedepends="
     binutils
     curl
     gcc
+    gettext
     gmp-dev
     happy
     libffi-dev

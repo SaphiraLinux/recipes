@@ -1,0 +1,131 @@
+.TH SAPHIRA-MKINITRAMFS 8 "September 2026" "Saphira Linux" "System Administration"
+.SH NAME
+saphira-mkinitramfs \- build, inspect and unpack a Saphira initramfs
+.SH SYNOPSIS
+.B saphira-mkinitramfs
+.B build
+.BI \-\-kernel " VERSION"
+.BI \-\-root " DIR"
+.BI \-\-output " FILE"
+.RI [ options ]
+.br
+.B saphira-mkinitramfs
+.B list
+.I ARCHIVE
+.br
+.B saphira-mkinitramfs
+.B unpack
+.I ARCHIVE
+.I DESTINATION
+.br
+.B saphira-mkinitramfs
+.B verify
+.I ARCHIVE
+.RI [ \-\-kernel " VERSION" ]
+.SH DESCRIPTION
+Builds a reproducible, zstd-compressed cpio
+.B newc
+initramfs containing a small static
+.B /init
+and whatever the configuration asks for.
+.PP
+One generator serves two callers. The media builder produces the
+.I installer
+initramfs from the installer root; the installer produces the destination
+machine's initramfs from the root it has just populated. Neither has separate
+tooling.
+.SH THE KERNEL ARGUMENT IS MANDATORY
+.B \-\-kernel
+is required and is never inferred from
+.BR uname \-r .
+The installer runs inside its own environment, where the running kernel is the
+installer's kernel and not the kernel of the machine being installed, so a
+default would silently produce an initramfs for the wrong kernel.
+.SH HOOKS ARE OF TWO KINDS
+The two kinds are kept in different directories because they run at different
+times on different machines.
+.TP
+.B Build-time hooks
+.IR /usr/lib/saphira/initramfs/build-hooks.d/NN\-name
+run on the BUILDING system while the archive is constructed, are not shipped
+in it, and may use build-time software. They may add files to the staging tree.
+.TP
+.B Runtime hooks
+.IR /lib/saphira/initramfs/early.d/NN\-name
+and the same layout under
+.IR root.d/
+and
+.IR pre-switch-root.d/
+are copied INTO the initramfs and executed by
+.B /init
+at boot, in lexical order within each stage. A failing hook stops the boot
+visibly.
+.PP
+A runtime hook is an executable, not necessarily a script. When one is a
+script, the generator includes its shebang interpreter and that interpreter's
+shared-library closure automatically, so the base initramfs does not require a
+shell for its own sake.
+.SH WHAT THE GENERATOR DOES
+For each requested binary it resolves the ELF interpreter and the whole
+recursive
+.B DT_NEEDED
+closure. For each requested module it takes the dependency and softdep closure
+from that kernel's
+.BR modules.dep " and " modules.softdep .
+For each script hook it takes the interpreter. Members are sorted, ownership is
+normalised to 0:0, timestamps are pinned from
+.BR SOURCE_DATE_EPOCH ,
+and the result is compressed with a fixed zstd level, so an unchanged input
+tree produces a byte-identical archive.
+.SH MODES
+The initramfs configuration selects one of two terminal modes.
+.TP
+.B mode=switch
+Hooks prepare
+.IR /newroot ;
+.B /init
+verifies that a new root exists and has an executable init, then
+.BR switch_root s
+into it. This is the installed-system path.
+.TP
+.B mode=ram
+.B /init
+executes the configured installer entrypoint from the initramfs itself and
+never leaves it. The installer payload is a complete environment in RAM and
+has no
+.IR /newroot .
+The interface exists so the installer initramfs does not require
+.B /init
+to be redesigned.
+.SH FAILURE
+The output is replaced atomically and only after a complete archive has been
+built and verified. A failed build therefore leaves the previous initramfs
+exactly as it was. Refuse rather than emit a partial payload: an initramfs that
+is subtly incomplete fails at boot with no diagnostic.
+.SH FILES
+.TP
+.I /etc/saphira/initramfs.conf
+default contents
+.TP
+.I /usr/lib/saphira/initramfs/init
+the packaged static
+.B /init
+.TP
+.I /usr/lib/saphira/initramfs/build-hooks.d/
+build-time hooks
+.TP
+.I /usr/libexec/saphira/elf-closure
+ELF closure helper; the reason binutils is not a runtime dependency
+.SH ENVIRONMENT
+.TP
+.B SAPHIRA_TMPDIR
+scratch location (default
+.IR /build/tmp ).
+Host
+.I /tmp
+is never used.
+.TP
+.B SOURCE_DATE_EPOCH
+timestamp pinning for reproducible archives.
+.SH SEE ALSO
+.BR saphira-profiles (5)

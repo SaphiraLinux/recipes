@@ -1,0 +1,29 @@
+#!/sbin/openrc-run
+
+description="strongSwan IPsec IKE daemon (charon)"
+
+# charon is the IKE daemon. It does NOT daemonize: `stroke` (the
+# traditional ipsec starter) does, but charon itself stays in the
+# foreground, so supervise-daemon owns the real process.
+#
+# charon runs as root per the upstream default recorded in recipe.sh: it
+# creates the XFRM state and the VICI control socket, and this package
+# does not configure an unprivileged mode.
+command="/usr/sbin/charon"
+supervisor="supervise-daemon"
+
+depend()
+{
+	need localmount
+	use net
+	after firewall
+}
+
+start_pre()
+{
+	# The XFRM and x509 kernel modules must be loaded before charon
+	# programs any policy, or every SA silently fails to install.
+	modprobe -q xfrm_user 2>/dev/null || :
+	modprobe -q x509 2>/dev/null || :
+	modprobe -q af_key 2>/dev/null || :
+}

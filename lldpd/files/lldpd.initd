@@ -1,0 +1,26 @@
+#!/sbin/openrc-run
+
+description="LLDP daemon (link-layer discovery)"
+
+# lldpd does its own privilege separation: the master starts as root and
+# workers drop to _lldpd (configured with --with-privsep-user/group), so
+# it must be started privileged and must NOT be given a User= here.
+#
+# -d keeps the master in the foreground under supervise-daemon.
+# /run/lldpd is declared by files/accounts.d/lldpd (0755 _lldpd:_lldpd)
+# and is where the chroot and the control socket live.
+command="/usr/sbin/lldpd"
+command_args="-d"
+supervisor="supervise-daemon"
+
+depend()
+{
+	need localmount
+	use net
+	after firewall
+}
+
+start_pre()
+{
+	checkpath -d -m 0755 -o _lldpd:_lldpd /run/lldpd
+}

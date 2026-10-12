@@ -70,6 +70,7 @@ struct service {
     uint64_t dropped_oversized;
     uint64_t dropped_no_backend;
     uint64_t dropped_queue;
+    uint64_t dropped_not_for_us;
     uint64_t dropped_frag;
     uint64_t dropped_version;
 };

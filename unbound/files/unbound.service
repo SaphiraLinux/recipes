@@ -1,0 +1,46 @@
+[Unit]
+Description=Validating, recursive, caching DNS resolver (unbound)
+Documentation=man:unbound(8)
+After=network-online.target nftables.service
+Wants=network-online.target
+
+[Service]
+# Mirrors files/unbound.initd.
+#
+# Deliberately NOT set: User=. unbound starts as root to bind port 53,
+# then drops to the unbound user itself (--with-username=unbound) and
+# chowns its own state. Pinning User= here would remove the privileges it
+# needs before it can drop them.
+#
+# The capability it genuinely needs is to bind the privileged port.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+Type=simple
+ExecStart=/usr/sbin/unbound -d -c /etc/unbound/unbound.conf
+PIDFile=/run/unbound.pid
+# /var/lib/unbound is declared by files/accounts.d/unbound; the DNSSEC
+# root key lives under /usr/share/dnssec-root and must stay readable.
+StateDirectory=unbound
+StateDirectoryMode=0755
+# Fail fast on a bad config instead of starting a resolver that then
+# silently refuses to answer. unbound-checkconf is the authoritative
+# parser for the configuration file.
+ExecStartPre=/usr/sbin/unbound-checkconf /etc/unbound/unbound.conf
+Restart=on-failure
+RestartSec=2
+
+# Deliberately NOT set: ProtectSystem=strict, because unbound writes its
+# state under /var/lib/unbound and its pid under /run, and it may need
+# to read the DNSSEC root key at a path we do not control.
+#
+# A resolver is the one daemon on a host that is reachable by everything,
+# so NoNewPrivileges and a restricted address family list are safe here
+# and worth having: it needs AF_UNIX, AF_INET, AF_INET6 and AF_NETLINK
+# (netfilter for IPVS-less firewall-mark style setups and for the
+# interface-state monitoring it does over netlink on Linux).
+NoNewPrivileges=yes
+ProtectHome=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target

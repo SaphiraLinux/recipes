@@ -94,5 +94,17 @@ recipe_install()
 		"$PKGDEST/usr/share/saphira/accounts.d/vpopmail"
 	# vpopmaild service units deferred: the daemon's runtime shape
 	# (foreground mode, config surface) gets its own review with the
-	# SMTP-listener phase, not smuggled into r1.
+	# SMTP-listener phase, not smuggled into r1.	# Dual-init policy: both definitions ship unconditionally; neither is
+	# enabled or started at install.
+	install -D -m 0755 "$RECIPE_DIR/files/vpopmaild.initd" \
+		"$PKGDEST/etc/init.d/vpopmaild"
+	install -D -m 0644 "$RECIPE_DIR/files/vpopmaild.service" \
+		"$PKGDEST/usr/lib/systemd/system/vpopmaild.service"
+	# Deferred in the original recipe comment until the SMTP-listener
+	# phase. The identity was already owned, so the deferral was cheap;
+	# it is closed now because the daemon is long-running and its shape
+	# (foreground mode, config surface, MySQL dependency) is settled.
+	[ -e "$PKGDEST/etc/init.d/vpopmaild" ] || { echo "ERROR: vpopmail payload is missing etc/init.d/vpopmaild" >&2; return 1; }
+	[ -e "$PKGDEST/usr/lib/systemd/system/vpopmaild.service" ] || { echo "ERROR: vpopmail payload is missing usr/lib/systemd/system/vpopmaild.service" >&2; return 1; }
+
 }

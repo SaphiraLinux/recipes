@@ -1,0 +1,31 @@
+[Unit]
+Description=Lightweight DNS forwarder, DHCP and TFTP server
+Documentation=man:dnsmasq(8)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Mirrors files/dnsmasq.initd. -k keeps dnsmasq in the foreground, so
+# Type=simple and the supervised process IS the daemon.
+#
+# Deliberately NOT set: User=. dnsmasq starts as root to bind the
+# privileged ports 53 and 67, then drops to --user=/--group= itself.
+Type=simple
+ExecStart=/usr/sbin/dnsmasq -k -C /etc/dnsmasq.conf
+# DHCP hands out addresses and leases, and TFTP serves files, so a
+# resolver that is also a DHCP server is exactly the daemon a
+# NoNewPrivileges misconfiguration would break.
+Restart=on-failure
+RestartSec=2
+
+# The capability it genuinely needs is the privileged ports. DHCP also
+# needs raw sockets, so CAP_NET_RAW is included.
+AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_RAW
+NoNewPrivileges=yes
+ProtectHome=yes
+ProtectSystem=full
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK AF_PACKET
+
+[Install]
+WantedBy=multi-user.target

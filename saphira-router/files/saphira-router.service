@@ -1,0 +1,63 @@
+[Unit]
+Description=Saphira Linux multi-tenant control plane
+Documentation=https://saphira.vm2.uk/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=saphira-router
+Group=saphira-router
+EnvironmentFile=-/etc/conf.d/saphira-router
+Environment=SR_DB=/var/lib/saphira-router/router.db
+Environment=SR_SOCK=/run/saphira-router/api.sock
+Environment=SR_MODULES=/usr/lib/saphira-router/modules
+# Membership of this group is the only thing an operator needs to drive the
+# control plane, and it confers NO database access: the state directory stays
+# 0750 to the service identity.
+Environment=SR_SOCK_GROUP=wheel
+Environment=SAPHIRA_ROUTER_GROUP=wheel
+RuntimeDirectory=saphira-router
+RuntimeDirectoryMode=0755
+StateDirectory=saphira-router
+StateDirectoryMode=0750
+ExecStart=/usr/bin/saphira-router daemon
+# The core is unprivileged, so it CANNOT chown the socket to another group:
+# that needs CAP_CHOWN. The service manager applies the group instead, after
+# the daemon has created the socket. The '+' prefix runs this with full
+# privileges despite User= -- a single, narrowly scoped privileged
+# operation at the service boundary, not an escalation of the core (D1 8).
+# Type=simple means systemd considers the service started the moment the
+# process is exec'd, so a plain ExecStartPost can run BEFORE the daemon has
+# bound its socket -- and then act on a stale inode left by an earlier run,
+# which the daemon is about to unlink. So this waits, chgrps, and VERIFIES,
+# retrying until the socket it changed is the one the daemon actually bound.
+ExecStartPost=+/bin/sh -c 'i=0; while [ $$i -lt 50 ]; do if [ -S /run/saphira-router/api.sock ] && /bin/chgrp ${SAPHIRA_ROUTER_GROUP} /run/saphira-router/api.sock 2>/dev/null && [ "$(/usr/bin/stat -c %%G /run/saphira-router/api.sock)" = "${SAPHIRA_ROUTER_GROUP}" ]; then exit 0; fi; i=$$((i+1)); /bin/sleep 0.1; done; echo "saphira-router: could not apply socket group ${SAPHIRA_ROUTER_GROUP}; operators cannot connect" >&2; exit 1'
+ExecStartPost=+/bin/chmod 0660 /run/saphira-router/api.sock
+Restart=on-failure
+RestartSec=5
+
+# The control plane needs no privileged socket and no hardware access, so
+# nothing is escalated here (D1 section 8). These are the boundaries that
+# actually matter for a network-facing control plane.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# Deliberately NOT set:
+#   ProtectSystem=strict -- StateDirectory=/var/lib/saphira-router is a
+#     writable StateDirectory, and strict would break the state engine.
+#   ReadWritePaths -- StateDirectory covers the only path the core writes.
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,40 @@
+From c358cfdb94aac3ecf5e945bf74739f7f46b8d7c2 Mon Sep 17 00:00:00 2001
+From: Gregory Price <gourry@gourry.net>
+Date: Fri, 19 Jun 2026 18:53:36 -0700
+Subject: [PATCH] dax/kmem: add the demotion and numa_balancing opt-ins for
+ private nodes
+
+Expose the two kernel-NUMA capabilities as separate per-device sysfs opt-ins:
+'demotion' (NODE_PRIVATE_CAP_DEMOTION) and 'numa_balancing'
+(NODE_PRIVATE_CAP_NUMA_BALANCING).  demotion additionally requires reclaim,
+enforced at hotplug by node_private_register().
+
+Signed-off-by: Gregory Price <gourry@gourry.net>
+---
+ drivers/dax/kmem.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/drivers/dax/kmem.c b/drivers/dax/kmem.c
+index 3892ad44d4e..1cb3384c003 100644
+--- a/drivers/dax/kmem.c
++++ b/drivers/dax/kmem.c
+@@ -631,12 +631,16 @@ static DEVICE_ATTR_RW(name)
+ KMEM_PRIVATE_CAP_ATTR(reclaim, NODE_PRIVATE_CAP_RECLAIM);
+ KMEM_PRIVATE_CAP_ATTR(user_numa, NODE_PRIVATE_CAP_USER_NUMA);
+ KMEM_PRIVATE_CAP_ATTR(hotunplug, NODE_PRIVATE_CAP_HOTUNPLUG);
++KMEM_PRIVATE_CAP_ATTR(demotion, NODE_PRIVATE_CAP_DEMOTION);
++KMEM_PRIVATE_CAP_ATTR(numa_balancing, NODE_PRIVATE_CAP_NUMA_BALANCING);
+ 
+ /* Per-service opt-ins. Visibility toggled by 'private' control */
+ static struct attribute *dax_kmem_private_attrs[] = {
+ 	&dev_attr_reclaim.attr,
+ 	&dev_attr_user_numa.attr,
+ 	&dev_attr_hotunplug.attr,
++	&dev_attr_demotion.attr,
++	&dev_attr_numa_balancing.attr,
+ 	NULL,
+ };
+ static const struct attribute_group dax_kmem_private_group = {
+-- 
+2.55.0
+

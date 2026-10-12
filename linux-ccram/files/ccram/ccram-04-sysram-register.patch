@@ -1,0 +1,127 @@
+From 3fc4c1ecd403cbd6c27f81f2c7f5fcd0fcb91025 Mon Sep 17 00:00:00 2001
+From: AKADATA LIMITED <linux@saphira.vm2.uk>
+Date: Sun, 11 Oct 2026 01:07:20 +0000
+Subject: [PATCH 4/4] ccram: CRAM registration and observability
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Part of CCRAM — AKADATA LIMITED adaptation of Meta CRAM (see
+CRAM.PROVENANCE in linux-saphira-meta-cram; Saphira-original code,
+GPL-2.0-only).
+
+Late registration: hand the committed window to Meta's CRAM core via
+cram_register() at 1:1 (the honest Phase 1 value — uncompressed
+DRAM), which owns node_private registration, hotplug as
+N_MEMORY_PRIVATE, movable online and kswapd from there.  Plus
+read-only debugfs accounting (start/size/nid) and the write-only
+compression-ratio/allow-allocation pass-throughs to CRAM's own
+controls.  No private pressure wheel is invented; no CRAM internal
+is renamed or forked.
+---
+ mm/ccram_sysram.c | 92 +++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 92 insertions(+)
+
+diff --git a/mm/ccram_sysram.c b/mm/ccram_sysram.c
+index 96fcc0572..a6674a51b 100644
+--- a/mm/ccram_sysram.c
++++ b/mm/ccram_sysram.c
+@@ -342,3 +342,95 @@ void __init ccram_sysram_early_reserve(void)
+ 	ccram_nid = NUMA_NO_NODE;
+ 	pr_err("ccram: disabled: %s\n", ccram_fail_reason);
+ }
++
++/* --- late registration ------------------------------------------------ */
++
++static struct range ccram_range;
++static struct dentry *ccram_dbg;
++static u32 ccram_nid_u32 = (u32)NUMA_NO_NODE;
++
++/*
++ * Synthetic pressure + accounting.  Thin pass-through to the CRAM core:
++ * ratio reports make the balloon track (Phase 1: 1000 unless driven),
++ * allow gates demotions.  No private pressure wheel is invented here.
++ */
++static ssize_t ccram_ratio_write(struct file *f, const char __user *buf,
++				 size_t len, loff_t *off)
++{
++	char kbuf[32];
++	u32 ratio;
++	int ret;
++
++	if (len >= sizeof(kbuf))
++		return -EINVAL;
++	if (copy_from_user(kbuf, buf, len))
++		return -EFAULT;
++	kbuf[len] = '\0';
++	ret = kstrtou32(kbuf, 0, &ratio);
++	if (ret)
++		return ret;
++	ret = cram_set_compression_ratio(ccram_nid, ratio, false);
++	return ret ? ret : len;
++}
++
++static ssize_t ccram_allow_write(struct file *f, const char __user *buf,
++				 size_t len, loff_t *off)
++{
++	bool allow;
++	int ret;
++
++	if (kstrtobool_from_user(buf, len, &allow))
++		return -EINVAL;
++	ret = cram_allow_allocation(ccram_nid, allow);
++	return ret ? ret : len;
++}
++
++static const struct file_operations ccram_ratio_fops = {
++	.write = ccram_ratio_write,
++};
++static const struct file_operations ccram_allow_fops = {
++	.write = ccram_allow_write,
++};
++
++static int __init ccram_sysram_late_init(void)
++{
++	int ret;
++
++	if (!ccram_size || ccram_nid < 0) {
++		if (ccram_failed)
++			pr_info("ccram: staying disabled (%s)\n",
++				ccram_fail_reason);
++		return 0;
++	}
++	ccram_range.start = ccram_start;
++	ccram_range.end = ccram_start + ccram_size - 1;
++	/*
++	 * CRAM owns everything from here: node_private registration,
++	 * hotplug as N_MEMORY_PRIVATE, movable online, kswapd.  zratio
++	 * 1000 = 1:1, the honest Phase 1 value (uncompressed DRAM).
++	 */
++	ret = cram_register(ccram_nid, &ccram_range, 1, 1000, ccram_ops,
++			    NULL);
++	if (ret) {
++		snprintf(ccram_fail_reason, sizeof(ccram_fail_reason),
++			 "cram_register failed: %d", ret);
++		ccram_failed = true;
++		pr_err("ccram: disabled: %s\n", ccram_fail_reason);
++		return 0;
++	}
++	pr_info("ccram: node %d online as N_MEMORY_PRIVATE (%llu bytes @ %pa), CRAM-managed 1:1\n",
++		ccram_nid, (unsigned long long)ccram_size, &ccram_start);
++	ccram_dbg = debugfs_create_dir("ccram", NULL);
++	if (!IS_ERR(ccram_dbg)) {
++		ccram_nid_u32 = (u32)ccram_nid;
++		debugfs_create_u64("start", 0444, ccram_dbg, &ccram_start);
++		debugfs_create_u64("size", 0444, ccram_dbg, &ccram_size);
++		debugfs_create_u32("nid", 0444, ccram_dbg, &ccram_nid_u32);
++		debugfs_create_file("compression_ratio", 0200, ccram_dbg,
++				    NULL, &ccram_ratio_fops);
++		debugfs_create_file("allow_allocation", 0200, ccram_dbg,
++				    NULL, &ccram_allow_fops);
++	}
++	return 0;
++}
++late_initcall(ccram_sysram_late_init);
+-- 
+2.55.0
+

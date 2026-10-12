@@ -56,4 +56,45 @@ recipe_install()
 	# (matches --enable-user/--enable-group) and the PID/state dir.
 	install -D -m 0644 "$RECIPE_DIR/files/accounts.d/frr" \
 		"$PKGDEST/usr/share/saphira/accounts.d/frr"
+	# Dual-init policy: both definitions ship unconditionally; neither is
+	# enabled or started at install.
+	install -D -m 0755 "$RECIPE_DIR/files/zebra.initd" \
+		"$PKGDEST/etc/init.d/zebra"
+	install -D -m 0644 "$RECIPE_DIR/files/zebra.service" \
+		"$PKGDEST/usr/lib/systemd/system/zebra.service"
+	install -D -m 0755 "$RECIPE_DIR/files/bgpd.initd" \
+		"$PKGDEST/etc/init.d/bgpd"
+	install -D -m 0644 "$RECIPE_DIR/files/bgpd.service" \
+		"$PKGDEST/usr/lib/systemd/system/bgpd.service"
+	install -D -m 0755 "$RECIPE_DIR/files/ospfd.initd" \
+		"$PKGDEST/etc/init.d/ospfd"
+	install -D -m 0644 "$RECIPE_DIR/files/ospfd.service" \
+		"$PKGDEST/usr/lib/systemd/system/ospfd.service"
+	install -D -m 0755 "$RECIPE_DIR/files/ospf6d.initd" \
+		"$PKGDEST/etc/init.d/ospf6d"
+	install -D -m 0644 "$RECIPE_DIR/files/ospf6d.service" \
+		"$PKGDEST/usr/lib/systemd/system/ospf6d.service"
+	install -D -m 0755 "$RECIPE_DIR/files/ripd.initd" \
+		"$PKGDEST/etc/init.d/ripd"
+	install -D -m 0644 "$RECIPE_DIR/files/ripd.service" \
+		"$PKGDEST/usr/lib/systemd/system/ripd.service"
+	# Every protocol daemon needs zebra's API socket, so the unit graph
+	# and the init.d depend() graph must agree.
+	for d in bgpd ospfd ospf6d ripd; do
+		grep -q "zebra.service" "$RECIPE_DIR/files/$d.service" || {
+			echo "ERROR: frr $d.service must order after zebra.service" >&2
+			return 1
+		}
+		grep -q "need zebra" "$RECIPE_DIR/files/$d.initd" || {
+			echo "ERROR: frr $d.initd must depend on zebra" >&2
+			return 1
+		}
+	done
+	for p in etc/init.d/zebra usr/lib/systemd/system/zebra.service; do
+		[ -e "$PKGDEST/$p" ] || {
+			echo "ERROR: frr payload is missing $p" >&2
+			return 1
+		}
+	done
+
 }

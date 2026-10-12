@@ -17,7 +17,7 @@ depends="
 # Files-only recipe: the payload is maintained in this package tree.
 # dhcpcd is used at runtime only when a config sets IPV4_MODE/IPV6_MODE
 # to dhcp; OVS types additionally require openvswitch.  Long-term this
-# framework supersedes the akadata-era /etc/network.d machinery; the
+# framework supersedes the generation-zero /etc/network.d machinery; the
 # tool auto-reads /etc/network.d/*.conf when /etc/saphira-network.d has
 # no active configs so upgraded systems migrate without edits.
 

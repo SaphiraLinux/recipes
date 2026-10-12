@@ -37,8 +37,12 @@ makedepends="
     scons
 "
 
-# No systemd unit (Saphira is OpenRC; the init script below is the
-# service), no X/Qt clients, no BlueZ (no bluetooth stack packaged), no
+# Dual-init policy: files/gpsd.initd and files/gpsd.service ship
+# unconditionally and neither is enabled or started at install. The unit
+# reads /etc/conf.d/gpsd through EnvironmentFile so $OPTIONS/$DEVICES
+# expand exactly as they do for the init script, and it deliberately
+# omits PrivateDevices (reading /dev/gps* is the daemon's whole purpose).
+# No X/Qt clients, no BlueZ (no bluetooth stack packaged), no
 # generated man pages (asciidoctor not packaged - same deferral as
 # chrony). Everything else stays at upstream defaults: all protocol
 # drivers (including u-blox/UBX and NMEA), shared-memory export for
@@ -96,6 +100,8 @@ recipe_install()
     DESTDIR="$PKGDEST" scons $scons_options udev-install
     install -D -m 0755 "$RECIPE_DIR/files/gpsd.initd" \
         "$PKGDEST/etc/init.d/gpsd"
+    install -D -m 0644 "$RECIPE_DIR/files/gpsd.service" \
+        "$PKGDEST/usr/lib/systemd/system/gpsd.service"
     install -D -m 0644 "$RECIPE_DIR/files/gpsd.confd" \
         "$PKGDEST/etc/conf.d/gpsd"
     # FHS migration declaration (hotfix/var-packaging-bug-var-run-isnot-run):

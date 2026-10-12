@@ -2,7 +2,12 @@
 
 pkgname=dovecot
 pkgver=2.4.4
-pkgrel=3
+pkgrel=5
+# r4: PAM enabled (linux-pam 1.7.2 + saphira-pambase now in tree):
+# --with-pam; ships the dovecot leaf file. Payload change, bumps.
+# r3: base runtime dir /run/dovecot -> /var/run/dovecot with fhs.d
+# migration (adopted from the published r3 so this lineage never
+# regresses it). Payload change, revision bumps.
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="IMAP and POP3 email server"
 license="LGPL-2.1-or-later MIT"
@@ -14,7 +19,9 @@ sha256=670f98d55a29b02ae6a97281e51374e553b94496480ab0a07439571ab30ca8c3
 
 depends="
     bzip2
+    linux-pam
     openssl
+    saphira-pambase
     sqlite
     zlib
 "
@@ -24,6 +31,7 @@ makedepends="
     bzip2-dev
     gawk
     gcc
+    linux-pam
     make
     mariadb-dev
     openssl-dev
@@ -47,7 +55,7 @@ recipe_build()
 		--localstatedir=/var \
 		--with-ssl=openssl \
 		--with-zlib \
-		--without-pam --without-systemd --without-lua --without-icu \
+		--with-pam --without-systemd --without-lua --without-icu \
 		--without-gssapi --without-ldap \
 		--with-sqlite --with-mysql \
 		--with-rundir=/var/run/dovecot \
@@ -82,4 +90,7 @@ recipe_install()
 	# ensure-fhs on install/upgrade.
 	install -D -m 0644 "$RECIPE_DIR/files/fhs.d/dovecot" \
 		"$PKGDEST/usr/share/saphira/fhs.d/dovecot"
+	# PAM service entry (saphira-pambase carries the shared stacks).
+	install -D -m 0644 "$RECIPE_DIR/files/pam.d/dovecot" \
+		"$PKGDEST/etc/pam.d/dovecot"
 }

@@ -2,7 +2,7 @@
 
 pkgname=saphira-zfs-7.2.2
 pkgver=2.4.4
-pkgrel=1
+pkgrel=2
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='OpenZFS 2.4.4 kernel modules for kernel 7.2.2 (kmods only; userspace is saphira-zfs-userspace)'
 license=CDDL
@@ -17,11 +17,19 @@ sha256=2a3c70d55a37cc71618a95a60e81ad66530201eb118d37741dc92efcf848c8b1
 # /input (build-kmod-set.sh), the headers pin only provides host UAPI.
 # New kernels: copy the nearest variant, set KVER_SHORT + headers pin
 # (see new-kmod-variant.sh).
-depends="kmod saphira-zfs-userspace"
+# Kernel identity is the line (KVER_SHORT), not the packaging revision:
+# the package name carries the kver, the build tree is the staged
+# /usr/src/linux-<kver> tree, and modules land under that KREL's extra/.
+# -rN is packaging metadata and stays out of the ABI dependency policy;
+# rebuilds follow source/config/KREL changes (release process), and the
+# build-time staged-tree config gate enforces exact-tree builds.
+depends="kmod saphira-zfs-userspace saphira-kernel-7.2.2"
 # Build secret contract: module signing is mandatory, never optional.
 # The worker refuses before spending anything when the builder did
 # not expose a readable /keys/module-signing.pem.
 saphira_sign_key_required=yes
+# saphira-kernel-headers stays kver-only (bare name, host UAPI only;
+# the build tree comes from staged /input). -rN never enters kmod deps.
 makedepends="
 	binutils
 	gcc
@@ -33,7 +41,7 @@ makedepends="
 	util-linux-dev
 	zlib-dev
 	openssl-dev
-	saphira-kernel-headers=7.2.2
+	saphira-kernel-headers
 	make
 	pkgconf
 	python3

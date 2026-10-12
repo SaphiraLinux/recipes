@@ -79,4 +79,6 @@ recipe_install()
 		"$PKGDEST/etc/drbd.d/global_common.conf"
 	install -D -m 0755 "$RECIPE_DIR/files/drbd.initd" \
 		"$PKGDEST/etc/init.d/drbd"
+	install -D -m 0644 "$RECIPE_DIR/files/drbd.service" \
+		"$PKGDEST/usr/lib/systemd/system/drbd.service"
 }

@@ -1,0 +1,24 @@
+--- a/meson.build
++++ b/meson.build
+@@ -252,6 +252,17 @@
+ endif
+-libcrypt = dependency('libcrypt', 'libxcrypt', required: false)
+-if not libcrypt.found()
+-  libcrypt = cc.find_library('crypt')
+-endif
++# Saphira: resolve libxcrypt explicitly, never the generic libcrypt name.
++# The generic crypt namespace belongs to musl: musl-dev ships an EMPTY
++# libcrypt.a for build-system compatibility with crypt()/crypt_r() living
++# in libc, so meson resolves plain 'libcrypt' via find_library('crypt')
++# and links nothing real, while the headers still declare the extended
++# API. The result is the worst combination: code compiled against
++# libxcrypt's 32KiB struct crypt_data calling an implementation that was
++# never linked, or -- when libcrypt.so.2 happens to be loaded by another
++# library in the process -- binding it with a musl-sized (260-byte)
++# struct. That exact mismatch segfaults (shadow passwd r9: pam_unix's
++# crypt_r writing 32KiB into a 260-byte calloc). libxcrypt-dev is a hard
++# makedepends entry, so this is a requirement, not a probe with a
++# fallback: a missing libxcrypt fails the configure step loudly instead
++# of silently building against musl's crypt.
++libcrypt = dependency('libxcrypt', required: true)
+ crypt_h = cdata.get('HAVE_CRYPT_H') == 1 ? '''#include <crypt.h>''' : '''#include <unistd.h>'''

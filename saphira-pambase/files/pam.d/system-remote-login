@@ -1,0 +1,8 @@
+#%PAM-1.0
+# Saphira Linux remote-login stack (saphira-pambase).
+# Thin alias over system-login for remote services (sshd).
+
+auth      include   system-login
+account   include   system-login
+password  include   system-login
+session   include   system-login

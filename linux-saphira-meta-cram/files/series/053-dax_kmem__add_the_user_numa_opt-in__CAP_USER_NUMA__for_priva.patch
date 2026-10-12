@@ -1,0 +1,34 @@
+From 9de54024b4791ce10b977837d6d8ca53ed95cf4a Mon Sep 17 00:00:00 2001
+From: Gregory Price <gourry@gourry.net>
+Date: Fri, 19 Jun 2026 18:52:28 -0700
+Subject: [PATCH] dax/kmem: add the user_numa opt-in (CAP_USER_NUMA) for
+ private nodes
+
+Add the "user_numa" setting NODE_PRIVATE_CAP_USER_NUMA so userspace
+may control residency on the node via mempolicy and migration.
+
+Signed-off-by: Gregory Price <gourry@gourry.net>
+---
+ drivers/dax/kmem.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/drivers/dax/kmem.c b/drivers/dax/kmem.c
+index cf6cb927e5e..8023db23e2f 100644
+--- a/drivers/dax/kmem.c
++++ b/drivers/dax/kmem.c
+@@ -629,10 +629,12 @@ static ssize_t name##_store(struct device *dev,				\
+ static DEVICE_ATTR_RW(name)
+ 
+ KMEM_PRIVATE_CAP_ATTR(reclaim, NODE_PRIVATE_CAP_RECLAIM);
++KMEM_PRIVATE_CAP_ATTR(user_numa, NODE_PRIVATE_CAP_USER_NUMA);
+ 
+ /* Per-service opt-ins. Visibility toggled by 'private' control */
+ static struct attribute *dax_kmem_private_attrs[] = {
+ 	&dev_attr_reclaim.attr,
++	&dev_attr_user_numa.attr,
+ 	NULL,
+ };
+ static const struct attribute_group dax_kmem_private_group = {
+-- 
+2.55.0
+

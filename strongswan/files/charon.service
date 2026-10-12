@@ -1,0 +1,37 @@
+[Unit]
+Description=strongSwan IPsec IKE daemon (charon)
+Documentation=man:charon(8)
+# The XFRM and x509 kernel modules must be loaded first or every security
+# association silently fails to install.
+After=systemd-modules-load.service network-online.target
+Wants=network-online.target
+
+[Service]
+# Mirrors files/charon.initd. charon does not daemonize, so Type=simple
+# and the supervised process IS the daemon.
+Type=simple
+ExecStart=/usr/sbin/charon
+# /var/run holds the VICI control socket (charon.ctl) and the stroke
+# sockets. charon is started root, so it creates them itself.
+RuntimeDirectory=strongswan
+RuntimeDirectoryMode=0755
+Restart=on-failure
+RestartSec=2
+
+# Deliberately NOT set: User=. charon runs as root per the upstream
+# default this package configures, and it needs it to create XFRM state
+# and the VICI socket.
+# Deliberately NOT set: ProtectKernelTunables=** -- XFRM is kernel state
+# and this daemon's entire job is programming it, so that is precisely
+# the wrong hardening. CapabilityBoundingSet is likewise left alone
+# because XFRM needs CAP_NET_ADMIN.
+#
+# The VICI control socket and the kernel interface are what a strongSwan
+# daemon needs and nothing else, so the address family list is narrow.
+NoNewPrivileges=yes
+ProtectHome=yes
+ReadOnlyPaths=/etc/strongswan
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target

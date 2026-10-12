@@ -32,6 +32,7 @@ makedepends="
     cmake
     curl
     gcc
+    gettext
     git
     make
     ninja

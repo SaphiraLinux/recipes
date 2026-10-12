@@ -1,0 +1,28 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Saphira forward-port <builder@saphira.vm2.uk>
+Date: Thu, 9 Oct 2026 12:00:00 +0000
+Subject: [FWD 7.2.9] proc: numa_maps pmd variant (1/2)
+
+Split of the 032 adaptation, applied first: the pmd-variant hunk. Its
+context matches the pte twin exactly, which patch(1) refuses as
+ambiguous; trailing context runs to the pmd-only #endif so the hunk is
+unique to both applicators. See 032b.
+
+Signed-off-by: Saphira builder <builder@saphira.vm2.uk>
+---
+diff --git a/fs/proc/task_mmu.c b/fs/proc/task_mmu.c
+--- a/fs/proc/task_mmu.c
++++ b/fs/proc/task_mmu.c
+@@ -3380,10 +3380,11 @@ static struct page *can_gather_numa_stats_pmd(pmd_t pmd,
+ 	if (PageReserved(page))
+ 		return NULL;
+ 
+ 	nid = page_to_nid(page);
+-	if (!node_isset(nid, node_states[N_MEMORY]))
++	if (!node_isset(nid, node_states[N_MEMORY]) &&
++	    !node_isset(nid, node_states[N_MEMORY_PRIVATE]))
+ 		return NULL;
+ 
+ 	return page;
+ }
+ #endif

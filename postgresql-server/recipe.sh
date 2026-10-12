@@ -2,9 +2,11 @@
 
 pkgname=postgresql-server
 pkgver=18.4
-pkgrel=3
+pkgrel=4
 # r3: socket dir /run/postgresql -> /var/run/postgresql via tmpfiles.d
 # (unit runs unprivileged). Payload change, revision bumps.
+# r4: merge line (unit gains the /var/run ExecStartPre repair line;
+# merged unit differs from r3). Payload change, bumps.
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="PostgreSQL database server"
 license="PostgreSQL"

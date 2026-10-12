@@ -1,0 +1,23 @@
+# saphira-bridge runtime identity: user saphira-bridge UID 149,
+# primary group saphira-bridge GID 149.
+#
+# The bridge opens its packet sockets before dropping, because promiscuous mode
+# needs CAP_NET_ADMIN, and it retains no capability afterwards: the sockets are
+# established, and the daemon then writes nothing but its own log. A reload
+# that would need a new socket is refused rather than attempted, so the daemon
+# never needs the privilege back.
+#
+# 149 is allocated in package-name order from 147, the first free ID above the
+# highest claimed identity (146 openldap), clear of systemd's block
+# (127-131, 144, 145). It is NOT the 128 this fragment originally declared:
+# 128 is systemd-resolve's, one package owns each declared identity, and
+# saphira-bridge has never been published, so the move costs no migration and
+# needs no legacy sidecar. Home /var/empty is shared infrastructure, left
+# untouched by design.
+#
+# NOTE for operators: because the bridge runs as this user, any configuration
+# directory it must read has to be readable by it. The package installs
+# /etc/saphira as 0750 root:root, so a private copy for this daemon needs the
+# group set to match, or the bridge must be pointed at a file it can read.
+user saphira-bridge 149 saphira-bridge /var/empty /sbin/nologin
+group saphira-bridge 149

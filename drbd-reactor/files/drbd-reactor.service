@@ -1,0 +1,37 @@
+[Unit]
+Description=DRBD event-driven resource manager (promoter)
+Documentation=man:drbd-reactor(8)
+# Mirrors `need drbd localmount` in files/drbd-reactor.initd: the
+# promoter exists to act on DRBD events, so the drbd resources must be up
+# first, and it needs netlink/TCP to talk to its peers.
+After=network.target drbd.service
+Requires=drbd.service
+
+[Service]
+# drbd-reactor daemonizes: the init script's start() runs it bare and
+# returns immediately. There is no pidfile, no sd_notify and no
+# Type=notify support, so the PID is genuinely unknowable and Type=forking
+# is the honest answer -- systemd will track the manager process.
+Type=forking
+ExecStart=/usr/sbin/drbd-reactor
+# Because the PID is not knowable, ExecStop via the control socket is the
+# ONLY reliable stop, exactly as the init script's stop() does. Do not
+# substitute $MAINPID here.
+ExecStop=/usr/sbin/drbd-reactorctl shutdown
+# Losing the promoter silently stops failover, which is the whole point
+# of the daemon.
+Restart=on-failure
+RestartSec=5
+RuntimeDirectory=drbd-reactor
+
+# DRBD resource management is root-only. Deliberately NOT set: User=,
+# ProtectKernelTunables or ProtectSystem=strict (it writes the drbd
+# control socket and reads netlink), and any CapabilityBoundingSet
+# without a failover test -- it needs CAP_NET_ADMIN at minimum.
+
+PrivateTmp=yes
+ProtectHome=yes
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

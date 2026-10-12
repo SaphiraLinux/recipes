@@ -1,0 +1,33 @@
+[Unit]
+Description=FRRouting zebra (FRR core: shared routing table and API)
+Documentation=man:zebra(8)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Mirrors files/zebra.initd. FRR daemons take -d to stay in the
+# foreground, so Type=simple and the supervised process IS the daemon.
+User=frr
+Group=frr
+Type=simple
+ExecStart=/usr/sbin/zebra -d -f /etc/frr/zebra.conf -i /var/run/frr/zebra.pid -z /var/run/frr/zserv.api
+# /var/run/frr is declared by files/accounts.d/frr as 0755 frr:frr, so
+# RuntimeDirectory must not replace it with a different mode.
+RuntimeDirectory=frr
+RuntimeDirectoryMode=0755
+Restart=on-failure
+RestartSec=5
+
+# Deliberately NOT set: ProtectKernelTunables=** (FRR *is* netlink
+# configuration; it writes routes), and CapabilityBoundingSet, because
+# zebra needs CAP_NET_ADMIN and narrowing it without a routing test
+# would break the suite. Safe and therefore set: NoNewPrivileges,
+# ProtectHome, RestrictAddressFamilies to the families a routing daemon
+# actually uses (AF_UNIX for vtysh, AF_INET/AF_INET6, AF_NETLINK, and
+# AF_PACKET for the zebra socket family).
+NoNewPrivileges=yes
+ProtectHome=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_PACKET AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target

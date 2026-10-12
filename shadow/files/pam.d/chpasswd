@@ -1,0 +1,6 @@
+#%PAM-1.0
+# Saphira shadow chpasswd service (root-only batch tool).
+
+auth		sufficient	pam_rootok.so
+account		required	pam_permit.so
+password	include		system-auth

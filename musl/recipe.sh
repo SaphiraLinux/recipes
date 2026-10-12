@@ -8,7 +8,7 @@ pkgver=1.2.6
 # override" contract) so libc.a links into static-PIE binaries.
 # Shared libc, loader, CRT, headers and ABI are intentionally
 # unchanged: libc.so keeps consuming the same LOBJS as before.
-pkgrel=3
+pkgrel=4
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='musl libc 1.2.6 with the Saphira 1MiB pthread stack patch - the installable base libc'
 license='MIT'
@@ -103,4 +103,15 @@ recipe_build()
 recipe_install()
 {
 	make -C "$SRC" DESTDIR="$PKGDEST" install
+	# musl upstream ships no ldd(1): the dynamic loader itself serves as
+	# one via --list. Ship the conventional wrapper owned by this package
+	# so clean roots get a working ldd with no handmade symlinks.
+	# Absolute loader path: no PATH lookup, no usrmerge assumption, and
+	# it keeps working when /usr is not yet mounted.
+	install -d -m 0755 "$PKGDEST/usr/bin"
+	cat > "$PKGDEST/usr/bin/ldd" <<'EOF'
+#!/bin/sh
+exec /lib/ld-musl-x86_64.so.1 --list "$@"
+EOF
+	chmod 0755 "$PKGDEST/usr/bin/ldd"
 }

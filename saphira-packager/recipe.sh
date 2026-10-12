@@ -29,7 +29,19 @@ pkgver=1.0
 # identity-less fragments) plus the legacy-gate namespace fix: a
 # legacy user's primary GID is a reference, not a group-namespace
 # history claim, so paired user+group sidecars publish.
-pkgrel=66
+pkgrel=72
+# r72: merge line (hotfix r62-r66 semantics ported onto the r71 line:
+# caps.d declarations + ensure-caps callers, LAYOUT_ALLOW usr/etc-var-com
+# refusal + --no-scripts seed assembly with fhs.d convergence, fhs
+# dual-claim ledger fix + per-carrier extraction isolation, saphira-build
+# pidfile path, additive-schema self-heal + sysusers-native counting).
+# Seed policy: saphira-kernel-headers pins the UAPI line fuzzily
+# (~7.1.5: newest rN on the line, other lines rejected by apk
+# itself); buildpkg resolves bare names for globs, enforces
+# constraints per candidate, compares drift by version line, and
+# the UAPI gate accepts = and ~ pins (a bare name still floats and
+# is refused as unpinned).
+# Payload change, revision bumps.
 # r66: caps.d file-capability declarations (saphira-permissions V1):
 # makepkg validates the fragment (known capability names, same
 # payload target, no strays/duplicates), generates

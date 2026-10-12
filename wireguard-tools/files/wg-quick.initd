@@ -1,0 +1,143 @@
+#!/sbin/openrc-run
+
+description="WireGuard tunnel via wg-quick(8) (instance-aware)"
+
+# OpenRC counterpart of wg-quick@.service.
+#
+# wg-quick is per-tunnel, not per-host: every /etc/wireguard/<if>.conf is
+# one independent WireGuard interface, which is exactly what the systemd
+# template unit expresses. OpenRC has no template units, so this script is
+# instance-aware in the same shape the tree already uses for hostapd and
+# wpa_supplicant:
+#
+#   rc-service wg-quick.wg0 start     -> wg-quick up   wg0
+#   rc-service wg-quick.wg0 stop      -> wg-quick down wg0
+#   rc-service wg-quick start         -> every /etc/wireguard/*.conf
+#
+# A plain invocation with no instance acts on every configuration in
+# /etc/wireguard, which is the bulk form of "bring the tunnels up". The
+# per-tunnel instance stays the precise form and is what an operator
+# enables.
+#
+# wg-quick is NOT a daemon. `up` programs the interface and exits, so there
+# is deliberately no command=, no command_args= and no supervisor=; start()
+# and stop() are one-shot invocations of wg-quick itself, mirroring
+# Type=oneshot + RemainAfterExit=yes in wg-quick@.service. Nothing is
+# auto-enabled and nothing is auto-started at install time.
+
+wgquick=/usr/bin/wg-quick
+confdir=/etc/wireguard
+
+# Strip the service name, then one separating dot, so a bare `wg-quick`
+# leaves iface empty (bulk form) instead of yielding the literal string
+# "wg-quick" as an interface name. OpenRC names an instance <service>.<name>,
+# so the dot is the whole difference between the two forms.
+iface="${RC_SVCNAME#wg-quick}"
+iface="${iface#.}"
+
+# The interfaces this invocation owns: the instance when there is one,
+# otherwise every configuration file wg-quick would accept. Names are
+# validated against wg-quick's own rule ([a-zA-Z0-9_=+.-]{1,15}) before
+# anything is executed, so a stray file cannot turn `stop` into a failure.
+targets()
+{
+	local conf name
+	if [ -n "$iface" ]; then
+		printf '%s\n' "$iface"
+		return 0
+	fi
+	for conf in "$confdir"/*.conf; do
+		[ -e "$conf" ] || continue
+		name=${conf##*/}
+		printf '%s\n' "${name%.conf}"
+	done
+}
+
+valid_iface()
+{
+	case $1 in
+		''|*[!a-zA-Z0-9_=+.-]*)
+			return 1
+			;;
+	esac
+	[ "${#1}" -le 15 ]
+}
+
+up_tunnel()
+{
+	local target=$1
+	ebegin "Bringing up WireGuard interface ${target}"
+	if "$wgquick" up "$target"; then
+		eend 0
+	else
+		eend 1
+		return 1
+	fi
+}
+
+# Stop is idempotent by design: shutdown, a restart and a stop after a
+# crash all land here, and `wg-quick down` on an interface that is already
+# gone exits non-zero. Saphira keeps /run and /var/run distinct, so there
+# is no pidfile to consult; the interface itself is the state.
+down_tunnel()
+{
+	local target=$1
+	if ! ip link show dev "$target" >/dev/null 2>&1; then
+		ebegin "WireGuard interface ${target} is already down"
+		eend 0
+		return 0
+	fi
+	ebegin "Bringing down WireGuard interface ${target}"
+	if "$wgquick" down "$target"; then
+		eend 0
+	else
+		eend 1
+		return 1
+	fi
+}
+
+each_tunnel()
+{
+	local action=$1 target conf
+	local failed=0 any=0
+	for target in $(targets); do
+		any=1
+		if ! valid_iface "$target"; then
+			eerror "Not a valid WireGuard interface name: ${target}"
+			failed=1
+			continue
+		fi
+		conf="$confdir/$target.conf"
+		if [ ! -f "$conf" ]; then
+			eerror "No WireGuard configuration for ${target}: ${conf} does not exist"
+			failed=1
+			continue
+		fi
+		case $action in
+			down) down_tunnel "$target" || failed=1 ;;
+			*) up_tunnel "$target" || failed=1 ;;
+		esac
+	done
+	if [ "$any" -eq 0 ]; then
+		eerror "No WireGuard configuration found in ${confdir}"
+		return 1
+	fi
+	return $failed
+}
+
+depend()
+{
+	need localmount
+	use net
+	after bootmisc
+}
+
+start()
+{
+	each_tunnel up
+}
+
+stop()
+{
+	each_tunnel down
+}

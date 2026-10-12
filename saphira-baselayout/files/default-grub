@@ -1,7 +1,13 @@
 GRUB_DEFAULT=0
 GRUB_TIMEOUT=3
 GRUB_DISTRIBUTOR="Saphira"
-GRUB_CMDLINE_LINUX="rootfstype=ext4 rw rootwait console=tty0 console=ttyS0,115200n8 nomodeset raid=noautodetect"
+GRUB_CMDLINE_LINUX="rootfstype=ext4 rw rootwait console=tty0 console=ttyS0,115200n8 raid=noautodetect init=/usr/lib/systemd/systemd"
+# No nomodeset: Saphira needs kernel modesetting and the EFI framebuffer
+# for console (nomodeset blinds UEFI boxes: no efifb, and i915 ships as
+# a module with no initramfs to load it early). A machine that genuinely
+# needs modesetting off overrides this on its own kernel line.
+# init= is belt-and-braces only: systemd ships a real /sbin/init, so the
+# kernel's ordinary search is the supported path (test boots omit init=).
 GRUB_TERMINAL_INPUT="console serial"
 GRUB_TERMINAL_OUTPUT="console serial"
 GRUB_SERIAL_COMMAND="serial --speed=115200 --unit=0 --word=8 --parity=no --stop=1"

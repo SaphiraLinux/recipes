@@ -12,7 +12,7 @@ kmod_kver_full()
 	_ks=$(sed -n 's/^SUBLEVEL = //p' "$1/Makefile")
 	_ke=$(sed -n 's/^EXTRAVERSION = //p' "$1/Makefile")
 	[ -n "$_kv" ] && [ -n "$_kp" ] && [ -n "$_ks" ] || return 1
-	printf '%s.%s.%s%s\n' "$_kv" "$_kp" "$_ks" "$_e"
+	printf '%s.%s.%s%s\n' "$_kv" "$_kp" "$_ks" "$_ke"
 }
 
 kmod_srcball()

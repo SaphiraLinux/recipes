@@ -1,0 +1,19 @@
+#!/sbin/openrc-run
+
+description="S.M.A.R.T. disk monitoring daemon (smartd)"
+
+# smartd polls S.M.A.R.T. attributes and logs or mails on impending
+# failure. The whole point of the daemon is raw access to block devices,
+# so it must NOT be confined away from /dev.
+#
+# -q logs only errors, -d keeps it in the foreground under
+# supervise-daemon.
+command="/usr/sbin/smartd"
+command_args="-q -d"
+supervisor="supervise-daemon"
+
+depend()
+{
+	need localmount
+	after bootmisc
+}

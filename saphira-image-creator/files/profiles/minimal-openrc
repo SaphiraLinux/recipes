@@ -1,0 +1,40 @@
+# Minimal bootable Saphira image, OpenRC target.
+#
+# Intentions ONLY. The package manager owns dependency closure; never
+# enumerate resolved dependencies here (saphira-profiles(5)).
+#
+# The minimum for a genuinely bootable, manageable machine, and nothing
+# more. Each entry earns its place:
+#
+#   saphira-base        libc/loader, filesystem layout, apk, shell, core
+#                       runtime, account and package tooling. The one
+#                       existing Saphira group; the profile layers onto it
+#                       rather than re-enumerating it.
+#   saphira-kernel      the kernel and its modules. Boot is impossible
+#                       without it.
+#   openrc              the init system for this target.
+#   grub                the bootloader. Deliberately an explicit
+#                       intention: a bootable image carries its own
+#                       bootloader, and later kernel upgrades need it.
+#   e2fsprogs           mkfs.ext4 for the root filesystem.
+#   dosfstools          mkfs.vfat for the EFI System Partition. Required
+#                       for any uefi-* target; harmless on bios-* (the
+#                       creator refuses to use it there).
+#   openssh             login/access. A server with no remote access is
+#                       not manageable.
+#   tzdata              a server with no timezone cannot reason about
+#                       logs, certificates or scheduling.
+#
+# Deliberately absent, each a decision rather than an oversight:
+#   - a graphical stack of any kind (see the headless policy);
+#   - ca-certificates is already inside saphira-base;
+#   - editors, mail, DNS, DHCP and web services: those are ROLE layers
+#     (see the role-* profiles), not part of a minimal boot.
+saphira-base
+saphira-kernel
+openrc
+grub
+e2fsprogs
+dosfstools
+openssh
+tzdata

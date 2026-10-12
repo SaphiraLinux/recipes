@@ -36,5 +36,13 @@ recipe_build()
 
 recipe_install()
 {
-	make DESTDIR="$PKGDEST" PREFIX=/usr install
+	make DESTDIR="$PKGDEST" PREFIX=/usr install	# Dual-init policy: both definitions ship unconditionally; neither is
+	# enabled or started at install.
+	install -D -m 0755 "$RECIPE_DIR/files/tuned.initd" \
+		"$PKGDEST/etc/init.d/tuned"
+	install -D -m 0644 "$RECIPE_DIR/files/tuned.service" \
+		"$PKGDEST/usr/lib/systemd/system/tuned.service"
+	[ -e "$PKGDEST/etc/init.d/tuned" ] || { echo "ERROR: tuned payload is missing etc/init.d/tuned" >&2; return 1; }
+	[ -e "$PKGDEST/usr/lib/systemd/system/tuned.service" ] || { echo "ERROR: tuned payload is missing usr/lib/systemd/system/tuned.service" >&2; return 1; }
+
 }

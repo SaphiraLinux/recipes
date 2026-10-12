@@ -1,0 +1,113 @@
+From 5f51b83612bd9c14962f6df031ec82de390d3cf8 Mon Sep 17 00:00:00 2001
+From: AKADATA LIMITED <linux@saphira.vm2.uk>
+Date: Sun, 11 Oct 2026 01:07:16 +0000
+Subject: [PATCH 3/4] ccram: post-initmem_init validation and node commit
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Part of CCRAM — AKADATA LIMITED adaptation of Meta CRAM (see
+CRAM.PROVENANCE in linux-saphira-meta-cram; Saphira-original code,
+GPL-2.0-only).
+
+Second half of the two-phase carve, from a setup_arch hook after
+initmem_init(): re-check the excised window against memblock.reserved
+(NODE_DATA, crashkernel, initrd, CMA all placed by now) and fail
+closed on any overlap — the window stays excised either way
+(unmapped, out of the buddy, e820-RESERVED), so a failed validation
+boots a healthy machine with less RAM and a loud error, never a
+corrupted overlap.  Then reserve the synthetic nid (firmware node ids
+known only now, after SRAT parsing) and commit the geometry with
+unambiguous [start-end] diagnostics.
+---
+ arch/x86/kernel/setup.c | 10 ++++++++
+ mm/ccram_sysram.c       | 55 +++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 65 insertions(+)
+
+diff --git a/arch/x86/kernel/setup.c b/arch/x86/kernel/setup.c
+index 4b81c327e..355e97c57 100644
+--- a/arch/x86/kernel/setup.c
++++ b/arch/x86/kernel/setup.c
+@@ -1199,6 +1199,16 @@ void __init setup_arch(char **cmdline_p)
+ 	x86_flattree_get_config();
+ 
+ 	initmem_init();
++	/*
++	 * CCRAM post-carve validation runs here, not at
++	 * e820__memblock_setup(): NUMA (SRAT) is parsed by now so firmware
++	 * node ids are known and the synthetic nid cannot collide with
++	 * one, and every late reservation (NODE_DATA, crashkernel, initrd,
++	 * CMA) is placed so the excised window can be re-checked for
++	 * overlaps before the node is committed.  The excision itself
++	 * happened before init_mem_mapping() above.  No-op without ccram=.
++	 */
++	ccram_sysram_early_reserve();
+ 	dma_contiguous_reserve(max_pfn_mapped << PAGE_SHIFT);
+ 
+ 	/*
+diff --git a/mm/ccram_sysram.c b/mm/ccram_sysram.c
+index 8a5823b01..96fcc0572 100644
+--- a/mm/ccram_sysram.c
++++ b/mm/ccram_sysram.c
+@@ -287,3 +287,58 @@ void __init ccram_sysram_carve_early(void)
+ 	ccram_failed = true;
+ 	pr_err("ccram: disabled: %s\n", ccram_fail_reason);
+ }
++
++/**
++ * ccram_sysram_early_reserve - validate the carve and commit the node.
++ * Called from setup_arch() after initmem_init().
++ *
++ * Second half of the two-phase carve.  Re-checks the excised window
++ * against memblock.reserved: NODE_DATA, crashkernel, initrd and CMA are
++ * all placed by now, so anything that landed inside the window fails
++ * closed HERE.  The window stays excised either way (unmapped, out of
++ * the buddy, e820-RESERVED): a failed validation boots a healthy
++ * machine with less RAM and a loud error, never a corrupted overlap.
++ * Then reserves the synthetic nid (firmware node ids are known only
++ * now, after SRAT parsing) and commits the geometry for late_initcall.
++ *
++ * No-op (with an info line) when ccram= was not given.
++ */
++void __init ccram_sysram_early_reserve(void)
++{
++	phys_addr_t end;
++	int nid;
++
++	if (!ccram_param[0]) {
++		pr_info("ccram: not requested (no ccram= parameter)\n");
++		return;
++	}
++	if (!ccram_carved)
++		return;
++	if (memblock_overlaps_region(&memblock.reserved,
++				     ccram_start, ccram_size)) {
++		snprintf(ccram_fail_reason, sizeof(ccram_fail_reason),
++			 "post-carve reservation inside window");
++		goto fail;
++	}
++	if (ccram_size & (ccram_block_align() - 1)) {
++		snprintf(ccram_fail_reason, sizeof(ccram_fail_reason),
++			 "block granularity changed after carve");
++		goto fail;
++	}
++	nid = ccram_reserve_nid();
++	if (nid < 0) {
++		snprintf(ccram_fail_reason, sizeof(ccram_fail_reason),
++			 "no free nid (ret %d)", nid);
++		goto fail;
++	}
++	ccram_nid = nid;
++	end = ccram_start + ccram_size - 1;
++	pr_info("ccram: committed [%pa-%pa] (%llu bytes) as future node %d\n",
++		&ccram_start, &end, (unsigned long long)ccram_size, nid);
++	return;
++fail:
++	ccram_failed = true;
++	ccram_size = 0;
++	ccram_nid = NUMA_NO_NODE;
++	pr_err("ccram: disabled: %s\n", ccram_fail_reason);
++}
+-- 
+2.55.0
+

@@ -148,6 +148,15 @@ PREFERRED_MAX_ID = 199
 # first, so declaring these orders the shell and tools before any script
 # can run — including mid-assembly, where the target has no shell yet.
 IDENTITY_DEPS = ("saphira-baselayout", "bash", "coreutils")
+# Optional maintainer hooks a recipe may declare, staged under
+# HOOKS_DIR/<output-name>/. makepkg embeds them into the generated
+# lifecycle scripts (see parse_maintainer_hooks). A hook runs under apk
+# with a minimal PATH, so it must use absolute command paths, and the
+# tools it needs must be declared dependencies -- this is the shell and
+# coreutils the identity callers already rely on.
+HOOKS_DIR = PurePosixPath("usr/share/saphira/hooks.d")
+HOOK_KINDS = ("post-install", "post-upgrade", "post-deinstall")
+HOOK_DEPS = ("bash", "coreutils")
 
 
 def parse_accounts_fragment(path: Path) -> tuple[dict[str, list[dict[str, str]]], list[str]]:
@@ -246,6 +255,56 @@ def parse_accounts_fragment(path: Path) -> tuple[dict[str, list[dict[str, str]]]
             die(f"account fragment {path}:{lineno}: malformed stanza")
     return ({"users": users, "groups": groups, "dirs": dirs, "files": files,
              "sysusers": sysusers}, notices)
+
+
+def parse_maintainer_hooks(hooks_root: Path, name: str) -> dict[str, str]:
+    """Validate and read a recipe's declared maintainer hooks.
+
+    A recipe stages optional lifecycle hooks under
+    usr/share/saphira/hooks.d/<output-name>/ as post-install,
+    post-upgrade and post-deinstall. makepkg embeds their bodies into
+    the generated package scripts and strips the declaration from the
+    payload, so the script is the only shipped copy and `apk adbdump`
+    is the audit trail.
+
+    Without this, a package that invalidates derived state shipped
+    that state stale: installing saphira-kernel left /boot/grub/grub.cfg
+    describing the previous kernel, and installing a per-kernel kmod
+    package left modules.dep without the module it just installed, so
+    `modprobe zfs' answered "Module zfs not found in directory
+    /lib/modules/7.2.3" on a package that had installed cleanly.
+
+    Hooks run under apk with a minimal PATH, so they must use absolute
+    command paths. Anything malformed fails the build rather than
+    producing a script that cannot run.
+    """
+    hooks: dict[str, str] = {}
+    if not hooks_root.is_dir():
+        return hooks
+    for entry in sorted(hooks_root.iterdir()):
+        if entry.name == name:
+            continue
+        die(f"payload carries foreign maintainer hooks: {entry.name}")
+    package_hooks = hooks_root / name
+    if not package_hooks.is_dir():
+        return hooks
+    for entry in sorted(package_hooks.iterdir()):
+        if entry.name not in HOOK_KINDS:
+            die(f"unknown maintainer hook {entry.name} for {name} "
+                f"(known hooks: {', '.join(HOOK_KINDS)})")
+        if entry.is_symlink() or not entry.is_file():
+            die(f"maintainer hook {entry.name} for {name} must be a regular file")
+        text = entry.read_text(encoding="utf-8")
+        if not text.strip():
+            die(f"maintainer hook {entry.name} for {name} is empty")
+        if not text.startswith("#!"):
+            die(f"maintainer hook {entry.name} for {name} has no interpreter line")
+        # The generated caller supplies its own interpreter line, so the
+        # hook's would land mid-script as a stray comment. It is still
+        # required above: a hook without one cannot be exec'd at all.
+        _first, _, _rest = text.partition("\n")
+        hooks[entry.name] = _rest
+    return hooks
 
 
 def fhs_action_path(path: Path, lineno: int, what: str, label: str = "fhs fragment") -> str:
@@ -481,18 +540,27 @@ def check_fhs_ownership(producer: str, accounts: dict, fhs: dict) -> None:
         if entry["group"] not in ("root", "0") and entry["group"] not in groups:
             die(f"{producer}: fhs group '{entry['group']}' is not declared in the same output's accounts.d (deterministic ownership required)")
 def identity_scripts(fragment_rel: str | None, temp_root: Path, name: str,
-                       fragment_text: str, *, sysusers: bool = False,
-                       fhs_fragment_rel: str | None = None,
-                       caps_fragment_rel: str | None = None,
-                       ) -> tuple[list[str], Path, Path, Path | None]:
+                     fragment_text: str, *, sysusers: bool = False,
+                     hooks: dict[str, str] | None = None,
+                     fhs_fragment_rel: str | None = None,
+                     caps_fragment_rel: str | None = None,
+                     ) -> tuple[list[str], Path, Path, Path | None]:
     """Generate the thin install/upgrade/deinstall callers for a fragment.
 
-    Package scripts may only invoke the platform reconciler, plus the
+    The identity callers invoke the platform reconciler, plus the
     package's native account mechanism when the fragment declares it
     (sysusers stanza). The declaration fragment is the single source
     of truth. The post-deinstall caller embeds the validated
     declaration text because apk runs it after the payload (including
     the fragment file itself) has been removed.
+
+    apk accepts exactly ONE script per lifecycle kind -- a second
+    `-s post-install:' silently replaces the first (verified: two
+    post-install scripts, only the last ran). So declared maintainer
+    hooks are COMPOSED into these same callers rather than registered
+    alongside them: reconciliation runs first, then the hook.
+    Registering a hook separately would silently disable identity
+    management for any package that also declares accounts.
 
     When the package also carries an fhs.d fragment, install/upgrade
     run ensure-identity first and ensure-fhs second, never the
@@ -503,24 +571,12 @@ def identity_scripts(fragment_rel: str | None, temp_root: Path, name: str,
     reverts; capabilities die with their files), and accounts.d
     disable behaviour is unchanged.
     """
-    sources = ", ".join(s for s in (fragment_rel, fhs_fragment_rel, caps_fragment_rel) if s is not None)
-    if fhs_fragment_rel is None and caps_fragment_rel is None:
-        # Byte-identical historical body when no fhs/caps fragment exists.
-        preamble = (f"#!/bin/sh\n"
-                    f"# Generated by saphira makepkg from {sources}.\n"
-                    f"# Package scripts may only invoke the platform identity reconciler,\n"
-                    f"# plus the package's native account mechanism when declared.\n"
-                    f"set -eu\n")
-    else:
-        preamble = (f"#!/bin/sh\n"
-                    f"# Generated by saphira makepkg from {sources}.\n"
-                    f"# Package scripts may only invoke the platform identity reconciler,\n"
-                    f"# plus the package's native account mechanism when declared,\n"
-                    f"# then the platform FHS reconciler when the package declares migrations,\n"
-                    f"# then the platform capability reconciler when the package declares file capabilities.\n"
-                    f"set -eu\n")
-    # All but the last command run plain; the last execs (preserves the
-    # exact historical bodies when no fhs/caps fragment is present).
+    hooks = hooks or {}
+    # Reconciler invocations in fixed order: identity (plus native
+    # sysusers creation right after it), then FHS migrations, then
+    # file capabilities. All but the last command run plain; the last
+    # execs (preserves the exact historical bodies when no fhs/caps
+    # fragment is present and no hook is declared).
     cmds: list[str] = []
     if fragment_rel is not None:
         cmds.append(f"{IDENTITY_HELPER} \"/{fragment_rel}\"")
@@ -535,20 +591,109 @@ def identity_scripts(fragment_rel: str | None, temp_root: Path, name: str,
         cmds.append(f"{FHS_HELPER} \"/{fhs_fragment_rel}\"")
     if caps_fragment_rel is not None:
         cmds.append(f"{CAPS_HELPER} \"/{caps_fragment_rel}\"")
-    *plain, last = cmds
-    body = preamble + "".join(f"{cmd}\n" for cmd in plain) + f"exec {last}\n"
+    if not cmds:
+        with_identity = bool(fragment_text) or sysusers
+        # A hook-only package has no fragment to point at; saying so keeps the
+        # generated header honest about where the caller came from.
+        source_rel = fragment_rel if with_identity else (HOOKS_DIR / name).as_posix()
+        if with_identity:
+            preamble = (f"#!/bin/sh\n"
+                        f"# Generated by saphira makepkg from {source_rel}.\n"
+                        f"# Package scripts may only invoke the platform identity reconciler,\n"
+                        f"# plus the package's native account mechanism when declared.\n"
+                        f"set -eu\n")
+        else:
+            preamble = (f"#!/bin/sh\n"
+                        f"# Generated by saphira makepkg from {source_rel}.\n"
+                        f"# This package declares no identities; this caller carries\n"
+                        f"# only its maintainer hook.\n"
+                        f"set -eu\n")
+        if not with_identity:
+            # A package may declare maintainer hooks and no accounts at all
+            # (saphira-kernel does: it has no service identity). Its callers
+            # then carry the hook alone -- no reconciler invocation to make,
+            # and none invented.
+            body = preamble
+            upgrade_body = preamble
+            install_hook = hooks.get("post-install", "")
+            upgrade_hook = hooks.get("post-upgrade", "")
+            deinstall_hook = hooks.get("post-deinstall", "")
+            if install_hook:
+                body = preamble + install_hook
+            if upgrade_hook:
+                upgrade_body = preamble + upgrade_hook
+            if deinstall_hook:
+                deinstall_body = (f"#!/bin/sh\n"
+                                  f"# Generated by saphira makepkg from {source_rel}.\n"
+                                  f"# This package's declared maintainer hook.\n"
+                                  f"set -eu\n"
+                                  f"{deinstall_hook}")
+            else:
+                deinstall_body = (f"#!/bin/sh\n"
+                                  f"# Generated by saphira makepkg from {source_rel}.\n"
+                                  f"set -eu\n"
+                                  f"exit 0\n")
+            post_install = temp_root / f"post-install-{name}"
+            post_upgrade = temp_root / f"post-upgrade-{name}"
+            post_install.write_text(body, encoding="utf-8")
+            post_upgrade.write_text(upgrade_body, encoding="utf-8")
+            post_install.chmod(0o755)
+            post_upgrade.chmod(0o755)
+            post_deinstall = temp_root / f"post-deinstall-{name}"
+            post_deinstall.write_text(deinstall_body, encoding="utf-8")
+            post_deinstall.chmod(0o755)
+            return (["-s", f"post-install:{post_install}", "-s", f"post-upgrade:{post_upgrade}",
+                     "-s", f"post-deinstall:{post_deinstall}"],
+                    post_install, post_upgrade, post_deinstall)
+    sources = ", ".join(s for s in (fragment_rel, fhs_fragment_rel, caps_fragment_rel) if s is not None)
+    if fhs_fragment_rel is None and caps_fragment_rel is None and not hooks:
+        # Byte-identical historical body when no fhs/caps fragment exists
+        # and no maintainer hook is declared.
+        preamble = (f"#!/bin/sh\n"
+                    f"# Generated by saphira makepkg from {sources}.\n"
+                    f"# Package scripts may only invoke the platform identity reconciler,\n"
+                    f"# plus the package's native account mechanism when declared.\n"
+                    f"set -eu\n")
+    else:
+        preamble = (f"#!/bin/sh\n"
+                    f"# Generated by saphira makepkg from {sources}.\n"
+                    f"# Package scripts may only invoke the platform identity reconciler,\n"
+                    f"# plus the package's native account mechanism when declared,\n"
+                    f"# then the platform FHS reconciler when the package declares migrations,\n"
+                    f"# then the platform capability reconciler when the package declares file capabilities,\n"
+                    f"# then this package's declared maintainer hook when one exists.\n"
+                    f"set -eu\n")
+    install_hook = hooks.get("post-install", "")
+    upgrade_hook = hooks.get("post-upgrade", "")
+    if install_hook or upgrade_hook:
+        # A hook cannot be appended after a trailing `exec': exec
+        # replaces this shell, so nothing after it would ever run. With a
+        # hook declared the callers therefore invoke (not exec) every
+        # reconciler in order, and set -eu propagates a failure from any
+        # of them -- a hook must not be able to mask a failed
+        # reconciliation, nor a failed reconciliation hide the hook.
+        #
+        # post-install and post-upgrade may differ (a kernel regenerates
+        # its boot config on both; a module index is refreshed on both
+        # too), so they are composed separately rather than sharing one
+        # body.
+        head = preamble + "".join(f"{cmd}\n" for cmd in cmds)
+        body = head + install_hook
+        upgrade_body = head + upgrade_hook
+    else:
+        *plain, last = cmds
+        body = preamble + "".join(f"{cmd}\n" for cmd in plain) + f"exec {last}\n"
+        upgrade_body = body
     post_install = temp_root / f"post-install-{name}"
     post_upgrade = temp_root / f"post-upgrade-{name}"
     post_install.write_text(body, encoding="utf-8")
-    post_upgrade.write_text(body, encoding="utf-8")
+    post_upgrade.write_text(upgrade_body, encoding="utf-8")
     post_install.chmod(0o755)
     post_upgrade.chmod(0o755)
     script_arguments = ["-s", f"post-install:{post_install}", "-s", f"post-upgrade:{post_upgrade}"]
     post_deinstall: Path | None = None
+    deinstall_hook = hooks.get("post-deinstall", "")
     if fragment_rel is not None:
-        # Deinstall stays reconciler-only and unchanged: sysusers has
-        # no removal concept (conservative on removal, per policy),
-        # and fhs layout never reverts.
         marker = "SAPHIRA_IDENTITY_EOF"
         if marker in fragment_text:
             die(f"account fragment embeds the reserved marker: {marker}")
@@ -565,7 +710,45 @@ def identity_scripts(fragment_rel: str | None, temp_root: Path, name: str,
                           f"cat > \"$fragment\" <<'{marker}'\n"
                           f"{fragment_text}"
                           f"{marker}\n"
-                          f"exec {IDENTITY_HELPER} --disable \"$fragment\"\n")
+                          # Deliberately NOT `exec'. exec replaces this
+                          # shell process, which discards every pending trap,
+                          # so the EXIT trap above never fired and EVERY
+                          # `apk del' of a fragment-carrying package left a
+                          # mode-0600 /tmp/saphira-identity.XXXXXX behind
+                          # holding the account declaration. On a long-lived
+                          # server with ordinary package churn that is an
+                          # unbounded permanent accumulation, in a directory
+                          # AGENTS.md explicitly designates as not Saphira
+                          # scratch. Invoke as a normal command and propagate
+                          # its status by hand, so the trap fires and a
+                          # reconciler failure still fails the removal.
+                          f"{IDENTITY_HELPER} --disable \"$fragment\"\n"
+                          f"status=$?\n")
+        if deinstall_hook:
+            # A module index has to be rebuilt on removal too, and apk runs
+            # post-deinstall AFTER the payload is gone, so this is exactly
+            # where a depmod belongs. The reconciler's status is preserved
+            # and still wins, so a declared hook can neither mask a failed
+            # removal nor be masked by one.
+            deinstall_body += (f"{deinstall_hook}"
+                               f"hook_status=$?\n"
+                               f"if [ \"$status\" -ne 0 ]; then exit \"$status\"; fi\n"
+                               f"exit \"$hook_status\"\n")
+        else:
+            deinstall_body += "exit $status\n"
+        post_deinstall = temp_root / f"post-deinstall-{name}"
+        post_deinstall.write_text(deinstall_body, encoding="utf-8")
+        post_deinstall.chmod(0o755)
+        script_arguments += ["-s", f"post-deinstall:{post_deinstall}"]
+    elif deinstall_hook:
+        # No fragment to disable (fhs layout never reverts, sysusers
+        # has no removal concept): the caller carries the declared
+        # removal hook alone.
+        deinstall_body = (f"#!/bin/sh\n"
+                          f"# Generated by saphira makepkg from {(HOOKS_DIR / name).as_posix()}.\n"
+                          f"# This package's declared maintainer hook.\n"
+                          f"set -eu\n"
+                          f"{deinstall_hook}")
         post_deinstall = temp_root / f"post-deinstall-{name}"
         post_deinstall.write_text(deinstall_body, encoding="utf-8")
         post_deinstall.chmod(0o755)
@@ -894,7 +1077,15 @@ def strip_payload(payload: Path) -> int:
         # Kernel modules: never strip until module safety is explicitly
         # verified (operator directive - saphira-kernel/saphira-zfs stay
         # out of the first strip pass).
-        if path.suffix in (".ko", ".ko.xz", ".ko.zst"):
+        # GRUB modules (.mod): same exemption. They are relocatable objects
+        # loaded at runtime by GRUB's own loader, which finds each module's
+        # init/fini entry points (grub_mod_init/grub_mod_fini, LOCAL symbols)
+        # in the symbol table. strip --strip-unneeded deletes exactly those
+        # LOCAL symbols, so the module loads "successfully" yet never
+        # initializes: no partition maps register, no commands appear, and
+        # the failure is completely silent (proven: UEFI GRUB saw (hd0) with
+        # no partitions on a valid GPT because part_gpt never ran).
+        if path.suffix in (".ko", ".ko.xz", ".ko.zst", ".mod"):
             continue
         args = [strip, "--strip-unneeded", str(path)]
         if path.suffix == ".a":
@@ -921,6 +1112,45 @@ def construct(apk: str, payload: Path, arguments: list[str], producer: str) -> s
     # loses its bit just the same.  Only symlinks are skipped - chmod
     # on a symlink would follow it and mutate the target.
     special: list[str] = []
+    # File capabilities are a FAIL-OPEN hazard here, so refuse them
+    # outright. The apk v3 payload has no xattr channel at all --
+    # `apk adbdump' of a package whose payload carries
+    # security.capability prints no capability field, and `apk mkpkg'
+    # drops the attribute silently. A recipe that setcap'd a binary
+    # therefore shipped a binary with NO privilege and no error anywhere.
+    #
+    # That is not hypothetical: shadow sets cap_setuid+ep on newuidmap and
+    # cap_setgid+ep on newgidmap (its --with-fcaps mode), and the built
+    # APK had them at mode 0755 with no capability. newuidmap installed
+    # that way can never map a UID for anyone.
+    #
+    # Setuid/setgid MODE BITS do survive (they are restored below, and the
+    # sudo hatchling incident is why that restoration exists), so the
+    # supported way to ship a privileged helper is a setuid bit, which is
+    # also shadow's own default: --with-fcaps defaults to no.
+    #
+    # Refusing here means a recipe author finds out at build time and can
+    # use a setuid bit, instead of discovering at install time, on a
+    # production host, that the privilege silently evaporated.
+    for path in sorted(payload.rglob("*")):
+        if path.is_symlink():
+            continue
+        try:
+            caps = os.listxattr(path, follow_symlinks=False)
+        except OSError:
+            continue
+        for name in caps:
+            if name == "security.capability":
+                try:
+                    value = os.getxattr(path, name, follow_symlinks=False)
+                except OSError:
+                    value = b"?"
+                die(
+                    f"{payload.name}: {path} carries a file capability "
+                    f"({value!r}); the apk payload cannot store it and it "
+                    f"would ship with no privilege. Use a setuid/setgid mode "
+                    f"bit instead -- those are preserved."
+                )
     for path in sorted(payload.rglob("*")):
         if path.is_symlink():
             continue
@@ -1014,7 +1244,25 @@ def main() -> int:
                     die(f"payload carries foreign account fragments: {', '.join(stray)}")
                 fragment_rel = (ACCOUNTS_DIR / name).as_posix()
                 fragment_path = payload_copy / fragment_rel
+                # Optional maintainer hooks, declared the same way as
+                # identities: a recipe stages them under
+                # usr/share/saphira/hooks.d/<output-name>/. They are
+                # embedded into the generated callers below and then
+                # stripped, so the script is the only shipped copy and
+                # `apk adbdump' is the audit trail.
+                hooks = parse_maintainer_hooks(payload_copy / HOOKS_DIR, name)
+                if (payload_copy / HOOKS_DIR).is_dir():
+                    shutil.rmtree(payload_copy / HOOKS_DIR)
+                # Schema must match parse_accounts_fragment() exactly.
+                # It previously omitted "sysusers", which is why the
+                # sysusers feature test used accounts.get("sysusers") and
+                # why the stanza-presence conditions had to be spelled out
+                # key by key. A uniform shape means "did this fragment
+                # declare anything at all" is one any() over the stanza
+                # keys, with no chance of a key silently missing from one
+                # of the two constructors.
                 accounts: dict = {"users": [], "groups": [], "dirs": [], "files": [],
+                                  "sysusers": False,
                                   "legacy": {"users": [], "groups": []}}
                 script_arguments: list[str] = []
                 has_accounts_fragment = fragment_path.is_file()
@@ -1103,9 +1351,17 @@ def main() -> int:
                     script_arguments, _, _, _ = identity_scripts(
                         fragment_rel if has_accounts_fragment else None,
                         temp_root, name, fragment_text,
-                        sysusers=accounts.get("sysusers", False),
+                        sysusers=accounts.get("sysusers", False), hooks=hooks,
                         fhs_fragment_rel=fhs_fragment_rel if has_fhs_fragment else None,
                         caps_fragment_rel=caps_fragment_rel if has_caps_fragment else None)
+                elif hooks:
+                    # Hooks without an account declaration: a kernel
+                    # refreshes its boot config but owns no service
+                    # identity. The callers carry the hook alone rather
+                    # than inventing a reconciler call for a fragment
+                    # that does not exist.
+                    script_arguments, _, _, _ = identity_scripts(
+                        None, temp_root, name, "", hooks=hooks)
                 # The legacy sidecar is validated whenever present, even
                 # without a sibling fragment: a lone sidecar then fails
                 # the same-fragment consistency check below (history
@@ -1130,15 +1386,33 @@ def main() -> int:
                     "--info", f"build-time:{manifest['build_time']}",
                 ]
                 dependencies = output.get("dependencies", [])
-                if (accounts["users"] or accounts["groups"] or accounts["files"]
-                        or accounts.get("sysusers")):
-                    # The generated scripts exec the baselayout helper, so
-                    # its provider plus a shell and coreutils must be
-                    # installed first: apk orders by dependency, and the
-                    # scripts fail closed without them. A sysusers-native
-                    # fragment needs the same edge (its callers run the
-                    # reconciler first, then systemd-sysusers).
+                # ANY stanza at all means a generated script exists, and
+                # every generated script execs the baselayout helper, so
+                # its provider plus a shell and coreutils must be
+                # installed first: apk orders by dependency and the
+                # scripts fail closed without them.
+                #
+                # `dirs' and `sysusers' were missing from this condition.
+                # identity_scripts() runs whenever the fragment file
+                # exists, so a dir-only or sysusers-only fragment still
+                # produced all three scripts -- while this test said no,
+                # so IDENTITY_DEPS was never declared. The consequence on a
+                # minimal target: post-deinstall needs mktemp and cat
+                # (coreutils) and a shell at /bin/sh (bash), neither
+                # declared, so `apk del' failed part-way with a bare
+                # "mktemp: not found" and the removal was left half-done.
+                if any(accounts[key] for key in ("users", "groups", "dirs", "files", "sysusers")):
                     for requirement in IDENTITY_DEPS:
+                        if name != requirement and requirement not in dependencies:
+                            dependencies = [*dependencies, requirement]
+                # A declared maintainer hook is also a generated script, so
+                # it needs the same shell and tools installed before it
+                # runs: apk orders by dependency, and a script whose
+                # interpreter is absent fails with a bare execve error
+                # (verified: "execve: No such file or directory", exit
+                # 127) that says nothing about the real cause.
+                if hooks:
+                    for requirement in HOOK_DEPS:
                         if name != requirement and requirement not in dependencies:
                             dependencies = [*dependencies, requirement]
                 if fhs["dirs"] or fhs["replaces"] or fhs["removals"]:
@@ -1152,6 +1426,8 @@ def main() -> int:
                     # provider plus libcap (getcap/setcap) and a shell
                     # must be installed first (deduped by the loop).
                     for requirement in CAPS_DEPS:
+                        if name != requirement and requirement not in dependencies:
+                            dependencies = [*dependencies, requirement]
                         if name != requirement and requirement not in dependencies:
                             dependencies = [*dependencies, requirement]
                 if dependencies:
@@ -1169,8 +1445,7 @@ def main() -> int:
                 run([config["SAPHIRA_APK"], "verify", "--allow-untrusted", str(temporary_artifact)])
                 metadata, recorded_dependencies = metadata_from_apk(config["SAPHIRA_APK"], temporary_artifact)
                 dump = run([config["SAPHIRA_APK"], "adbdump", str(temporary_artifact)]).stdout
-                if (accounts["users"] or accounts["groups"] or accounts["files"]
-                        or accounts.get("sysusers")):
+                if any(accounts[key] for key in ("users", "groups", "dirs", "files", "sysusers")):
                     for script in ("post-install", "post-upgrade", "post-deinstall"):
                         if script not in dump:
                             die(f"constructed APK is missing generated identity script {script}: {temporary_artifact}")

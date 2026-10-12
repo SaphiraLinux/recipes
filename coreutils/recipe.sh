@@ -2,7 +2,7 @@
 
 pkgname=coreutils
 pkgver=9.7
-pkgrel=2
+pkgrel=3
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='GNU core utilities (Genesis base, /bin layout)'
 license='GPL-3.0-or-later'
@@ -12,7 +12,7 @@ url=https://www.gnu.org/software/coreutils/
 # Vendored: https://ftp.gnu.org/gnu/coreutils/coreutils-9.7.tar.xz
 coreutils_sha256=e8bb26ad0293f9b5a1fc43fb42ba970e312c66ce92c1b0b16713d7500db251bf
 
-depends="musl"
+depends="gmp musl"
 makedepends="
 	gawk
 	gcc

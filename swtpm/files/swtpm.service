@@ -1,0 +1,41 @@
+[Unit]
+Description=Software TPM 2.0 emulator daemon (qemu TPM backend)
+Documentation=man:swtpm(8)
+# A TPM emulator is a guest backend, not a platform service. It is
+# started on demand by libvirt or qemu, which connect to its control
+# socket, so it is ordered after local-fs and left out of the critical
+# boot path.
+After=local-fs.target
+
+[Service]
+# Mirrors files/swtpm.initd. --daemon is deliberately NOT passed, so
+# swtpm stays in the foreground and Type=simple needs no pidfile.
+#
+# Deliberately NOT set: User=. This package configures
+# --with-tss-user=root --with-tss-group=root, so swtpm runs as root.
+Type=simple
+ExecStart=/usr/sbin/swtpm socket --tpmstate dir=/var/lib/swtpm-state --ctrl type=unixio,path=/run/swtpm/sock
+# TWO runtime directories are required: the TPM state directory is
+# persistent state and must survive a restart, the control directory
+# holds the socket and is volatile.
+StateDirectory=swtpm-state
+StateDirectoryMode=0700
+RuntimeDirectory=swtpm
+RuntimeDirectoryMode=0755
+Restart=on-failure
+RestartSec=2
+
+# A TPM emulator needs NO host devices at all -- that is the whole point
+# of emulating one -- so this is one of the few places where
+# PrivateDevices and a closed device policy are the correct hardening
+# rather than a break.
+PrivateDevices=yes
+DevicePolicy=closed
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/swtpm-state /run/swtpm
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

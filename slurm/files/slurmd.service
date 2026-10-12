@@ -1,0 +1,21 @@
+[Unit]
+Description=Slurm node daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+# No User=: slurmd must stay root (spawns slurmstepd, manages job
+# cgroups). Upstream ships it the same way.
+ExecStart=/usr/sbin/slurmd --systemd
+ExecReload=/bin/kill -HUP $MAINPID
+# Jobs must survive daemon reload/restart signalling: only the main
+# process is signalled, never the job cgroups.
+KillMode=process
+# task/cgroup management requires cgroup delegation to the daemon.
+Delegate=yes
+LimitNOFILE=131072
+LimitMEMLOCK=infinity
+
+[Install]
+WantedBy=multi-user.target

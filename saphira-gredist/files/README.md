@@ -41,13 +41,13 @@ Signals: `SIGHUP` reload config, `SIGUSR1` dump stats, `SIGTERM`/`SIGINT` exit.
 
 ## Design
 
-- **Userspace control, kernel dataplane where practical**: userspace owns config, membership, health, stats and HRW policy. Kernel handles routing, optional `nft` fast-path (same-family DNAT via `inet` table `saphira_gredist_<name>`), and raw-socket I/O. Cross-family translation is always userspace-rebuilt outer header (kernel adds correct family header on send).
+- **Userspace control, kernel dataplane**: userspace owns config, membership, health, stats and HRW policy. The kernel provides routing and raw-socket I/O; it rebuilds the outer IP header on send, so cross-family translation needs nothing from userspace beyond choosing a backend. There is no `nft` fast path: an earlier revision created an empty `inet saphira_gredist_<name>` table and logged a placeholder, which accelerated nothing and was never cleaned up. It was removed.
 
 - **GRE parsing**: follows `net/ipv4/gre_demux.c:gre_parse_header` – validates 4-byte base, checks `GRE_VERSION`/`GRE_ROUTING`, computes `gre_calc_hlen` from `CSUM|KEY|SEQ`, fails closed on truncated claims, supports keyless and keyed (key is visible identifier, not secret). Malformed (version, routing, truncated option, fragment, oversized >9000) are dropped and counted.
 
-- **Backend selection**: rendezvous/HRW hashing on `outer_src || gre_key`. Score = `splitmix64(fnv1a(backend_str) XOR flow_hash)`, pick max among healthy. Removal of a backend moves only its flows; surviving mappings remain stable; rejoin is deterministic.
+- **Backend selection**: rendezvous/HRW hashing on `outer_src || gre_key`. Score = `splitmix64(fnv1a(backend_str) XOR flow_hash)`, pick max among healthy. The score depends on the backend's identity and the flow only, never on the backend's position in the config, so removal of a backend moves only its flows, surviving mappings stay stable, and reordering the config file changes nothing. Rejoin is deterministic.
 
-- **Health**: active ICMP `ping -c1 -W1` per backend every 2s, 2 fails → down, 2 successes → up. Logs transitions. Forwarding to no healthy backend drops.
+- **Health**: active ICMP `ping -c1 -W1` per backend every 2s, 2 fails → down, 2 successes → up. Logs transitions. Forwarding to no healthy backend drops. Probes are detached children: the event loop reaps them as they finish and kills any that overrun, so an unresponsive or absent peer never stalls packet forwarding. The cadence, the thresholds and the transition log lines are the same as when probing was synchronous; only the waiting changed.
 
 - **Forwarding**: receive via `AF_INET`/`AF_INET6` `SOCK_RAW` `IPPROTO_GRE` bound to frontend, strip outer IP, select backend, send via `AF_INET`/`AF_INET6` raw with `GRE+inner` payload to backend – kernel builds new outer header (v4 `tot_len`/`checksum`, v6 `payload_len`). Same-family preserves payload; cross-family rebuilds outer.
 

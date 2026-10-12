@@ -1,0 +1,44 @@
+From d2ddff255960aaf648f6cb928bb3b195658a7307 Mon Sep 17 00:00:00 2001
+From: Gregory Price <gourry@gourry.net>
+Date: Wed, 10 Jun 2026 16:59:42 -0700
+Subject: [PATCH] mm/vmscan: disallow reclaim of private node memory
+
+Private nodes do not support reclaim by default, so prevent all
+reclaimers from operating on private nodes.
+
+shrink_node() is the common chokepoint for most reclaimers (direct,
+kswapd, proactive, mglru, etc), so it's the best place to filter.
+
+DAMON's proactive pageout bypasses shrink_node() entirely, so we
+disable DAMON in a separate commit as its own discrete service.
+
+Other reclaim entry points are already covered - e.g. MGLRU's debugfs
+interface rejects nids that are not N_MEMORY (N_MEMORY_PRIVATE is
+mutually exclusive), and madvise pageout/cold skips private nodes.
+
+Signed-off-by: Gregory Price <gourry@gourry.net>
+---
+ mm/vmscan.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/mm/vmscan.c b/mm/vmscan.c
+index 61d26437beb..c807511a8be 100644
+--- a/mm/vmscan.c
++++ b/mm/vmscan.c
+@@ -6156,6 +6156,13 @@ static void shrink_node(pg_data_t *pgdat, struct scan_control *sc)
+ 	struct lruvec *target_lruvec;
+ 	bool reclaimable = false;
+ 
++	/*
++	 * Private nodes do not support reclaim by default, filtering here
++	 * captures all normal reclaim paths that may attempt eviction.
++	 */
++	if (node_is_private(pgdat->node_id))
++		return;
++
+ 	if ((lru_gen_enabled() || lru_gen_switching()) && root_reclaim(sc)) {
+ 		memset(&sc->nr, 0, sizeof(sc->nr));
+ 		lru_gen_shrink_node(pgdat, sc);
+-- 
+2.55.0
+

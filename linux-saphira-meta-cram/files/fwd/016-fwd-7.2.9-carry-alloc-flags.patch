@@ -1,0 +1,344 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Saphira forward-port <builder@saphira.vm2.uk>
+Date: Thu, 9 Oct 2026 12:00:00 +0000
+Subject: [FWD 7.2.9] mm: let bulk and folio allocators carry alloc_flags
+
+Fwd-port of upstream 2b652377 ("mm/page_alloc: let the bulk and folio
+allocators carry alloc_flags", Gregory Price, 2026-07-18, series
+position 016) onto Linux 7.2.9.
+
+Why needed: the branch base carries akpm 7.3-bound plumbing in which
+mm/page_alloc.h holds __alloc_pages_noprof(..., alloc_flags) and struct
+alloc_context.alloc_flags. 7.2.9 predates that restructure: there is no
+mm/page_alloc.h (decls live in include/linux/gfp.h + mm/internal.h),
+__alloc_pages_noprof/__alloc_frozen_pages_noprof take no flags, and
+struct alloc_context has no alloc_flags field. This adaptation
+introduces the same carrying capability in 7.2.9 shape:
+- struct alloc_context += alloc_flags (mm/internal.h) + ALLOC_DEFAULT
+- __alloc_frozen_pages_noprof/__alloc_pages_noprof/__folio_alloc_noprof
+  += alloc_flags param, threaded into ac and the fastpath flags
+- alloc_pages_bulk_noprof split into __alloc_pages_bulk_noprof(zlflags)
+  + wrapper (ALLOC_DEFAULT), failover passes zlflags through
+- all in-tree callers (slub, mempolicy x4, khugepaged, migrate,
+  page_frag_cache x2, gfp.h inline node helpers, non-NUMA stub, nolock
+  path) pass ALLOC_DEFAULT/0 or the through-param: behavior-preserving
+  (every new arg is 0/DEFAULT except plumbed pass-through).
+- the mm/page_alloc.h hunk is redirected to gfp.h/internal.h.
+- continuation-line alignment matches the branch revision byte-for-byte
+  where later patches (035) reuse the lines as hunk context.
+No WARN_ON/validation is added here; flag interpretation
+(ALLOC_ZONELIST_PRIVATE/select_zonelist) arrives with fwd-018.
+
+Byte-identical upstream patch retained in series/ (recorded SKIP-FWD).
+Verifies with git apply --check (no fuzz).
+
+Signed-off-by: Saphira builder <builder@saphira.vm2.uk>
+---
+diff --git a/include/linux/gfp.h b/include/linux/gfp.h
+index cdf95a9f0..cb5310e67 100644
+--- a/include/linux/gfp.h
++++ b/include/linux/gfp.h
+@@ -231,9 +231,14 @@ struct page *__alloc_pages_noprof(gfp_t gfp, unsigned int order, int preferred_n
+ #define __alloc_pages(...)			alloc_hooks(__alloc_pages_noprof(__VA_ARGS__))
+ 
+ struct folio *__folio_alloc_noprof(gfp_t gfp, unsigned int order, int preferred_nid,
+-		nodemask_t *nodemask);
++		nodemask_t *nodemask, unsigned int alloc_flags);
+ #define __folio_alloc(...)			alloc_hooks(__folio_alloc_noprof(__VA_ARGS__))
+ 
++/* Bulk allocator taking explicit alloc_flags; alloc_pages_bulk() wraps it. */
++unsigned long __alloc_pages_bulk_noprof(gfp_t gfp, unsigned int alloc_flags,
++		int preferred_nid, nodemask_t *nodemask, int nr_pages,
++		struct page **page_array);
++
+ unsigned long alloc_pages_bulk_noprof(gfp_t gfp, int preferred_nid,
+ 				nodemask_t *nodemask, int nr_pages,
+ 				struct page **page_array);
+@@ -288,7 +293,7 @@ __alloc_pages_node_noprof(int nid, gfp_t gfp_mask, unsigned int order)
+ 	VM_BUG_ON(nid < 0 || nid >= MAX_NUMNODES);
+ 	warn_if_node_offline(nid, gfp_mask);
+ 
+-	return __alloc_pages_noprof(gfp_mask, order, nid, NULL);
++	return __alloc_pages_noprof(gfp_mask, order, nid, NULL, 0);
+ }
+ 
+ #define  __alloc_pages_node(...)		alloc_hooks(__alloc_pages_node_noprof(__VA_ARGS__))
+@@ -299,7 +304,8 @@ struct folio *__folio_alloc_node_noprof(gfp_t gfp, unsigned int order, int nid)
+ 	VM_BUG_ON(nid < 0 || nid >= MAX_NUMNODES);
+ 	warn_if_node_offline(nid, gfp);
+ 
+-	return __folio_alloc_noprof(gfp, order, nid, NULL);
++	/* gfp.h can't see the mm-internal ALLOC_* flags; 0 == ALLOC_DEFAULT. */
++	return __folio_alloc_noprof(gfp, order, nid, NULL, 0);
+ }
+ 
+ #define  __folio_alloc_node(...)		alloc_hooks(__folio_alloc_node_noprof(__VA_ARGS__))
+diff --git a/mm/internal.h b/mm/internal.h
+index 8e56c0a65..78b5d3b9d 100644
+--- a/mm/internal.h
++++ b/mm/internal.h
+@@ -684,6 +684,15 @@ struct alloc_context {
+ 	 */
+ 	enum zone_type highest_zoneidx;
+ 	bool spread_dirty_pages;
++
++	/*
++	 * Explicit allocator selection flags carried from the entry point
++	 * (e.g. ALLOC_ZONELIST_PRIVATE for N_MEMORY_PRIVATE zonelists).
++	 * Set by __alloc_frozen_pages_noprof()/bulk entry points; consumed
++	 * by prepare_alloc_pages() via select_zonelist(). ALLOC_DEFAULT (0)
++	 * keeps the historical gfp-based selection.
++	 */
++	unsigned int alloc_flags;
+ };
+ 
+ /*
+@@ -913,7 +922,7 @@ extern bool free_pages_prepare(struct page *page, unsigned int order);
+ extern int user_min_free_kbytes;
+ 
+ struct page *__alloc_frozen_pages_noprof(gfp_t, unsigned int order, int nid,
+-		nodemask_t *);
++		nodemask_t *, unsigned int alloc_flags);
+ #define __alloc_frozen_pages(...) \
+ 	alloc_hooks(__alloc_frozen_pages_noprof(__VA_ARGS__))
+ void free_frozen_pages(struct page *page, unsigned int order);
+@@ -924,7 +933,8 @@ struct page *alloc_frozen_pages_noprof(gfp_t, unsigned int order);
+ #else
+ static inline struct page *alloc_frozen_pages_noprof(gfp_t gfp, unsigned int order)
+ {
+-	return __alloc_frozen_pages_noprof(gfp, order, numa_node_id(), NULL);
++	return __alloc_frozen_pages_noprof(gfp, order, numa_node_id(), NULL,
++					     ALLOC_DEFAULT);
+ }
+ #endif
+ 
+@@ -1487,6 +1497,7 @@ unsigned int reclaim_clean_pages_from_list(struct zone *zone,
+ #define ALLOC_HIGHATOMIC	0x200 /* Allows access to MIGRATE_HIGHATOMIC */
+ #define ALLOC_TRYLOCK		0x400 /* Only use spin_trylock in allocation path */
+ #define ALLOC_KSWAPD		0x800 /* allow waking of kswapd, __GFP_KSWAPD_RECLAIM set */
++#define ALLOC_DEFAULT		0x0 /* no explicit selection: historical gfp-based path */
+ 
+ /* Flags that allow allocations below the min watermark. */
+ #define ALLOC_RESERVES (ALLOC_NON_BLOCK|ALLOC_MIN_RESERVE|ALLOC_HIGHATOMIC|ALLOC_OOM)
+diff --git a/mm/khugepaged.c b/mm/khugepaged.c
+index 2d0aee031..53ca9876a 100644
+--- a/mm/khugepaged.c
++++ b/mm/khugepaged.c
+@@ -1237,7 +1237,7 @@ static enum scan_result alloc_charge_folio(struct folio **foliop, struct mm_stru
+ 	int node = collapse_find_target_node(cc);
+ 	struct folio *folio;
+ 
+-	folio = __folio_alloc(gfp, order, node, &cc->alloc_nmask);
++	folio = __folio_alloc(gfp, order, node, &cc->alloc_nmask, ALLOC_DEFAULT);
+ 	if (!folio) {
+ 		*foliop = NULL;
+ 		if (is_pmd_order(order))
+diff --git a/mm/mempolicy.c b/mm/mempolicy.c
+index 9d7cb63d3..99fbc7998 100644
+--- a/mm/mempolicy.c
++++ b/mm/mempolicy.c
+@@ -2418,9 +2418,11 @@ static struct page *alloc_pages_preferred_many(gfp_t gfp, unsigned int order,
+ 	 */
+ 	preferred_gfp = gfp | __GFP_NOWARN;
+ 	preferred_gfp &= ~(__GFP_DIRECT_RECLAIM | __GFP_NOFAIL);
+-	page = __alloc_frozen_pages_noprof(preferred_gfp, order, nid, nodemask);
++	page = __alloc_frozen_pages_noprof(preferred_gfp, order, nid, nodemask,
++					   ALLOC_DEFAULT);
+ 	if (!page)
+-		page = __alloc_frozen_pages_noprof(gfp, order, nid, NULL);
++		page = __alloc_frozen_pages_noprof(gfp, order, nid, NULL,
++						   ALLOC_DEFAULT);
+ 
+ 	return page;
+ }
+@@ -2468,7 +2470,7 @@ static struct page *alloc_pages_mpol(gfp_t gfp, unsigned int order,
+ 			 */
+ 			page = __alloc_frozen_pages_noprof(
+ 				gfp | __GFP_THISNODE | __GFP_NORETRY, order,
+-				nid, NULL);
++				nid, NULL, ALLOC_DEFAULT);
+ 			if (page || !(gfp & __GFP_DIRECT_RECLAIM))
+ 				return page;
+ 			/*
+@@ -2480,7 +2482,7 @@ static struct page *alloc_pages_mpol(gfp_t gfp, unsigned int order,
+ 		}
+ 	}
+ 
+-	page = __alloc_frozen_pages_noprof(gfp, order, nid, nodemask);
++	page = __alloc_frozen_pages_noprof(gfp, order, nid, nodemask, ALLOC_DEFAULT);
+ 
+ 	if (unlikely(pol->mode == MPOL_INTERLEAVE ||
+ 		     pol->mode == MPOL_WEIGHTED_INTERLEAVE) && page) {
+diff --git a/mm/migrate.c b/mm/migrate.c
+index 35381ce36..6aa0b013b 100644
+--- a/mm/migrate.c
++++ b/mm/migrate.c
+@@ -2224,7 +2224,7 @@ struct folio *alloc_migration_target(struct folio *src, unsigned long private)
+ 	if (is_highmem_idx(zidx) || zidx == ZONE_MOVABLE)
+ 		gfp_mask |= __GFP_HIGHMEM;
+ 
+-	return __folio_alloc(gfp_mask, order, nid, mtc->nmask);
++	return __folio_alloc(gfp_mask, order, nid, mtc->nmask, ALLOC_DEFAULT);
+ }
+ 
+ #ifdef CONFIG_NUMA_MIGRATION
+diff --git a/mm/page_alloc.c b/mm/page_alloc.c
+index 50aa66dcd..7396b82a7 100644
+--- a/mm/page_alloc.c
++++ b/mm/page_alloc.c
+@@ -5148,8 +5148,8 @@ static inline bool prepare_alloc_pages(gfp_t gfp_mask, unsigned int order,
+  * @page_array were set to %NULL on entry, the slots from 0 to the return value
+  * - 1 will be filled.
+  */
+-unsigned long alloc_pages_bulk_noprof(gfp_t gfp, int preferred_nid,
+-			nodemask_t *nodemask, int nr_pages,
++unsigned long __alloc_pages_bulk_noprof(gfp_t gfp, unsigned int zlflags,
++			int preferred_nid, nodemask_t *nodemask, int nr_pages,
+ 			struct page **page_array)
+ {
+ 	struct page *page;
+@@ -5157,8 +5157,10 @@ unsigned long alloc_pages_bulk_noprof(gfp_t gfp, int preferred_nid,
+ 	struct zoneref *z;
+ 	struct per_cpu_pages *pcp;
+ 	struct list_head *pcp_list;
+-	struct alloc_context ac;
+-	unsigned int alloc_flags = ALLOC_WMARK_LOW;
++	struct alloc_context ac = {
++		.alloc_flags = zlflags,
++	};
++	unsigned int alloc_flags = ALLOC_WMARK_LOW | zlflags;
+ 	int nr_populated = 0, nr_account = 0;
+ 
+ 	/*
+@@ -5283,11 +5285,19 @@ unsigned long alloc_pages_bulk_noprof(gfp_t gfp, int preferred_nid,
+ 	return nr_populated;
+ 
+ failed:
+-	page = __alloc_pages_noprof(gfp, 0, preferred_nid, nodemask);
++	page = __alloc_pages_noprof(gfp, 0, preferred_nid, nodemask, zlflags);
+ 	if (page)
+ 		page_array[nr_populated++] = page;
+ 	goto out;
+ }
++
++unsigned long alloc_pages_bulk_noprof(gfp_t gfp, int preferred_nid,
++			nodemask_t *nodemask, int nr_pages,
++			struct page **page_array)
++{
++	return __alloc_pages_bulk_noprof(gfp, ALLOC_DEFAULT, preferred_nid,
++					 nodemask, nr_pages, page_array);
++}
+ EXPORT_SYMBOL_GPL(alloc_pages_bulk_noprof);
+ 
+ /*
+@@ -5322,12 +5332,14 @@ void free_pages_bulk(struct page **page_array, unsigned long nr_pages)
+  * This is the 'heart' of the zoned buddy allocator.
+  */
+ struct page *__alloc_frozen_pages_noprof(gfp_t gfp, unsigned int order,
+-		int preferred_nid, nodemask_t *nodemask)
++		int preferred_nid, nodemask_t *nodemask, unsigned int alloc_flags)
+ {
+ 	struct page *page;
+-	unsigned int alloc_flags = ALLOC_WMARK_LOW;
++	unsigned int fastpath_alloc_flags = ALLOC_WMARK_LOW | alloc_flags;
+ 	gfp_t alloc_gfp; /* The gfp_t that was actually used for allocation */
+-	struct alloc_context ac = { };
++	struct alloc_context ac = {
++		.alloc_flags = alloc_flags,
++	};
+ 
+ 	/*
+ 	 * There are several places where we assume that the order value is sane
+@@ -5347,17 +5359,17 @@ struct page *__alloc_frozen_pages_noprof(gfp_t gfp, unsigned int order,
+ 	gfp = current_gfp_context(gfp);
+ 	alloc_gfp = gfp;
+ 	if (!prepare_alloc_pages(gfp, order, preferred_nid, nodemask, &ac,
+-			&alloc_gfp, &alloc_flags))
++			&alloc_gfp, &fastpath_alloc_flags))
+ 		return NULL;
+ 
+ 	/*
+ 	 * Forbid the first pass from falling back to types that fragment
+ 	 * memory until all local zones are considered.
+ 	 */
+-	alloc_flags |= alloc_flags_nofragment(zonelist_zone(ac.preferred_zoneref), gfp);
++	fastpath_alloc_flags |= alloc_flags_nofragment(zonelist_zone(ac.preferred_zoneref), gfp);
+ 
+ 	/* First allocation attempt */
+-	page = get_page_from_freelist(alloc_gfp, order, alloc_flags, &ac);
++	page = get_page_from_freelist(alloc_gfp, order, fastpath_alloc_flags, &ac);
+ 	if (likely(page))
+ 		goto out;
+ 
+@@ -5387,11 +5399,12 @@ struct page *__alloc_frozen_pages_noprof(gfp_t gfp, unsigned int order,
+ EXPORT_SYMBOL(__alloc_frozen_pages_noprof);
+ 
+ struct page *__alloc_pages_noprof(gfp_t gfp, unsigned int order,
+-		int preferred_nid, nodemask_t *nodemask)
++		int preferred_nid, nodemask_t *nodemask, unsigned int alloc_flags)
+ {
+ 	struct page *page;
+ 
+-	page = __alloc_frozen_pages_noprof(gfp, order, preferred_nid, nodemask);
++	page = __alloc_frozen_pages_noprof(gfp, order, preferred_nid, nodemask,
++					   alloc_flags);
+ 	if (page)
+ 		set_page_refcounted(page);
+ 	return page;
+@@ -5399,10 +5412,10 @@ struct page *__alloc_pages_noprof(gfp_t gfp, unsigned int order,
+ EXPORT_SYMBOL(__alloc_pages_noprof);
+ 
+ struct folio *__folio_alloc_noprof(gfp_t gfp, unsigned int order, int preferred_nid,
+-		nodemask_t *nodemask)
++		nodemask_t *nodemask, unsigned int alloc_flags)
+ {
+ 	struct page *page = __alloc_pages_noprof(gfp | __GFP_COMP, order,
+-					preferred_nid, nodemask);
++					preferred_nid, nodemask, alloc_flags);
+ 	return page_rmappable_folio(page);
+ }
+ EXPORT_SYMBOL(__folio_alloc_noprof);
+@@ -7963,7 +7976,9 @@ struct page *alloc_frozen_pages_nolock_noprof(gfp_t gfp_flags, int nid, unsigned
+ 	gfp_t alloc_gfp = __GFP_NOWARN | __GFP_ZERO | __GFP_NOMEMALLOC | __GFP_COMP
+ 			| gfp_flags;
+ 	unsigned int alloc_flags = ALLOC_TRYLOCK;
+-	struct alloc_context ac = { };
++	struct alloc_context ac = {
++		.alloc_flags = ALLOC_DEFAULT,
++	};
+ 	struct page *page;
+ 
+ 	VM_WARN_ON_ONCE(gfp_flags & ~__GFP_ACCOUNT);
+diff --git a/mm/page_frag_cache.c b/mm/page_frag_cache.c
+index d2423f305..d9573170e 100644
+--- a/mm/page_frag_cache.c
++++ b/mm/page_frag_cache.c
+@@ -57,10 +57,10 @@ static struct page *__page_frag_cache_refill(struct page_frag_cache *nc,
+ 	gfp_mask = (gfp_mask & ~__GFP_DIRECT_RECLAIM) |  __GFP_COMP |
+ 		   __GFP_NOWARN | __GFP_NORETRY | __GFP_NOMEMALLOC;
+ 	page = __alloc_pages(gfp_mask, PAGE_FRAG_CACHE_MAX_ORDER,
+-			     numa_mem_id(), NULL);
++			     numa_mem_id(), NULL, ALLOC_DEFAULT);
+ #endif
+ 	if (unlikely(!page)) {
+-		page = __alloc_pages(gfp, 0, numa_mem_id(), NULL);
++		page = __alloc_pages(gfp, 0, numa_mem_id(), NULL, ALLOC_DEFAULT);
+ 		order = 0;
+ 	}
+ 
+diff --git a/mm/slub.c b/mm/slub.c
+index 3791d69ba..06bb7f8d1 100644
+--- a/mm/slub.c
++++ b/mm/slub.c
+@@ -5279,7 +5279,8 @@ static void *___kmalloc_large_node(size_t size, gfp_t flags, int node)
+ 	if (node == NUMA_NO_NODE)
+ 		page = alloc_frozen_pages_noprof(flags, order);
+ 	else
+-		page = __alloc_frozen_pages_noprof(flags, order, node, NULL);
++		page = __alloc_frozen_pages_noprof(flags, order, node, NULL,
++						     ALLOC_DEFAULT);
+ 
+ 	if (page) {
+ 		ptr = page_address(page);
+--
+2.55.0

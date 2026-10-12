@@ -1,6 +1,6 @@
 --- /dev/null
 +++ b/compiler/rustc_target/src/spec/targets/x86_64_akadata_linux_musl.rs
-@@ -0,0 +1,51 @@
+@@ -0,0 +1,53 @@
 +// Saphira first-class AKADATA Rust target. Cloned from
 +// x86_64_unknown_linux_musl; only what Saphira deliberately owns
 +// differs (vendor, CPU floor, default linker, description, tier).
@@ -32,6 +32,8 @@
 +        | SanitizerSet::LEAK
 +        | SanitizerSet::MEMORY
 +        | SanitizerSet::THREAD;
++    // Mirrored from the cloned musl base (added upstream in 1.98).
++    base.supports_fentry = true;
 +    base.supports_xray = true;
 +    // Same upstream default as the cloned musl target; the recipe's
 +    // bootstrap.toml sets crt-static = false for our builds.
@@ -54,8 +56,8 @@
 +}
 --- a/compiler/rustc_target/src/spec/mod.rs
 +++ b/compiler/rustc_target/src/spec/mod.rs
-@@ -1506,6 +1506,7 @@ supported_targets! {
-     ("aarch64-unknown-linux-musl", aarch64_unknown_linux_musl),
+@@ -1491,6 +1491,7 @@ supported_targets! {
+     ("aarch64-unknown-linux-pauthtest", aarch64_unknown_linux_pauthtest),
      ("aarch64_be-unknown-linux-musl", aarch64_be_unknown_linux_musl),
      ("x86_64-unknown-linux-musl", x86_64_unknown_linux_musl),
 +    ("x86_64-akadata-linux-musl", x86_64_akadata_linux_musl),
@@ -64,13 +66,15 @@
      ("mips-unknown-linux-musl", mips_unknown_linux_musl),
 --- a/src/bootstrap/src/core/sanity.rs
 +++ b/src/bootstrap/src/core/sanity.rs
-@@ -38,6 +38,9 @@ pub struct Finder {
+@@ -36,6 +36,9 @@
  /// when the newly-bumped stage 0 compiler now knows about the formerly-missing targets.
  const STAGE0_MISSING_TARGETS: &[&str] = &[
      // just a dummy comment so the list doesn't get onelined
 +    // Saphira: our first-class target is newer than any stage0 compiler;
 +    // remove if a future stage0 ever ships it (i.e. never, unless upstreamed).
 +    "x86_64-akadata-linux-musl",
- ];
+     "powerpc64-unknown-linux-gnuelfv2",
+     "aarch64-unknown-linux-pauthtest", // Stage 0 compiler is not guaranteed to see the target yet.
+     "aarch64-unknown-qnx",
  
  /// Minimum version threshold for libstdc++ required when using prebuilt LLVM

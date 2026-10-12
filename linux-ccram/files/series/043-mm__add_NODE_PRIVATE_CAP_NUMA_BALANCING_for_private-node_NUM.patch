@@ -1,0 +1,118 @@
+From d53abc9207b99b25fde876bd176f9c99708861f4 Mon Sep 17 00:00:00 2001
+From: Gregory Price <gourry@gourry.net>
+Date: Tue, 30 Jun 2026 22:59:43 -0700
+Subject: [PATCH] mm: add NODE_PRIVATE_CAP_NUMA_BALANCING for private-node NUMA
+ balancing
+
+By default NUMA balancing does not scan or prot_none private-node
+folios, so the kernel never migrates them via access sampling.
+
+Add NODE_PRIVATE_CAP_NUMA_BALANCING to opt a private node in.
+
+Add folio_allows_numa_balance() to gate change_prot_numa() scans on
+node eligibility. Opted-in private node participate like normal.
+
+Unlike demotion, NUMA balancing is not reclaim-driven, so this
+capability stands alone and does not require CAP_RECLAIM.
+
+Signed-off-by: Gregory Price <gourry@gourry.net>
+---
+ include/linux/node_private.h | 29 +++++++++++++++++++++++++++++
+ mm/internal.h                | 13 +++++++++++++
+ mm/mempolicy.c               |  2 +-
+ 3 files changed, 43 insertions(+), 1 deletion(-)
+
+diff --git a/include/linux/node_private.h b/include/linux/node_private.h
+index 87b03444b2c..5c3e070ed0d 100644
+--- a/include/linux/node_private.h
++++ b/include/linux/node_private.h
+@@ -16,6 +16,7 @@ struct page;
+ #define NODE_PRIVATE_CAP_USER_NUMA	(1UL << 1)	/* allow mempolicy */
+ #define NODE_PRIVATE_CAP_HOTUNPLUG	(1UL << 2)	/* allow hot-unplug */
+ #define NODE_PRIVATE_CAP_DEMOTION	(1UL << 3)	/* allow tiering demotion */
++#define NODE_PRIVATE_CAP_NUMA_BALANCING	(1UL << 4)	/* allow NUMA balancing */
+ 
+ /**
+  * struct node_private - Per-node container for N_MEMORY_PRIVATE nodes
+@@ -143,6 +144,29 @@ static inline bool node_allows_demotion(int nid)
+ 	return ret;
+ }
+ 
++/**
++ * node_allows_numa_balancing - may NUMA balancing scan/migrate this node?
++ * @nid: the node to test
++ *
++ * Access-based promotion/migration.  Unlike demotion this is not reclaim-driven,
++ * so CAP_NUMA_BALANCING stands alone (no CAP_RECLAIM dependency).
++ *
++ * return: true for normal nodes and private nodes opted into CAP_NUMA_BALANCING.
++ */
++static inline bool node_allows_numa_balancing(int nid)
++{
++	struct node_private *np;
++	bool ret;
++
++	if (!node_state(nid, N_MEMORY_PRIVATE))
++		return true;
++	rcu_read_lock();
++	np = rcu_dereference(NODE_DATA(nid)->node_private);
++	ret = np && (np->caps & NODE_PRIVATE_CAP_NUMA_BALANCING);
++	rcu_read_unlock();
++	return ret;
++}
++
+ #else /* !CONFIG_NUMA */
+ 
+ static inline bool folio_is_private_node(struct folio *folio)
+@@ -180,6 +204,11 @@ static inline bool node_allows_demotion(int nid)
+ 	return true;
+ }
+ 
++static inline bool node_allows_numa_balancing(int nid)
++{
++	return true;
++}
++
+ #endif /* CONFIG_NUMA */
+ 
+ #if defined(CONFIG_NUMA) && defined(CONFIG_MEMORY_HOTPLUG)
+diff --git a/mm/internal.h b/mm/internal.h
+index 62e68acae08..01ab8b32b0b 100644
+--- a/mm/internal.h
++++ b/mm/internal.h
+@@ -123,6 +123,19 @@ static inline bool folio_allows_madvise(struct folio *folio)
+ 	       node_allows_reclaim(folio_nid(folio));
+ }
+ 
++/*
++ * folio_allows_numa_balance() - may NUMA balancing scan/migrate this folio?
++ *
++ * NUMA balancing is access-aware tiering migration, so it follows the tiering
++ * opt-in: false for ZONE_DEVICE and for N_MEMORY_PRIVATE nodes without
++ * CAP_NUMA_BALANCING, true for all other folios.
++ */
++static inline bool folio_allows_numa_balance(struct folio *folio)
++{
++	return !folio_is_zone_device(folio) &&
++	       node_allows_numa_balancing(folio_nid(folio));
++}
++
+ /*
+  * folio_allows_longterm_pin() - may this folio be long-term GUP-pinned?
+  *
+diff --git a/mm/mempolicy.c b/mm/mempolicy.c
+index fe42a510590..4daba81fff7 100644
+--- a/mm/mempolicy.c
++++ b/mm/mempolicy.c
+@@ -874,7 +874,7 @@ bool folio_can_map_prot_numa(struct folio *folio, struct vm_area_struct *vma,
+ {
+ 	int nid;
+ 
+-	if (!folio || folio_is_private_managed(folio) || folio_test_ksm(folio))
++	if (!folio || !folio_allows_numa_balance(folio) || folio_test_ksm(folio))
+ 		return false;
+ 
+ 	/* Also skip shared copy-on-write folios */
+-- 
+2.55.0
+

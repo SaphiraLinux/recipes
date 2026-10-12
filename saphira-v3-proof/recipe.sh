@@ -2,7 +2,7 @@
 
 pkgname=saphira-v3-proof
 pkgver=1.0.0
-pkgrel=3
+pkgrel=4
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='Saphira Genesis x86-64-v3 validation proof: AVX2/FMA/BMI2/F16C/LZCNT + pthreads benchmark/stress test'
 license='BUSL-1.1'

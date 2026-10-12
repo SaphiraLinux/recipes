@@ -1,0 +1,15 @@
+# Saphira x86-64-v3 baseline (same policy as saphira-kernel's
+# files/x86-64-v3.patch, context refreshed for the 7.2.9 Makefile which
+# grew APX/Rust-target comment lines around this spot; no behavior change).
+--- a/arch/x86/Makefile
++++ b/arch/x86/Makefile
+@@ -169,7 +169,7 @@ ifdef CONFIG_X86_NATIVE_CPU
+         KBUILD_RUSTFLAGS += -Ctarget-cpu=native
+ else
+-        KBUILD_CFLAGS += -march=x86-64 -mtune=generic
+-        KBUILD_RUSTFLAGS += -Ctarget-cpu=x86-64 -Ztune-cpu=generic
++        KBUILD_CFLAGS += -march=x86-64-v3 -mtune=generic
++        KBUILD_RUSTFLAGS += -Ctarget-cpu=x86-64-v3 -Ztune-cpu=generic
+ endif
+ 
+         KBUILD_CFLAGS += -mno-red-zone

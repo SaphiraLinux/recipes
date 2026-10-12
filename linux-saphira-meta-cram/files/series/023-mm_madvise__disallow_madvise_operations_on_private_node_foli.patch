@@ -1,0 +1,81 @@
+From 99414009d0296c2eb884d7be06200c1e3f6d0f82 Mon Sep 17 00:00:00 2001
+From: Gregory Price <gourry@gourry.net>
+Date: Mon, 20 Apr 2026 18:34:57 -0700
+Subject: [PATCH] mm/madvise: disallow madvise operations on private node
+ folios
+
+Use the same filter locations as zone_device, plus additional filters
+for huge pages to avoid madvise operations on private node memory.
+
+Signed-off-by: Gregory Price <gourry@gourry.net>
+---
+ mm/huge_memory.c | 5 +++++
+ mm/madvise.c     | 8 ++++++--
+ 2 files changed, 11 insertions(+), 2 deletions(-)
+
+diff --git a/mm/huge_memory.c b/mm/huge_memory.c
+index 5bd8d4f59a7..1df91b4e5c2 100644
+--- a/mm/huge_memory.c
++++ b/mm/huge_memory.c
+@@ -37,6 +37,7 @@
+ #include <linux/page_owner.h>
+ #include <linux/sched/sysctl.h>
+ #include <linux/memory-tiers.h>
++#include <linux/node_private.h>
+ #include <linux/compat.h>
+ #include <linux/pgalloc.h>
+ #include <linux/pgalloc_tag.h>
+@@ -2338,6 +2339,10 @@ bool madvise_free_huge_pmd(struct mmu_gather *tlb, struct vm_area_struct *vma,
+ 	}
+ 
+ 	folio = pmd_folio(orig_pmd);
++
++	if (folio_is_private_node(folio))
++		goto out;
++
+ 	/*
+ 	 * If other processes are mapping this folio, we couldn't discard
+ 	 * the folio unless they all do MADV_FREE so let's skip the folio.
+diff --git a/mm/madvise.c b/mm/madvise.c
+index 07a21ca31ba..29f35a23919 100644
+--- a/mm/madvise.c
++++ b/mm/madvise.c
+@@ -32,6 +32,7 @@
+ #include <linux/leafops.h>
+ #include <linux/shmem_fs.h>
+ #include <linux/mmu_notifier.h>
++#include <linux/node_private.h>
+ 
+ #include <asm/tlb.h>
+ 
+@@ -395,6 +396,9 @@ static int madvise_cold_or_pageout_pte_range(pmd_t *pmd,
+ 
+ 		folio = pmd_folio(orig_pmd);
+ 
++		if (folio_is_private_node(folio))
++			goto huge_unlock;
++
+ 		/* Do not interfere with other mappings of this folio */
+ 		if (folio_maybe_mapped_shared(folio))
+ 			goto huge_unlock;
+@@ -474,7 +478,7 @@ restart:
+ 			continue;
+ 
+ 		folio = vm_normal_folio(vma, addr, ptent);
+-		if (!folio || folio_is_zone_device(folio))
++		if (!folio || folio_is_private_managed(folio))
+ 			continue;
+ 
+ 		/*
+@@ -703,7 +707,7 @@ static int madvise_free_pte_range(pmd_t *pmd, unsigned long addr,
+ 		}
+ 
+ 		folio = vm_normal_folio(vma, addr, ptent);
+-		if (!folio || folio_is_zone_device(folio))
++		if (!folio || folio_is_private_managed(folio))
+ 			continue;
+ 
+ 		/*
+-- 
+2.55.0
+

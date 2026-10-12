@@ -1,0 +1,6 @@
+# tmpfiles.d entries for the sackd fetch-cache dir referenced by
+# RUNTIME_DIRECTORY in sackd.service. /var/run is persistent by design
+# (never wiped at boot); this converges the runtime dir with the slurm
+# service identity. OpenRC converges the same path via checkpath in
+# sackd.initd.
+d /var/run/sackd 0755 slurm slurm -

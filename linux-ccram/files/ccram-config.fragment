@@ -1,0 +1,53 @@
+# linux-ccram Kconfig delta over linux-saphira-meta-cram.
+#
+# CCRAM — AKADATA LIMITED adaptation of Meta CRAM (see CRAM.PROVENANCE
+# in linux-saphira-meta-cram; Saphira-original delta, GPL-2.0-only).
+#
+# Derivation (proven 2026-10-11, reproducible by hand):
+#   config-7.2.9-ccram-akadata
+#     == config-7.2.9-meta-cram-akadata
+#        + the lines below + `make olddefconfig` (ripple checked: only
+#          the symbols these select — DRM_CLIENT_SETUP and
+#          FRAMEBUFFER_CONSOLE_DETECT_PRIMARY — may appear; anything
+#          else fails the recipe's delta gate).
+# Proof command (from the recipe tree root):
+#   diff linux-saphira-meta-cram/files/config-7.2.9-meta-cram-akadata \
+#        linux-ccram/files/config-7.2.9-ccram-akadata
+# yields exactly the LOCALVERSION rename, the CCRAM_SYSRAM line and the
+# DRM_FBDEV_EMULATION line.
+# Parent config sha256:
+#   5d750d6aa2f70424df799c07cf1f9a1f24b50bd8df56ada7c13ed5baa89dcdae
+# This config sha256:
+#   5967b5926533484590c58fec47460f2db7f3be98e964445c4da8ea8f583e1f35
+# The meta-cram config itself derives from config-7.2.2-akadata plus
+# cram-config.fragment (see CONFIG-DIFF-JUSTIFICATION.md there), so the
+# full chain back to the normal Saphira kernel config is documented.
+#
+# Release identity: distinct /lib/modules/7.2.9-ccram so every normal
+# Saphira kernel keeps its module tree untouched (GRUB fallback stays).
+CONFIG_LOCALVERSION="-ccram"
+#
+# The CCRAM sysram backend itself (bool, default n; Saphira-original).
+CONFIG_CCRAM_SYSRAM=y
+#
+# Legacy fbdev emulation for the modesetting driver (bool, default
+# follows FB).  Required on 7.2.9+ for ANY drm framebuffer console:
+# the 7.2.9 DRM client rework gates drm_client_setup_* (and hence
+# i915's fbdev setup and fbcon takeover) behind this symbol.  Without
+# it the driver initialises fully but creates no fb0, fbcon stays on
+# the dummy device, and there is no local boot console — unlike the
+# 7.2.x Saphira kernels, where the fbdev client was unconditional.
+# Selects DRM_CLIENT_SETUP (+ FRAMEBUFFER_CONSOLE_DETECT_PRIMARY);
+# no other ripple (proven by the 2-line diff method in the
+# justification document).
+CONFIG_DRM_FBDEV_EMULATION=y
+#
+# Resolution-selected (added by `make olddefconfig`, not part of this
+# fragment, asserted present by the recipe's post-resolution gate):
+#   CONFIG_DRM_CLIENT_SETUP=y
+#   CONFIG_DRM_CLIENT_DEFAULT_FBDEV=y
+#   CONFIG_DRM_CLIENT_DEFAULT="fbdev"
+#   CONFIG_FRAMEBUFFER_CONSOLE_DETECT_PRIMARY=y
+# These four are the documented, intended consequence of the
+# FBDEV_EMULATION line above (see drivers/gpu/drm/clients/Kconfig).
+# Any other resolution addition fails the build for review.

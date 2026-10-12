@@ -1,0 +1,28 @@
+[Unit]
+Description=FRRouting OSPF daemon
+Documentation=man:ospfd(8)
+After=network-online.target zebra.service
+Wants=network-online.target
+# zebra provides the shared routing table and the zserv API socket; a
+# protocol daemon without it exits rather than degrading.
+Requires=zebra.service
+
+[Service]
+# Mirrors files/ospfd.initd. -d keeps the daemon in the foreground.
+User=frr
+Group=frr
+Type=simple
+ExecStart=/usr/sbin/ospfd -d -f /etc/frr/ospfd.conf -i /var/run/frr/ospfd.pid -z /var/run/frr/zserv.api
+RuntimeDirectory=frr
+RuntimeDirectoryMode=0755
+Restart=on-failure
+RestartSec=5
+
+# Deliberately NOT set: ProtectKernelTunables=** or a
+# CapabilityBoundingSet; see the note in zebra.service.
+NoNewPrivileges=yes
+ProtectHome=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_PACKET AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target

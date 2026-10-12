@@ -1,0 +1,108 @@
+From 86457a9cd66077c5bb19a93051f25aa602c9c04b Mon Sep 17 00:00:00 2001
+From: Gregory Price <gourry@gourry.net>
+Date: Fri, 19 Jun 2026 12:28:15 -0700
+Subject: [PATCH] mm/khugepaged: base private node collapse eligiblity on
+ actor/cap bits
+
+Collapse can move base pages across nodes.  The khugepaged daemon does
+this transparently, while MADV_COLLAPSE is a userland construct.
+
+Isolate private nodes from khugepaged exactly like ZONE_DEVICE.
+Never collapse private node folios silently (the owner may not
+support migration).
+
+MADV_COLLAPSE is user-initiated, so it is allowed on a private node
+opted into CAP_USER_NUMA, consistent with other userspace interfaces.
+
+folio_allows_collapse() encodes this: false for khugepaged on a private
+node, CAP_USER_NUMA for MADV_COLLAPSE.
+
+Signed-off-by: Gregory Price <gourry@gourry.net>
+---
+ mm/internal.h   | 26 ++++++++++++++++++++++++++
+ mm/khugepaged.c | 16 +++++++++++++---
+ 2 files changed, 39 insertions(+), 3 deletions(-)
+
+diff --git a/mm/internal.h b/mm/internal.h
+index 9621eb127c2..9dbc5752cd3 100644
+--- a/mm/internal.h
++++ b/mm/internal.h
+@@ -136,6 +136,32 @@ static inline bool folio_allows_numa_balance(struct folio *folio)
+ 	       node_allows_numa_balancing(folio_nid(folio));
+ }
+ 
++/*
++ * folio_allows_collapse() - may collapse fold this folio into a THP?
++ * @is_khugepaged: true for the khugepaged, false for MADV_COLLAPSE.
++ *
++ * Collapse is a residency operation gated by the actor calling it:
++ *   - khugepaged never operates on private-node folios (like ZONE_DEVICE)
++ *   - MADV_COLLAPSE is gated by CAP_USER_NUMA
++ *
++ * Never true for ZONE_DEVICE.
++ */
++static inline bool folio_allows_collapse(struct folio *folio, bool is_khugepaged)
++{
++	int nid = folio_nid(folio);
++
++	if (folio_is_zone_device(folio))
++		return false;
++	if (is_khugepaged)
++		return !node_is_private(nid);
++	return node_allows_user_numa(nid);
++}
++
++static inline bool page_allows_collapse(struct page *page, bool is_khugepaged)
++{
++	return folio_allows_collapse(page_folio(page), is_khugepaged);
++}
++
+ /*
+  * folio_allows_longterm_pin() - may this folio be long-term GUP-pinned?
+  *
+diff --git a/mm/khugepaged.c b/mm/khugepaged.c
+index fb4378cc17b..5f208398577 100644
+--- a/mm/khugepaged.c
++++ b/mm/khugepaged.c
+@@ -700,7 +700,8 @@ static enum scan_result __collapse_huge_page_isolate(struct vm_area_struct *vma,
+ 			goto out;
+ 		}
+ 		page = vm_normal_page(vma, addr, pteval);
+-		if (unlikely(!page) || unlikely(page_is_private_managed(page))) {
++		if (unlikely(!page) ||
++		    unlikely(!page_allows_collapse(page, cc->is_khugepaged))) {
+ 			result = SCAN_PAGE_NULL;
+ 			goto out;
+ 		}
+@@ -1241,9 +1242,17 @@ static enum scan_result alloc_charge_folio(struct folio **foliop, struct mm_stru
+ 	gfp_t gfp = (cc->is_khugepaged ? alloc_hugepage_khugepaged_gfpmask() :
+ 		     GFP_TRANSHUGE);
+ 	int node = collapse_find_target_node(cc);
++	unsigned int aflags;
+ 	struct folio *folio;
++	bool allow;
+ 
+-	folio = __folio_alloc(gfp, order, node, &cc->alloc_nmask, ALLOC_DEFAULT);
++	/* Private node access: khugepaged never, madvise with CAP_USER_NUMA */
++	allow = cc->is_khugepaged ? !node_is_private(node)
++				  : node_allows_user_numa(node);
++	aflags = (allow && node_is_private(node)) ?
++		ALLOC_ZONELIST_PRIVATE : ALLOC_DEFAULT;
++
++	folio = __folio_alloc(gfp, order, node, &cc->alloc_nmask, aflags);
+ 	if (!folio) {
+ 		*foliop = NULL;
+ 		if (is_pmd_order(order))
+@@ -1687,7 +1696,8 @@ static enum scan_result collapse_scan_pmd(struct mm_struct *mm,
+ 		}
+ 
+ 		page = vm_normal_page(vma, addr, pteval);
+-		if (unlikely(!page) || unlikely(page_is_private_managed(page))) {
++		if (unlikely(!page) ||
++		    unlikely(!page_allows_collapse(page, cc->is_khugepaged))) {
+ 			result = SCAN_PAGE_NULL;
+ 			goto out_unmap;
+ 		}
+-- 
+2.55.0
+

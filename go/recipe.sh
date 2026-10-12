@@ -25,7 +25,7 @@ bootstrap_sha256=675c26c449cbb18fc24b74650de1eabbae6e16f64326fd85a283fb3b5828068
 # x86-64-v3 baseline), same GOROOT_FINAL, same CGO posture (proven on
 # musl by the old bootstrap). 1.24.11 was the genesis line; 1.27.0
 # supersedes it (same-version binary bootstrap, no stepping needed).
-# The akadata-era go-1.25.5-r0 in the archive has no
+# The generation-zero go-1.25.5-r0 in the archive has no
 # recipe or provenance and is not followed.
 makedepends="
     bash

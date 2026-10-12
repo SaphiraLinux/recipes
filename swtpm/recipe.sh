@@ -56,5 +56,13 @@ recipe_build()
 
 recipe_install()
 {
-	make -C "$SRC" DESTDIR="$PKGDEST" install
+	make -C "$SRC" DESTDIR="$PKGDEST" install	# Dual-init policy: both definitions ship unconditionally; neither is
+	# enabled or started at install.
+	install -D -m 0755 "$RECIPE_DIR/files/swtpm.initd" \
+		"$PKGDEST/etc/init.d/swtpm"
+	install -D -m 0644 "$RECIPE_DIR/files/swtpm.service" \
+		"$PKGDEST/usr/lib/systemd/system/swtpm.service"
+	[ -e "$PKGDEST/etc/init.d/swtpm" ] || { echo "ERROR: swtpm payload is missing etc/init.d/swtpm" >&2; return 1; }
+	[ -e "$PKGDEST/usr/lib/systemd/system/swtpm.service" ] || { echo "ERROR: swtpm payload is missing usr/lib/systemd/system/swtpm.service" >&2; return 1; }
+
 }

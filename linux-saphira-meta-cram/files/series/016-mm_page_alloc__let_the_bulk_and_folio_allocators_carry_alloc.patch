@@ -1,0 +1,157 @@
+From 2b652377d4587fe45b7222dc4084f052c81e512d Mon Sep 17 00:00:00 2001
+From: Gregory Price <gourry@gourry.net>
+Date: Sat, 18 Jul 2026 13:00:38 -0700
+Subject: [PATCH] mm/page_alloc: let the bulk and folio allocators carry
+ alloc_flags
+
+__alloc_pages_noprof() takes an explicit alloc_flags, but the bulk and
+folio entry points do not, so callers cannot select allocator behaviour
+(e.g. an alternate zonelist) through them.
+
+Thread alloc_flags through both, matching __alloc_pages_noprof():
+
+ - add __alloc_pages_bulk_noprof(gfp, alloc_flags, ...) as the bulk
+   primitive; alloc_pages_bulk_noprof() becomes a thin wrapper passing
+   ALLOC_DEFAULT, so its (many) callers are unchanged.
+
+ - give __folio_alloc_noprof() an alloc_flags parameter.  Its only
+   gfp.h caller (__folio_alloc_node_noprof) passes 0: ALLOC_DEFAULT is
+   mm-internal and not visible to the public header.
+
+No functional change: every caller passes ALLOC_DEFAULT.
+
+Signed-off-by: Gregory Price <gourry@gourry.net>
+---
+ include/linux/gfp.h |  5 +++--
+ mm/khugepaged.c     |  2 +-
+ mm/migrate.c        |  2 +-
+ mm/page_alloc.c     | 20 ++++++++++++++------
+ mm/page_alloc.h     |  5 +++++
+ 5 files changed, 24 insertions(+), 10 deletions(-)
+
+diff --git a/include/linux/gfp.h b/include/linux/gfp.h
+index 872bc53f32e..91ae3cd133c 100644
+--- a/include/linux/gfp.h
++++ b/include/linux/gfp.h
+@@ -205,7 +205,7 @@ static inline void arch_alloc_page(struct page *page, int order) { }
+ #endif
+ 
+ struct folio *__folio_alloc_noprof(gfp_t gfp, unsigned int order, int preferred_nid,
+-		nodemask_t *nodemask);
++		nodemask_t *nodemask, unsigned int alloc_flags);
+ #define __folio_alloc(...)			alloc_hooks(__folio_alloc_noprof(__VA_ARGS__))
+ 
+ unsigned long alloc_pages_bulk_noprof(gfp_t gfp, int preferred_nid,
+@@ -257,7 +257,8 @@ struct folio *__folio_alloc_node_noprof(gfp_t gfp, unsigned int order, int nid)
+ {
+ 	warn_if_node_offline(nid, gfp);
+ 
+-	return __folio_alloc_noprof(gfp, order, nid, NULL);
++	/* gfp.h can't see the mm-internal ALLOC_* flags; 0 == ALLOC_DEFAULT. */
++	return __folio_alloc_noprof(gfp, order, nid, NULL, 0);
+ }
+ 
+ #define  __folio_alloc_node(...)		alloc_hooks(__folio_alloc_node_noprof(__VA_ARGS__))
+diff --git a/mm/khugepaged.c b/mm/khugepaged.c
+index 27e8f3077e8..89ce6bcbc37 100644
+--- a/mm/khugepaged.c
++++ b/mm/khugepaged.c
+@@ -1243,7 +1243,7 @@ static enum scan_result alloc_charge_folio(struct folio **foliop, struct mm_stru
+ 	int node = collapse_find_target_node(cc);
+ 	struct folio *folio;
+ 
+-	folio = __folio_alloc(gfp, order, node, &cc->alloc_nmask);
++	folio = __folio_alloc(gfp, order, node, &cc->alloc_nmask, ALLOC_DEFAULT);
+ 	if (!folio) {
+ 		*foliop = NULL;
+ 		if (is_pmd_order(order))
+diff --git a/mm/migrate.c b/mm/migrate.c
+index 60355be9f65..a8a86141dbb 100644
+--- a/mm/migrate.c
++++ b/mm/migrate.c
+@@ -2231,7 +2231,7 @@ struct folio *alloc_migration_target(struct folio *src, unsigned long private)
+ 	if (is_highmem_idx(zidx) || zidx == ZONE_MOVABLE)
+ 		gfp_mask |= __GFP_HIGHMEM;
+ 
+-	return __folio_alloc(gfp_mask, order, nid, mtc->nmask);
++	return __folio_alloc(gfp_mask, order, nid, mtc->nmask, ALLOC_DEFAULT);
+ }
+ 
+ #ifdef CONFIG_NUMA_MIGRATION
+diff --git a/mm/page_alloc.c b/mm/page_alloc.c
+index 4c1ef84c02a..b478e7e7338 100644
+--- a/mm/page_alloc.c
++++ b/mm/page_alloc.c
+@@ -5103,8 +5103,8 @@ static inline bool prepare_alloc_pages(gfp_t gfp_mask, unsigned int order,
+  * @page_array were set to %NULL on entry, the slots from 0 to the return value
+  * - 1 will be filled.
+  */
+-unsigned long alloc_pages_bulk_noprof(gfp_t gfp, int preferred_nid,
+-			nodemask_t *nodemask, int nr_pages,
++unsigned long __alloc_pages_bulk_noprof(gfp_t gfp, unsigned int zlflags,
++			int preferred_nid, nodemask_t *nodemask, int nr_pages,
+ 			struct page **page_array)
+ {
+ 	struct page *page;
+@@ -5112,7 +5112,7 @@ unsigned long alloc_pages_bulk_noprof(gfp_t gfp, int preferred_nid,
+ 	struct zoneref *z;
+ 	struct per_cpu_pages *pcp;
+ 	struct list_head *pcp_list;
+-	struct alloc_context ac;
++	struct alloc_context ac = { .alloc_flags = zlflags };
+ 	unsigned int alloc_flags = ALLOC_WMARK_LOW;
+ 	int nr_populated = 0, nr_account = 0;
+ 
+@@ -5238,11 +5238,19 @@ out:
+ 	return nr_populated;
+ 
+ failed:
+-	page = __alloc_pages_noprof(gfp, 0, preferred_nid, nodemask, ALLOC_DEFAULT);
++	page = __alloc_pages_noprof(gfp, 0, preferred_nid, nodemask, zlflags);
+ 	if (page)
+ 		page_array[nr_populated++] = page;
+ 	goto out;
+ }
++
++unsigned long alloc_pages_bulk_noprof(gfp_t gfp, int preferred_nid,
++			nodemask_t *nodemask, int nr_pages,
++			struct page **page_array)
++{
++	return __alloc_pages_bulk_noprof(gfp, ALLOC_DEFAULT, preferred_nid,
++					 nodemask, nr_pages, page_array);
++}
+ EXPORT_SYMBOL_GPL(alloc_pages_bulk_noprof);
+ 
+ /*
+@@ -5433,10 +5441,10 @@ struct page *alloc_pages_node_noprof(int nid, gfp_t gfp_mask, unsigned int order
+ EXPORT_SYMBOL(alloc_pages_node_noprof);
+ 
+ struct folio *__folio_alloc_noprof(gfp_t gfp, unsigned int order, int preferred_nid,
+-		nodemask_t *nodemask)
++		nodemask_t *nodemask, unsigned int alloc_flags)
+ {
+ 	struct page *page = __alloc_pages_noprof(gfp | __GFP_COMP, order,
+-					preferred_nid, nodemask, ALLOC_DEFAULT);
++					preferred_nid, nodemask, alloc_flags);
+ 	return page_rmappable_folio(page);
+ }
+ EXPORT_SYMBOL(__folio_alloc_noprof);
+diff --git a/mm/page_alloc.h b/mm/page_alloc.h
+index b9259deddb5..94c814f45d5 100644
+--- a/mm/page_alloc.h
++++ b/mm/page_alloc.h
+@@ -258,6 +258,11 @@ struct page *__alloc_pages_noprof(gfp_t gfp, unsigned int order, int preferred_n
+ 		nodemask_t *nodemask, unsigned int alloc_flags);
+ #define __alloc_pages(...)			alloc_hooks(__alloc_pages_noprof(__VA_ARGS__))
+ 
++/* Bulk allocator taking explicit alloc_flags; alloc_pages_bulk() wraps it. */
++unsigned long __alloc_pages_bulk_noprof(gfp_t gfp, unsigned int alloc_flags,
++		int preferred_nid, nodemask_t *nodemask, int nr_pages,
++		struct page **page_array);
++
+ extern void zone_pcp_reset(struct zone *zone);
+ extern void zone_pcp_disable(struct zone *zone);
+ extern void zone_pcp_enable(struct zone *zone);
+-- 
+2.55.0
+

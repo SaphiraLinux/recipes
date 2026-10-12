@@ -1,0 +1,217 @@
+#!/bin/sh
+# saphira-init-switch - deliberate OpenRC <-> systemd init swap.
+#
+#   saphira-init-switch --to openrc|systemd [--apply-services]
+#                       [--accept-heuristic-names] [--yes]
+#
+# Owns the whole flow; `apk add/del` alone migrates nothing:
+#   1. preflight: saphira-net-migrate dry-run (any ERROR aborts all)
+#   2. migrate --apply (backup taken, source never deleted)
+#   3. swap: apk del <other> && apk add <target> (skipped if target
+#      already installed)
+#   4. enablement: printed always; executed only with --apply-services
+#   5. verify: addresses, default routes, init state
+#
+# Heuristic destination names (positional evidence, i.e. names the
+# tool could not anchor in existing config) require explicit
+# acceptance: --accept-heuristic-names or an interactive yes.
+# There is no post-reboot repair step; the files are right before
+# the swap or the tool refuses.
+
+set -eu
+
+PROG=saphira-init-switch
+MIGRATE=${SAPHIRA_INITSWITCH_MIGRATE:-/usr/sbin/saphira-net-migrate}
+# Highest-numbered wired recommendation first (matches are exact).
+TO=""
+APPLY_SERVICES=0
+ACCEPT_HEURISTIC=0
+YES=0
+
+usage()
+{
+	printf 'usage: %s --to openrc|systemd [--apply-services] [--accept-heuristic-names] [--yes]\n' "$PROG" >&2
+	exit 2
+}
+
+while [ "$#" -gt 0 ]; do
+	case $1 in
+		--to)
+			[ "$#" -ge 2 ] || usage
+			TO=$2
+			shift 2
+			;;
+		--to=*)
+			TO=${1#--to=}
+			shift
+			;;
+		--apply-services)
+			APPLY_SERVICES=1
+			shift
+			;;
+		--accept-heuristic-names)
+			ACCEPT_HEURISTIC=1
+			shift
+			;;
+		--yes | -y)
+			YES=1
+			shift
+			;;
+		-h | --help)
+			printf 'usage: %s --to openrc|systemd [--apply-services] [--accept-heuristic-names] [--yes]\n' "$PROG"
+			exit 0
+			;;
+		*)
+			usage
+			;;
+	esac
+done
+
+case $TO in
+	openrc | systemd) ;;
+	*) usage ;;
+esac
+
+if [ "$TO" = openrc ]; then
+	TARGET=openrc
+	OTHER=systemd
+else
+	TARGET=systemd
+	OTHER=openrc
+fi
+
+# Only the apk swap and service enablement need privilege; the
+# test harness sets SAPHIRA_INITSWITCH_ALLOW_UNPRIVILEGED=1.
+if [ "${SAPHIRA_INITSWITCH_ALLOW_UNPRIVILEGED:-0}" != 1 ] && [ "$(id -u)" -ne 0 ]; then
+	printf '%s: must run as root (apk swap + service enablement)\n' "$PROG" >&2
+	exit 2
+fi
+
+command -v "$MIGRATE" >/dev/null 2>&1 || {
+	printf '%s: %s not found\n' "$PROG" "$MIGRATE" >&2
+	exit 2
+}
+
+current_init()
+{
+	if [ -d /run/systemd/system ]; then
+		printf 'systemd'
+	elif command -v openrc-run >/dev/null 2>&1; then
+		printf 'openrc'
+	else
+		printf 'unknown'
+	fi
+}
+
+confirm()
+{
+	[ "$YES" -eq 1 ] && return 0
+	printf '%s ' "$1" >&2
+	read -r ans || return 1
+	case $ans in
+		y | Y | yes | YES) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+printf '%s: target=%s (running under %s)\n' "$PROG" "$TARGET" "$(current_init)"
+
+# --- 1. preflight ---------------------------------------------------------
+PRE=$(mktemp "${TMPDIR:-/tmp}"/saphira-init-switch.XXXXXX)
+trap 'rm -f "$PRE"' EXIT HUP INT TERM
+if ! "$MIGRATE" --to "$TO" >"$PRE" 2>&1; then
+	cat "$PRE" >&2
+	printf '%s: preflight migration FAILED; swap refused, nothing changed.\n' "$PROG" >&2
+	exit 1
+fi
+cat "$PRE"
+
+if grep -q 'evidence: positional' "$PRE"; then
+	printf '%s: heuristic destination names present (positional evidence).\n' "$PROG" >&2
+	if [ "$ACCEPT_HEURISTIC" -ne 1 ]; then
+		printf '%s: refused (positional names are guesses: verify them, or re-run with --accept-heuristic-names).\n' "$PROG" >&2
+		exit 1
+	fi
+fi
+
+# --- 2. migrate --apply ----------------------------------------------------
+"$MIGRATE" --to "$TO" --apply || {
+	printf '%s: migration FAILED; swap refused, nothing changed.\n' "$PROG" >&2
+	exit 1
+}
+
+# --- 3. swap ----------------------------------------------------------------
+if apk info -e "$TARGET" >/dev/null 2>&1; then
+	printf '%s: %s already installed; skipping apk swap.\n' "$PROG" "$TARGET"
+else
+	confirm "Swap init now: apk del $OTHER && apk add $TARGET? [y/N]" || {
+		printf '%s: swap declined (network files are migrated; re-run to swap).\n' "$PROG"
+		exit 1
+	}
+	apk del "$OTHER" && apk add "$TARGET" || {
+		printf '%s: apk swap FAILED; network files are migrated, init unchanged.\n' "$PROG" >&2
+		exit 1
+	}
+fi
+
+# --- 4. enablement -----------------------------------------------------------
+enable_openrc()
+{
+	printf 'rc-update add network default\n'
+	if grep -q -i 'ovs' "$PRE"; then
+		printf 'rc-update add openvswitch default\n'
+	fi
+}
+
+enable_systemd()
+{
+	printf 'systemctl enable systemd-networkd\n'
+	if grep -q -i 'ovs' "$PRE"; then
+		printf 'systemctl enable openvswitch\n'
+	fi
+}
+
+CMDS=$(mktemp "${TMPDIR:-/tmp}"/saphira-init-switch-cmds.XXXXXX)
+trap 'rm -f "$PRE" "$CMDS"' EXIT HUP INT TERM
+if [ "$TO" = openrc ]; then
+	enable_openrc >"$CMDS"
+else
+	enable_systemd >"$CMDS"
+fi
+
+if [ "$APPLY_SERVICES" -eq 1 ]; then
+	while IFS= read -r cmd; do
+		[ -n "$cmd" ] || continue
+		printf '+ %s\n' "$cmd"
+		# shellcheck disable=SC2086
+		$cmd || {
+			printf '%s: enablement command failed: %s\n' "$PROG" "$cmd" >&2
+			exit 1
+		}
+	done <"$CMDS"
+else
+	printf '%s: enablement (not applied; re-run with --apply-services):\n' "$PROG"
+	sed -e 's/^/  /' "$CMDS"
+fi
+
+# --- 5. verify -----------------------------------------------------------------
+printf '%s: verify:\n' "$PROG"
+ip addr show | sed -e 's/^/  /'
+ip route show | sed -e 's/^/  /'
+if [ "$TO" = openrc ]; then
+	if command -v rc-status >/dev/null 2>&1; then
+		rc-status -a 2>/dev/null | sed -e 's/^/  /' || true
+	fi
+else
+	if command -v networkctl >/dev/null 2>&1; then
+		networkctl status --no-legend 2>/dev/null | sed -e 's/^/  /' || true
+	fi
+fi
+
+if ! ip route show default 2>/dev/null | grep -q .; then
+	printf '%s: WARNING: no default route (management access may be down).\n' "$PROG" >&2
+else
+	printf '%s: default route present.\n' "$PROG"
+fi
+
+printf '%s: done. Reboot to complete the init swap, then verify SSH.\n' "$PROG"

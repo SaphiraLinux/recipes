@@ -14,6 +14,16 @@ die()
 	exit 1
 }
 
+# Saphira tool scratch lives under SAPHIRA_TMPDIR, never host /tmp.
+# RECIPE_RULES.md: "Host /tmp is never Saphira scratch: not for archives,
+# not for work, not for tests. Tool and test scratch lives under
+# SAPHIRA_TMPDIR (/build/tmp default)". /tmp is wiped on reboot, shared,
+# and invisible; on a live system it is also a small tmpfs.
+saphira_tmpdir()
+{
+	printf '%s\n' "${SAPHIRA_TMPDIR:-/build/tmp}"
+}
+
 repository=${SAPHIRA_REPOSITORY:-}
 case ${1:-} in
 	-r|--repository)
@@ -45,7 +55,7 @@ if find "$target" -mindepth 1 -maxdepth 1 ! -name lost+found -print -quit |
 	die 'target is not empty'
 fi
 
-packages_file=$(mktemp /tmp/saphira-bootstrap.packages.XXXXXX) ||
+packages_file=$(mktemp "$(saphira_tmpdir)/saphira-bootstrap.packages.XXXXXX") ||
 	die 'cannot create package-list workspace'
 trap 'rm -f -- "$packages_file"' EXIT HUP INT TERM
 seen_profiles=
@@ -60,9 +70,22 @@ expand_profile()
 	while IFS= read -r entry || test -n "$entry"; do
 		case $entry in
 			''|'#'*) continue ;;
+			@saphira-stage4-*) expand_profile "${entry#@saphira-stage4-}" ;;
 			@akadata-stage4-*) expand_profile "${entry#@akadata-stage4-}" ;;
 			@*) expand_profile "${entry#@}" ;;
-			*[!A-Za-z0-9._+-]*) die "invalid package in profile $current: $entry" ;;
+			# '=' is permitted so a CONSUMER can pin a version, e.g.
+			# saphira-kernel=7.1.5-r10. Saphira must not withhold that
+			# capability: someone installing an older line deliberately, or
+			# holding a system steady while a new one is validated, needs to
+			# say so, and the mechanism should be there for them.
+			#
+			# This says nothing about what WE do. Our own profiles name bare
+			# packages and never pin - see recipe-rules.sh, which enforces
+			# exactly that. The distinction matters: the system provides the
+			# capability, the project declines to use it. Removing the '='
+			# here would not make our installs safer, it would only make
+			# pinning impossible for everyone else.
+			*[!A-Za-z0-9._+=-]*) die "invalid package in profile $current: $entry" ;;
 			*) printf '%s\n' "$entry" >> "$packages_file" ;;
 		esac
 	done < "$profile_root/$current"
@@ -114,8 +137,10 @@ if test ! -e "$target/etc/mtab" && test ! -L "$target/etc/mtab"; then
 	ln -s /proc/mounts "$target/etc/mtab"
 fi
 # Root shell convention (mirrors the builder's root initialization):
-# /bin/sh is always a link to bash; no package owns it, so the
-# installer creates it. Fail closed when bash is absent.
+# /bin/sh is always a link to bash. The bash package owns the link, so this
+# is normally already in place; the installer keeps creating it as an
+# ordering safety net for profiles whose bash payload has not landed yet.
+# Fail closed when bash is absent.
 if test ! -e "$target/bin/sh" && test ! -L "$target/bin/sh"; then
 	test -x "$target/bin/bash" ||
 		die 'installed profile did not provide /bin/bash for /bin/sh'

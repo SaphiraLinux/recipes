@@ -1,0 +1,52 @@
+From 937516e7579ba51f974a128f1cb46c8aad2dc110 Mon Sep 17 00:00:00 2001
+From: Gregory Price <gourry@gourry.net>
+Date: Mon, 20 Apr 2026 18:37:45 -0700
+Subject: [PATCH] mm/damon: skip private node memory in DAMON migration and
+ pageout
+
+DAMON operates on physical address ranges, which can cover private
+node memory. Skip private-node folios in both DAMON's migration
+and reclaim paths.
+
+Signed-off-by: Gregory Price <gourry@gourry.net>
+---
+ mm/damon/paddr.c | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/mm/damon/paddr.c b/mm/damon/paddr.c
+index e4f98d67461..c741a943197 100644
+--- a/mm/damon/paddr.c
++++ b/mm/damon/paddr.c
+@@ -12,6 +12,7 @@
+ #include <linux/swap.h>
+ #include <linux/memory-tiers.h>
+ #include <linux/mm_inline.h>
++#include <linux/node_private.h>
+ 
+ #include "../internal.h"
+ #include "ops-common.h"
+@@ -250,6 +251,10 @@ static unsigned long damon_pa_pageout(struct damon_region *r,
+ 			continue;
+ 		}
+ 
++		/* private node memory is not reclaimable by default */
++		if (folio_is_private_node(folio))
++			goto put_folio;
++
+ 		if (damos_pa_filter_out(s, folio))
+ 			goto put_folio;
+ 		else
+@@ -344,6 +349,10 @@ static unsigned long damon_pa_migrate(struct damon_region *r,
+ 		else
+ 			*sz_filter_passed += folio_size(folio) / addr_unit;
+ 
++		/* private nodes do not support migration by default */
++		if (folio_is_private_node(folio))
++			goto put_folio;
++
+ 		if (!folio_isolate_lru(folio))
+ 			goto put_folio;
+ 		list_add(&folio->lru, &folio_list);
+-- 
+2.55.0
+

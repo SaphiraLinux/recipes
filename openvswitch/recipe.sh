@@ -2,7 +2,26 @@
 
 pkgname=openvswitch
 pkgver=3.7.1
-pkgrel=4
+pkgrel=6
+# r4 (never committed, unpublishable as built): fhs.d/ensure-fhs era -
+# maintainer scripts called the retired helper (exit 127) and the
+# rundir choice lived only in the build tree.
+# r5: /var/run runtime contract (ovs daemons run from /usr, so runtime
+# state belongs under /var/run; /run and /var/run are separate real
+# trees, never symlinked). Commits the previously-uncommitted choice:
+# --with-rundir, service/initd/tmpfiles all name /var/run/openvswitch
+# (root:root 0755, as before). No accounts fragment (root service, as
+# before). The old rmdir-if-empty residue line is dropped deliberately:
+# /run is fresh tmpfs every boot, so volatile residue evaporates on its
+# own. Payload change.
+# r4 (hotfix/var-packaging-bug-var-run-isnot-run): rundir
+# /run/openvswitch -> /var/run/openvswitch with the fhs.d migration
+# declaration (root-run suite, no accounts.d identity; ovs-ctl owns
+# lifecycle). Payload change, revision bumps.
+# r6: merge line (both parents shipped different r4/r5 payloads): keep
+# the r5 /var/run commitment AND the r4 fhs.d migration declaration -
+# merge decision: the fhs.d migration/reconciliation machinery survives,
+# so the fragment ships again. Payload change, revision bumps.
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='Open vSwitch: production-quality multilayer virtual switch (OVS bridge dataplane for libvirt/qemu)'
 license='Apache-2.0'
@@ -55,6 +74,8 @@ recipe_install()
 		"$PKGDEST/etc/init.d/openvswitch"
 	install -D -m 0644 "$RECIPE_DIR/files/openvswitch.confd" \
 		"$PKGDEST/etc/conf.d/openvswitch"
+	install -D -m 0644 "$RECIPE_DIR/files/openvswitch.tmpfiles" \
+		"$PKGDEST/usr/lib/tmpfiles.d/openvswitch.conf"
 	install -d -m 0755 "$PKGDEST/etc/openvswitch" "$PKGDEST/var/log/openvswitch"
 	# FHS migration declaration (hotfix/var-packaging-bug-var-run-isnot-run):
 	# root-run suite (no accounts.d identity); ovs-ctl owns lifecycle.

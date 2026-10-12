@@ -1,5 +1,5 @@
 # mailDragon main.cf additions.
-# Source: live ZeroDNS postfix (akadata-mailserver/etc/postfix/main.cf),
+# Source: live ZeroDNS postfix (generation-zero mailserver/etc/postfix/main.cf),
 # MariaDB lookups replaced by sqlite maps shipped beside this file.
 # Apply over the package default with:
 #   postconf -e $(grep -v '^#' /usr/share/saphira/maildragon/etc/main.cf.d/*)

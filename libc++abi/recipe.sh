@@ -22,6 +22,7 @@ makedepends="
     cmake
     compiler-rt>=22.1.8-r1
     gcc
+    gettext
     libunwind-dev>=22.1.8-r1
     ninja
     python3

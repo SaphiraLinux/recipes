@@ -1,0 +1,30 @@
+#!/sbin/openrc-run
+
+description="Standard cron daemon (the sole cron on Saphira)"
+
+# cronie is the only cron: it replaces dcron (disabled), and both provide
+# /usr/sbin/crond, so they cannot coexist. That makes this service a
+# single point of failure for all scheduled work on the host.
+#
+# -f keeps crond in the foreground, so there is a real process to
+# supervise and no pidfile to go stale.
+command="/usr/sbin/crond"
+command_args="-f"
+command_background="yes"
+pidfile="/run/crond.pid"
+supervisor="supervise-daemon"
+
+depend()
+{
+	need localmount
+	use logger
+	after bootmisc
+}
+
+start_pre()
+{
+	# The crontab spool is the daemon's primary state and must not be
+	# world-readable: a readable crontab is a readable root cron job.
+	checkpath -d -m 0700 -o root:root -p /var/spool/cron
+	checkpath -d -m 0700 -o root:root /var/spool/cron/crontabs
+}

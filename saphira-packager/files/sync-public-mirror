@@ -4,13 +4,17 @@
 
 Reads ONLY a committed git HEAD (never the working tree, never /out,
 never the builder, and no other recipe source): uncommitted drafts
-cannot leak by construction. The public tree stays pure-text: upstream
-archives, wheels, firmware blobs and other binary payloads are excluded
-by extension AND rejected by a content sniff. Named recipes can be
-excluded explicitly (--exclude-recipe), and the leakage gate greps the
-entire export for those names and fails closed. The generated
-recipes.json covers the exported tree only; it never resolves names
-outside it.
+cannot leak by construction. The export policy bars source archives,
+package archives, eggs and generated build artefacts: matched by
+filename extension AND by content magic, so misleading names (a branch
+snapshot called "master") or missing ones (a stray ELF with no
+extension) are still caught. Legitimate non-archive inputs ship
+normally no matter their bytes: UTF-16 data files, DER certificates
+and other binary-format source inputs are not archives. Named recipes
+can be excluded explicitly (--exclude-recipe), and the leakage gate
+greps the entire export for those names and fails closed. The
+generated recipes.json covers the exported tree only; it never
+resolves names outside it.
 
 Usage:
     sync-public-mirror SOURCE_DIR PUBLIC_CLONE [--live-repo DIR]
@@ -37,13 +41,44 @@ from pathlib import Path
 from typing import NoReturn
 
 
-# Binary payload extensions excluded from the public tree. .asc (upstream
-# ASCII-armoured signatures) and .sha256/.sig sidecars are text and ship.
+# Archive/package extensions excluded from the public tree. .asc
+# (upstream ASCII-armoured signatures) and .sha256/.sig sidecars are
+# text and ship. .apk (package archives) and .egg (eggs) are named
+# explicitly: the policy bars them even though no recipe should ever
+# vendor one.
 ARCHIVE_SUFFIXES = (
     ".tar.gz", ".tgz", ".tar.xz", ".tar.bz2", ".tar.zst", ".tar",
-    ".whl", ".gem", ".crate", ".zip", ".bin",
+    ".whl", ".gem", ".crate", ".zip", ".bin", ".apk", ".egg",
 )
 BARE_COMPRESSED = (".gz", ".xz", ".bz2", ".zst")
+
+# Content magic probed on leading bytes, independent of filename:
+# branch snapshots named "master" and stray build outputs with no
+# extension are still archives/artefacts. Compressed formats here
+# are archive containers, never legitimate public content; ELF marks
+# generated build artefacts, which must be removed at the source
+# rather than silently dropped (so export skips archives but lets
+# ELF through to fail the gate loudly).
+COMPRESSED_MAGIC = (
+    b"\x1f\x8b",          # gzip
+    b"BZh",               # bzip2
+    b"\xfd7zXZ\x00",      # xz
+    b"\x28\xb5\x2f\xfd",  # zstd
+)
+ELF_MAGIC = b"\x7fELF"
+
+
+def content_kind(head: bytes) -> str:
+    """Classify leading bytes: "archive", "elf", or "".
+    `head` may be shorter than any signature; startswith handles that.
+    Plain data - including UTF-16 text and DER certificates - classifies
+    as "" : the policy bars archives and artefacts, not bytes."""
+    if head[:4] == ELF_MAGIC:
+        return "elf"
+    for magic in COMPRESSED_MAGIC:
+        if head.startswith(magic):
+            return "archive"
+    return ""
 
 NVR_RE = re.compile(r"^(.*)-([0-9][^-]*)-r([0-9]+)\.apk$")
 
@@ -270,7 +305,17 @@ def export_tree(source: Path, head: str, dest: Path,
             target.parent.mkdir(parents=True, exist_ok=True)
             extracted = stream.extractfile(member)
             assert extracted is not None
+            # Content sniff on leading bytes: streaming mode forces us
+            # to consume the entry either way, so peek, then either
+            # skip the rest (archive magic: legit vendored input that
+            # must not export) or write head + remainder.
+            head = extracted.read(6)
+            if content_kind(head) == "archive":
+                skipped += 1
+                extracted.read()
+                continue
             with target.open("wb") as out:
+                out.write(head)
                 shutil.copyfileobj(extracted, out)
             try:
                 os.chmod(target, member.mode)
@@ -312,8 +357,11 @@ def snapshot_public_only(clone: Path, source_names: set[str]) -> dict[str, bytes
 
 
 def leakage_gate(clone: Path, excluded: set[str]) -> None:
-    """Fail closed: excluded names must appear nowhere (any case), no
-    binary payload may remain, recipes.json must be clean."""
+    """Fail closed: no source/package archives, no eggs and no build
+    artefacts (matched by filename or content magic); excluded names
+    appear nowhere (any case); recipes.json is clean. Non-archive
+    bytes are NOT findings: UTF-16 data, DER certificates and any
+    other binary-format source input ship normally."""
     failures = []
     for root, dirs, files in os.walk(clone):
         if ".git" in dirs:
@@ -324,20 +372,23 @@ def leakage_gate(clone: Path, excluded: set[str]) -> None:
                 content = path.read_bytes()
             except OSError:
                 continue
+            rel = path.relative_to(clone)
             if is_archive(filename):
-                failures.append(f"archive present: {path.relative_to(clone)}")
-            if b"\x00" in content[:65536]:
-                failures.append(f"binary content: {path.relative_to(clone)}")
-            try:
-                text = content.decode("utf-8", errors="strict")
-            except UnicodeDecodeError:
-                failures.append(f"non-text content: {path.relative_to(clone)}")
+                failures.append(f"archive present: {rel}")
                 continue
+            kind = content_kind(content[:6])
+            if kind == "archive":
+                failures.append(f"archive present (magic): {rel}")
+                continue
+            if kind == "elf":
+                failures.append(f"build artifact present: {rel}")
+                continue
+            text = content.decode("utf-8", errors="replace")
             lowered = text.lower()
             for name in excluded:
                 if name.lower() in lowered:
                     failures.append(
-                        f"excluded name {name!r} in {path.relative_to(clone)}")
+                        f"excluded name {name!r} in {rel}")
     index = clone / "recipes.json"
     if index.is_file():
         try:

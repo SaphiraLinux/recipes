@@ -1,0 +1,9 @@
+#%PAM-1.0
+# Saphira sudo service. The pam_systemd line is dash-optional so the
+# one file serves OpenRC and systemd alike (class=none: no session
+# scope registration, matching the Arch shape).
+
+auth		include		system-auth
+account		include		system-auth
+session		include		system-auth
+-session	optional	pam_systemd.so class=none

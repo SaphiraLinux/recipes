@@ -1,0 +1,30 @@
+[Unit]
+Description=PPPoE relay
+Documentation=man:pppoe-relay(8)
+After=network.target
+
+[Service]
+# Mirrors files/pppoe-relay.initd.
+#
+# The rp-pppoe pppd plugin is a hard requirement: pppd refuses to load
+# the plugin and the daemon cannot start without it. Assert it up front
+# so the failure names the missing plugin rather than appearing as a
+# generic daemon exit.
+ExecCondition=/bin/sh -c 'ls /usr/lib/pppd/*/rp-pppoe.so >/dev/null 2>&1'
+Type=simple
+ExecStart=/usr/sbin/pppoe-relay /etc/ppp/pppoe-server-options
+Restart=on-failure
+RestartSec=5
+
+# pppoe-server programs the kernel PPPoE netfilter state and pppoe-sniff
+# needs raw sockets, so the bounding set keeps both. Deliberately NOT set:
+# ProtectKernelTunables=** -- netfilter state is the daemon's job.
+# User= is also NOT set: PPPoE is a link-establishment protocol run by root.
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+NoNewPrivileges=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK AF_PACKET
+
+[Install]
+WantedBy=multi-user.target

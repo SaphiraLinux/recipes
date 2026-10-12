@@ -2,7 +2,17 @@
 
 pkgname=saphira-baselayout
 pkgver=0.1
-pkgrel=20
+pkgrel=24
+# r24: merge line (r23 nomodeset-drop + r20 reconciler semantics + r16
+# fhs.d machinery + r22 inittab split combined: the merged payload
+# carries ensure-fhs, permissions-override.sh, the global fhs.d
+# fragment, the converge service and the real /var/run+/run dirs,
+# which published r23 does not ship - payload change, bumps).
+# r23: drop nomodeset from default-grub (it blinds UEFI console: no
+# efifb, i915 is a module with no initramfs; proven on minimer N100).
+# Payload change (default-grub conffile).
+# r21: default-grub names init=/usr/lib/systemd/systemd (262 merged layout
+# has no /sbin/init; kernel falls back on 261, so mixed fleet is safe).
 # r20: reconciler failure semantics (live Egg incident: orchestrated
 # ensure-fhs died usage on `--root ""` and the deaths were counted
 # as drift inside a success-style summary). --root accepts an empty
@@ -11,6 +21,9 @@ pkgrel=20
 # identity resolution falls back to the fragment index for
 # declared-but-absent users/groups (audit must not die on what
 # apply would create). Payload change, revision bumps.
+# (r20 adopted from hotfix/var-packaging-bug-var-run-isnot-run; r24
+# already outranks r20. Published r23 predates the merge, so the
+# merged payload takes the next revision.)
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="Saphira filesystem skeleton and platform tools (init-system neutral)"
 license="BUSL-1.1"
@@ -72,6 +85,11 @@ makedepends=""
 # openrc leaves zero OpenRC traces behind.  The systemd variant needs no
 # separate baselayout fork: this one is neutral.  saphira-base-abi stays
 # untouched; it tracks ABI, not init systems.
+# r22: /etc/inittab leaves baselayout (it was the last OpenRC-specific
+# path still shipped here, so every systemd machine carried a stale
+# OpenRC sysvinit table). Ownership moves to the openrc package, which
+# ships the byte-identical stock file; apk ownership semantics then
+# govern both directions with no transition hooks. Payload change.
 
 recipe_build()
 {
@@ -91,7 +109,10 @@ recipe_install()
 		"$PKGDEST/var/empty" "$PKGDEST/var/lib/saphira-firstboot" \
 		"$PKGDEST/var/spool/mail" \
 		"$PKGDEST/var/run" "$PKGDEST/run"
-	install -m 0644 "$RECIPE_DIR/files/inittab" "$PKGDEST/etc/inittab"
+	# NOTE (merge line): no /etc/inittab here. r22 moved inittab
+	# ownership to the openrc package (byte-identical stock file);
+	# installing it here too would dual-own /etc/inittab and trip
+	# the repository ownership gate.
 	install -m 0644 "$RECIPE_DIR/files/profile" "$PKGDEST/etc/profile"
 	install -m 0644 "$RECIPE_DIR/files/network.conf" \
 		"$PKGDEST/etc/network.conf"

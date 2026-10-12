@@ -3,11 +3,15 @@
 pkgname=clamav-freshclam
 pkgver=1.5.3
 # r2: rebuild against the branded rustc (x86_64-akadata-linux-musl).
-pkgrel=3
+pkgrel=5
 # r3: pid paths /run/clamav -> /var/run/clamav (shared dir lifecycle
 # in base clamav; old-dir removal declared once by clamav-daemon's
 # fhs.d - exact-path union refuses duplicates, so no fragment here).
 # Payload change, revision bumps.
+# (r3 adopted from hotfix/var-packaging-bug-var-run-isnot-run so this
+# lineage never regresses it.)
+# r5: merge line (r4 rustc rebuild + r3 pid paths combined: the merged
+# unit paths differ from both parents). Payload change, bumps.
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="ClamAV virus signature updater (freshclam)"
 license="GPL-2.0-or-later"
@@ -69,7 +73,7 @@ recipe_build()
 		-DENABLE_EXAMPLES=OFF -DENABLE_STATIC_LIB=OFF \
 		-DENABLE_SHARED_LIB=ON -DENABLE_JSON_SHARED=ON \
 		-DDO_NOT_SET_RPATH=ON
-	CARGO_NET_OFFLINE=true RUSTFLAGS="-Clink-arg=-no-pie" ninja -C build freshclam-bin
+	CARGO_NET_OFFLINE=true ninja -C build freshclam-bin
 }
 
 recipe_install()

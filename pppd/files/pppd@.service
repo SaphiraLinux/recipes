@@ -1,0 +1,36 @@
+[Unit]
+Description=PPP link daemon for %i
+Documentation=man:pppd(8)
+# A PPP link is network-dependent and per-interface, so this is a
+# template rather than a single multi-user service: the network layer or
+# an operator starts the links that matter.
+After=network.target
+
+[Service]
+# pppd forks once the link is established, so Type=forking and the
+# pidfile is per-interface (/var/run/ppp<N>.pid) and cannot be named
+# before the link number is known. systemd tracks the manager process.
+Type=forking
+ExecStart=/usr/sbin/pppd /etc/ppp/peers/%i
+# Peer options carry the credentials and the plugin. Never enable this
+# template with a peer that has none.
+ExecCondition=/bin/sh -c 'test -f /etc/ppp/peers/%i'
+
+# Restart= is deliberately NOT on-failure. pppd holds a live PPP session:
+# a restart storm on a flapping WAN link is worse than staying down, and
+# each restart tears down and re-establishes the session. Restart only on
+# abnormal exit, and bound the attempts.
+Restart=on-abnormal
+RestartSec=10
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+# Deliberately NOT set: User= (root by design; PPP carries the link and
+# the pty), CapabilityBoundingSet (the TTY and netlink paths need
+# CAP_NET_ADMIN), or ProtectSystem=strict.
+NoNewPrivileges=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

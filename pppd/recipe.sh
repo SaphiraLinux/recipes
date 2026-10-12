@@ -75,5 +75,18 @@ recipe_install()
 	for m in "$SRC/pppd"/*.8 "$SRC/chat/chat.8"; do
 		[ -f "$m" ] && install -m 644 "$m" "$PKGDEST/usr/share/man/man8/"
 	done
-	install -m 644 "$SRC/etc.ppp/options" "$PKGDEST/etc/ppp/options"
+	install -m 644 "$SRC/etc.ppp/options" "$PKGDEST/etc/ppp/options"	# Dual-init policy: both definitions ship unconditionally; neither is
+	# enabled or started at install.
+	install -D -m 0755 "$RECIPE_DIR/files/pppd@.initd" \
+		"$PKGDEST/etc/init.d/pppd"
+	install -D -m 0644 "$RECIPE_DIR/files/pppd@.service" \
+		"$PKGDEST/usr/lib/systemd/system/pppd@.service"
+	# Not a plain multi-user service: pppd is per-link, so both
+	# definitions are instance/template shaped. A single fixed service
+	# would be the wrong abstraction, which is why the registry records
+	# this package as a daemon but a deliberately shaped one.
+	install -d -m 0755 "$PKGDEST/etc/ppp/peers"
+	[ -e "$PKGDEST/etc/init.d/pppd" ] || { echo "ERROR: pppd payload is missing etc/init.d/pppd" >&2; return 1; }
+	[ -e "$PKGDEST/usr/lib/systemd/system/pppd@.service" ] || { echo "ERROR: pppd payload is missing usr/lib/systemd/system/pppd@.service" >&2; return 1; }
+
 }

@@ -1,6 +1,6 @@
 pkgname=grub
 pkgver=2.12
-pkgrel=6
+pkgrel=7
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='GRUB 2 boot loader (BIOS/i386-pc and EFI/x86_64-efi platforms, tools and scripts)'
 license='GPL-3.0-or-later'
@@ -32,7 +32,7 @@ subpackages="$pkgname-doc"
 # grub-bios + grub-efi; the worker only splits -dev/-doc/-libs, and the
 # openssh precedent applies: drop the split, ship one package). Both
 # platform module trees are included so grub-install works for BIOS and
-# EFI from the same package. akadata policy preserved from the reference
+# EFI from the same package. Saphira policy preserved from the reference
 # recipes: 30_os-prober removed (never probe other OSes), any systemd
 # units upstream installs are dropped, no fonts (grub-mkfont disabled -
 # no freetype dependency).

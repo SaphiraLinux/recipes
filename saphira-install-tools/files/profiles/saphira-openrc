@@ -1,0 +1,7 @@
+# Saphira, booting with OpenRC.
+#
+# A convenience composition only: base-system states what a Saphira machine
+# is, init-openrc states how it boots. Both remain usable on their own, and
+# nothing is duplicated here.
+@saphira-stage4-base-system
+@saphira-stage4-init-openrc

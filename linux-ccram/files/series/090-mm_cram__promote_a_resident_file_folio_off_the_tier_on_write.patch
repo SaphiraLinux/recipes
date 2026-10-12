@@ -1,0 +1,234 @@
+From 574cedce74872fcb4502a07f3deb45801bfdd4b0 Mon Sep 17 00:00:00 2001
+From: Gregory Price <gourry@gourry.net>
+Date: Thu, 9 Jul 2026 00:18:07 -0700
+Subject: [PATCH] mm/cram: promote a resident file folio off the tier on write
+
+A clean file folio on a write-fenced (CRAM) node is mapped read-only in place; a
+write must promote it back to DRAM before it is modified so the read-only device
+is never written.  cram_promote_pagecache() migrates the resident folio at
+(mapping, index) off the tier in place (rmap repoints every mapper) and is the
+action behind the file write-fence gates.
+
+Wire the two write entry points:
+  - shared mmap write: wp_page_shared() promotes, then re-faults onto the
+    promoted writable folio (a shared mapping cannot COW in place).
+  - page-cache write path: __filemap_get_folio() promotes on an FGP_WRITE
+    acquire before returning the folio, so a write_begin() memcpy never lands on
+    the device.  The FGP_FOR_MMAP read fault is exempt and maps in place.
+
+Inert until file folios are placed on such a node.
+
+Signed-off-by: Gregory Price <gourry@gourry.net>
+Assisted-by: Claude:claude-opus-4-8
+---
+ include/linux/cram.h | 16 +++++++++
+ mm/cram.c            | 79 ++++++++++++++++++++++++++++++++++++++++++++
+ mm/filemap.c         | 26 +++++++++++++++
+ mm/memory.c          | 24 ++++++++++++++
+ 4 files changed, 145 insertions(+)
+
+diff --git a/include/linux/cram.h b/include/linux/cram.h
+index e94dc5c4a61..bf6e24b7ad3 100644
+--- a/include/linux/cram.h
++++ b/include/linux/cram.h
+@@ -92,6 +92,17 @@ int cram_migrate_to(struct list_head *demote_folios, int src_nid,
+ 		    enum migrate_mode mode, enum migrate_reason reason,
+ 		    unsigned int *nr_succeeded);
+ 
++/*
++ * Resident file-cache tier (body in mm/cram.c).  A clean file folio demoted
++ * onto a CRAM node stays in the page cache, mapped read-only in place.  A byte
++ * writer promotes it back to DRAM first.  cram_promote_pagecache() migrates the
++ * resident folio at (mapping, index) off the tier and is the action behind the
++ * write-fence gates in filemap/memory/mprotect.  Returns 0 when promoted or
++ * already gone, or -EAGAIN on transient failure (caller retries unless @nowait).
++ */
++int cram_promote_pagecache(struct address_space *mapping, pgoff_t index,
++			   bool nowait);
++
+ #else /* !CONFIG_CRAM */
+ 
+ static inline int cram_register(int nid, const struct range *ranges,
+@@ -147,6 +158,11 @@ static inline int cram_migrate_to(struct list_head *demote_folios, int src_nid,
+ {
+ 	return -ENODEV;
+ }
++static inline int cram_promote_pagecache(struct address_space *mapping,
++					 pgoff_t index, bool nowait)
++{
++	return 0;
++}
+ 
+ #endif /* CONFIG_CRAM */
+ 
+diff --git a/mm/cram.c b/mm/cram.c
+index 3f147e14ed3..862a480e7a2 100644
+--- a/mm/cram.c
++++ b/mm/cram.c
+@@ -467,6 +467,85 @@ static void cram_promote_work_fn(struct work_struct *work)
+ 	kfree(batch);
+ }
+ 
++/**
++ * cram_promote_pagecache() - migrate a resident CRAM file folio to DRAM in place
++ * @mapping: the file mapping
++ * @index: page index within @mapping
++ * @nowait: if true, do not block on migration
++ *
++ * Migrates the resident CRAM file folio at (@mapping, @index) off the tier to
++ * DRAM, in place (rmap repoints every mapper).  This is the action behind the
++ * file write-fence gates (filemap/memory/mprotect).  A byte writer promotes the
++ * folio off the read-only device tier before touching it.  One-shot.  Never
++ * serves the folio.
++ *
++ * Return: 0 when promoted, already promoted by a racer, or gone.  -EAGAIN on a
++ * transient isolate/migrate failure, which the caller retries unless @nowait.
++ */
++int cram_promote_pagecache(struct address_space *mapping, pgoff_t index,
++			   bool nowait)
++{
++	struct migration_target_control mtc = {
++		.nid = numa_node_id(),	/* CRAM nodes are CPU-less: caller node is DRAM */
++		.gfp_mask = GFP_HIGHUSER_MOVABLE | __GFP_NOWARN,
++		.reason = MR_NUMA_MISPLACED,
++	};
++	struct folio *folio;
++	LIST_HEAD(list);
++	int ret;
++
++	/*
++	 * Raw lookup.  filemap_get_folio() routes through the acquire gate, which
++	 * calls back here, so use filemap_get_entry() to avoid the recursion.
++	 */
++	folio = filemap_get_entry(mapping, index);
++	if (!folio || xa_is_value(folio))
++		return 0;		/* gone / shadow entry: nothing resident */
++	if (!folio_is_cram(folio)) {
++		folio_put(folio);
++		return 0;		/* already promoted by a racer */
++	}
++	if (nowait) {
++		folio_put(folio);
++		return -EAGAIN;		/* migration may block */
++	}
++
++	/*
++	 * A just-demoted folio sits on a per-cpu LRU add-batch and is not yet
++	 * isolatable.  Drain this cpu's batch first (cheap).  The demotion may have
++	 * run on another cpu, so on a miss drain all cpus to flush it
++	 * deterministically, with no retry-count guesswork.
++	 */
++	if (!folio_test_lru(folio)) {
++		lru_add_drain();
++		if (!folio_test_lru(folio))
++			lru_add_drain_all();
++	}
++	if (!folio_isolate_lru(folio)) {
++		/* Concurrently isolated (reclaim/compaction): transient, caller retries. */
++		atomic_long_inc(&cram_cnt_promote_fail);
++		folio_put(folio);
++		return -EAGAIN;
++	}
++	node_stat_mod_folio(folio, NR_ISOLATED_ANON + folio_is_file_lru(folio),
++			    folio_nr_pages(folio));
++	list_add(&folio->lru, &list);
++	folio_put(folio);		/* migrate_pages() works off the isolation ref */
++
++	ret = migrate_pages(&list, alloc_migration_target, NULL,
++			    (unsigned long)&mtc, MIGRATE_SYNC, MR_NUMA_MISPLACED,
++			    NULL);
++	if (ret && !list_empty(&list))
++		putback_movable_pages(&list);
++	if (ret) {
++		atomic_long_inc(&cram_cnt_promote_fail);
++		return -EAGAIN;
++	}
++	atomic_long_inc(&cram_cnt_promote);
++	return 0;
++}
++EXPORT_SYMBOL_GPL(cram_promote_pagecache);
++
+ /* Zero a reserved balloon page so the compressor sees a minimal footprint. */
+ static void cram_zero_page(unsigned long pfn)
+ {
+diff --git a/mm/filemap.c b/mm/filemap.c
+index 1dbb4c6f824..c5cb9bf4336 100644
+--- a/mm/filemap.c
++++ b/mm/filemap.c
+@@ -1969,6 +1969,32 @@ repeat:
+ 		VM_BUG_ON_FOLIO(!folio_contains(folio, index), folio);
+ 	}
+ 
++	/*
++	 * File-CRAM write fence.  A non-mmap acquire is a byte access.  Promote the
++	 * folio off the CRAM tier to DRAM before handing it back, so no writer ever
++	 * touches the device.  The mmap read fault path (FGP_FOR_MMAP without
++	 * FGP_WRITE) is exempt and maps the CRAM folio read-only in place.  A shared
++	 * mmap write fault sets FGP_WRITE and promotes here too, because
++	 * do_shared_fault()'s page_mkwrite() would dirty the folio in place before
++	 * the wp promote fires.  Never serve an un-promoted CRAM folio.  A later
++	 * write_begin() store is a kernel memcpy into it, not a fault, so it would
++	 * bypass the PTE fences and hit the device.  cram_promote_pagecache() is
++	 * one-shot.  A blocking caller retries via the repeat loop and converges,
++	 * because CRAM folios are never long-term pinned.  Only NOWAIT gets -EAGAIN.
++	 */
++	if (unlikely(folio_is_cram(folio)) &&
++	    (!(fgp_flags & FGP_FOR_MMAP) || (fgp_flags & FGP_WRITE))) {
++		if (fgp_flags & FGP_LOCK)
++			folio_unlock(folio);
++		folio_put(folio);
++		if (cram_promote_pagecache(mapping, index, fgp_flags & FGP_NOWAIT)) {
++			if (fgp_flags & FGP_NOWAIT)
++				return ERR_PTR(-EAGAIN);
++			cond_resched();
++		}
++		goto repeat;
++	}
++
+ 	if (fgp_flags & FGP_ACCESSED)
+ 		folio_mark_accessed(folio);
+ 	else if (fgp_flags & FGP_WRITE) {
+diff --git a/mm/memory.c b/mm/memory.c
+index da7a2b567d1..27669b51e43 100644
+--- a/mm/memory.c
++++ b/mm/memory.c
+@@ -4141,12 +4141,36 @@ static vm_fault_t wp_pfn_shared(struct vm_fault *vmf)
+ 	return 0;
+ }
+ 
++/*
++ * wp_page_shared_promote_cram() - promote a CRAM folio off-tier on a shared write
++ *
++ * A shared mapping cannot COW.  A write to a CRAM folio promotes it to DRAM in
++ * place, updating every mapper via rmap, and re-faults.  The write then lands on
++ * the promoted, writable folio.  Capture mapping and index while the PTL still
++ * pins the folio's identity.
++ */
++static vm_fault_t wp_page_shared_promote_cram(struct vm_fault *vmf,
++					      struct folio *folio)
++	__releases(vmf->ptl)
++{
++	struct address_space *mapping = folio->mapping;
++	pgoff_t index = folio->index;
++
++	pte_unmap_unlock(vmf->pte, vmf->ptl);
++	if (mapping)
++		cram_promote_pagecache(mapping, index, false);
++	return 0;
++}
++
+ static vm_fault_t wp_page_shared(struct vm_fault *vmf, struct folio *folio)
+ 	__releases(vmf->ptl)
+ {
+ 	struct vm_area_struct *vma = vmf->vma;
+ 	vm_fault_t ret = 0;
+ 
++	if (unlikely(folio_is_cram(folio)))
++		return wp_page_shared_promote_cram(vmf, folio);
++
+ 	folio_get(folio);
+ 
+ 	if (vma->vm_ops && vma->vm_ops->page_mkwrite) {
+-- 
+2.55.0
+

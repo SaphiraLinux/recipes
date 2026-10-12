@@ -1,0 +1,278 @@
+From 6f3923d976232a5b43c09e80565117098e2f6233 Mon Sep 17 00:00:00 2001
+From: Gregory Price <gourry@gourry.net>
+Date: Wed, 17 Jun 2026 09:13:53 -0700
+Subject: [PATCH] mm: add NODE_PRIVATE_CAP_USER_NUMA for userland numa controls
+
+Provide a mechanism to opt private nodes into userland numa management.
+
+Add node_allows_user_numa() to encapsulate whether a node supports
+userland NUMA controls (always true for normal nodes).
+
+Placement - setting mempolicy via:
+  - mbind()
+  - set_mempolicy()
+  - set_mempolicy_home_node()
+
+  For mempolicy, enforcement lives in one place: mpol_set_nodemask()
+
+  Private nodes are not N_MEMORY, so they are trimmed from a nodemask
+  like a cpuset-trimmed node.  All-private nodemasks without a valid
+  node collapse to empty and the mempolicy fails.
+
+  home_node is not special-cased - it is only a preferred-nid hint, and
+  placement is governed by the bind nodemask, so a home node pointed at
+  an invalid node simply falls back via the normal fallback zonelists.
+
+  (All the same behavior as a node/mask not intersecting cpuset.mems).
+
+Migration - relocation of pages to/from a private node:
+  - mbind(MPOL_MF_MOVE)
+  - move_pages()
+  - migrate_pages()
+
+  mbind(MPOL_MF_MOVE) is a migration, so mempolicy and migration share
+  a single opt-in control.
+
+  The migration interfaces all check node eligibility and use
+  ALLOC_ZONELIST_PRIVATE to allow eligible migration requests to
+  move a folio to a private node..
+
+  alloc_migration_target() carries mtc->zlsel into the allocator
+  via __folio_alloc_zonelist().
+
+Signed-off-by: Gregory Price <gourry@gourry.net>
+---
+ include/linux/node_private.h | 33 +++++++++++++++++++++++++++++++++
+ mm/internal.h                |  1 +
+ mm/mempolicy.c               | 27 ++++++++++++++++++++-------
+ mm/migrate.c                 | 19 ++++++++++++++-----
+ 4 files changed, 68 insertions(+), 12 deletions(-)
+
+diff --git a/include/linux/node_private.h b/include/linux/node_private.h
+index f7cbae13099..655fe9ec5cb 100644
+--- a/include/linux/node_private.h
++++ b/include/linux/node_private.h
+@@ -13,6 +13,7 @@ struct page;
+  * to let specific services operate on its node.
+  */
+ #define NODE_PRIVATE_CAP_RECLAIM	(1UL << 0)	/* allow mm reclaim */
++#define NODE_PRIVATE_CAP_USER_NUMA	(1UL << 1)	/* allow mempolicy */
+ 
+ /**
+  * struct node_private - Per-node container for N_MEMORY_PRIVATE nodes
+@@ -69,6 +70,33 @@ static inline bool node_allows_reclaim(int nid)
+ 	return ret;
+ }
+ 
++/**
++ * node_allows_user_numa - may userspace place or migrate memory here?
++ * @nid: the node to test
++ *
++ * Gate all userspace-directed memory operations on a private node.
++ *   - mbind()/set_mempolicy()
++ *   - move_pages()/migrate_pages()
++ *
++ * return: true for N_MEMORY and N_MEMORY_PRIVATE with CAP_USER_NUMA.
++ *         false for memoryless or opted-out private node.
++ */
++static inline bool node_allows_user_numa(int nid)
++{
++	struct node_private *np;
++	bool ret;
++
++	if (node_state(nid, N_MEMORY))
++		return true;
++	if (!node_state(nid, N_MEMORY_PRIVATE))
++		return false;
++	rcu_read_lock();
++	np = rcu_dereference(NODE_DATA(nid)->node_private);
++	ret = np && (np->caps & NODE_PRIVATE_CAP_USER_NUMA);
++	rcu_read_unlock();
++	return ret;
++}
++
+ #else /* !CONFIG_NUMA */
+ 
+ static inline bool folio_is_private_node(struct folio *folio)
+@@ -91,6 +119,11 @@ static inline bool node_allows_reclaim(int nid)
+ 	return true;
+ }
+ 
++static inline bool node_allows_user_numa(int nid)
++{
++	return true;
++}
++
+ #endif /* CONFIG_NUMA */
+ 
+ #if defined(CONFIG_NUMA) && defined(CONFIG_MEMORY_HOTPLUG)
+diff --git a/mm/internal.h b/mm/internal.h
+index 8329034ae56..62e68acae08 100644
+--- a/mm/internal.h
++++ b/mm/internal.h
+@@ -1250,6 +1250,7 @@ struct migration_target_control {
+ 	nodemask_t *nmask;
+ 	gfp_t gfp_mask;
+ 	enum migrate_reason reason;
++	unsigned int alloc_flags;
+ };
+ 
+ /*
+diff --git a/mm/mempolicy.c b/mm/mempolicy.c
+index a3ffb098974..fe42a510590 100644
+--- a/mm/mempolicy.c
++++ b/mm/mempolicy.c
+@@ -434,13 +434,14 @@ static int mpol_set_nodemask(struct mempolicy *pol,
+ 
+ 	/*
+ 	 * Private nodes are not in cpuset.mems, so they're always stripped.
+-	 * Driver-allocated policies will already have MPOL_F_PRIVATE set,
+-	 * if that's the case, add back in the requested set of private nodes.
++	 * Driver-allocated policies (MPOL_F_PRIVATE) and CAP_USER_NUMA private
++	 * nodes should be added back into the nodemask.
+ 	 */
+ 	for_each_node_mask(nid, *nodes) {
+ 		if (!node_is_private(nid))
+ 			continue;
+-		if (pol->flags & MPOL_F_PRIVATE)
++		if ((pol->flags & MPOL_F_PRIVATE) ||
++		    node_allows_user_numa(nid))
+ 			node_set(nid, nsc->mask2);
+ 	}
+ 
+@@ -696,7 +697,7 @@ static void queue_folios_pmd(pmd_t *pmd, struct mm_walk *walk)
+ 	}
+ 	if (!queue_folio_required(folio, qp))
+ 		return;
+-	if (folio_is_private_node(folio))
++	if (!node_allows_user_numa(folio_nid(folio)))
+ 		return;
+ 	if (!(qp->flags & (MPOL_MF_MOVE | MPOL_MF_MOVE_ALL)) ||
+ 	    !vma_migratable(walk->vma) ||
+@@ -752,7 +753,8 @@ static int queue_folios_pte_range(pmd_t *pmd, unsigned long addr,
+ 			continue;
+ 		}
+ 		folio = vm_normal_folio(vma, addr, ptent);
+-		if (!folio || folio_is_private_managed(folio))
++		if (!folio || folio_is_zone_device(folio) ||
++		    !node_allows_user_numa(folio_nid(folio)))
+ 			continue;
+ 		if (folio_test_large(folio) && max_nr != 1)
+ 			nr = folio_pte_batch(folio, pte, ptent, max_nr);
+@@ -827,7 +829,7 @@ static int queue_folios_hugetlb(pte_t *pte, unsigned long hmask,
+ 	folio = pfn_folio(pte_pfn(ptep));
+ 	if (!queue_folio_required(folio, qp))
+ 		goto unlock;
+-	if (folio_is_private_node(folio))
++	if (!node_allows_user_numa(folio_nid(folio)))
+ 		goto unlock;
+ 	if (!(flags & (MPOL_MF_MOVE | MPOL_MF_MOVE_ALL)) ||
+ 	    !vma_migratable(walk->vma)) {
+@@ -1412,6 +1414,8 @@ static long migrate_to_node(struct mm_struct *mm, int source, int dest,
+ 		.nid = dest,
+ 		.gfp_mask = GFP_HIGHUSER_MOVABLE | __GFP_THISNODE,
+ 		.reason = MR_SYSCALL,
++		.alloc_flags = node_is_private(dest) ?
++			 ALLOC_ZONELIST_PRIVATE : ALLOC_DEFAULT,
+ 	};
+ 
+ 	nodes_clear(nmask);
+@@ -1985,9 +1989,10 @@ static int kernel_migrate_pages(pid_t pid, unsigned long maxnode,
+ 	struct mm_struct *mm = NULL;
+ 	struct task_struct *task;
+ 	nodemask_t task_nodes;
+-	int err;
++	nodemask_t priv_ok;
+ 	nodemask_t *old;
+ 	nodemask_t *new;
++	int err, nid;
+ 	NODEMASK_SCRATCH(scratch);
+ 
+ 	if (!scratch)
+@@ -2027,7 +2032,14 @@ static int kernel_migrate_pages(pid_t pid, unsigned long maxnode,
+ 	}
+ 	rcu_read_unlock();
+ 
++	/* Private nodes are stripped by cpuset checks. Allow eligible ones. */
++	nodes_clear(priv_ok);
++	for_each_node_mask(nid, *new)
++		if (node_is_private(nid) && node_allows_user_numa(nid))
++			node_set(nid, priv_ok);
++
+ 	task_nodes = cpuset_mems_allowed(task);
++	nodes_or(task_nodes, task_nodes, priv_ok);
+ 	/* Is the user allowed to access the target nodes? */
+ 	if (!nodes_subset(*new, task_nodes) && !capable(CAP_SYS_NICE)) {
+ 		err = -EPERM;
+@@ -2035,6 +2047,7 @@ static int kernel_migrate_pages(pid_t pid, unsigned long maxnode,
+ 	}
+ 
+ 	task_nodes = cpuset_mems_allowed(current);
++	nodes_or(task_nodes, task_nodes, priv_ok);
+ 	if (!nodes_and(*new, *new, task_nodes))
+ 		goto out_put;
+ 
+diff --git a/mm/migrate.c b/mm/migrate.c
+index d20674c07b9..b548d79352a 100644
+--- a/mm/migrate.c
++++ b/mm/migrate.c
+@@ -2231,7 +2231,8 @@ struct folio *alloc_migration_target(struct folio *src, unsigned long private)
+ 	if (is_highmem_idx(zidx) || zidx == ZONE_MOVABLE)
+ 		gfp_mask |= __GFP_HIGHMEM;
+ 
+-	return __folio_alloc(gfp_mask, order, nid, mtc->nmask, ALLOC_DEFAULT);
++	return __folio_alloc(gfp_mask, order, nid, mtc->nmask,
++			     mtc->alloc_flags);
+ }
+ 
+ #ifdef CONFIG_NUMA_MIGRATION
+@@ -2253,6 +2254,8 @@ static int do_move_pages_to_node(struct list_head *pagelist, int node)
+ 		.nid = node,
+ 		.gfp_mask = GFP_HIGHUSER_MOVABLE | __GFP_THISNODE,
+ 		.reason = MR_SYSCALL,
++		.alloc_flags = node_is_private(node) ?
++			 ALLOC_ZONELIST_PRIVATE : ALLOC_DEFAULT,
+ 	};
+ 
+ 	err = migrate_pages(pagelist, alloc_migration_target, NULL,
+@@ -2268,7 +2271,8 @@ static int __add_folio_for_migration(struct folio *folio, int node,
+ 	if (is_zero_folio(folio) || is_huge_zero_folio(folio))
+ 		return -EFAULT;
+ 
+-	if (folio_is_private_managed(folio))
++	if (folio_is_zone_device(folio) ||
++	    !node_allows_user_numa(folio_nid(folio)))
+ 		return -ENOENT;
+ 
+ 	if (folio_nid(folio) == node)
+@@ -2392,11 +2396,14 @@ static int do_pages_move(struct mm_struct *mm, nodemask_t task_nodes,
+ 		err = -ENODEV;
+ 		if (node < 0 || node >= MAX_NUMNODES)
+ 			goto out_flush;
+-		if (!node_state(node, N_MEMORY))
++
++		if (!node_allows_user_numa(node))
+ 			goto out_flush;
+ 
+ 		err = -EACCES;
+-		if (!node_isset(node, task_nodes))
++		/* Private nodes are not partitioned by cpuset.mem */
++		if (!node_is_private(node) &&
++		    !node_isset(node, task_nodes))
+ 			goto out_flush;
+ 
+ 		if (current_node == NUMA_NO_NODE) {
+@@ -2477,7 +2484,9 @@ static void do_pages_stat_array(struct mm_struct *mm, unsigned long nr_pages,
+ 		if (folio) {
+ 			if (is_zero_folio(folio) || is_huge_zero_folio(folio))
+ 				err = -EFAULT;
+-			else if (folio_is_private_managed(folio))
++			else if (folio_is_zone_device(folio) ||
++				 (folio_is_private_node(folio) &&
++				  !node_allows_user_numa(folio_nid(folio))))
+ 				err = -ENOENT;
+ 			else
+ 				err = folio_nid(folio);
+-- 
+2.55.0
+

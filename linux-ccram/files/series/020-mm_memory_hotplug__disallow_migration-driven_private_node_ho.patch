@@ -1,0 +1,90 @@
+From 4728b22a6ed929a5f42cd81ee2d17c1dbbaab85e Mon Sep 17 00:00:00 2001
+From: Gregory Price <gourry@gourry.net>
+Date: Tue, 14 Apr 2026 19:34:07 -0700
+Subject: [PATCH] mm/memory_hotplug: disallow migration-driven private node
+ hotunplug
+
+By default, device-backed private node memory may not be safe to
+migrate without coordination.
+
+Do not attempt to hotunplug private node memory, instead fail the
+hotunplug attempt, and require the owner to drain the folios
+safely before allowing hotunplug to proceed.
+
+Unlike transient / longterm pins causing failures, this is not a
+transient condition - so we can break out of the hotunplug attempt
+entirely instead of spinning forever on a failed migration attempt.
+
+Signed-off-by: Gregory Price <gourry@gourry.net>
+---
+ mm/memory_hotplug.c | 21 +++++++++++++++++----
+ 1 file changed, 17 insertions(+), 4 deletions(-)
+
+diff --git a/mm/memory_hotplug.c b/mm/memory_hotplug.c
+index 226ab9cb078..2b9c0830821 100644
+--- a/mm/memory_hotplug.c
++++ b/mm/memory_hotplug.c
+@@ -34,6 +34,7 @@
+ #include <linux/memblock.h>
+ #include <linux/compaction.h>
+ #include <linux/rmap.h>
++#include <linux/node_private.h>
+ #include <linux/module.h>
+ #include <linux/node.h>
+ 
+@@ -1843,11 +1844,12 @@ found:
+ 	return 0;
+ }
+ 
+-static void do_migrate_range(unsigned long start_pfn, unsigned long end_pfn)
++static int do_migrate_range(unsigned long start_pfn, unsigned long end_pfn)
+ {
+ 	struct folio *folio;
+ 	unsigned long pfn;
+ 	LIST_HEAD(source);
++	int err = 0;
+ 	static DEFINE_RATELIMIT_STATE(migrate_rs, DEFAULT_RATELIMIT_INTERVAL,
+ 				      DEFAULT_RATELIMIT_BURST);
+ 
+@@ -1884,6 +1886,15 @@ static void do_migrate_range(unsigned long start_pfn, unsigned long end_pfn)
+ 			goto put_folio;
+ 		}
+ 
++		/* Private node folios cannot migrate, fail outright */
++		if (folio_is_private_node(folio)) {
++			pr_info_ratelimited("memory offline refused: node %d pfn %lx\n",
++					    folio_nid(folio), pfn);
++			folio_put(folio);
++			err = -EBUSY;
++			break;
++		}
++
+ 		if (!isolate_folio_to_list(folio, &source)) {
+ 			if (__ratelimit(&migrate_rs)) {
+ 				pr_warn("failed to isolate pfn %lx\n",
+@@ -1931,6 +1942,7 @@ put_folio:
+ 			putback_movable_pages(&source);
+ 		}
+ 	}
++	return err;
+ }
+ 
+ static int __init cmdline_parse_movable_node(char *p)
+@@ -2067,10 +2079,11 @@ int offline_pages(unsigned long start_pfn, unsigned long nr_pages,
+ 			ret = scan_movable_pages(pfn, end_pfn, &pfn);
+ 			if (!ret) {
+ 				/*
+-				 * TODO: fatal migration failures should bail
+-				 * out
++				 * A fatal migration failure (e.g. a folio on a
++				 * non-migratable private node) bails out; transient
++				 * failures leave ret zero and are retried below.
+ 				 */
+-				do_migrate_range(pfn, end_pfn);
++				ret = do_migrate_range(pfn, end_pfn);
+ 			}
+ 		} while (!ret);
+ 
+-- 
+2.55.0
+

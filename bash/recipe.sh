@@ -1,7 +1,7 @@
 #!/bin/sh
 pkgname=bash
 pkgver=5.3
-pkgrel=2
+pkgrel=3
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='GNU Bourne-Again shell - Saphira /bin/sh'
 license='GPL-3.0-or-later'
@@ -26,4 +26,13 @@ recipe_build() {
 }
 recipe_install() {
 	make -C "$SRC" DESTDIR="$PKGDEST" install
+	# Saphira /bin/sh is a relative link to bash owned by this package:
+	# the target lives here, so the link lives here too. Every makepkg-
+	# generated maintainer script uses a #!/bin/sh shebang, and a clean
+	# apk --root install runs those scripts with only dependencies
+	# installed first -- so without this link the first script fails
+	# execve 127. Controller fallbacks (buildpkg root-init,
+	# saphira-bootstrap, initialise_install_root) tolerate a pre-existing
+	# correct link and only create it when absent.
+	ln -s bash "$PKGDEST/bin/sh"
 }

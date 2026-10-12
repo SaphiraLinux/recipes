@@ -605,6 +605,149 @@ fi
 grep 'foreign account fragments' "$test_root/legacystray.log" >/dev/null
 printf '%s\n' 'account legacy sidecar refusal: ok (malformed, undeclared, identical, reserved, lone, stray)'
 
+
+# Maintainer hooks: a recipe may declare lifecycle hooks that refresh
+# derived state it invalidates (a kernel its boot config, a kmod package
+# its module index). These are generated scripts, and apk allows only ONE
+# script per lifecycle kind, so they must COMPOSE with the identity
+# callers rather than replace them -- and a package with no accounts must
+# still get them.
+hooks_stage()
+{
+	producer=$1
+	mkdir -p "$stage/$producer/pkg/usr/bin" "$stage/$producer/pkg/usr/share/saphira/hooks.d/$producer"
+	printf '%s\n' "$producer" > "$stage/$producer/pkg/usr/bin/$producer"
+	write_manifest "$producer" "{\"arch\":\"x86_64\",\"build_time\":20,\"license\":\"MIT\",\"name\":\"$producer\",\"origin\":\"$producer\",\"outputs\":[{\"dependencies\":[],\"description\":\"$producer\",\"name\":\"$producer\",\"payload\":\"pkg\"}],\"schema\":\"saphira-stage-manifest/v1\",\"url\":\"https://example.invalid/\",\"version\":\"1-r0\"}"
+}
+
+# 1. hook-only package: the caller carries the hook and invents no
+#    reconciler call for a fragment that does not exist.
+hooks_stage hookonly
+printf '%s\n' '#!/bin/sh' 'echo HOOKRAN' > "$stage/hookonly/pkg/usr/share/saphira/hooks.d/hookonly/post-install"
+run_makepkg hookonly >/dev/null
+hookonly_apk=$artifacts/x86_64/hookonly-1-r0.apk
+apk adbdump "$hookonly_apk" | grep -A12 'post-install:' | grep 'HOOKRAN' >/dev/null
+if apk adbdump "$hookonly_apk" | grep -A12 'post-install:' | grep -q 'ensure-identity.sh'; then
+	printf '%s\n' 'hook-only package invented an identity reconciler call' >&2
+	exit 1
+fi
+# the declaration is stripped from the payload paths: the generated
+# script is the only shipped copy. Scope this to the paths block -- the
+# generated caller legitimately names the hooks directory in its header.
+if apk adbdump "$hookonly_apk" | sed -n '/^paths:/,/^[a-z]/p' | grep -q 'hooks\.d'; then
+	printf '%s\n' 'maintainer hook declaration leaked into the payload' >&2
+	exit 1
+fi
+# a hook is a generated script, so its shell must be ordered before it runs
+apk adbdump "$hookonly_apk" | grep -A14 'info:' | grep -q 'bash' || {
+	printf '%s\n' 'hook package did not gain its shell dependency' >&2
+	exit 1
+}
+printf '%s\n' 'maintainer hook, hook-only package: ok (embedded, stripped, no invented reconciler, deps)'
+
+# 2. hooks compose with identity management: reconciliation first, then the
+#    hook, in every caller kind. This is the single-slot-per-kind trap.
+hooks_stage hookidsvc
+mkdir -p "$stage/hookidsvc/pkg/usr/share/saphira/accounts.d"
+printf '%s\n' 'user hookiduser 661 hookidgroup /var/lib/hookidsvc /sbin/nologin' 'group hookidgroup 661' > "$stage/hookidsvc/pkg/usr/share/saphira/accounts.d/hookidsvc"
+for hook_kind in post-install post-upgrade post-deinstall; do
+	printf '%s\n' '#!/bin/sh' "echo HOOK-$hook_kind" > "$stage/hookidsvc/pkg/usr/share/saphira/hooks.d/hookidsvc/$hook_kind"
+done
+write_manifest hookidsvc '{"arch":"x86_64","build_time":21,"license":"MIT","name":"hookidsvc","origin":"hookidsvc","outputs":[{"dependencies":[],"description":"hookidsvc","name":"hookidsvc","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r0"}'
+run_makepkg hookidsvc >/dev/null
+hookidsvc_apk=$artifacts/x86_64/hookidsvc-1-r0.apk
+apk adbdump "$hookidsvc_apk" > "$test_root/hookidsvc.dump"
+for hook_kind in post-install post-upgrade post-deinstall; do
+	awk "/$hook_kind:/,0" "$test_root/hookidsvc.dump" | grep -q 'ensure-identity.sh' || {
+		printf '%s\n' "identity reconciliation lost from $hook_kind when a hook was declared" >&2
+		exit 1
+	}
+	awk "/$hook_kind:/,0" "$test_root/hookidsvc.dump" | grep -q "HOOK-$hook_kind" || {
+		printf '%s\n' "declared $hook_kind hook missing from the generated caller" >&2
+		exit 1
+	}
+	# ordering: reconciliation must be invoked before the hook body
+	awk "/$hook_kind:/,0" "$test_root/hookidsvc.dump" | \
+		grep -o 'ensure-identity\.sh\|HOOK-'"$hook_kind" | head -1 | grep -q 'ensure-identity' || {
+		printf '%s\n' "$hook_kind runs the hook before identity reconciliation" >&2
+		exit 1
+	}
+done
+# the reconciler must not be exec'd when a hook follows it: exec replaces
+# the shell, so the hook could never run.
+if awk '/post-install:/,0' "$test_root/hookidsvc.dump" | grep -q 'exec /usr/libexec/saphira/ensure-identity.sh'; then
+	printf '%s\n' 'exec-ed reconciler would discard the trailing hook' >&2
+	exit 1
+fi
+printf '%s\n' 'maintainer hook composition: ok (reconciler first in all three kinds, never exec-ed)'
+
+# 3. malformed hook declarations fail the build rather than shipping a
+#    script that cannot run.
+hooks_stage hookstray
+mkdir -p "$stage/hookstray/pkg/usr/share/saphira/hooks.d/someoneelse"
+printf '%s\n' '#!/bin/sh' 'echo hi' > "$stage/hookstray/pkg/usr/share/saphira/hooks.d/someoneelse/post-install"
+if run_makepkg hookstray > "$test_root/hookstray.log" 2>&1; then
+	printf '%s\n' 'foreign maintainer hooks unexpectedly packaged' >&2
+	exit 1
+fi
+grep 'foreign maintainer hooks' "$test_root/hookstray.log" >/dev/null
+
+hooks_stage hookkind
+printf '%s\n' '#!/bin/sh' 'echo hi' > "$stage/hookkind/pkg/usr/share/saphira/hooks.d/hookkind/post-boot"
+if run_makepkg hookkind > "$test_root/hookkind.log" 2>&1; then
+	printf '%s\n' 'unknown maintainer hook kind unexpectedly packaged' >&2
+	exit 1
+fi
+grep 'unknown maintainer hook' "$test_root/hookkind.log" >/dev/null
+
+hooks_stage hooknoexec
+printf '%s\n' 'echo hi' > "$stage/hooknoexec/pkg/usr/share/saphira/hooks.d/hooknoexec/post-install"
+if run_makepkg hooknoexec > "$test_root/hooknoexec.log" 2>&1; then
+	printf '%s\n' 'interpreter-less maintainer hook unexpectedly packaged' >&2
+	exit 1
+fi
+grep 'no interpreter line' "$test_root/hooknoexec.log" >/dev/null
+
+hooks_stage hookempty
+printf '%s\n' '' > "$stage/hookempty/pkg/usr/share/saphira/hooks.d/hookempty/post-install"
+if run_makepkg hookempty > "$test_root/hookempty.log" 2>&1; then
+	printf '%s\n' 'empty maintainer hook unexpectedly packaged' >&2
+	exit 1
+fi
+grep 'is empty' "$test_root/hookempty.log" >/dev/null
+printf '%s\n' 'maintainer hook refusal: ok (foreign, unknown kind, no interpreter, empty)'
+
+# GRUB .mod exemption: runtime-loaded relocatable modules keep their LOCAL
+# init symbols. strip --strip-unneeded deletes exactly grub_mod_init and
+# grub_mod_fini, after which the module loads yet never initializes: no
+# partition maps register, no commands appear, and the failure is fully
+# silent (proven: UEFI GRUB saw (hd0) with no partitions on a valid GPT
+# because part_gpt never ran). Same exemption class as .ko.
+mkdir -p "$stage/grubmod/pkg/usr/lib/grub/x86_64-efi"
+cat > "$stage/grubmod/probe.c" <<'EOF'
+int grub_mod_init(void) { return 0; }
+int grub_mod_fini(void) { return 0; }
+EOF
+gcc -c -o "$stage/grubmod/pkg/usr/lib/grub/x86_64-efi/probe.mod" "$stage/grubmod/probe.c" || {
+	printf '%s\n' 'cannot compile probe object for strip test' >&2
+	exit 1
+}
+write_manifest grubmod '{"arch":"x86_64","build_time":23,"license":"MIT","name":"grubmod","origin":"grubmod","outputs":[{"dependencies":[],"description":"grubmod","name":"grubmod","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r0"}'
+run_makepkg grubmod >/dev/null
+modroot=$test_root/modroot
+mkdir -p "$modroot/etc/apk/keys" "$modroot/lib/apk/db"
+: > "$modroot/lib/apk/db/installed"
+install -m 0644 /etc/apk/keys/*.pub "$modroot/etc/apk/keys/" 2>/dev/null || true
+apk --root "$modroot" --initdb --usermode --keys-dir etc/apk/keys --allow-untrusted add --no-scripts "$artifacts/x86_64/grubmod-1-r0.apk" >/dev/null 2>&1
+if ! readelf -s "$modroot/usr/lib/grub/x86_64-efi/probe.mod" 2>/dev/null | grep -q grub_mod_init; then
+	printf '%s\n' 'strip removed LOCAL init symbols from .mod payload' >&2
+	exit 1
+fi
+if ! readelf -s "$modroot/usr/lib/grub/x86_64-efi/probe.mod" 2>/dev/null | grep -q grub_mod_fini; then
+	printf '%s\n' 'strip removed LOCAL fini symbols from .mod payload' >&2
+	exit 1
+fi
+printf '%s\n' 'strip exemption: ok (.mod keeps LOCAL init/fini symbols)'
 # File capability declarations: a fragment caps.d/<name> is
 # validated, recorded in the receipt, shipped in the payload, and the
 # install/upgrade callers run ensure-caps after ensure-identity and

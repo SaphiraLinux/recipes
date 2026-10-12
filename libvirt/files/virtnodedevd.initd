@@ -1,0 +1,18 @@
+#!/sbin/openrc-run
+
+description="libvirt virtualization node device driver (virtnodedevd)"
+
+# libvirt's modular daemons do not daemonize, so supervise-daemon owns the
+# real process and there is no pidfile to track.
+#
+# virtnodedevd runs as root: this package configures -Dqemu_user=root
+# -Dqemu_group=root, so it must NOT be given a User= here.
+command="/usr/sbin/virtnodedevd"
+supervisor="supervise-daemon"
+
+depend()
+{
+	need localmount
+	use net
+	after firewall
+}

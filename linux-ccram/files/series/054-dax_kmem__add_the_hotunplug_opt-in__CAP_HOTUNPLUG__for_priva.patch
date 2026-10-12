@@ -1,0 +1,35 @@
+From 344f8b1f8ab263b0d5eb10bcf9510336783a1352 Mon Sep 17 00:00:00 2001
+From: Gregory Price <gourry@gourry.net>
+Date: Fri, 19 Jun 2026 18:52:54 -0700
+Subject: [PATCH] dax/kmem: add the hotunplug opt-in (CAP_HOTUNPLUG) for
+ private nodes
+
+Add the "hotunplug" setting for NODE_PRIVATE_CAP_HOTUNPLUG, so the
+node's memory may be bulk-evacuated for device removal.
+
+Signed-off-by: Gregory Price <gourry@gourry.net>
+---
+ drivers/dax/kmem.c | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/drivers/dax/kmem.c b/drivers/dax/kmem.c
+index 8023db23e2f..3892ad44d4e 100644
+--- a/drivers/dax/kmem.c
++++ b/drivers/dax/kmem.c
+@@ -630,11 +630,13 @@ static DEVICE_ATTR_RW(name)
+ 
+ KMEM_PRIVATE_CAP_ATTR(reclaim, NODE_PRIVATE_CAP_RECLAIM);
+ KMEM_PRIVATE_CAP_ATTR(user_numa, NODE_PRIVATE_CAP_USER_NUMA);
++KMEM_PRIVATE_CAP_ATTR(hotunplug, NODE_PRIVATE_CAP_HOTUNPLUG);
+ 
+ /* Per-service opt-ins. Visibility toggled by 'private' control */
+ static struct attribute *dax_kmem_private_attrs[] = {
+ 	&dev_attr_reclaim.attr,
+ 	&dev_attr_user_numa.attr,
++	&dev_attr_hotunplug.attr,
+ 	NULL,
+ };
+ static const struct attribute_group dax_kmem_private_group = {
+-- 
+2.55.0
+

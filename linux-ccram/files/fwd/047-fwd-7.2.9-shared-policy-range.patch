@@ -1,0 +1,95 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Saphira forward-port <builder@saphira.vm2.uk>
+Date: Thu, 9 Oct 2026 12:00:00 +0000
+Subject: [FWD 7.2.9] mm/mempolicy: add mpol_set_shared_policy_range()
+
+Fwd-port of upstream ("mm/mempolicy: add mpol_set_shared_policy_range
+and build do_set_mempolicy() on it", Gregory Price, series position
+047) onto Linux 7.2.9.
+
+Why needed: the branch base carries the 7.3-bound vma_pgoff helper
+refactor (vma_start_pgoff()/vma_end_pgoff()); 7.2.9 still open-codes
+vma->vm_pgoff + vma_pages(vma) (identical arithmetic). The extracted
+range function is verbatim upstream; only the thin wrapper keeps
+7.2.9 idiom (sz local). Header decl verbatim upstream.
+
+Byte-identical upstream patch retained in series/ (recorded SKIP-FWD).
+Verifies with git apply --check (no fuzz).
+
+Signed-off-by: Saphira builder <builder@saphira.vm2.uk>
+---
+diff --git a/include/linux/mempolicy.h b/include/linux/mempolicy.h
+index 715951a5b..1348e9f5f 100644
+--- a/include/linux/mempolicy.h
++++ b/include/linux/mempolicy.h
+@@ -125,6 +125,8 @@ int vma_dup_policy(struct vm_area_struct *src, struct vm_area_struct *dst);
+ void mpol_shared_policy_init(struct shared_policy *sp, struct mempolicy *mpol);
+ int mpol_set_shared_policy(struct shared_policy *sp,
+ 			   struct vm_area_struct *vma, struct mempolicy *mpol);
++int mpol_set_shared_policy_range(struct shared_policy *sp, pgoff_t start,
++				 pgoff_t end, struct mempolicy *mpol);
+ void mpol_free_shared_policy(struct shared_policy *sp);
+ struct mempolicy *mpol_shared_policy_lookup(struct shared_policy *sp,
+ 					    pgoff_t idx);
+diff --git a/mm/mempolicy.c b/mm/mempolicy.c
+index ce758798a..6d842d956 100644
+--- a/mm/mempolicy.c
++++ b/mm/mempolicy.c
+@@ -3423,23 +3423,49 @@ void mpol_shared_policy_init(struct shared_policy *sp, struct mempolicy *mpol)
+ }
+ EXPORT_SYMBOL_FOR_MODULES(mpol_shared_policy_init, "kvm");
+ 
+-int mpol_set_shared_policy(struct shared_policy *sp,
+-			struct vm_area_struct *vma, struct mempolicy *pol)
++/**
++ * mpol_set_shared_policy_range - install @pol over [@start, @end) of @sp
++ * @sp:    the shared policy tree
++ * @start: first page offset (inclusive)
++ * @end:   last page offset (exclusive)
++ * @pol:   a fully-built, validated policy, or NULL to clear the range
++ *
++ * Installs @pol over the given range, replacing any overlapping policy.
++ * @sp takes its own reference, the caller retains its reference on @pol.
++ *
++ * The policy is not reconstructed, so the policy is preserved exactly.
++ *
++ * Unlike mpol_set_shared_policy(), no VMA is required, so a range that
++ * is never mapped into a VMA can be covered, including the whole file.
++ *
++ * Return: 0 on success, -ENOMEM on allocation failure.
++ */
++int mpol_set_shared_policy_range(struct shared_policy *sp, pgoff_t start,
++				 pgoff_t end, struct mempolicy *pol)
+ {
+-	int err;
+ 	struct sp_node *new = NULL;
+-	unsigned long sz = vma_pages(vma);
++	int err;
+ 
+ 	if (pol) {
+-		new = sp_alloc(vma->vm_pgoff, vma->vm_pgoff + sz, pol);
++		new = sp_alloc(start, end, pol);
+ 		if (!new)
+ 			return -ENOMEM;
+ 	}
+-	err = shared_policy_replace(sp, vma->vm_pgoff, vma->vm_pgoff + sz, new);
++	err = shared_policy_replace(sp, start, end, new);
+ 	if (err && new)
+ 		sp_free(new);
+ 	return err;
+ }
++EXPORT_SYMBOL_FOR_MODULES(mpol_set_shared_policy_range, "kvm");
++
++int mpol_set_shared_policy(struct shared_policy *sp,
++			struct vm_area_struct *vma, struct mempolicy *pol)
++{
++	unsigned long sz = vma_pages(vma);
++
++	return mpol_set_shared_policy_range(sp, vma->vm_pgoff,
++					    vma->vm_pgoff + sz, pol);
++}
+ EXPORT_SYMBOL_FOR_MODULES(mpol_set_shared_policy, "kvm");
+ 
+ /* Free a backing policy store on inode delete. */
+--
+2.55.0

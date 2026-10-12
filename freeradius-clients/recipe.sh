@@ -46,7 +46,7 @@ makedepends="
 # build runs here too, so feature makedepends mirror the server recipe
 # for what ships here (libpcap for radsniff, readline for the radclient
 # CLI); r2: libpcap+readline on both dep sides.
-# Runtime pin on freeradius (akadata-r0 precedent): radclient/radtest
+# Runtime pin on freeradius (generation-zero r0 precedent): radclient/radtest
 # read their dictionaries from the server package's dictdir - a
 # clients-only install without them cannot encode attributes.
 # In-tree build like the server recipe (rlm_cache/configure assumes

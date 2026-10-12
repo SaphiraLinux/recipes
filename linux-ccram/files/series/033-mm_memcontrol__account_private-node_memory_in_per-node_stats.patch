@@ -1,0 +1,115 @@
+From c89957217cd37b50d2f57fa8cfd5731f46efd54f Mon Sep 17 00:00:00 2001
+From: Gregory Price <gourry@gourry.net>
+Date: Sat, 13 Jun 2026 15:24:46 -0700
+Subject: [PATCH] mm/memcontrol: account private-node memory in per-node stats
+
+Private nodes folios are charged like any other - the node's per-cpu
+lruvec counters are increment even for N_MEMORY_PRIVATE.
+
+The memcg-level totals in memory.stat therefore include this memory,
+but the per-node views do not:
+
+  - mem_cgroup_css_rstat_flush() folds the per-node percpu deltas into the
+    aggregate only for N_MEMORY nodes, so a private node's lruvec aggregate
+    is never refreshed.
+
+  - memory.numa_stat (v2) and the v1 numa_stat skip private nodes, so they
+    never emit an Nx= field for one.
+
+So memory.numa_stat does not sum to memory.stat once a cgroup has memory
+on a private node.
+
+Include N_MEMORY_PRIVATE in the flush/display process so private-node
+memory is folded in and reported per node.
+
+This is pure accounting of memory that already exists and is already
+charged, so it is unconditional - regardless of future capabilities.
+
+Signed-off-by: Gregory Price <gourry@gourry.net>
+---
+ mm/memcontrol-v1.c |  8 ++++++--
+ mm/memcontrol.c    | 11 +++++++++--
+ 2 files changed, 15 insertions(+), 4 deletions(-)
+
+diff --git a/mm/memcontrol-v1.c b/mm/memcontrol-v1.c
+index 2dc599484d0..5e464e52dfb 100644
+--- a/mm/memcontrol-v1.c
++++ b/mm/memcontrol-v1.c
+@@ -2132,14 +2132,18 @@ static int memcg_numa_stat_show(struct seq_file *m, void *v)
+ 	const struct numa_stat *stat;
+ 	int nid;
+ 	struct mem_cgroup *memcg = mem_cgroup_from_seq(m);
++	nodemask_t reportable;
+ 
+ 	mem_cgroup_flush_stats(memcg);
+ 
++	/* Private nodes hold cgroup memory too, report them. */
++	nodes_or(reportable, node_states[N_MEMORY], node_states[N_MEMORY_PRIVATE]);
++
+ 	for (stat = stats; stat < ARRAY_END(stats); stat++) {
+ 		seq_printf(m, "%s=%lu", stat->name,
+ 			   mem_cgroup_nr_lru_pages(memcg, stat->lru_mask,
+ 						   false));
+-		for_each_node_state(nid, N_MEMORY)
++		for_each_node_mask(nid, reportable)
+ 			seq_printf(m, " N%d=%lu", nid,
+ 				   mem_cgroup_node_nr_lru_pages(memcg, nid,
+ 							stat->lru_mask, false));
+@@ -2151,7 +2155,7 @@ static int memcg_numa_stat_show(struct seq_file *m, void *v)
+ 		seq_printf(m, "hierarchical_%s=%lu", stat->name,
+ 			   mem_cgroup_nr_lru_pages(memcg, stat->lru_mask,
+ 						   true));
+-		for_each_node_state(nid, N_MEMORY)
++		for_each_node_mask(nid, reportable)
+ 			seq_printf(m, " N%d=%lu", nid,
+ 				   mem_cgroup_node_nr_lru_pages(memcg, nid,
+ 							stat->lru_mask, true));
+diff --git a/mm/memcontrol.c b/mm/memcontrol.c
+index f0dde52dc9e..4d79e238bc5 100644
+--- a/mm/memcontrol.c
++++ b/mm/memcontrol.c
+@@ -4496,6 +4496,7 @@ static void mem_cgroup_css_rstat_flush(struct cgroup_subsys_state *css, int cpu)
+ 	struct mem_cgroup *parent = parent_mem_cgroup(memcg);
+ 	struct memcg_vmstats_percpu *statc;
+ 	struct aggregate_control ac;
++	nodemask_t reportable;
+ 	int nid;
+ 
+ 	flush_nmi_stats(memcg, parent);
+@@ -4524,7 +4525,9 @@ static void mem_cgroup_css_rstat_flush(struct cgroup_subsys_state *css, int cpu)
+ 	};
+ 	mem_cgroup_stat_aggregate(&ac);
+ 
+-	for_each_node_state(nid, N_MEMORY) {
++	/* Private nodes must also be accounted or numa_stat is misleading */
++	nodes_or(reportable, node_states[N_MEMORY], node_states[N_MEMORY_PRIVATE]);
++	for_each_node_mask(nid, reportable) {
+ 		struct mem_cgroup_per_node *pn = memcg->nodeinfo[nid];
+ 		struct lruvec_stats *lstats = pn->lruvec_stats;
+ 		struct lruvec_stats *plstats = NULL;
+@@ -4947,9 +4950,13 @@ static int memory_numa_stat_show(struct seq_file *m, void *v)
+ {
+ 	int i;
+ 	struct mem_cgroup *memcg = mem_cgroup_from_seq(m);
++	nodemask_t reportable;
+ 
+ 	mem_cgroup_flush_stats(memcg);
+ 
++	/* Private nodes hold cgroup memory too, report them. */
++	nodes_or(reportable, node_states[N_MEMORY], node_states[N_MEMORY_PRIVATE]);
++
+ 	for (i = 0; i < ARRAY_SIZE(memory_stats); i++) {
+ 		int nid;
+ 
+@@ -4957,7 +4964,7 @@ static int memory_numa_stat_show(struct seq_file *m, void *v)
+ 			continue;
+ 
+ 		seq_printf(m, "%s", memory_stats[i].name);
+-		for_each_node_state(nid, N_MEMORY) {
++		for_each_node_mask(nid, reportable) {
+ 			u64 size;
+ 			struct lruvec *lruvec;
+ 
+-- 
+2.55.0
+

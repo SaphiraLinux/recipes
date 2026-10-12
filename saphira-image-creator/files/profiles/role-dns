@@ -1,0 +1,4 @@
+# Role layer: authoritative DNS.
+# bind is the Saphira-resolved resolver and ships both init formats, so the
+# image creator's --init choice decides which one is enabled.
+bind

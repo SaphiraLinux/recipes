@@ -20,12 +20,22 @@ sha256=a7bfb016070c31df1c738569ca8cc5e5fc337dd449147f7bf62e746d87d38f21
 # /input (build-kmod-set.sh), the headers pin only provides host UAPI.
 # New kernels: copy the nearest variant, set KVER_SHORT + headers pin
 # (see new-kmod-variant.sh).
-depends="kmod"
+# Kernel identity is the line (KVER_SHORT), not the packaging revision:
+# the package name carries the kver, the build tree is the staged
+# /usr/src/linux-<kver> tree, and modules land under that KREL's extra/.
+# -rN is packaging metadata and stays out of the ABI dependency policy;
+# rebuilds follow source/config/KREL changes (release process), and the
+# build-time staged-tree config gate enforces exact-tree builds.
+depends="kmod saphira-kernel-7.2.2"
 
 # Build secret contract: module signing is mandatory, never optional.
 # The worker refuses before spending anything when the builder did
 # not expose a readable /keys/module-signing.pem.
 saphira_sign_key_required=yes
+# saphira-kernel-headers stays kver-only (bare name, host UAPI only;
+# the build tree comes from staged /input). -rN never enters kmod deps.
+# elfutils is a build-root input: the staged tree's prebuilt host tools
+# (objtool) link libelf.so.1, and the tree arrives built, not built here.
 makedepends="
     bash
     binutils
@@ -35,7 +45,8 @@ makedepends="
     make
     patch
     perl
-    saphira-kernel-headers=7.2.2
+    elfutils
+    saphira-kernel-headers
 "
 
 KVER_SHORT=7.2.2

@@ -1,0 +1,44 @@
+--- a/src/slurmctld/groups.c
++++ b/src/slurmctld/groups.c
+@@ -185,7 +185,12 @@
+ 	uid_t *group_uids = NULL, my_uid;
+ 	gid_t my_gid;
+ 	int buflen = PW_BUF_SIZE, i, res, group_uids_size = 0;
+-#if defined (__APPLE__)
++/* getgrent_r/getpwent_r are glibc/BSD extensions absent from musl
++ * (like __APPLE__, which already takes the plain path); plain
++ * getgrent/getpwent are universal. Negative formulation keeps
++ * every platform that builds today on its current path.
++ * Saphira/musl port patch. */
++#if defined (__APPLE__) || (defined (__linux__) && !defined (__GLIBC__) && !defined (__ANDROID__))
+ #else
+ 	char pw_buffer[PW_BUF_SIZE];
+ 	struct passwd pw;
+@@ -250,7 +255,12 @@
+ 	 * databases), the rest of this function essentially does
+ 	 * nothing.  */
+ 
+-#if defined (__APPLE__)
++/* getgrent_r/getpwent_r are glibc/BSD extensions absent from musl
++ * (like __APPLE__, which already takes the plain path); plain
++ * getgrent/getpwent are universal. Negative formulation keeps
++ * every platform that builds today on its current path.
++ * Saphira/musl port patch. */
++#if defined (__APPLE__) || (defined (__linux__) && !defined (__GLIBC__) && !defined (__ANDROID__))
+ 	setgrent();
+ 	while (1) {
+ 		if ((grp_result = getgrent()) == NULL)
+@@ -301,7 +311,12 @@
+ 	}
+ 	endgrent();
+ 	setpwent();
+-#if defined (__APPLE__)
++/* getgrent_r/getpwent_r are glibc/BSD extensions absent from musl
++ * (like __APPLE__, which already takes the plain path); plain
++ * getgrent/getpwent are universal. Negative formulation keeps
++ * every platform that builds today on its current path.
++ * Saphira/musl port patch. */
++#if defined (__APPLE__) || (defined (__linux__) && !defined (__GLIBC__) && !defined (__ANDROID__))
+ 	while ((pwd_result = getpwent()) != NULL) {
+ #else
+ 	while (!getpwent_r(&pw, pw_buffer, PW_BUF_SIZE, &pwd_result)) {

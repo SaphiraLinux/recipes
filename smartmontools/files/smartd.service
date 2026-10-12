@@ -1,0 +1,34 @@
+[Unit]
+Description=S.M.A.R.T. disk monitoring daemon (smartd)
+Documentation=man:smartd(8)
+After=local-fs.target
+
+[Service]
+# Mirrors files/smartd.initd: -q for errors only, -d to stay in the
+# foreground so Type=simple needs no pidfile.
+Type=simple
+ExecStart=/usr/sbin/smartd -q -d
+Restart=on-failure
+RestartSec=5
+
+# smartd's entire purpose is issuing S.M.A.R.T. commands to block
+# devices, which is raw device I/O. PrivateDevices=yes would hide every
+# disk it is supposed to watch, so it is deliberately NOT set. The device
+# allowlist below narrows access to storage nodes instead, which is the
+# restriction that is actually meaningful here.
+DeviceAllow=/dev/sd* rw
+DeviceAllow=/dev/nvme* rw
+DeviceAllow=/dev/hd* rw
+DeviceAllow=/dev/tape* rw
+# No User=: S.M.A.R.T. passthrough needs raw device I/O, which an
+# unprivileged account cannot perform.
+#
+# ProtectKernelTunables is deliberately NOT set: smartd is frequently run
+# with -M exec, which invokes smartd/smartmontools helpers from
+# /usr/libexec/smartmontools, and confining that breaks it.
+NoNewPrivileges=yes
+ProtectHome=yes
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

@@ -2,7 +2,7 @@
 
 pkgname=gmp
 pkgver=6.3.0
-pkgrel=1
+pkgrel=2
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="GNU multiple precision arithmetic library"
 license="LGPL-3.0-or-later GPL-2.0-or-later"
@@ -46,4 +46,17 @@ recipe_install()
 {
 	cd "$BUILDDIR"
 	make DESTDIR="$PKGDEST" install
+	# FHS non-usrmerged: /bin consumers (coreutils expr) need the runtime
+	# SONAME chain in /lib; the dev linker name stays in /usr/lib
+	# pointing back (zlib precedent). Verified: across the whole coreutils
+	# payload the only DT_NEEDED libs are libc.so and libgmp.so.10.
+	mkdir -p "$PKGDEST/lib"
+	for lib in "$PKGDEST/usr/lib/libgmp.so.10"*; do
+		[ -e "$lib" ] && mv "$lib" "$PKGDEST/lib/"
+	done
+	link="$PKGDEST/usr/lib/libgmp.so"
+	if [ -L "$link" ]; then
+		target=$(readlink "$link")
+		case $target in */*) :;; *) [ -e "$PKGDEST/lib/$target" ] && ln -sf "../../lib/$target" "$link";; esac
+	fi
 }

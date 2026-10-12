@@ -29,6 +29,7 @@ makedepends="
     rustc
     gcc
     make
+    libunwind-dev
 "
 
 # No vendor/ dir upstream: cargo fetches crates.io at build (Cargo.lock
@@ -53,4 +54,6 @@ recipe_install()
 	make -C "$SRC" DESTDIR="$PKGDEST" install
 	install -D -m 0755 "$RECIPE_DIR/files/drbd-reactor.initd" \
 		"$PKGDEST/etc/init.d/drbd-reactor"
+	install -D -m 0644 "$RECIPE_DIR/files/drbd-reactor.service" \
+		"$PKGDEST/usr/lib/systemd/system/drbd-reactor.service"
 }

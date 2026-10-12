@@ -1,0 +1,11 @@
+# Role layer: networking.
+#
+# A role layer is an ADDITIONAL intention list, composed on top of a
+# minimal profile. Roles are not meta-packages: they are profile data, so
+# the package manager still owns the closure and no new package name is
+# invented for a role.
+saphira-network
+iproute2
+iputils
+nftables
+chrony

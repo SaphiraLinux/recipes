@@ -1,0 +1,150 @@
+From 76e4e194d973f8639b16aa17a18d3701f42bf32e Mon Sep 17 00:00:00 2001
+From: Gregory Price <gourry@gourry.net>
+Date: Wed, 24 Jun 2026 06:50:24 -0700
+Subject: [PATCH] KVM: guest_memfd: bind backing memory to a NUMA node at
+ creation
+
+guest_memfd presently allocates its page-cache folios through a
+per-inode shared mempolicy (kvm_gmem_get_folio()).
+
+Today that policy can only be set after the fact, via mbind() on
+a host mmap of the fd. This requires the fd to be mmap-able and
+cannot reach folios that are only ever guest-faulted (no host VMA).
+
+Neither holds for a non-mappable (confidential) guest_memfd.
+
+Add GUEST_MEMFD_FLAG_BIND_NODE.
+
+When set, KVM builds an MPOL_BIND policy for the requested node and
+installs it over the whole inode's shared policy, so every folio
+is allocated on the requested node with no userspace mbind().
+
+The flag is advertised through KVM_CAP_GUEST_MEMFD_FLAGS only when
+CONFIG_NUMA is enabled.
+
+Suggested-by: Dave Jiang <dave.jiang@intel.com>
+Co-developed-by: Dave Jiang <dave.jiang@intel.com>
+Signed-off-by: Dave Jiang <dave.jiang@intel.com>
+Signed-off-by: Gregory Price <gourry@gourry.net>
+Assisted-by: Claude:claude-opus-4-8
+---
+ include/linux/kvm_host.h |  3 +++
+ include/uapi/linux/kvm.h |  5 ++++-
+ virt/kvm/guest_memfd.c   | 39 +++++++++++++++++++++++++++++++++++++--
+ 3 files changed, 44 insertions(+), 3 deletions(-)
+
+diff --git a/include/linux/kvm_host.h b/include/linux/kvm_host.h
+index ab8cfaec82d..f6448a73d46 100644
+--- a/include/linux/kvm_host.h
++++ b/include/linux/kvm_host.h
+@@ -739,6 +739,9 @@ static inline u64 kvm_gmem_get_supported_flags(struct kvm *kvm)
+ 	if (!kvm || kvm_arch_supports_gmem_init_shared(kvm))
+ 		flags |= GUEST_MEMFD_FLAG_INIT_SHARED;
+ 
++	if (IS_ENABLED(CONFIG_NUMA))
++		flags |= GUEST_MEMFD_FLAG_BIND_NODE;
++
+ 	return flags;
+ }
+ #endif
+diff --git a/include/uapi/linux/kvm.h b/include/uapi/linux/kvm.h
+index 419011097fa..a8ff150e2cb 100644
+--- a/include/uapi/linux/kvm.h
++++ b/include/uapi/linux/kvm.h
+@@ -1654,11 +1654,14 @@ struct kvm_memory_attributes {
+ #define KVM_CREATE_GUEST_MEMFD	_IOWR(KVMIO,  0xd4, struct kvm_create_guest_memfd)
+ #define GUEST_MEMFD_FLAG_MMAP		(1ULL << 0)
+ #define GUEST_MEMFD_FLAG_INIT_SHARED	(1ULL << 1)
++#define GUEST_MEMFD_FLAG_BIND_NODE	(1ULL << 2)
+ 
+ struct kvm_create_guest_memfd {
+ 	__u64 size;
+ 	__u64 flags;
+-	__u64 reserved[6];
++	__u32 node;
++	__u32 pad;
++	__u64 reserved[5];
+ };
+ 
+ #define KVM_PRE_FAULT_MEMORY	_IOWR(KVMIO, 0xd5, struct kvm_pre_fault_memory)
+diff --git a/virt/kvm/guest_memfd.c b/virt/kvm/guest_memfd.c
+index f0e5da49086..de320df08e0 100644
+--- a/virt/kvm/guest_memfd.c
++++ b/virt/kvm/guest_memfd.c
+@@ -456,6 +456,26 @@ static struct mempolicy *kvm_gmem_get_policy(struct vm_area_struct *vma,
+ 	 */
+ 	return mpol_shared_policy_lookup(&GMEM_I(inode)->policy, pgoff);
+ }
++
++static int kvm_gmem_bind_node(struct inode *inode, int node)
++{
++	struct mempolicy *pol;
++	int err;
++
++	pol = mpol_bind_node(node);
++	if (IS_ERR(pol))
++		return PTR_ERR(pol);
++
++	err = mpol_set_shared_policy_range(&GMEM_I(inode)->policy, 0,
++					  MAX_LFS_FILESIZE >> PAGE_SHIFT, pol);
++	mpol_put(pol);
++	return err;
++}
++#else
++static int kvm_gmem_bind_node(struct inode *inode, int node)
++{
++	return -EINVAL;
++}
+ #endif /* CONFIG_NUMA */
+ 
+ static const struct vm_operations_struct kvm_gmem_vm_ops = {
+@@ -557,7 +577,7 @@ bool __weak kvm_arch_supports_gmem_init_shared(struct kvm *kvm)
+ 	return true;
+ }
+ 
+-static int __kvm_gmem_create(struct kvm *kvm, loff_t size, u64 flags)
++static int __kvm_gmem_create(struct kvm *kvm, loff_t size, u64 flags, int node)
+ {
+ 	static const char *name = "[kvm-gmem]";
+ 	struct gmem_file *f;
+@@ -598,6 +618,12 @@ static int __kvm_gmem_create(struct kvm *kvm, loff_t size, u64 flags)
+ 
+ 	GMEM_I(inode)->flags = flags;
+ 
++	if (flags & GUEST_MEMFD_FLAG_BIND_NODE) {
++		err = kvm_gmem_bind_node(inode, node);
++		if (err)
++			goto err_inode;
++	}
++
+ 	file = alloc_file_pseudo(inode, kvm_gmem_mnt, name, O_RDWR, &kvm_gmem_fops);
+ 	if (IS_ERR(file)) {
+ 		err = PTR_ERR(file);
+@@ -630,6 +656,7 @@ int kvm_gmem_create(struct kvm *kvm, struct kvm_create_guest_memfd *args)
+ {
+ 	loff_t size = args->size;
+ 	u64 flags = args->flags;
++	int node = NUMA_NO_NODE;
+ 
+ 	if (flags & ~kvm_gmem_get_supported_flags(kvm))
+ 		return -EINVAL;
+@@ -637,7 +664,15 @@ int kvm_gmem_create(struct kvm *kvm, struct kvm_create_guest_memfd *args)
+ 	if (size <= 0 || !PAGE_ALIGNED(size))
+ 		return -EINVAL;
+ 
+-	return __kvm_gmem_create(kvm, size, flags);
++	if (flags & GUEST_MEMFD_FLAG_BIND_NODE) {
++		if (args->pad || args->node >= MAX_NUMNODES)
++			return -EINVAL;
++		node = args->node;
++	} else if (args->node || args->pad) {
++		return -EINVAL;
++	}
++
++	return __kvm_gmem_create(kvm, size, flags, node);
+ }
+ 
+ int kvm_gmem_bind(struct kvm *kvm, struct kvm_memory_slot *slot,
+-- 
+2.55.0
+

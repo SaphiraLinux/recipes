@@ -1,0 +1,18 @@
+#!/sbin/openrc-run
+
+description="FRRouting RIP daemon"
+
+# Every FRR protocol daemon talks to zebra over the zserv API socket in
+# /var/run/frr, so zebra must be up first.
+command="/usr/sbin/ripd"
+command_args="-d -f /etc/frr/ripd.conf -i /var/run/frr/ripd.pid -z /var/run/frr/zserv.api"
+supervisor="supervise-daemon"
+pidfile="/var/run/frr/ripd.pid"
+
+depend()
+{
+	need localmount
+	use net
+	need zebra
+	after firewall
+}

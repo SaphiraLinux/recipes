@@ -1,4 +1,6 @@
-# tmpfiles.d entry for the nginx service; /var/run is persistent by
-# design (never wiped at boot), so this creates the runtime dir with
-# the service identity on first boot after install.
+# tmpfiles.d entry for the nginx service; /var/run is the persistent
+# runtime tree for /usr services (never confused with /run, and never
+# symlinked to it). Boot-layer redundancy behind the unit's ExecStartPre
+# and OpenRC's checkpath, which both create the dir at service start;
+# this creates it with the service identity on first boot after install.
 d /var/run/nginx 0755 nginx nginx -

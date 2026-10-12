@@ -1,0 +1,39 @@
+From aa46e43b5a3694c8bbc05189a0de746b5e0cdb5f Mon Sep 17 00:00:00 2001
+From: Gregory Price <gourry@gourry.net>
+Date: Mon, 20 Apr 2026 18:34:31 -0700
+Subject: [PATCH] mm/migrate: disallow userland driven migration for private
+ nodes
+
+Use the same filter locations as zone_device folios to disallow
+userland driven migration requests for private node memory.
+
+Signed-off-by: Gregory Price <gourry@gourry.net>
+---
+ mm/migrate.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/mm/migrate.c b/mm/migrate.c
+index a8a86141dbb..d20674c07b9 100644
+--- a/mm/migrate.c
++++ b/mm/migrate.c
+@@ -2268,7 +2268,7 @@ static int __add_folio_for_migration(struct folio *folio, int node,
+ 	if (is_zero_folio(folio) || is_huge_zero_folio(folio))
+ 		return -EFAULT;
+ 
+-	if (folio_is_zone_device(folio))
++	if (folio_is_private_managed(folio))
+ 		return -ENOENT;
+ 
+ 	if (folio_nid(folio) == node)
+@@ -2477,7 +2477,7 @@ static void do_pages_stat_array(struct mm_struct *mm, unsigned long nr_pages,
+ 		if (folio) {
+ 			if (is_zero_folio(folio) || is_huge_zero_folio(folio))
+ 				err = -EFAULT;
+-			else if (folio_is_zone_device(folio))
++			else if (folio_is_private_managed(folio))
+ 				err = -ENOENT;
+ 			else
+ 				err = folio_nid(folio);
+-- 
+2.55.0
+

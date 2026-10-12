@@ -1,8 +1,11 @@
 #!/bin/sh
 
+# r2: move the snmp identity off 105, which is haproxy's in the base seed;
+# one package owns each declared identity. 105 -> 148. net-snmp was
+# unpublished, so no migration and no legacy sidecar.
 pkgname=net-snmp
 pkgver=5.9.5.2
-pkgrel=1
+pkgrel=2
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='Net-SNMP tools, agent and trap daemon (snmpwalk, snmpd, snmptrapd, ...)'
 license='BSD-3-Clause'
@@ -19,7 +22,9 @@ sha256=16707719f833184a4b72835dac359ae188123b06b5e42817c00790d7dc1384bf
 subpackages="$pkgname-dev $pkgname-doc"
 depends="openssl"
 makedepends="
+    file
     gcc
+    gettext
     libcap
     make
     openssl-dev

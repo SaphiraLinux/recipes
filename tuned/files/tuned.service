@@ -1,0 +1,37 @@
+[Unit]
+Description=Dynamic system tuning daemon
+Documentation=man:tuned(8)
+# tuned is python3 + pygobject and uses the system bus for most of its
+# work, so it is meaningless without a running message bus. The dbus
+# package ships both formats, so After= is the portable statement: on a
+# systemd host it resolves to dbus.service, on OpenRC the init script
+# expresses the same dependency with `use dbus'.
+After=network.target dbus.service
+Wants=network.target
+
+[Service]
+# Mirrors files/tuned.initd. -l keeps it in the foreground.
+Type=simple
+ExecStart=/usr/sbin/tuned-daemon -l
+PIDFile=/run/tuned/tuned.pid
+RuntimeDirectory=tuned
+Restart=on-failure
+RestartSec=2
+
+# Deliberately NOT set: User= and any CapabilityBoundingSet. tuned reads
+# /sys and /proc, consults dmidecode output, and applies profiles through
+# sysctl and the scheduler, so it needs genuine privilege. Confining it
+# would break profiles silently rather than loudly.
+# Deliberately NOT set: SystemCallFilter. A python3 + GLib mainloop makes
+# seccomp filters a real risk of breaking the daemon in ways that only
+# show up under load, and guessing here would be security theatre.
+#
+# What IS safe: tuned's own state is the only thing it needs to write.
+NoNewPrivileges=yes
+ProtectHome=yes
+ProtectSystem=full
+ReadWritePaths=/var/lib/tuned /run/tuned
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

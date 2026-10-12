@@ -1,7 +1,7 @@
 #!/bin/sh
 pkgname=keyutils
 pkgver=1.6.3
-pkgrel=1
+pkgrel=2
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="Linux key management utilities (kernel keyring; required for NFSv4 id mapping)"
 license="GPL-2.0-or-later AND LGPL-2.0-or-later"
@@ -16,6 +16,11 @@ subpackages="$pkgname-dev"
 # Upstream Makefile has no configure; plain CFLAGS override (drops the
 # built-in -Werror) is enough for musl/GCC16. Layout overrides keep the
 # Saphira policy: /lib for the library, /usr/{bin,sbin} for tools.
+# LIBDIR/USRLIBDIR are pinned explicitly: upstream guesses them from
+# `ldd /usr/bin/make` output, which yields an empty string inside the
+# isolated build root, so the libraries landed at the filesystem root
+# (ld could not find -lkeyutils; same breakage documented in ndctl).
+# r2: payload paths corrected (/lib + /usr/lib); supersedes r1.
 depends=""
 makedepends="gcc make"
 
@@ -26,11 +31,13 @@ recipe_build()
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xzf "$TARBALL"
 	make -C "$SRC" -j${JOBS:-$(nproc)} \
 		CFLAGS="${CFLAGS-} -Wall -O2" \
+		LIBDIR=/lib USRLIBDIR=/usr/lib \
 		BINDIR=/usr/bin SBINDIR=/usr/sbin
 }
 
 recipe_install()
 {
 	make -C "$SRC" DESTDIR="$PKGDEST" install \
+		LIBDIR=/lib USRLIBDIR=/usr/lib \
 		BINDIR=/usr/bin SBINDIR=/usr/sbin
 }
