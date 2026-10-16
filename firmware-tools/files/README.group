@@ -1,0 +1,23 @@
+Saphira firmware toolkit group
+==============================
+
+Installing this package installs the normal safe Saphira
+firmware-management toolkit: SPI flash programming (flashrom),
+coreboot/UEFI image inspection (coreboot-tools, uefi-tools),
+Intel ME image inspection (me-analyzer) and modification
+(me-cleaner, file-level only), local MEI/AMT status (mei-amt-check,
+metee), and the low-level I2C/MSR/PCI/USB/DMI/EFI utilities plus
+their libraries.
+
+This package carries no payload of its own beyond this file. The
+authoritative member list is the `depends` field of this package's
+APK metadata (`apk info -a firmware-tools`).
+
+Deliberately excluded: chipsec (research-only low-level access, a
+separate package by policy), intel-lms (blocked on the unpackaged ACE
+framework - see project record), fwupd (blocked on unpackaged
+libxmlb/polkit/fwupd-efi), and all proprietary Intel FIT/FITC/FPT
+System Tools (no redistribution rights).
+
+Flash/descriptor/ME write operations are never run by package tests;
+they are deliberate operator actions on real hardware.

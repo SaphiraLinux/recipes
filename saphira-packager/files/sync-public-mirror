@@ -52,6 +52,29 @@ ARCHIVE_SUFFIXES = (
 )
 BARE_COMPRESSED = (".gz", ".xz", ".bz2", ".zst")
 
+# Reviewed payload exclusions: kept in /recipes (tracked canonical),
+# never public. rsync-based manual tool lists these explicitly in
+# RSYNC_EXCLUDES; the deterministic exporter skips them by the same
+# rule so both implementations agree. `*.x509` covers the single
+# canonical wireless-regdb/files/saphira-regdb.x509 plus any legacy
+# per-recipe copies that have not yet been removed; `usb.ids` covers
+# hwdata/files/usb.ids (latin-1 upstream data, fails strict UTF-8).
+PAYLOAD_EXCLUDES = ("saphira-regdb.x509", "usb.ids")
+
+# Private-location patterns: fail closed on any occurrence.
+# Matches the manual /usr/local/bin tool (keeper scp-style remotes with
+# trailing colon, git SSH form with trailing at-sign; public recipes use
+# https://). Bare keeper word in prose is not a hit; only the colon form
+# is. Patterns are built by concatenation so this file itself contains
+# no literal hit and stays exportable.
+PRIVATE_PATTERNS = ("keeper" + ":", "git" + "@",)
+# Operator-accepted exception (same as manual tool): saphira-memoryd
+# names its (currently private, empty) source repository. Built by
+# concatenation for the same self-export reason; runtime value matches.
+PRIVATE_PATTERN_EXCEPTIONS = (
+    "git" + "@github.com:SaphiraLinux/shampoo.git",
+)
+
 # Content magic probed on leading bytes, independent of filename:
 # branch snapshots named "master" and stray build outputs with no
 # extension are still archives/artefacts. Compressed formats here
@@ -79,6 +102,14 @@ def content_kind(head: bytes) -> str:
         if head.startswith(magic):
             return "archive"
     return ""
+
+def is_payload_excluded(name: str) -> bool:
+    """Reviewed non-text payloads that must never export (canonical
+    cert, usb.ids). Matched by basename so legacy per-recipe copies
+    and the single canonical are all covered."""
+    base = name.rsplit("/", 1)[-1]
+    return base in PAYLOAD_EXCLUDES
+
 
 NVR_RE = re.compile(r"^(.*)-([0-9][^-]*)-r([0-9]+)\.apk$")
 
@@ -301,6 +332,9 @@ def export_tree(source: Path, head: str, dest: Path,
             if is_archive(member.name):
                 skipped += 1
                 continue
+            if is_payload_excluded(member.name):
+                skipped += 1
+                continue
             target = dest / member.name
             target.parent.mkdir(parents=True, exist_ok=True)
             extracted = stream.extractfile(member)
@@ -308,14 +342,14 @@ def export_tree(source: Path, head: str, dest: Path,
             # Content sniff on leading bytes: streaming mode forces us
             # to consume the entry either way, so peek, then either
             # skip the rest (archive magic: legit vendored input that
-            # must not export) or write head + remainder.
-            head = extracted.read(6)
-            if content_kind(head) == "archive":
+            # must not export) or write head_bytes + remainder.
+            head_bytes = extracted.read(6)
+            if content_kind(head_bytes) == "archive":
                 skipped += 1
                 extracted.read()
                 continue
             with target.open("wb") as out:
-                out.write(head)
+                out.write(head_bytes)
                 shutil.copyfileobj(extracted, out)
             try:
                 os.chmod(target, member.mode)
@@ -330,7 +364,12 @@ def export_tree(source: Path, head: str, dest: Path,
 
 def clear_public(clone: Path) -> None:
     """Remove every tracked file except .git internals; public-only
-    community files are restored by the caller from a snapshot."""
+    community files are restored by the caller from a snapshot.
+    Never endangers .git: the top-level .git entry is spared and its
+    survival is asserted before returning."""
+    git_dir = clone / ".git"
+    if not git_dir.is_dir():
+        die(f"public clone has no .git: {clone}")
     for entry in sorted(clone.iterdir()):
         if entry.name == ".git":
             continue
@@ -338,6 +377,8 @@ def clear_public(clone: Path) -> None:
             entry.unlink()
         elif entry.is_dir():
             shutil.rmtree(entry)
+    if not (clone / ".git" / "HEAD").is_file():
+        die(f"public clone .git damaged during clear: {clone}")
 
 
 def snapshot_public_only(clone: Path, source_names: set[str]) -> dict[str, bytes]:
@@ -358,10 +399,13 @@ def snapshot_public_only(clone: Path, source_names: set[str]) -> dict[str, bytes
 
 def leakage_gate(clone: Path, excluded: set[str]) -> None:
     """Fail closed: no source/package archives, no eggs and no build
-    artefacts (matched by filename or content magic); excluded names
+    artefacts (matched by filename or content magic); no reviewed
+    payload exclusions (canonical cert, usb.ids); no private-location
+    patterns (keeper colon form, git at-sign form); excluded names
     appear nowhere (any case); recipes.json is clean. Non-archive
-    bytes are NOT findings: UTF-16 data, DER certificates and any
-    other binary-format source input ship normally."""
+    bytes are NOT findings: UTF-16 data and other binary-format source
+    inputs ship normally, but the reviewed payloads above never do
+    (they are skipped at export and fail here if stale copies linger)."""
     failures = []
     for root, dirs, files in os.walk(clone):
         if ".git" in dirs:
@@ -376,6 +420,9 @@ def leakage_gate(clone: Path, excluded: set[str]) -> None:
             if is_archive(filename):
                 failures.append(f"archive present: {rel}")
                 continue
+            if is_payload_excluded(str(rel)):
+                failures.append(f"excluded payload present: {rel}")
+                continue
             kind = content_kind(content[:6])
             if kind == "archive":
                 failures.append(f"archive present (magic): {rel}")
@@ -384,6 +431,16 @@ def leakage_gate(clone: Path, excluded: set[str]) -> None:
                 failures.append(f"build artifact present: {rel}")
                 continue
             text = content.decode("utf-8", errors="replace")
+            for pattern in PRIVATE_PATTERNS:
+                if pattern in text:
+                    if any(exc in text for exc in PRIVATE_PATTERN_EXCEPTIONS
+                           if pattern in exc):
+                        print(f"sync-public-mirror: accepted exception "
+                              f"{pattern!r}: {rel}")
+                        continue
+                    failures.append(
+                        f"private pattern {pattern!r}: {rel}")
+                    break
             lowered = text.lower()
             for name in excluded:
                 if name.lower() in lowered:

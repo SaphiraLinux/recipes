@@ -1,0 +1,27 @@
+#!/sbin/openrc-run
+# Saphira PBX MCP bearer-auth transport (OpenRC). Mirrors
+# files/saphira-pbx-mcp.service: foreground process under
+# supervise-daemon, real v0.2.0 `mcp serve` interface.
+# Runs as root by design (see the .service comments): no
+# command_user here on purpose.
+
+description="Saphira PBX MCP bearer-auth transport"
+
+command="/usr/sbin/saphira-pbx"
+command_args="mcp serve --config /etc/saphira-pbx/mcp.conf"
+supervisor="supervise-daemon"
+
+depend()
+{
+	need net
+	after firewall
+}
+
+start_pre()
+{
+	# The daemon is foreground-only with no pidfile; supervise-daemon
+	# tracks it. Only assert the owned config path exists: a bad
+	# listener address or missing TLS for non-loopback fails the
+	# start itself (`mcp serve --dry-run` validates offline).
+	checkpath -d -m 0750 -o root:root /etc/saphira-pbx
+}

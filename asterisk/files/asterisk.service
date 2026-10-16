@@ -1,0 +1,25 @@
+[Unit]
+Description=Asterisk PBX and telephony daemon
+After=network.target
+
+[Service]
+Type=simple
+User=asterisk
+Group=asterisk
+WorkingDirectory=/var/lib/asterisk
+Environment=HOME=/var/lib/asterisk
+RuntimeDirectory=asterisk
+ExecStart=/usr/sbin/asterisk -f -C /etc/asterisk/asterisk.conf
+# Deterministic shutdown through the control socket (runs as root, so the
+# 0660 control socket is accessible); the leading '-' tolerates a daemon
+# that is already down. Plain SIGTERM handling differs between console
+# (-c installs its own handlers) and service mode, so prefer the
+# explicit command and keep the default SIGTERM only as fallback.
+ExecStop=-/usr/sbin/asterisk -rx 'core stop now'
+Restart=on-failure
+LimitCORE=infinity
+StandardOutput=null
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -12,8 +12,8 @@ license='BUSL-1.1'
 origin=saphira-bridge
 repo=saphira
 url=https://saphira.vm2.uk/
-# Local source for now: the payload lives in files/ and mirrors the keeper
-# repository keeper:/saphira-git-repo/saphira-bridge.git at dc82176,
+# Local source for now: the payload lives in files/.
+# Source is vendored under files/; the package build requires no access to the internal development repository.
 # byte-for-byte across all 20 files. vendor=/sha256= are deliberately absent
 # until a reachable public URL exists, rather than invented: a URL that cannot
 # be fetched is the saphira-garden defect, and no build may depend on one.

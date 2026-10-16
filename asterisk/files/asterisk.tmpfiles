@@ -1,0 +1,6 @@
+# tmpfiles.d entry for asterisk. The service runs unprivileged
+# (User=asterisk), so it cannot create its own runtime dir; tmpfiles.d
+# owns creation with the service identity at boot. /run is volatile by
+# design (pid/control-socket state is restart-scoped, unlike alfred's
+# persistent socket which deliberately lives under /var/run).
+d /run/asterisk 0755 asterisk asterisk -

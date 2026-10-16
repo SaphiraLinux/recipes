@@ -3,9 +3,13 @@ Description=Saphira FHS layout convergence (before ordinary services)
 # Early-boot structural migration only: the historical /var/run alias
 # swap must happen before daemons start, never in a live post-upgrade.
 # A failed run marks this unit failed (loud) without halting boot.
+# Ordered before the tmpfiles units (cycle-free: neither references
+# this unit): the alias must be replaced before anything populates
+# through it, otherwise population and replacement race and the first
+# boot fails intermittently while retries succeed.
 DefaultDependencies=no
 After=local-fs.target
-Before=sysinit.target
+Before=sysinit.target systemd-tmpfiles-setup-dev.service systemd-tmpfiles-setup.service
 ConditionPathExists=/usr/share/saphira/fhs.d/saphira-baselayout
 
 [Service]

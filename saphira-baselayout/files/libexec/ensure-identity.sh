@@ -114,8 +114,22 @@
 
 set -eu
 
+# Non-usrmerged PATH (same reason as ensure-fhs): this helper runs
+# from makepkg-generated install/upgrade callers under apk's minimal
+# PATH. Account tools live in /bin and /sbin on Saphira.
+export PATH=/usr/bin:/bin:/usr/sbin:/sbin
+
 # Argument parsing lives below die() so usage failures report cleanly.
 ROOT=${SAPHIRA_ENSURE_ROOT:-/}
+# A root of "/" must not be pasted onto every path: "$ROOT$path" would
+# make them "//etc/passwd", "//var/lib/dhcpcd", and chown(1) rejects a
+# double-slashed path with EINVAL, so the account was created and then
+# the identity reconciliation died on its own home directory. An empty
+# ROOT joins to exactly the same absolute paths without the defect, and
+# every non-"/" root is untouched.
+case $ROOT in
+/) ROOT= ;;
+esac
 PASSWD=$ROOT/etc/passwd
 GROUPF=$ROOT/etc/group
 SHADOW=$ROOT/etc/shadow
@@ -223,19 +237,58 @@ apply_sysusers_d()
 				skip_sysusers_line "$conffile" "line $lineno: incomplete identity"
 				continue
 			}
-			case $id in
-				''|*[!0-9]*)
-					# A dynamic or name-resolved ID. Never guess: a
-					# wrong allocation is a permanent, silent
-					# identity conflict.
-					skip_sysusers_line "$conffile" "line $lineno: non-numeric ID '$id' for $name"
-					continue
-					;;
-			esac
-			case $kind in
-				g*)
-					ensure_group "$name" "$id"
-					;;
+		case $id in
+			''|*[!0-9]*)
+				# A dynamic or name-resolved ID. Never guess: a
+				# wrong allocation is a permanent, silent
+				# identity conflict.
+				skip_sysusers_line "$conffile" "line $lineno: non-numeric ID '$id' for $name"
+				continue
+				;;
+		esac
+		# Reserved-identity convergence: upstream boilerplate
+		# (systemd basic.conf and kin) re-declares the foundation
+		# identities with their canonical IDs, and systemd-sysusers
+		# treats those declarations as no-ops live. The offline
+		# replay converges rather than dying: an EXACT match against
+		# the already-present identity is a logged no-op. This
+		# grants nothing: a missing identity, and any redefinition,
+		# still reaches ensure_* below, where the reserved guard
+		# refuses every creation and every move. Non-reserved
+		# names never enter this branch.
+		case $kind in
+			g*)
+				case $name in
+					root|wheel|spokes)
+						existing=$(group_entry "$name")
+						if [ -n "$existing" ] && [ "$(field 3 "$existing")" = "$id" ]; then
+							printf 'ensure-identity: notice: %s: reserved group %s %s already present, no change\n' \
+								"${conffile##*/}" "$name" "$id" >&2
+							unset name id kind existing
+							continue
+						fi
+						;;
+				esac
+				;;
+			*)
+				case $name in
+					root)
+						existing=$(passwd_entry "$name")
+						if [ -n "$existing" ] && [ "$(field 3 "$existing")" = "$id" ]; then
+							printf 'ensure-identity: notice: %s: reserved user %s %s already present, no change\n' \
+								"${conffile##*/}" "$name" "$id" >&2
+							unset name id kind existing
+							continue
+						fi
+						;;
+				esac
+				;;
+		esac
+		unset existing
+		case $kind in
+			g*)
+				ensure_group "$name" "$id"
+				;;
 				*)
 					# A `u' line creates the user AND a group of the
 					# same name, which is what makes it usable as a

@@ -2,7 +2,18 @@
 
 pkgname=openrc
 pkgver=0.62.1
-pkgrel=3
+pkgrel=5
+# r5: Saphira bootmisc never migrates /var/run or /var/lock into
+# /run (upstream OpenRC does on every boot: an empty real directory
+# rmdir's cleanly and is then symlinked - proven by a 0.2.1 guest
+# that kept /var/run -> /run despite fhs-converge. Same patch class
+# as systemd's saphira-split-run: the non-usrmerged split is policy,
+# no unit or script may undo it).
+# r4: depends gains findutils, procps-ng and kbd (the shipped and
+# pre-enabled boot services shell out to them: bootmisc needs find,
+# sysctl needs sysctl, keymaps/save-keymaps need kbd_mode/loadkeys/
+# dumpkeys. Without them every OpenRC boot logs three service
+# failures - proven on the 0.2.1 first boot).
 # r3: own /etc/inittab (moved out of saphira-baselayout, which wrongly
 # shipped this OpenRC sysvinit table on every host including systemd
 # machines). Byte-identical stock content; apk ownership semantics govern
@@ -19,6 +30,9 @@ source=https://github.com/OpenRC/openrc/archive/refs/tags/${pkgver}.tar.gz
 sha256=935014044b5704b4f4e2f8b2b5faf4d1a3597f925a8a204a7a6d050060f5dcc4
 
 depends="
+    findutils
+    kbd
+    procps-ng
     saphira-baselayout
 "
 
@@ -33,6 +47,10 @@ makedepends="
 
 recipe_build()
 {
+	# Non-usrmerged boot: OpenRC's own bootmisc would migrate /var/run
+	# and /var/lock into /run on every boot. Fails closed on upstream
+	# drift like the systemd split-run patches.
+	patch -d "$SRC" -Np1 -i "$RECIPE_DIR/files/saphira-no-run-migration.patch"
 	meson setup build "$SRC" \
 		--bindir=/bin --sbindir=/sbin --libdir=/lib \
 		--libexecdir=/lib --buildtype=release \

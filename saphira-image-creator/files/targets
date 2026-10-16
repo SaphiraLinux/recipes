@@ -15,5 +15,9 @@
 # This file never re-enumerates a resolved closure.
 bios-openrc     bios  openrc   minimal-openrc
 bios-systemd    bios  systemd  minimal-systemd
+bios-saphira    bios  openrc   saphira-openrc
+bios-saphirad   bios  systemd  saphirad-systemd
 uefi-openrc     uefi  openrc   minimal-openrc
 uefi-systemd    uefi  systemd  minimal-systemd
+uefi-saphira    uefi  openrc   saphira-openrc
+uefi-saphirad   uefi  systemd  saphirad-systemd

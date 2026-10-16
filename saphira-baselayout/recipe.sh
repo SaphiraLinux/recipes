@@ -2,7 +2,273 @@
 
 pkgname=saphira-baselayout
 pkgver=0.1
-pkgrel=24
+pkgrel=49
+# r49: an identity must not die reconciling its own home directory.
+# The reconciler pasted its root onto every path, so a root of "/" made
+# them "//etc/passwd" and "//var/lib/dhcpcd". A double-slashed path is
+# implementation-defined and chown(1) rejects it with EINVAL, so an
+# account declared with a home was CREATED and then the reconciliation
+# died fixing that home - leaving the package uninstallable with an error
+# that names a path the caller never wrote. Found while declaring the
+# dhcpcd identity, which is the first fragment in the tree to exercise a
+# home directory through the real image build path. Proven by
+# saphira-packager/tests/accounts.sh.
+# r48: one owner for the network configuration, and a completion rule
+# that cannot strand a machine. Found by live BIOS/OpenRC acceptance:
+# network setup was lost across a reboot and firstboot offered itself
+# again on every boot afterwards.
+#
+# THE SPLIT. saphira-baselayout shipped its own older copy of
+# saphira-network-config at /sbin; saphira-network ships the real one at
+# /usr/sbin. firstboot applied through the /sbin copy while the boot
+# service ran the /usr/sbin one. They disagreed about everything that
+# matters: /etc/network.conf and /etc/network.d versus
+# /etc/saphira-network.conf and /etc/saphira-network.d, and the /sbin
+# copy had no notion of SLAAC at all - a mode the wizard itself offers.
+# So a reasonable answer either failed the apply outright, or was written
+# where the boot service reaches it only through its legacy fallback.
+# That copy is deleted, apply-network.sh now runs the owning binary, and
+# it writes into the owning directory. The legacy /etc/network.d keeps
+# working for existing installs as the owner's documented fallback.
+# Guarded by saphira-network/tests/network-config-ownership.sh, which
+# also fails if a second copy is ever added quietly.
+#
+# THE COMPLETION RULE. The root password is the commit point. firstboot
+# runs only until it is set, and setting it spends the marker
+# permanently; nothing after that may re-arm it. The previous contract
+# spent the marker only after EVERY step succeeded, which is exactly what
+# turned one late failure into an unbreakable loop: the machine was told
+# setup would run again, rebooted into setup, failed the same way, and
+# had no network with which to be repaired. A commit point has to be a
+# fact about the machine, not a summary of how the wizard's own steps
+# went. So: set_password root spends the marker at once, entry self-heals
+# a machine that has a root password with the marker still armed (spend it
+# and leave, never re-prompt), and the administrator, network, DNS and
+# repository steps run best-effort afterwards - retried at most twice,
+# skippable with q or Ctrl-C, recorded and reported as an explicit list of
+# what is not configured, with boot continuing either way.
+# Proven by tests/firstboot-completion.sh.
+#
+# Also fixed a latent silent abort: `sed ... | head -1` under
+# `set -euo pipefail` exits non-zero when sed cannot open the file, which
+# under set -e killed the wizard outright on any root with no
+# /etc/os-release - no message, no marker movement, just a stopped
+# process. Reading an optional file must never be able to end the
+# transaction.
+# r47: firstboot completion contract, navigation, and target-neutral
+# kernel arguments. Found by live BIOS/OpenRC acceptance.
+# Completion: the wizard died part-way through a finished-looking run
+# and the machine offered setup again on the next boot, because an
+# unchecked failure in the window between confirmation and the end left
+# the marker armed and said nothing. Now every post-confirmation step is
+# required and named (require_step), a network activation failure
+# aborts instead of being tolerated and then reported as complete, the
+# marker is spent last and its removal verified, and any failure exits
+# through transaction_failed, which states what broke and leaves the
+# marker intact on purpose. The marker is now also checked BEFORE the
+# completion record: an ordinary boot with the marker spent is a silent
+# success, and the one inconsistent state (record present, marker
+# present) is loud rather than a silent reconfigure. Proven by
+# tests/firstboot-completion.sh.
+# Navigation: q or Ctrl-C goes back one step at every menu and input -
+# from a gateway or address back to its mode menu, from the IPv6
+# question back to the IPv4 mode, from an interface back to the previous
+# one. Ctrl-C no longer terminates the transaction: a mistaken Static
+# selection is recoverable without a reboot. TERM/QUIT/TSTP still refuse
+# to end a setup in progress, because those are a console competitor
+# hanging up, not an operator changing their mind.
+# Network order, as the live console test showed it: IPv4 first, then
+# whether IPv6 is wanted at all, then the IPv6 mode. The IPv6 question
+# has no default either - blank re-prompts - and "no" disables IPv6 for
+# that interface. Revisiting an interface replaces its recorded answer
+# instead of appending a duplicate to the summary.
+# /etc/skel ships real .bashrc and .profile now; they were a zero-byte
+# file and a one-line PATH, which is what a first-boot account inherits.
+# install_shell_defaults tolerates their absence rather than aborting the
+# transaction over a dotfile.
+# Kernel arguments: systemd.imds=no is gone from the packaged
+# GRUB_CMDLINE_LINUX, which is init-neutral; saphira-image adds it for
+# SaphiraD targets only, next to systemd.getty_auto=0. An OpenRC kernel
+# line carries no systemd-only arguments.
+# r46: network policy for a server, and firstboot in the right place.
+# saphira-firstboot must never infer DHCP from an empty answer. The
+# per-interface prompt used to offer (d)HCP/(s)tatic/(k)eep with D as
+# the default, so pressing Enter silently configured DHCP and a
+# machine could decide its own address from whatever answered on the
+# wire. IPv6 configuration is now presented before IPv4, as two
+# explicit menus - IPv6 Static/SLAAC/DHCPv6/Disabled and IPv4
+# Static/DHCP/Disabled - and neither has a default: an empty answer
+# re-prompts, because the address mode is an operator decision and is
+# never inferred. DHCP and DHCPv6 are explicit operator selections
+# only; static addressing, SLAAC where selected, and disabled are
+# equally valid choices. Choosing Static now requires a valid address
+# (blank re-prompts instead of silently disabling the family), and
+# Disabled is the only way to say "no address for this family".
+# Disabled for both families means Saphira leaves that interface
+# alone: no configuration file is written for it, so nothing ever
+# reconfigures it. Every detected interface is offered configuration
+# and every one appears in the summary, including the ones left
+# unconfigured. The DNS prompt still preselects Quad9 and the final
+# confirmation still defaults to Y: those are different classes of
+# decision, not addressing choices.
+# Ordering: firstboot no longer runs first in sysinit. It now runs in
+# the boot runlevel, after the boot-level services that constitute
+# essential boot and platform setup (modules and kernel state,
+# filesystem work, seedrng for entropy, console encoding, the FHS
+# convergence), so the wizard appears on a console that has finished
+# booting rather than halfway through it - and, on a machine where
+# interfaces are still being discovered, no longer races its own
+# interface list. It still blocks its runlevel, so gettys, sshd and
+# the network service start only after setup completes.
+# dhcpcd remains installed as an optional capability and is never
+# enabled or started merely because it is present; it runs only for an
+# explicit DHCP or DHCPv6 selection, confined to the selected family,
+# and never writes the resolver, so the DNS recorded here stays
+# authoritative.
+# r45: the kernel console is the VGA and only the VGA. The packaged
+# GRUB_CMDLINE_LINUX listed "console=tty0 console=ttyS0,115200n8"; the
+# kernel takes the LAST console= as the device /dev/console maps to, so
+# /dev/console became ttyS0 - a serial port most Saphira machines do not
+# have. Firstboot runs entirely on /dev/console (the openrc init script
+# redirects stdin/stdout/stderr there, the systemd unit sets
+# TTYPath=/dev/console), so on a machine with no serial hardware it had
+# nowhere to show a prompt or read an answer: an unconfigured BIOS
+# acceptance image booted straight past firstboot to the login prompt,
+# with the failure invisible (getty clears the screen; agetty uses
+# /dev/tty1, which is why login still worked). The r44 wizard itself was
+# proven good by running it inside that image's root. Serial consoles
+# remain supported for deployments that have one: add console=ttyS0 to
+# the kernel line there, and the wizard's console-aware erase handling
+# (serial '^H', VT '^?') applies as before. The boot menu terminals stay
+# dual (grub ignores a terminal it cannot open; the VGA menu is proven).
+# r44: firstboot console polish (single OpenRC BIOS acceptance pass).
+# The wizard configures the erase character for the console actually
+# attached (VT '^?', serial '^H' - the unconditional '^H' broke
+# Backspace on VGA), clears the screen and presents a proper welcome
+# screen (product from os-release, 60-column rules, bullet summary,
+# "Press Enter to begin"), labels each phase with a heading, offers
+# IPv6-as-well on the DHCP path, accepts a blank static gateway,
+# shows DNS provider addresses in the choice, defaults the
+# repository prompt to Enter, and closes with a full summary and a
+# [Y/n] confirmation. Kernel console output is quieted for the
+# interactive window (restored on exit) so nothing overwrites a
+# prompt. Completion also mints SSH host keys (best-effort; sshd's
+# own first start remains the safety net) and prints a clean
+# handover. The OpenRC init script's marker check moved from
+# start_pre (return 1 = failed service and a boot-log line on every
+# boot) into start() as a silent success with a no-op stop(), so
+# ordinary boots reach the login prompt with no firstboot chatter.
+# r43: move device-owner groups to GIDs 157-163. The r40 picks
+# (124-126, 132-135) collided with published repo packages (hostapd
+# 124, breathgslb 126, qmail 132) and blocked publication: the repo
+# gate refuses any GID claimed twice, and published packages do not
+# move, so the seed vacates. New block verified free against the live
+# reservations table (plus systemd sysusers pins avoided).
+# r42: remove the firstboot GRUB/systemd boot-mode architecture (the r40
+# dedicated saphira-firstboot.target + bootloader selection was an
+# unrequested design: ONE normal boot path; firstboot is init-level).
+# The systemd service now runs in the normal boot, condition-gated on
+# the marker; the boot gate serializing operational services behind
+# setup follows after graph inspection (never a second boot mode).
+# The wizard's at-boot handover signal is now explicit env
+# (SAPHIRA_FIRSTBOOT_AT_BOOT from the init script/service) instead of
+# a kernel-cmdline probe; a missing marker is a plain exit, never a
+# reboot (a reboot there would loop on the single boot path).
+# r41: no serial getty, ever. Saphira generally has no serial hardware,
+# so firstboot no longer creates a serial login prompt (release_console
+# removed with both its call sites); VGA gettys cover login. This also
+# removes the dev-ttyS0.device wait that timed out on hardware without
+# the port. claim_console's stops stay as defensive no-ops.
+# r40: firstboot UX + device groups + fhs/tmpfiles order + idempotent
+# dhcpcd (legacy copy) + no-imds. (The dedicated saphira-firstboot.target
+# + bootloader selection from this rev was removed in r42: unrequested
+# second boot mode. The wizard UX, groups, ordering, dhcpcd, and imds
+# work below are retained.) The wizard applies
+# network via SIGHUP (no bus runs this early), enables (not starts)
+# the serial getty, and hands off with a reboot into the normal boot.
+# OpenRC keeps its strictly-ordered sysinit-first blocking start (no
+# reboot needed there). The wizard also prints a product heading
+# (PRETTY_NAME) before asking anything. New device-owner groups
+# (cdrom, tape, dialout, kvm, render, sgx, clock) silence udev/tmpfiles
+# "Unknown group" noise and fix node ownership (/dev/rtc0, /dev/kvm).
+# fhs-converge runs Before both tmpfiles units (alias swap must precede
+# population; the race failed first boots intermittently).
+# saphira-network-config (legacy /sbin copy invoked by firstboot)
+# gains the same idempotent dhcpcd_up helper as the current copy.
+# r48 removed that copy outright: see the r48 note at the top.
+# Default kernel cmdline gains systemd.imds=no (Saphira is not a cloud
+# image; the auto-detecting IMDS generator otherwise logs a failed
+# hwdb lookup on every boot).
+# r39: order the wizard after vconsole-setup as well (it is pulled in
+# beside the wizard and would otherwise print its completion line
+# into the interactive session just as the first prompt appears;
+# DefaultDependencies=no with no After=sysinit of its own, so no
+# cycle, and After-without-Requires can never block setup).
+# r38: exclusive-console firstboot ordering (both inits) + console
+# erase setup. OpenRC: the wizard runs first in sysinit with a
+# FOREGROUND blocking start() (keyword -timeout opts out of
+# openrc-run's 60s SIGKILL, WAIT_TIMEOUT in openrc-run.c) instead of
+# detached in boot, so no service output can interleave with the
+# prompts; normal services start only after setup. systemd: the unit
+# runs Before sysinit.target (DefaultDependencies=no, after udevd and
+# networkd - both DefaultDependencies=no upstream, so cycle-free) for
+# the same exclusivity; sshd/getty/sessions start only after setup.
+# The wizard also establishes the console erase character (^H, what
+# libvirt/virt-manager serial consoles send) instead of inheriting
+# the kernel default ^?, which made every Backspace echo literally.
+# r37: firstboot survival traps first (HUP ignored outright:
+# a console competitor can hang up the session in the first
+# milliseconds, before any later trap would be installed).
+# r36: firstboot unit routes stdout/stderr to the console too
+# (stdin alone left a blind wizard: prompts in the journal,
+# input on the serial - proven deaf); no TTYVHangup.
+# r35: tunnels report ARPHRD_ETHER too, so firstboot requires a real
+# backing device link as well (erspan/gretap excluded, proven); a
+# failed activation restores the previous stanza (or removes the new
+# one) instead of leaving poison behind (both paths proven).
+# r34: firstboot network activation is per-interface best-effort
+# (warn + continue, accounts/identity still established) instead
+# of aborting the whole run on one failed NIC.
+# r33: firstboot enumerates ARPHRD_ETHER interfaces only (tunnel
+# devices like erspan0 cannot be addressed and aborted the whole
+# activation with 'Address not available' - proven on hardware).
+# r32: firstboot creates the serial login prompt on completion
+# (enable+start, both inits) instead of racing a pre-enabled getty
+# for the same port; the image ships no serial getty anymore.
+# r31: firstboot launch that survives service supervision -
+# openrc-run SIGKILLs a foreground-blocking start() at timeout, and
+# systemd oneshot defaults to a 90s start timeout, so the wizard now
+# runs detached (setsid, console fds) with an instant-returning
+# start(), TimeoutStartSec=infinity on the unit, and owns the console
+# by stopping/restarting the serial getty around the session (a
+# sharing getty provably steals input mid-wizard).
+# r30: firstboot release readiness - the existing wizard repaired in
+# place (no new package): /bin/bash shebang + self-sufficient PATH
+# (both were merged-usr assumptions that broke first boot), getent
+# replaced by local awk lookups, interface discovery with per-NIC
+# DHCP/static/skip instead of hardcoded eth0, hatchling repo URL
+# corrected to hatched, machine-id minted at completion, Wi-Fi
+# offered only when its packages exist. New dual-init invocation
+# services (marker-gated no-ops without it) enabled by the image.
+# r29: self-sufficient PATH in ensure-fhs and ensure-identity.sh
+# (same non-usrmerged reason: install callers and the systemd boot
+# unit run with a bare PATH; ensure-fhs died with dirname-not-found
+# on first boot, failing fhs-converge).
+# r28: no staging path literally anywhere shipped (the r27 comment
+# itself named the retired path and tripped the provenance gate).
+# r27: retire Stage4 archaeology (configure-stage4-grub removed: no
+# callers, staging path in guard; apply-accounts.sh drops the
+# $ROOT/out/stage4/rootfs clause, installer target only). No staging
+# path may appear in shipped tooling.
+# r26: sysusers replay converges on reserved exact matches (systemd
+# basic.conf re-declares g root 0; systemd-sysusers no-ops that live,
+# so the offline replay logs it and moves on). Grants nothing: missing
+# and redefined reserved identities still die in ensure_*. Proven by
+# the 0.2.1 SaphiraD assembly, which could not complete without it.
+# r25: ensure-fhs uid_of/gid_of read the target root's own database in
+# all cases (the `getent | cut` empty-ROOT branch succeeded empty when
+# getent was absent, masking the fallback and producing `chown 81:`
+# failures - proven on dbus/polkit installs). No getent/id dependency.
 # r24: merge line (r23 nomodeset-drop + r20 reconciler semantics + r16
 # fhs.d machinery + r22 inittab split combined: the merged payload
 # carries ensure-fhs, permissions-override.sh, the global fhs.d
@@ -122,13 +388,10 @@ recipe_install()
 		printf '# Example %s interface configuration.\n# INTERFACE=eth0\n# ADDRESS=192.168.0.10/24\n# GATEWAY=192.168.0.1\n' \
 			"${example%%-*}" > "$PKGDEST/etc/network.d/$example"
 	done
-	install -m 0644 /dev/null "$PKGDEST/etc/skel/.bashrc"
-	printf 'export PATH=/usr/bin:/bin:/usr/sbin:/sbin\n' > \
-		"$PKGDEST/etc/skel/.profile"
+	install -m 0644 "$RECIPE_DIR/files/skel.bashrc" "$PKGDEST/etc/skel/.bashrc"
+	install -m 0644 "$RECIPE_DIR/files/skel.profile" "$PKGDEST/etc/skel/.profile"
 	install -m 0755 "$RECIPE_DIR/files/saphira-firstboot" \
 		"$PKGDEST/sbin/saphira-firstboot"
-	install -m 0755 "$RECIPE_DIR/files/saphira-network-config" \
-		"$PKGDEST/sbin/saphira-network-config"
 	install -m 0755 "$RECIPE_DIR/files/sbin/saphira-identity" \
 		"$PKGDEST/sbin/saphira-identity"
 	install -m 0755 "$RECIPE_DIR/files/installkernel" \
@@ -153,6 +416,14 @@ install -m 0644 "$RECIPE_DIR/files/libexec/permissions-override.sh" \
 		"$PKGDEST/etc/init.d/saphira-fhs-converge"
 	install -D -m 0644 "$RECIPE_DIR/files/saphira-fhs-converge.service" \
 		"$PKGDEST/usr/lib/systemd/system/saphira-fhs-converge.service"
+	# Firstboot invocation (both inits): the wizard runs only while
+	# /etc/saphira-firstboot-required exists (assembly writes it when
+	# root ships locked); without the marker both are no-ops, so the
+	# image enables them unconditionally via prepare_init.
+	install -D -m 0755 "$RECIPE_DIR/files/saphira-firstboot.initd" \
+		"$PKGDEST/etc/init.d/saphira-firstboot"
+	install -D -m 0644 "$RECIPE_DIR/files/saphira-firstboot.service" \
+		"$PKGDEST/usr/lib/systemd/system/saphira-firstboot.service"
 	install -m 0755 "$RECIPE_DIR/files/libexec/apply-network.sh" \
 		"$PKGDEST/usr/libexec/saphira/apply-network.sh"
 	install -m 0644 "$RECIPE_DIR/files/accounts.tsv" \
@@ -163,8 +434,9 @@ install -m 0644 "$RECIPE_DIR/files/libexec/permissions-override.sh" \
 		"$PKGDEST/usr/share/saphira/root.profile"
 	install -m 0644 "$RECIPE_DIR/files/00-loopback.conf" \
 		"$PKGDEST/usr/share/saphira/00-loopback.conf"
-	install -m 0755 "$RECIPE_DIR/files/libexec/configure-stage4-grub" \
-		"$PKGDEST/usr/libexec/saphira/configure-stage4-grub"
+	# configure-stage4-grub is retired with the generation-zero
+	# bootstrap (no callers; its guard named a staging path) and
+	# removed from the tree; git history retains it.
 	install -D -m 0644 "$RECIPE_DIR/files/LICENSE" \
 		"$PKGDEST/usr/share/licenses/saphira-baselayout/LICENSE"
 }

@@ -1165,7 +1165,7 @@ def construct(apk: str, payload: Path, arguments: list[str], producer: str) -> s
         '[ -n "$path" ] || continue; chmod "$mode" "$path" || exit 1; done < "$modes"; '
         'rm -f "$modes"; exec "$@"'
     )
-    command_tail = [apk, "mkpkg", "-F", str(payload), *arguments]
+    command_tail = [apk, "mkpkg", "--compression", "zstd:22", "-F", str(payload), *arguments]
     unshare = shutil.which("unshare")
     if not unshare:
         die("unshare is required for rootless payload ownership")

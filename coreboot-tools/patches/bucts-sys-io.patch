@@ -1,0 +1,11 @@
+--- a/util/bucts/bucts.c
++++ b/util/bucts/bucts.c
+@@ -11,7 +11,7 @@
+ #include <errno.h>
+ #include <unistd.h>
+ #include <sys/mman.h>
+-#if defined(__GLIBC__)
++#if defined(__GLIBC__) || defined(__linux__)
+ #include <sys/io.h>
+ #endif
+ #include <pci/pci.h>

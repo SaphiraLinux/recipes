@@ -1,13 +1,37 @@
 GRUB_DEFAULT=0
 GRUB_TIMEOUT=3
 GRUB_DISTRIBUTOR="Saphira"
-GRUB_CMDLINE_LINUX="rootfstype=ext4 rw rootwait console=tty0 console=ttyS0,115200n8 raid=noautodetect init=/usr/lib/systemd/systemd"
+# console= names exactly one console, and it is the VGA (tty0). The kernel
+# takes the LAST console= on the command line as the one /dev/console maps
+# to, so listing ttyS0 here handed /dev/console to a serial port that most
+# Saphira machines do not have: firstboot - which runs entirely on
+# /dev/console (openrc init script redirection, systemd TTYPath) - had
+# nowhere to show or read, so an unconfigured machine booted straight past
+# setup to the login prompt with no error anywhere (proven on a BIOS
+# acceptance image booted on a machine with no serial hardware). A
+# deployment that genuinely has a serial console adds console=ttyS0 to its
+# own kernel line.
+GRUB_CMDLINE_LINUX="rootfstype=ext4 rw rootwait console=tty0 raid=noautodetect init=/usr/lib/systemd/systemd"
 # No nomodeset: Saphira needs kernel modesetting and the EFI framebuffer
 # for console (nomodeset blinds UEFI boxes: no efifb, and i915 ships as
 # a module with no initramfs to load it early). A machine that genuinely
 # needs modesetting off overrides this on its own kernel line.
 # init= is belt-and-braces only: systemd ships a real /sbin/init, so the
 # kernel's ordinary search is the supported path (test boots omit init=).
+# systemd.imds=no: Saphira is not a cloud image, so the IMDS metadata
+# generator can never enable here - but in auto mode it still opens the
+# hardware database at every boot and logs a failed lookup when none
+# exists yet. Disabling it explicitly (documented upstream knob) keeps
+# boot output clean; a future cloud role re-enables it deliberately.
+# It is NOT in the line above. The packaged default is init-neutral, and
+# a systemd-only kernel argument on an OpenRC target is target leakage:
+# meaningless there, and misleading to anyone reading /proc/cmdline.
+# saphira-image adds it for SaphiraD targets only, alongside
+# systemd.getty_auto=0, and OpenRC targets carry neither.
+# The boot MENU still offers serial alongside the VGA console, and that is
+# deliberately independent of the kernel console above: grub ignores a
+# terminal it cannot open, so the menu always appears on the VGA (proven)
+# while a deployment that does have a serial port can watch the boot.
 GRUB_TERMINAL_INPUT="console serial"
 GRUB_TERMINAL_OUTPUT="console serial"
 GRUB_SERIAL_COMMAND="serial --speed=115200 --unit=0 --word=8 --parity=no --stop=1"

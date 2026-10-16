@@ -15,6 +15,13 @@ depend()
 start_pre()
 {
 	checkpath -d -m 0755 /var/run/sshd
+	# First-start host keys, before any validation: ssh-keygen -A is
+	# idempotent (it generates only missing key types, never replaces
+	# existing keys), so this is safe on every start, and sshd -t
+	# below requires the keys to exist. Same semantics as the
+	# systemd unit's ExecStartPre=/usr/bin/ssh-keygen -A.
+	ebegin "Generating missing SSH host keys"
+	/usr/bin/ssh-keygen -A || return 1
 	ebegin "Checking sshd configuration"
 	/usr/sbin/sshd -t
 }

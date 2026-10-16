@@ -1,0 +1,57 @@
+[Unit]
+Description=Saphira first-boot account and identity setup
+# Console-owned interactive setup, by design: an unconfigured machine
+# has no remote path in. Runs only while the assembly-written marker
+# exists; without it this unit is skipped without starting.
+ConditionPathExists=/etc/saphira-firstboot-required
+# This unit runs in the NORMAL boot, enabled like any service: there is
+# exactly one boot path and no boot-mode selection anywhere (no second
+# GRUB entry, no marker-conditional default, no special kernel command
+# line). It deliberately carries systemd's DEFAULT dependencies, which
+# order it after basic.target - that is, after sysinit, paths, slices,
+# sockets and the platform services that constitute essential boot and
+# platform setup. An earlier revision set DefaultDependencies=no and
+# gated basic.target instead, which put the wizard on screen BEFORE
+# that setup finished: boot messages were still pending behind it, and
+# the wizard was racing device discovery for its interface list.
+#
+# After= names the platform work it consumes: udevd for device
+# discovery, networkd so the wizard's own address/DHCP apply works live
+# (via SIGHUP reload, no D-Bus: no message bus runs this early by
+# design), and the layout migration this package owns. Without= is not
+# claimed: their failure must never block setup - the marker is kept
+# and setup retries on the next boot either way.
+#
+# The boot gate that holds login, gettys and operational services until
+# setup completes is NOT here; it is normal-boot dependency structure
+# applied by the image (multi-user.target, which is the default target),
+# designed from the real unit graph - never a second boot mode.
+After=systemd-udevd.service systemd-networkd.service saphira-fhs-converge.service
+Wants=systemd-udevd.service systemd-networkd.service
+# At-boot handover signal for the wizard: set only when launched by
+# this unit (manual runs leave it unset, so a manual setup never
+# reboots a live machine). The wizard consumes the marker and reboots
+# into the ordinary boot only when it runs at boot.
+Environment=SAPHIRA_FIRSTBOOT_AT_BOOT=1
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# The wizard is interactive: a human answers on the console, which
+# takes minutes, not seconds. The default start timeout would kill it
+# mid-flow, so oneshot simply has no timeout to hit.
+TimeoutStartSec=infinity
+# Console on all three fds: stdin alone is not enough - without
+# explicit output routing the prompts vanish into the journal while
+# input still comes from the console (proven: blind wizard, deaf
+# operator). No TTYVHangup: hanging up the console would cut the
+# very session being configured.
+ExecStart=/sbin/saphira-firstboot
+StandardInput=tty-force
+StandardOutput=tty
+StandardError=tty
+TTYPath=/dev/console
+TTYReset=yes
+
+[Install]
+WantedBy=multi-user.target

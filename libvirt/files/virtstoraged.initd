@@ -10,6 +10,14 @@ description="libvirt virtualization storage driver (virtstoraged)"
 command="/usr/sbin/virtstoraged"
 supervisor="supervise-daemon"
 
+# Saphira is not usrmerged and /var/run is a real directory, never a
+# /run alias: the daemons are built with -Drunstatedir=/var/run, so the
+# socket directory must exist here before the daemon starts.
+start_pre()
+{
+	checkpath -d -o root:root -m 0755 /var/run/libvirt
+}
+
 depend()
 {
 	need localmount

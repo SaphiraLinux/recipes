@@ -132,3 +132,30 @@ CCRAMP1 ccram/ccram-04-sysram-register.patch
 # CCRAM Phase 2A (software-compressed object store + self-test).
 # Standalone: no residency wiring yet, default off. See CCRAM-PHASE2A.md.
 CCRAMP1 ccram/ccram-05-swstore-object-store.patch
+# Phase 2A fix from the minimer boot gate: xa_alloc requires TRACK_FREE
+# (XA_FLAGS_ALLOC1, ids from 1); propagate its real errors instead of
+# forcing ENOSPC.
+CCRAMP1 ccram/ccram-06-swstore-xarray-alloc-flag.patch
+# Phase 2B residency (anonymous 4K only): non-present marker encoding
+# (PTE_MARKER BIT(3), purpose-built extension), fault discharge to
+# private pages, fork/zap lifecycle hooks...
+CCRAMP1 ccram/ccram-07-residency-encoding-fault.patch
+# ...then the demote-store path (rmap unmap with rollback) ahead of
+# migrate-placement. See CCRAM-PHASE2B-DESIGN.md.
+CCRAMP1 ccram/ccram-08-residency-demote.patch
+# Residency compile fixes (local pte-changed helper, no devmap here,
+# hugetlb.h for TLB macros).
+CCRAMP1 ccram/ccram-09-residency-compile-fixes.patch
+# DIAGNOSTIC r10 ONLY (not for release/merge): preempt-state tripwires
+# around the Phase-2B demote path to locate the FIRST preempt-count
+# corruption. One diagnostic stack on first mismatch, then demotion
+# stops. No behavioural change.
+CCRAMP1 ccram/ccram-10-diag-tripwires.patch
+# DIAGNOSTIC r11 ONLY: finer boundaries at PTL release (tolerant
+# pre-walk-done, exact post-walk-done, pre-range-end). Splits the span
+# r10 localized. No behavioural change.
+CCRAMP1 ccram/ccram-11-diag-tripwire-fine.patch
+# FIX r12: single-ownership PTL cleanup in demote walks. Natural
+# exhaustion already ran the internal not_found() cleanup, so a second
+# done() double-releases (proven root cause of the preempt corruption).
+# Stock convention: done only on in-loop break. Tripwires retained.

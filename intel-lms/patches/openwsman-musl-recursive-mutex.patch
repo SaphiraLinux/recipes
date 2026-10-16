@@ -1,0 +1,15 @@
+--- a/CIM_Framework/openwsman/src/lib/u/lock.c
++++ b/CIM_Framework/openwsman/src/lib/u/lock.c
+@@ -49,7 +49,10 @@
+ #ifndef _WIN32
+ extern int pthread_mutexattr_settype(pthread_mutexattr_t *attr, int type);
+ #endif
+
+-#if defined (__SVR4) && defined (__sun)
++/* PTHREAD_MUTEX_RECURSIVE_NP is a glibc extension; POSIX (and musl)
++ * provide PTHREAD_MUTEX_RECURSIVE with identical semantics. */
++#if (defined (__SVR4) && defined (__sun)) || \
++    (defined (__linux__) && !defined (__GLIBC__))
+ #define PTHREAD_MUTEX_RECURSIVE_NP PTHREAD_MUTEX_RECURSIVE
+ #endif
+

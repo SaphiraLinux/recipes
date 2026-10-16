@@ -1,0 +1,49 @@
+[Unit]
+Description=Saphira libvirt virtualization stack (modular daemon umbrella)
+Documentation=man:virtqemud(8) man:virtproxyd(8)
+# Umbrella over the modular daemons, NOT a daemon itself: this package
+# builds with -Dlibvirtd=disabled, so no monolithic libvirtd binary
+# exists and nothing here executes one. This unit restores the stable
+# operator contract over the modular stack:
+#   systemctl enable --now libvirtd  enables the stack for boot and
+#                                    starts every member now
+#   systemctl restart libvirtd       restarts the whole stack
+#   systemctl stop libvirtd          stops the whole stack
+#   systemctl status libvirtd        one top-level state for the stack
+# Mechanism is pure systemd dependency propagation (Wants=/After= here,
+# PartOf=libvirtd.service on every member): nothing shells out to
+# systemctl, and stop/restart propagation rides PartOf, which Wants=
+# alone would not provide.
+After=network-online.target nftables.service
+Wants=network-online.target
+# Start ordering: every member is started before the umbrella goes active.
+After=virtlogd.service virtlockd.service virtqemud.service virtstoraged.service virtnetworkd.service virtnodedevd.service virtsecretd.service virtproxyd.service virtinterfaced.service virtnwfilterd.service
+Wants=virtlogd.service virtlockd.service virtqemud.service virtstoraged.service virtnetworkd.service virtnodedevd.service virtsecretd.service virtproxyd.service virtinterfaced.service virtnwfilterd.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# /bin/true: coreutils installs to /bin on Saphira (non-usrmerged), so
+# this is the packaged path, not a compat alias.
+ExecStart=/bin/true
+# Deliberately NOT set: User=, Restart=, RuntimeDirectory= (systemd
+# would create that under /run, the wrong tree). This unit owns no
+# process and no socket: sockets live under /var/run/libvirt, created
+# per-daemon by the member units' ExecStartPre.
+
+[Install]
+WantedBy=multi-user.target
+# Install-time propagation: Wants= starts members at runtime but does
+# NOT enable them. Also= makes enable/disable of the umbrella
+# enable/disable the whole stack, which is the old operator contract:
+# one command installs the virtualisation service for boot.
+Also=virtlogd.service
+Also=virtlockd.service
+Also=virtqemud.service
+Also=virtstoraged.service
+Also=virtnetworkd.service
+Also=virtnodedevd.service
+Also=virtsecretd.service
+Also=virtproxyd.service
+Also=virtinterfaced.service
+Also=virtnwfilterd.service

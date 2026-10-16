@@ -1,7 +1,7 @@
 #!/bin/sh
 pkgname=rpcbind
 pkgver=1.2.9
-pkgrel=3
+pkgrel=4
 # r2: state dir + lock /run/* -> /var/run/* (statedir flag + source
 # patch for the hardcoded lock); initd/unit wired into payload (were
 # dead files); fhs.d migration. Payload change, revision bumps.

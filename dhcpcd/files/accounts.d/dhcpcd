@@ -1,0 +1,26 @@
+# dhcpcd service identity.
+#
+# dhcpcd drops privileges to this user before it does anything else, and
+# if the account does not exist it refuses to run at all. Nothing
+# declared it: the upstream install target creates no account, the recipe
+# installed the payload with a bare `make install`, and there is no
+# sysusers.d fragment anywhere in the closure to replay.
+#
+# The result is worse than an obvious failure, because it is a SILENT
+# one. saphira-network-config runs `dhcpcd -q <iface>`, which daemonises:
+# the parent exits 0 the moment it forks, and the privileged child then
+# prints "no such user dhcpcd" and dies. dhcpcd_up therefore saw success,
+# the service reported "configured N interface definition(s)", the boot
+# logged nothing red, and the machine came up with no address and no
+# default route at all. A DHCP client that cannot start must not be able
+# to report that it started.
+#
+# This is the same gap already fixed for frr, lldpd and mysql: the
+# package configures a service account the package never declared, only
+# quieter.
+#
+# ID IT NOT 157:  it is 104:104  check base seeds! do not assume an id is free
+# the next free slot above the declared 100-199 package tier
+# (sshd 101 ... polkitd 156), clear of the foundation identities.
+user dhcpcd 104 dhcpcd /var/lib/dhcpcd /sbin/nologin
+group dhcpcd 104

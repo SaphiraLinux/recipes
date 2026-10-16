@@ -2,7 +2,7 @@
 
 pkgname=postgresql-server
 pkgver=18.4
-pkgrel=4
+pkgrel=5
 # r3: socket dir /run/postgresql -> /var/run/postgresql via tmpfiles.d
 # (unit runs unprivileged). Payload change, revision bumps.
 # r4: merge line (unit gains the /var/run ExecStartPre repair line;
@@ -36,6 +36,7 @@ makedepends="
     make
     ncurses-dev
     openssl-dev
+    perl
     pkgconf
     readline-dev
     zlib-dev
@@ -70,6 +71,15 @@ recipe_install()
 		"$PKGDEST/usr/lib/pkgconfig/libpq.pc" \
 		"$PKGDEST/usr/bin/pg_config" \
 		"$PKGDEST/usr/share/postgresql/pg_service.conf.sample"
+	# Client headers belong to libpq (single-ownership gate): the full
+	# server install tree carries libpq-fe.h, libpq-events.h,
+	# postgres_ext.h, the usr/include/libpq/ subdir (incl. libpq-fs.h)
+	# and usr/include/postgresql/internal/, all owned by libpq.
+	rm -f "$PKGDEST/usr/include"/libpq-fe.h \
+		"$PKGDEST/usr/include"/libpq-events.h \
+		"$PKGDEST/usr/include"/postgres_ext.h
+	rm -rf "$PKGDEST/usr/include/libpq" \
+		"$PKGDEST/usr/include/postgresql/internal"
 	install -D -m 0755 "$RECIPE_DIR/files/postgresql-initdb" \
 		"$PKGDEST/usr/bin/postgresql-initdb"
 	install -D -m 0755 "$RECIPE_DIR/files/postgresql.initd" \

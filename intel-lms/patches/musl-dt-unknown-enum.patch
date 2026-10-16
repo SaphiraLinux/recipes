@@ -1,0 +1,15 @@
+--- a/CIM_Framework/CimFrameworkUntyped/include/CimDateTime.h
++++ b/CIM_Framework/CimFrameworkUntyped/include/CimDateTime.h
+@@ -183,6 +183,12 @@
+ 			{
+ 			public:
+ 
++				/* musl exposes the d_type constants (DT_UNKNOWN etc.)
++				 * as macros; CIM's own DateTimeType enum needs the
++				 * identifier, which no other TU uses for dirent. */
++				#if defined(__linux__) && !defined(__GLIBC__)
++				#undef DT_UNKNOWN
++				#endif
+ 				enum DateTimeType
+ 				{
+ 					DT_INTERVAL,

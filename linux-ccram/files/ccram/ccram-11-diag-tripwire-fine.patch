@@ -1,0 +1,71 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: AKADATA LIMITED <linux@saphira.vm2.uk>
+Date: Mon, 12 Oct 2026 14:45:00 +0000
+Subject: [PATCH] ccram: finer tripwire boundaries at PTL release (r11 diagnostic only)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+DIAGNOSTIC BUILD ONLY -- not for release, not for merge. Follows r10,
+which localized the first preempt-count corruption to after the sane
+in-PTL state and before replace_one exit. Splits that span: tolerant
+check pre-walk-done (PTL may or may not still be held), exact check
+post-walk-done (the PTL-release discriminator: +1 -> 0 sane,
++1 -> 0x7fffffff imbalance found), exact pre-range-end, existing
+replace-exit retained. Boot tag updated to r11. No behavioural,
+eligibility, THP, ARC, ZFS or reclaim-policy change.
+---
+ mm/ccram_residency.c | 24 +++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 23 insertions(+), 1 deletions(-)
+
+--- a/mm/ccram_residency.c
++++ b/mm/ccram_residency.c
+@@ -282,6 +282,25 @@
+ 	}\
+ } while (0)
+ 
++/*
++ * Tolerant variant for the PTL-release boundary: at loop exit the PTL
++ * may or may not still be held, so pc == baseline or baseline+1 both
++ * pass; anything else, or any task/irq change, fires. Documents the
++ * pre-PTL-unlock point; post-PTL-unlock is the exact post-walk-done.
++ */
++#define CCRAM_TRIP_AT_TOL(_ctx, _folio, _where) do {		\
++	struct ccram_trip_state __now;	\
++	ccram_trip_snap(&__now);	\
++	if ((__now.pc != (_ctx)->trip.pc &&	\
++	    __now.pc != (_ctx)->trip.pc + 1) ||	\
++	    __now.task != (_ctx)->trip.task ||	\
++	    __now.irq != (_ctx)->trip.irq) {	\
++		if (!atomic_xchg(&ccram_trip_fired, 1))	\
++			ccram_trip_fire(_where, &(_ctx)->trip, 0,	\
++				_folio, (_ctx)->id);	\
++	}	\
++} while (0)
++
+ /* Eligibility for software-compressed demote.  Narrow by construction:
+  * anonymous, order-0, mapped, non-KSM, non-swapcache, no writeback,
+  * not already CRAM-resident, unpinned, compress mode on with a live
+@@ -363,8 +382,11 @@
+ 		ccram_obj_ref(ctx->obj);
+ 		ctx->replaced++;
+ 	}
++	CCRAM_TRIP_AT_TOL(ctx, folio, "pre-walk-done");
+ 	page_vma_mapped_walk_done(&pvmw);
++	CCRAM_TRIP_AT(ctx, folio, "post-walk-done", 0);
+ 	mmu_notifier_invalidate_range_end(&range);
++	CCRAM_TRIP_AT(ctx, folio, "pre-range-end", 0);
+ 	CCRAM_TRIP_AT(ctx, folio, "replace-exit", 0);
+ 	return !ctx->failed;
+ }
+@@ -440,7 +462,7 @@
+ 	struct folio *folio, *tmp;
+ 	unsigned int nr_stored = 0;
+ 
+-	pr_info_once("ccram: DIAGNOSTIC preempt tripwires active (r10 diagnostic build, not for release)\n");
++	pr_info_once("ccram: DIAGNOSTIC preempt tripwires active (r11 diagnostic build, not for release)\n");
+ 	if (unlikely(atomic_read(&ccram_trip_fired)))
+ 		return 0;
+ 
+-- 
+2.55.0

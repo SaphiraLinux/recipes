@@ -1,0 +1,9 @@
+# File capabilities for iputils (saphira-permissions V1).
+#
+# Least privilege by construction: ping and arping need raw sockets
+# to do their job for ordinary users. Declared here instead of
+# build-time setcap (the build uses -DNO_SETCAP_OR_SUID=true) so the
+# authority survives in the package and converges at install/upgrade
+# via the generated ensure-caps caller. No setuid anywhere.
+cap /usr/bin/ping cap_net_raw+ep
+cap /usr/bin/arping cap_net_raw+ep

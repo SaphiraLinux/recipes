@@ -1,6 +1,9 @@
-#!/usr/bin/env bash
+#!/bin/bash
+# Non-usrmerged PATH (same reason as ensure-fhs): invoked by the
+# firstboot wizard, which itself runs under minimal boot PATH.
 
 set -euo pipefail
+export PATH=/usr/bin:/bin:/usr/sbin:/sbin
 umask 077
 
 test "$(id -u)" -eq 0 || {
@@ -9,9 +12,27 @@ test "$(id -u)" -eq 0 || {
 }
 
 NETWORK_ROOT=${SAPHIRA_NETWORK_ROOT:-}
-NETWORK_DIR=$NETWORK_ROOT/etc/network.d
-NETWORK_FILE=$NETWORK_DIR/eth0.conf
-NETWORK_SERVICE=${SAPHIRA_NETWORK_SERVICE:-/sbin/saphira-network-config}
+# ONE owner, ONE tool, ONE directory.
+#
+# This used to point at /sbin/saphira-network-config (a second, older
+# copy of the tool that saphira-baselayout shipped) and write into
+# /etc/network.d, the generation-zero directory that saphira-network
+# only reads as a compatibility fallback. Two copies meant the wizard
+# applied the configuration with one tool while the boot service ran
+# the other, against different directories - and the copy the wizard
+# used did not even understand SLAAC, a mode the wizard offers. So a
+# perfectly reasonable answer either failed the apply (leaving the
+# first-boot marker armed, so setup was offered again on every reboot)
+# or was written somewhere the boot service only reaches by fallback.
+#
+# saphira-network owns the tool at /usr/sbin/saphira-network-config and
+# the directory /etc/saphira-network.d. The OpenRC unit and the systemd
+# unit both run exactly that binary. Writing beside them means the
+# wizard and the boot service now read and write the same place, and
+# the legacy /etc/network.d keeps working for existing installs purely
+# as the owner's documented compatibility fallback.
+NETWORK_DIR=$NETWORK_ROOT/etc/saphira-network.d
+NETWORK_SERVICE=${SAPHIRA_NETWORK_SERVICE:-/usr/sbin/saphira-network-config}
 
 fail()
 {
@@ -200,11 +221,17 @@ load_state()
 
 validate_state()
 {
-	test "$TYPE" = physical || fail 'only physical eth0 configuration is supported'
-	test "$INTERFACE" = eth0 || fail 'INTERFACE must be eth0'
+	test "$TYPE" = physical || fail 'only physical interface configuration is supported'
+	case $INTERFACE in
+		''|*[!A-Za-z0-9_.:-]*|.*) fail "INTERFACE is invalid: $INTERFACE" ;;
+	esac
+	test "$INTERFACE" != lo || fail 'INTERFACE must not be lo'
+	if test -d "$NETWORK_ROOT/sys/class/net/$INTERFACE"; then :;
+	elif test -d "/sys/class/net/$INTERFACE"; then :;
+	else fail "INTERFACE does not exist: $INTERFACE"; fi
 	case $IPV4_MODE in
-		off) test -z "$IPV4_CIDR" && test -z "$IPV4_GATEWAY" ||
-			fail 'IPv4 fields must be empty when IPv4 is off' ;;
+		off|dhcp) test -z "$IPV4_CIDR" && test -z "$IPV4_GATEWAY" ||
+			fail 'IPv4 fields must be empty when IPv4 is off or DHCP' ;;
 		static)
 			valid_ipv4_cidr "$IPV4_CIDR" || fail "invalid IPv4 CIDR: $IPV4_CIDR"
 			test -z "$IPV4_GATEWAY" ||
@@ -213,8 +240,8 @@ validate_state()
 		*) fail "invalid IPv4 mode: $IPV4_MODE" ;;
 	esac
 	case $IPV6_MODE in
-		off) test -z "$IPV6_CIDR" && test -z "$IPV6_GATEWAY" ||
-			fail 'IPv6 fields must be empty when IPv6 is off' ;;
+		off|dhcp|slaac) test -z "$IPV6_CIDR" && test -z "$IPV6_GATEWAY" ||
+			fail 'IPv6 fields must be empty when IPv6 is off, DHCP or SLAAC' ;;
 		static)
 			valid_ipv6_cidr "$IPV6_CIDR" || fail "invalid IPv6 CIDR: $IPV6_CIDR"
 			test -z "$IPV6_GATEWAY" ||
@@ -223,6 +250,8 @@ validate_state()
 		*) fail "invalid IPv6 mode: $IPV6_MODE" ;;
 	esac
 	test "$IPV4_MODE" = static || test "$IPV6_MODE" = static ||
+		test "$IPV4_MODE" = dhcp || test "$IPV6_MODE" = dhcp ||
+		test "$IPV6_MODE" = slaac ||
 		fail 'at least one address family must be configured'
 	DNS_SERVERS=$(normalize_dns "$DNS_SERVERS") || fail 'DNS_SERVERS is invalid or empty'
 	valid_domain "$DNS_SEARCH" || fail "DNS_SEARCH is invalid: $DNS_SEARCH"
@@ -230,12 +259,26 @@ validate_state()
 
 write_network_file()
 {
-	local temporary
+	local temporary network_file had_previous previous_backup
+	network_file=$NETWORK_DIR/$INTERFACE.conf
 	install -d -m 0755 "$NETWORK_DIR"
-	temporary=$(mktemp "$NETWORK_DIR/.eth0.conf.XXXXXX")
-	trap 'rm -f "$temporary"' RETURN
+	# A failed activation must not leave a poison stanza behind (it
+	# would fail every later service start): back up any previous
+	# file here; apply_network() restores it - or removes the new
+	# file - when the service fails to apply.
+	had_previous=0
+	previous_backup=
+	if test -e "$network_file"; then
+		had_previous=1
+		previous_backup=$(mktemp "$NETWORK_DIR/.prev-$INTERFACE.conf.XXXXXX")
+		cp -f "$network_file" "$previous_backup"
+	fi
+	WRITE_FILE=$network_file
+	WRITE_HAD_PREVIOUS=$had_previous
+	WRITE_BACKUP=$previous_backup
+	temporary=$(mktemp "$NETWORK_DIR/.$INTERFACE.conf.XXXXXX")
 	{
-		printf 'TYPE=physical\nINTERFACE=eth0\n'
+		printf 'TYPE=physical\nINTERFACE=%s\n' "$INTERFACE"
 		printf 'IPV4_MODE=%s\nIPV4_CIDR=%s\nIPV4_GATEWAY=%s\nIPV4_METRIC=\n' "$IPV4_MODE" "$IPV4_CIDR" "$IPV4_GATEWAY"
 		printf 'IPV6_MODE=%s\nIPV6_CIDR=%s\nIPV6_GATEWAY=%s\nIPV6_METRIC=\n' \
 			"$IPV6_MODE" "$IPV6_CIDR" "$IPV6_GATEWAY"
@@ -243,8 +286,8 @@ write_network_file()
 	} > "$temporary"
 	chmod 0644 "$temporary"
 	test "${SAPHIRA_NETWORK_SKIP_OWNERSHIP:-0}" = 1 || chown 0:0 "$temporary"
-	mv -f "$temporary" "$NETWORK_FILE"
-	trap - RETURN
+	mv -f "$temporary" "$network_file"
+	rm -f "$temporary"
 }
 
 dns_provider()
@@ -292,7 +335,16 @@ apply_network()
 	write_network_file
 	if test "${SAPHIRA_NETWORK_APPLY:-1}" = 1; then
 		test -x "$NETWORK_SERVICE" || fail "network service is absent: $NETWORK_SERVICE"
-		"$NETWORK_SERVICE" start || fail 'network service could not apply eth0.conf'
+		if ! "$NETWORK_SERVICE" start; then
+			if test "$WRITE_HAD_PREVIOUS" = 1; then
+				mv -f "$WRITE_BACKUP" "$WRITE_FILE"
+			else
+				rm -f "$WRITE_FILE"
+			fi
+			test -z "$WRITE_BACKUP" || rm -f "$WRITE_BACKUP"
+			fail "network service could not apply $INTERFACE.conf (previous state restored)"
+		fi
+		test -z "$WRITE_BACKUP" || rm -f "$WRITE_BACKUP"
 	fi
 }
 

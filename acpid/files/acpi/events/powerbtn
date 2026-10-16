@@ -1,0 +1,5 @@
+# Power-button event -> orderly poweroff. This is the only ACPI
+# event the base image handles; lid, battery and custom keys are
+# role configuration, not base.
+event=button/power.*
+action=/sbin/poweroff

@@ -1,0 +1,33 @@
+# Packaging derivative of LICENCE-summary.txt in the saphira-pbx project repo (canonical copy).
+
+Business Source License 1.1
+
+Licensor:      AKADATA LIMITED
+Change License: GPL-2.0-or-later
+Change Date:   Four years from the first public release of that version
+
+Additional Use Grant:
+Production and commercial use of the Licensed Work is permitted,
+including internal business use, self-hosting, redistribution, and
+use as part of products. What is not permitted is taking the
+Licensed Work itself out of Saphira and commercialising it as somebody
+else's product: lifting this code into another paid product, another
+appliance, another distribution, or another hosted/managed/SaaS
+offering. Such uses require a separate commercial licence from
+AKADATA LIMITED, the copyright holder.
+
+No pricing, terms, or contractual commitments are stated here; they
+are agreed directly between AKADATA LIMITED and the licensee.
+
+After the Change Date for a given version, that version is governed
+by the Change License (GPL-2.0-or-later) and the above restriction
+does not survive the conversion.
+
+---
+
+Licensed Work: Saphira PBX (saphira-pbx)
+Copyright (c) 2026 AKADATA LIMITED
+
+The Licensed Work is provided under this Business Source License, and
+the Additional Use Grant above applies. Previously published releases
+that were issued under other licences remain under those licences.

@@ -1,0 +1,56 @@
+From f20612eb9a4ac441db6c5f0467e979f30e6040a9 Mon Sep 17 00:00:00 2001
+From: AKADATA LIMITED <linux@saphira.vm2.uk>
+Date: Mon, 12 Oct 2026 06:00:03 +0000
+Subject: [PATCH] ccram: fix store xarray alloc flags + honest errors
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+XArray id allocation requires TRACK_FREE; our xa_init() lacked it,
+so every first store died in __xa_alloc's WARN_ON_ONCE with -EINVAL
+- which store_page() then mistranslated to -ENOSPC, hiding a certain
+misconfiguration behind a plausible resource error (found by the
+minimer Phase-2A boot gate: selftest zero-store failed -28).
+
+Use XA_FLAGS_ALLOC1 (TRACK_FREE + ids from 1, keeping 0 invalid) and
+propagate xa_alloc's real return (-EBUSY on exhaustion, -ENOMEM,
+-EINVAL on misuse) instead of forcing ENOSPC.
+
+Part of CCRAM — AKADATA LIMITED adaptation of Meta CRAM
+(Saphira-original code, GPL-2.0-only).
+---
+ mm/ccram_store.c | 10 +++++++---
+ 1 file changed, 7 insertions(+), 3 deletions(-)
+
+diff --git a/mm/ccram_store.c b/mm/ccram_store.c
+index e8ef8df47..23669cef5 100644
+--- a/mm/ccram_store.c
++++ b/mm/ccram_store.c
+@@ -164,7 +164,9 @@ struct ccram_store *ccram_store_create(int nid)
+ 		return NULL;
+ 	s->nid = nid;
+ 	spin_lock_init(&s->lock);
+-	xa_init(&s->objs);
++	/* ALLOC1: xa_alloc() requires TRACK_FREE (it WARNs and fails
++	 * -EINVAL without it); ids start at 1 so 0 stays invalid. */
++	xa_init_flags(&s->objs, XA_FLAGS_ALLOC1);
+ 	INIT_LIST_HEAD(&s->chunks);
+ 	return s;
+ }
+@@ -435,9 +437,11 @@ int ccram_store_page(struct ccram_store *s, struct page *src, gfp_t gfp,
+ 			s->ncompress_ops++;
+ 			*id_out = id;
+ 			ret = 0;
+-		} else {
+-			ret = -ENOSPC;
+ 		}
++		/* Propagate xa_alloc's own error (-EBUSY when the id space
++		 * is exhausted, -ENOMEM, -EINVAL on misuse): translating
++		 * every failure to -ENOSPC once hid a certain -EINVAL
++		 * behind a plausible resource error.  Never again. */
+ 	}
+ 	if (ret)
+ 		ccram_units_free_locked(s, o->units, nunits);
+-- 
+2.55.0
+

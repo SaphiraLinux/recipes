@@ -1,0 +1,46 @@
+# saphira-agents: developer/agent workstation
+
+One command makes a fresh Saphira machine an agent-development box:
+
+    apk add saphira-agents
+    saphira-agents --setup          # per-user scope (default)
+    sudo saphira-agents --setup     # machine-wide scope
+
+Later:
+
+    saphira-agents --list           # installable catalogue
+    saphira-agents --installed      # audit what this tool recorded
+    saphira-agents --update         # refresh recorded packages
+
+What the package carries:
+
+- /usr/bin/saphira-agents: the interactive installer for coding
+  agents (OpenCode v2, Codex, Claude Code) and model provider SDKs.
+  Per-user installs land under ~/.local; global installs (root)
+  land in /usr, root-owned, executable by all users.
+- Dependencies only otherwise: nodejs, rtk, grit, bubblewrap. No
+  configs, hooks, services or home-directory files.
+
+What it deliberately does not carry:
+
+- Coding agents and provider SDKs as APKs: that ecosystem moves too
+  fast for APK rebuilds. The installer fetches them explicitly at
+  operator request via npm, vendor-direct (hash-verified) and pip
+  backends, with per-package lifecycle policy
+  (narrow --allow-scripts approvals only, never blanket). "Latest"
+  means newest signed Saphira package for the APK layer, and newest
+  upstream release explicitly chosen here for the npm layer -- never
+  a runtime download hidden inside an install.
+- Credentials, logins or provider configuration: system executables
+  are shared machine-wide; auth and sessions stay per-user.
+
+Node.js invariant: the runtime comes from the Saphira nodejs APK
+only (bare `nodejs` dependency, so apk upgrade tracks new Saphira
+Node revisions normally; nodejs22 is never pulled in
+automatically). The installer consumes /usr/bin/node and
+/usr/bin/npm owned by that APK and installs npm application
+packages only -- never the Node/npm runtime itself, no version
+managers, no runtime replacement.
+
+saphira-ai stays reserved for a future broader AI umbrella (local
+inference, speech, models) and is not used here.

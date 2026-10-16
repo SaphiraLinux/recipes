@@ -1,0 +1,22 @@
+--- a/main/loader.c
++++ b/main/loader.c
+@@ -2545,6 +2545,19 @@
+ #endif
+ 
+ 	AST_LIST_HEAD_INIT_NOLOCK(&load_order);
++
++	/* SAPHIRA-MUSL: module_list.lock is statically initialized to a plain
++	 * non-recursive mutex on Linux (AST_MUTEX_INIT_W_CONSTRUCTORS is only
++	 * defined for SOLARIS/BSD). loader_builtin_init() below re-enters
++	 * ast_module_register(), which locks module_list again while
++	 * load_modules() holds it (see the "locking again" comment in
++	 * ast_module_register). Upstream therefore requires recursive
++	 * semantics here; on musl a non-recursive self-relock deadlocks
++	 * (first victim: builtin 'ccss', zero modules load, no log output).
++	 * Initialize the lock recursive (AST_MUTEX_KIND). load_modules()
++	 * runs once at boot and nothing touches module_list.lock before it,
++	 * so (re)initializing here is safe. */
++	ast_mutex_init(&module_list.lock);
+ 	AST_DLLIST_LOCK(&module_list);
+ 
+ 	AST_VECTOR_INIT(&startup_errors, 0);

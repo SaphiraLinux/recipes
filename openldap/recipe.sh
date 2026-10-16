@@ -9,7 +9,7 @@ pkgver=2.6.15
 # double compilation (packaging limitation, documented below).
 # r2: slapd runtime /run/slapd -> /var/run/slapd (example config,
 # initd, unit drop-in, fhs.d fragment). Payload change, revision bumps.
-pkgrel=2
+pkgrel=3
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='OpenLDAP directory server, client libraries and tools'
 license='OLDAP-2.8'

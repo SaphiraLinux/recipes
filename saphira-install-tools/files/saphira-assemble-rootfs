@@ -93,6 +93,15 @@ if test -d "$accounts_dir"; then
 	{
 		for fragment in "$accounts_dir"/*; do
 			test -f "$fragment" || continue
+			# Sidecars are not fragments: <fragment>.legacy records
+			# recognised history for the sibling fragment and is
+			# loaded by ensure-identity itself ($FRAGMENT.legacy).
+			# Feeding it as a fragment dies on its `legacy' lines,
+			# which is exactly how a systemd profile (dbus sidecar)
+			# failed assembly.
+			case $fragment in
+				*.legacy) continue ;;
+			esac
 			SAPHIRA_ENSURE_ROOT="$target" \
 				"$target/usr/libexec/saphira/ensure-identity.sh" \
 				"$fragment" || return 1
@@ -128,6 +137,28 @@ if test -d "$sysusers_dir" && ls "$sysusers_dir"/*.conf >/dev/null 2>&1; then
 		"$target/usr/libexec/saphira/ensure-identity.sh" \
 		--sysusers-d "$sysusers_dir" ||
 		die 'package sysusers.d identity replay failed'
+fi
+
+# 3d. File capabilities, replayed offline.
+#
+# Same reason as identities above: bootstrap installs with
+# --no-scripts, and APK records no xattr/capability field, so a
+# package whose payload needs file capabilities (ping without
+# cap_net_raw fails for ordinary users - proven on firstboot
+# accounts) would install dead. Replay every installed caps.d
+# fragment through ensure-caps with the target as its root, the
+# same helper and fragments as live `apk add`. Guarded by helper
+# presence: closures without saphira-permissions have no fragments
+# to converge and skip cleanly.
+caps_dir=$target/usr/share/saphira/caps.d
+caps_helper=$target/usr/libexec/saphira/ensure-caps
+if test -x "$caps_helper" && test -d "$caps_dir"; then
+	for fragment in "$caps_dir"/*; do
+		test -f "$fragment" || continue
+		SAPHIRA_ENSURE_ROOT="$target" \
+			"$caps_helper" --root "$target" "$fragment" ||
+			die "package capability replay failed: $fragment"
+	done
 fi
 
 # 4. CA bundle inside the target (mirrors the builder root-init).
@@ -172,3 +203,16 @@ if test -f "$services_file"; then
 	rm -f -- "$units"
 	trap - EXIT HUP INT TERM
 fi
+
+# 6. Factory-state stamp, LAST: /etc/.updated records that the target
+# was just assembled, so first-boot ConditionNeedsUpdate units (notably
+# systemd-hwdb-update.service, whose database ships prebuilt in the
+# udev package) are skipped instead of redoing that work while the
+# machine is being configured. A later package upgrade makes /usr
+# newer than this stamp and refires those units exactly once, which is
+# the semantics the condition exists for. This must stay the final
+# assembly step: anything writing /etc afterwards belongs before it.
+touch "$target/etc/.updated" ||
+	die 'cannot write factory-state stamp'
+chmod 0444 "$target/etc/.updated" ||
+	die 'cannot protect factory-state stamp'

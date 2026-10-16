@@ -1,0 +1,16 @@
+#!/sbin/openrc-run
+# acpid: ACPI event daemon (power button -> poweroff).
+
+description="ACPI event daemon"
+command="/usr/sbin/acpid"
+command_args="--foreground --socketfile /var/run/acpid.socket"
+# Supervised foreground process (same shape as sshd): a foreground
+# command in a plain start() never returns, and openrc-run SIGKILLs
+# it on timeout. supervise-daemon returns at once and owns the
+# process instead.
+supervisor="supervise-daemon"
+
+depend() {
+	need localmount
+	after bootmisc
+}

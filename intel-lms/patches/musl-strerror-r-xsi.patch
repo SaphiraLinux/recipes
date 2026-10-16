@@ -1,0 +1,17 @@
+--- a/UNS/PortForwardingService/Protocol.cpp
++++ b/UNS/PortForwardingService/Protocol.cpp
+@@ -94,7 +94,14 @@
+ #else
+ 		char cbuf[1024];
+ 		char* pbuf;
++#ifdef __GLIBC__
+ 		pbuf = strerror_r(err, cbuf, sizeof(cbuf) - 1);
++#else
++		/* XSI/POSIX strerror_r returns int and always fills cbuf. */
++		if (strerror_r(err, cbuf, sizeof(cbuf) - 1) != 0)
++			cbuf[0] = '\0';
++		pbuf = cbuf;
++#endif
+ 		return ACE_TEXT_CHAR_TO_TCHAR(pbuf);
+ #endif  // WIN32
+ 	}

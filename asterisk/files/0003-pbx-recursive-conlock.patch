@@ -1,0 +1,17 @@
+--- a/main/pbx.c
++++ b/main/pbx.c
+@@ -6597,6 +6597,14 @@
+ 
+ 	ast_register_cleanup(unload_pbx);
+ 
++	/* SAPHIRA-MUSL: conlock is documented above as REQUIRED recursive
++	 * (upstream issue 17643), but AST_MUTEX_DEFINE_STATIC yields a plain
++	 * non-recursive mutex on Linux. Re-entrant takes (proven during
++	 * module load: two nested takes by the main thread, zero unlocks)
++	 * deadlock musl's strict NORMAL mutex. Initialize recursive here;
++	 * load_pbx() runs once at boot before any contexts exist. */
++	ast_mutex_init(&conlock);
++
+ 	/* Initialize the PBX */
+ 	ast_verb(1, "Asterisk PBX Core Initializing\n");
+ 

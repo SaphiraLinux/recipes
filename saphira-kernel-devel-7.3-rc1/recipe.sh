@@ -39,9 +39,9 @@ url=https://saphira.vm2.uk/
 # is the bulk of the size and cannot be pruned away, which is precisely why this
 # is a package nobody installs on a running system.
 #
-# install_prepared_tree already removes build intermediates (*.o, *.cmd, *.ko,
-# built-in.a, vmlinux, System.map, .tmp_vmlinux*), the module signing PRIVATE
-# key, Documentation, and the standalone userspace bulk of tools/.
+# The corrected helper stages a pristine extraction and refuses a contaminated
+# one: see saphira-kernel/files/kernel-source-tree.sh. The denylist this
+# identity used to rely on is what let build output through.
 
 depends=""
 # Inherited wholesale from saphira-kernel rather than curated separately.
@@ -66,22 +66,16 @@ makedepends="
   zlib-dev
   kmod
 "
-# The module signing key is build-time only and is exposed read-only by the
-# builder at the fixed path below. It is never staged, never copied into
-# /recipes, and install_prepared_tree removes it from the payload.
-SAPHIRA_MODULE_KEY_DEFAULT=/keys/module-signing.pem
+# No module signing key is required any more. This identity used to compile the
+# kernel so it could ship a tree an external module could be built against, and
+# that build signed nothing by itself but did stage the key's tree. It now stages
+# pristine source, so requiring the key would make the builder demand a build
+# secret for a package that never signs. The key is never staged and never
+# copied into /recipes, and install_clean_source_tree refuses a tree carrying it.
 
 recipe_build()
 {
 	export TAR_OPTIONS=--no-same-owner
-	# Builder-exposed read-only module signing key, same fixed path
-	# saphira-kernel uses. Absent key must fail closed, never sign nothing.
-	KEY=/keys/module-signing.pem
-	[ -r "$KEY" ] || {
-		echo "ERROR: module signing key not readable at $KEY" >&2
-		return 1
-	}
-
 	# 7.3-rc1 is a .tar.gz (torvalds cgit snapshot); the rest are .tar.xz.
 	# Same fallback saphira-kernel uses, rather than hardcoding one spelling.
 	KBALL="$RECIPE_DIR/../saphira-kernel/files/linux-7.3-rc1.tar.xz"
@@ -107,30 +101,43 @@ recipe_build()
 		return 1
 	}
 
-	mkdir -p "$SRC/linux-7.3-rc1"
-	tar --no-same-owner -C "$SRC/linux-7.3-rc1" --strip-components=1 -xf "$KBALL"
-	cd "$SRC/linux-7.3-rc1"
+	# A FRESH extraction into a directory of its own. Deliberately NOT $SRC:
+	# $SRC is the shared recipe workspace and $BUILDDIR is where a build would
+	# live if this recipe built anything. Neither is used, and keeping the
+	# pristine tree in its own directory is what makes "this package was never
+	# staged from a build tree" checkable rather than merely asserted.
+	PRISTINE="$BUILDDIR/pristine/linux-7.3-rc1"
+	rm -rf "$BUILDDIR/pristine"
+	mkdir -p "$PRISTINE"
+	tar --no-same-owner -C "$PRISTINE" --strip-components=1 -xf "$KBALL"
+	[ -f "$PRISTINE/Makefile" ] || {
+		echo "ERROR: extracted tree has no Makefile: $PRISTINE" >&2
+		return 1
+	}
 
-	patch -Np1 -i "$RECIPE_DIR/../saphira-kernel/files/x86-64-v3.patch"
-	# The SAME canonical config file saphira-kernel builds from. Shared by
-	# path, not copied, so the two cannot drift.
-	cp "$RECIPE_DIR/../saphira-kernel/files/config-7.3-rc1-akadata" "$SRC/linux-7.3-rc1/.config"
+	# The one intentional Saphira source patch, and the ONLY modification made
+	# to upstream source here.
+	patch -Np1 --no-backup-if-mismatch -d "$PRISTINE" -i \
+		"$RECIPE_DIR/../saphira-kernel/files/x86-64-v3.patch" ||
+		{ echo "ERROR: x86-64-v3.patch did not apply" >&2; return 1; }
 
-	mkdir -p "$SRC/linux-7.3-rc1/certs/regdb"
-	cp "$RECIPE_DIR/../saphira-kernel/files/saphira-regdb.x509" \
-	   "$SRC/linux-7.3-rc1/certs/regdb/saphira-regdb.x509"
-	cp "$KEY" "$SRC/linux-7.3-rc1/certs/module-signing.pem"
-	chmod 600 "$SRC/linux-7.3-rc1/certs/module-signing.pem"
-
-	make olddefconfig
-	make -j${JOBS:-$(nproc)}
+	# Deliberately NOT done here, and each omission is load-bearing: no
+	# .config, no cert material, no `make`. This identity was disabled before
+	# it was corrected, and it shared the r1 defect: it staged its payload from
+	# a post-make tree and relied on install_prepared_tree()'s denylist to
+	# remove the build output afterwards. The corrected helper stages from the
+	# pristine tree and refuses a contaminated one outright, so the defect
+	# cannot return if this recipe is ever re-enabled.
+	. "$RECIPE_DIR/../saphira-kernel/files/kernel-source-tree.sh"
+	check_source_tree_pure "$PRISTINE"
 }
 
 recipe_install()
 {
-	. "$RECIPE_DIR/../saphira-kernel/files/install-kernel-layout.sh"
-	KREL=$(kernel_layout_release "$SRC/linux-7.3-rc1")
-	install_prepared_tree "$SRC/linux-7.3-rc1" "$PKGDEST/usr/src/linux-7.3-rc1-saphira"
+	. "$RECIPE_DIR/../saphira-kernel/files/kernel-source-tree.sh"
+	# Verifies the input, copies, then verifies the destination.
+	install_clean_source_tree "$BUILDDIR/pristine/linux-7.3-rc1" \
+		"$PKGDEST/usr/src/linux-7.3-rc1-saphira"
 	# No /lib/modules/build link here, deliberately. That link belongs to
 	# saphira-kernel, which owns the module directory; this package ships no
 	# modules at all, and install_module_build_link correctly refuses a tree

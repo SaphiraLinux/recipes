@@ -1,0 +1,14 @@
+# polkitd runtime identity (canonical, fixed): user polkitd UID 156,
+# primary group polkitd GID 156. Required by the shipped units
+# (polkit.service User=polkitd, polkit.initd command_user) and the
+# /etc/polkit-1/rules.d ownership. UID 156 sits in the preferred
+# 0..199 packaged range - never reuse it for another identity.
+# (108 = base-seed unbound, 109 = base-seed dnsmasq; identity
+# freeness must be audited against the repository ledger (both
+# generations, tombstones included) and accounts.tsv, not fragments
+# alone: UID 127 was taken by systemd-network (senior holding since
+# 261.2-r5, tombstoned) when r1 claimed it, which the hatched gate
+# correctly refuses - IDs never recycle to unrelated identities.)
+# /var/empty is the platform no-home idiom (never chowned/created).
+group polkitd 156
+user polkitd 156 polkitd /var/empty /sbin/nologin

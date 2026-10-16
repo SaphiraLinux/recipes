@@ -1,6 +1,13 @@
 #!/bin/sh
 
 set -eu
+# Non-usrmerged PATH, set here rather than in any caller: this script
+# runs from an OpenRC init.d (full PATH), a systemd unit (bare PATH
+# without /bin:/sbin, proven by mkdir-not-found on first boot), and
+# possibly other minimal environments. Core tools (mkdir, ip, dhcpcd)
+# live in /bin and /sbin on Saphira; without this export the script
+# can only run where the caller happened to provide them.
+export PATH=/usr/bin:/bin:/usr/sbin:/sbin
 # Saphira names take precedence; AKADATA_* variables remain honored
 # during the v0.1 -> saphira-network migration era.
 AKADATA_NETWORK_CONFIG=${AKADATA_NETWORK_CONFIG:-${SAPHIRA_NETWORK_CONFIG:-}}
@@ -13,6 +20,7 @@ CONFIG=${AKADATA_NETWORK_CONFIG:-/etc/saphira-network.conf}
 CONFIG_DIR=${AKADATA_NETWORK_DIR:-/etc/saphira-network.d}
 LEGACY_CONFIG=${AKADATA_LEGACY_NETWORK_CONFIG:-/etc/akadata-network.conf}
 STATE_DIR=${AKADATA_NETWORK_STATE_DIR:-/run/saphira-network}
+DHCPCD_PID_DIR=${DHCPCD_PID_DIR:-/var/run/dhcpcd}
 STATE=$STATE_DIR/state
 RESOLV_CONF=${AKADATA_RESOLV_CONF:-/etc/resolv.conf}
 TAB=$(printf '\t')
@@ -28,9 +36,16 @@ apply()
 	"$@" || fail "command failed: $*"
 }
 
+# Address modes, per family. SLAAC exists only for IPv6: it is the
+# kernel's own IPv6 autoconfiguration (router advertisement
+# acceptance), never a DHCP client, so an IPv4 config that asks for it
+# is rejected rather than silently reinterpreted.
 valid_mode()
 {
-	case $1 in off|static|dhcp) return 0 ;; esac
+	case ${2:-4} in
+	4) case $1 in off|static|dhcp) return 0 ;; esac ;;
+	6) case $1 in off|static|dhcp|slaac) return 0 ;; esac ;;
+	esac
 	return 1
 }
 
@@ -150,8 +165,8 @@ validate_file()
 	test -n "$INTERFACE" || fail "$file: INTERFACE is required"
 	case $TYPE in physical|ovs-bridge|ovs-port|ovs-internal) ;; *)
 		fail "$file: TYPE is invalid: $TYPE" ;; esac
-	valid_mode "$IPV4_MODE" || fail "$file: IPV4_MODE is invalid: $IPV4_MODE"
-	valid_mode "$IPV6_MODE" || fail "$file: IPV6_MODE is invalid: $IPV6_MODE"
+	valid_mode "$IPV4_MODE" 4 || fail "$file: IPV4_MODE is invalid: $IPV4_MODE"
+	valid_mode "$IPV6_MODE" 6 || fail "$file: IPV6_MODE is invalid: $IPV6_MODE"
 	valid_metric "$IPV4_METRIC" || fail "$file: IPV4_METRIC is invalid: $IPV4_METRIC"
 	valid_metric "$IPV6_METRIC" || fail "$file: IPV6_METRIC is invalid: $IPV6_METRIC"
 	valid_search "$DNS_SEARCH" || fail "$file: DNS_SEARCH is invalid: $DNS_SEARCH"
@@ -164,6 +179,10 @@ validate_file()
 		valid_cidr 6 "$IPV6_CIDR" || fail "$file: IPV6_CIDR is invalid: $IPV6_CIDR"
 		test -z "$IPV6_GATEWAY" || valid_gateway 6 "$IPV6_GATEWAY" ||
 			fail "$file: IPV6_GATEWAY is invalid: $IPV6_GATEWAY"
+	fi
+	if test "$IPV6_MODE" = slaac; then
+		test -z "$IPV6_CIDR" && test -z "$IPV6_GATEWAY" ||
+			fail "$file: IPv6 fields must be empty when IPv6 is SLAAC"
 	fi
 	if test "$TYPE" = ovs-port; then
 		test -n "$OVS_BRIDGE" || fail "$file: OVS_BRIDGE is required for ovs-port"
@@ -260,6 +279,108 @@ route_replace()
 	record_state route "$family" "$interface" "$gateway|$metric"
 }
 
+# Idempotent DHCP client start. A live per-interface dhcpcd daemon
+# manages its own renewals; launching a second client against it
+# fails ("already running") while it is still initializing - exactly
+# what happens when firstboot applies an interface and the network
+# service re-applies the same file seconds later. So: if a live
+# daemon already owns the interface, report and succeed without
+# starting another; otherwise start, retrying briefly for the
+# fork/pidfile handover window, and fail loudly past that. Every path
+# either leaves exactly one managing daemon or reports a real error;
+# no non-zero return is ever swallowed.
+# The dhcpcd argument vector for one interface. Family isolation is
+# decided here, once: an IPv4-only selection gets -4, an IPv6-only
+# selection gets -6, both get neither. A family that is off or static
+# is never handed to the client.
+#
+# -C resolv.conf is always present and is not optional. dhcpcd installs
+# a 20-resolv.conf hook that writes the resolver (via resolvconf(8) when
+# present, otherwise straight to /etc/resolv.conf), so without this the
+# DNS servers firstboot recorded could be replaced by whatever a DHCP
+# server offered. The DNS choice made in firstboot is authoritative;
+# this network configuration owns the resolver.
+dhcpcd_plan()
+{
+	v4mode=$1
+	v6mode=$2
+	test "$v4mode" = dhcp || test "$v6mode" = dhcp || return 1
+	if test "$v4mode" = dhcp && test "$v6mode" != dhcp; then
+		printf '%s\n' '-4 -C resolv.conf'
+	elif test "$v4mode" != dhcp && test "$v6mode" = dhcp; then
+		printf '%s\n' '-6 -C resolv.conf'
+	else
+		printf '%s\n' '-C resolv.conf'
+	fi
+}
+
+# Did the client actually come up? `dhcpcd -q` daemonises, so its exit
+# status is the PARENT's: it is 0 the instant the fork happens, and the
+# privileged child can still die afterwards - which it does, loudly
+# ("no such user dhcpcd"), long after the caller has decided everything
+# was fine. Trusting that status is how a DHCP client that cannot start
+# still gets reported as started, and the machine boots with no address
+# and nothing red in the log. So wait, bounded, for the pidfile the
+# daemon writes for itself and check the pid is really alive.
+dhcpcd_running()
+{
+	local interface=$1 suffix pid pidfile
+	for suffix in '' '-4' '-6'; do
+		pidfile=$DHCPCD_PID_DIR/$interface$suffix.pid
+		test -f "$pidfile" || continue
+		pid=$(cat "$pidfile" 2>/dev/null || true)
+		case $pid in
+		'' | *[!0-9]*) continue ;;
+		esac
+		kill -0 "$pid" 2>/dev/null && return 0
+	done
+	return 1
+}
+
+dhcpcd_up()
+{
+	flags=$1
+	interface=$2
+	attempt=1
+	while :; do
+		for suffix in '' '-4' '-6'; do
+			pidfile=$DHCPCD_PID_DIR/$interface$suffix.pid
+			if test -f "$pidfile"; then
+				pid=$(cat "$pidfile" 2>/dev/null || true)
+				case $pid in
+					''|*[!0-9]*) ;;
+					*)
+						if kill -0 "$pid" 2>/dev/null; then
+							printf 'network: dhcpcd already running on %s (pid %s), skipping start\n' "$interface" "$pid" >&2
+							return 0
+						fi ;;
+				esac
+			fi
+		done
+		# Word splitting is intentional for the optional family flag.
+		# The client gets its own stdout/stderr: a daemon that keeps the
+		# service's descriptors open holds a reader of the boot log
+		# open with it, and its messages then arrive at arbitrary times
+		# rather than where the failure happened.
+		# shellcheck disable=SC2086
+		if dhcpcd -q $flags "$interface" >/dev/null 2>&1; then
+			# Started is not the same as running. Give the daemon a
+			# bounded moment to write its pidfile, then require it.
+			waited=1
+			while test "$waited" -le 5; do
+				dhcpcd_running "$interface" && return 0
+				sleep 1
+				waited=$((waited + 1))
+			done
+			printf 'network: dhcpcd exited before it began serving %s (check that the dhcpcd account exists and /var/lib/dhcpcd is writable)\n' "$interface" >&2
+			return 1
+		fi
+		test "$attempt" -ge 3 && return 1
+		sleep 2
+		attempt=$((attempt + 1))
+	done
+}
+
 configure_addresses()
 {
 	while IFS='|' read -r file type interface v4mode v4cidr v4gw v4metric v6mode v6cidr v6gw v6metric dns ports protocols fail_mode datapath bridge; do
@@ -275,14 +396,21 @@ configure_addresses()
 			record_state address 6 "$interface" "$v6cidr"
 			test -z "$v6gw" || route_replace 6 "$v6gw" "$interface" "$v6metric"
 		fi
-		if test "$v4mode" = dhcp || test "$v6mode" = dhcp; then
-			flags=
-			if test "$v4mode" = dhcp && test "$v6mode" != dhcp; then flags=-4; fi
-			if test "$v4mode" != dhcp && test "$v6mode" = dhcp; then flags=-6; fi
-			# Word splitting is intentional for the optional family flag.
+		if dhcpcd_args=$(dhcpcd_plan "$v4mode" "$v6mode"); then
+			# Word splitting is intentional for the family flag.
 			# shellcheck disable=SC2086
-			apply dhcpcd -q $flags "$interface"
+			apply dhcpcd_up "$dhcpcd_args" "$interface"
 			record_state dhcp 0 "$interface" -
+		fi
+		if test "$v6mode" = slaac; then
+			# Kernel SLAAC, never dhcpcd-managed. accept_ra is 2,
+			# not 1: the kernel ignores router advertisements
+			# when accept_ra=1 and forwarding is enabled. Set
+			# after the client so nothing the client does can
+			# reset it.
+			apply sysctl -w "net.ipv6.conf.$interface.accept_ra=2"
+			apply sysctl -w "net.ipv6.conf.$interface.autoconf=1"
+			record_state slaac 6 "$interface" -
 		fi
 	done
 	return 0
@@ -375,7 +503,13 @@ start_network()
 	configure_addresses < "$STATE_DIR/records"
 	configure_dns "$STATE_DIR/records"
 	mv "$STATE.new" "$STATE"
-	printf 'network: configured %s interface definition(s)\n' "$(printf '%s\n' "$records" | wc -l)"
+	# Counted from the file the addresses were actually applied from,
+	# not from `printf '%s\n' "$records" | wc -l`: whether validate_all
+	# terminates its last record decides that count, so an image with
+	# loopback plus one NIC reported "configured 1". An operator reading
+	# the boot log must not be told a smaller number than was applied.
+	printf 'network: configured %s interface definition(s)\n' \
+		"$(grep -c '' "$STATE_DIR/records" 2>/dev/null || echo 0)"
 }
 
 stop_network()
@@ -388,6 +522,11 @@ stop_network()
 				gateway=${value%%|*}; metric=${value#*|}
 				if test -n "$metric"; then ip "-$family" route del default via "$gateway" dev "$interface" metric "$metric" >/dev/null 2>&1 || true
 				else ip "-$family" route del default via "$gateway" dev "$interface" >/dev/null 2>&1 || true; fi ;;
+		slaac)
+			# Hand IPv6 autoconfiguration back to the kernel
+			# default (accept_ra=1) and forget it.
+			sysctl -w "net.ipv6.conf.$interface.accept_ra=1" >/dev/null 2>&1 || true
+			sysctl -w "net.ipv6.conf.$interface.autoconf=1" >/dev/null 2>&1 || true ;;
 		dhcp) command -v dhcpcd >/dev/null 2>&1 && dhcpcd -x "$interface" >/dev/null 2>&1 || true ;;
 			dns)
 			if test -e "$STATE_DIR/resolv.conf.before"; then
@@ -406,5 +545,12 @@ case ${1:-} in
 	start) start_network ;;
 	stop) stop_network ;;
 	validate) validate_all >/dev/null ;;
-	*) fail "usage: $0 {start|stop|validate}" ;;
+	# Read-only introspection of the two decisions an operator most
+	# often needs to check: which address modes a family accepts, and
+	# the exact client invocation a pair of modes produces. Both answer
+	# without root, without a live interface, and from the same code
+	# the service uses, so they cannot drift from real behaviour.
+	mode-ok) valid_mode "${2:-}" "${3:-4}" || fail "mode is not valid for family ${3:-4}: ${2:-}" ;;
+	dhcpcd-plan) dhcpcd_plan "${2:-}" "${3:-}" || fail 'no DHCP mode selected: nothing would be started' ;;
+	*) fail "usage: $0 {start|stop|validate|mode-ok MODE [4|6]|dhcpcd-plan V4MODE V6MODE}" ;;
 esac

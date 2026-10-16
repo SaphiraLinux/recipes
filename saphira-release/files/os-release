@@ -1,0 +1,7 @@
+NAME="Saphira Linux"
+PRETTY_NAME="Saphira Linux 0.2.1"
+ID=saphira
+VERSION_ID=0.2.1
+VERSION="0.2.1"
+HOME_URL="https://saphira.vm2.uk/"
+BUG_REPORT_URL="https://saphira.vm2.uk/"

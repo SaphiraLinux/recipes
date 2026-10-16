@@ -1,0 +1,542 @@
+From ddea3457be7622fb1339663b43210f11db2b2205 Mon Sep 17 00:00:00 2001
+From: AKADATA LIMITED <linux@saphira.vm2.uk>
+Date: Mon, 12 Oct 2026 07:25:43 +0000
+Subject: [PATCH 1/2] ccram: residency encoding, fault-in and lifecycle hooks
+ (Phase 2B/1)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Part of CCRAM — AKADATA LIMITED adaptation of Meta CRAM (see
+CRAM.PROVENANCE in linux-saphira-meta-cram; Saphira-original code,
+GPL-2.0-only).
+
+Non-present encoding on the purpose-built PTE-marker extension point
+(BIT(3) + A/D bits + u32 id, no stolen namespace): fault branch in
+handle_pte_marker discharging to a private page (hash-verified,
+SIGBUS on any failure), fork verbatim-copy with ref bump, zap
+exact-once put.  New mm/ccram_residency.c holds the paths; core
+touches are additive branches only.  No markers are created yet, so
+this commit cannot trigger: off-mode behaviour is bit-identical.
+---
+ include/linux/ccram_store.h |  87 ++++++++++++++++
+ include/linux/leafops.h     |  18 ++++
+ include/linux/swapops.h     |  10 +-
+ mm/Makefile                 |   1 +
+ mm/ccram_residency.c        | 201 ++++++++++++++++++++++++++++++++++++
+ mm/ccram_store.c            |  24 +++++
+ mm/memory.c                 |  24 +++++
+ 7 files changed, 364 insertions(+), 1 deletion(-)
+ create mode 100644 mm/ccram_residency.c
+
+diff --git a/include/linux/ccram_store.h b/include/linux/ccram_store.h
+index ede00e28a..7fc5ab40d 100644
+--- a/include/linux/ccram_store.h
++++ b/include/linux/ccram_store.h
+@@ -11,6 +11,12 @@
+ #define _LINUX_CCRAM_STORE_H
+ 
+ #include <linux/types.h>
++#include <linux/bits.h>
++#include <linux/list.h>
++#include <linux/mm_types.h>
++#include <linux/swap.h>
++#include <linux/swapops.h>
++#include <linux/leafops.h>
+ 
+ /* compress= modes for ccram.compress (default off). */
+ #define CCRAM_COMPRESS_OFF	0
+@@ -20,9 +26,27 @@
+ #define CCRAM_OBJ_RAW		0x00000001U	/* stored uncompressed */
+ #define CCRAM_OBJ_ALGO_LZ4	0x00000100U	/* LZ4 content (only algo now) */
+ 
++/*
++ * Non-present marker encoding (Phase 2B residency).  The offset payload
++ * of a SWP_PTE_MARKER entry carries:
++ *   bit 3:		PTE_MARKER_CCRAM (see swapops.h)
++ *   bit 4:		original PTE was young
++ *   bit 5:		original PTE was dirty
++ *   bits 6..37:	u32 object id (ids from 1; 0 invalid)
++ * x86-64 carries 58 offset bits; ids stay far below bit 60+, so no
++ * arch page-flag bit (e.g. uffd-wp) can ever alias.  store_page()
++ * WARNs and refuses rather than encode an oversized id.
++ */
++#define CCRAM_MARKER_ID_SHIFT	6U
++#define CCRAM_MARKER_YOUNG	BIT(4)
++#define CCRAM_MARKER_DIRTY	BIT(5)
++#define CCRAM_MARKER_ID_MAX	((1U << 26))
++
+ struct ccram_store;
+ struct ccram_obj;
+ struct page;
++struct vm_fault;
++struct mm_struct;
+ 
+ struct ccram_store_stats {
+ 	__u64 phys_bytes;	/* chunk pages held x 4096 */
+@@ -36,8 +60,45 @@ struct ccram_store_stats {
+ 	__u64 ncompress_ops;
+ 	__u64 ndecompress_ops;
+ 	__u64 nfail;
++	__u64 ndemote;		/* residency: objects admitted by demote */
++	__u64 npromote;		/* residency: objects materialized by fault */
+ };
+ 
++/* Marker construction and inspection.  Unconditional: harmless without
++ * CONFIG_CCRAM_SYSRAM since such PTEs can never exist then. */
++static inline swp_entry_t ccram_marker_entry(u32 id, bool young, bool dirty)
++{
++	unsigned long v = PTE_MARKER_CCRAM | ((unsigned long)id << CCRAM_MARKER_ID_SHIFT);
++
++	if (young)
++		v |= CCRAM_MARKER_YOUNG;
++	if (dirty)
++		v |= CCRAM_MARKER_DIRTY;
++	return swp_entry(SWP_PTE_MARKER, v);
++}
++
++static inline bool ccram_marker_test_pte(pte_t pte)
++{
++	softleaf_t e = softleaf_from_pte(pte);
++
++	return softleaf_is_ccram_marker(e);
++}
++
++static inline u32 ccram_marker_id_pte(pte_t pte)
++{
++	return (u32)(swp_offset(softleaf_from_pte(pte)) >> CCRAM_MARKER_ID_SHIFT);
++}
++
++static inline bool ccram_marker_young_pte(pte_t pte)
++{
++	return swp_offset(softleaf_from_pte(pte)) & CCRAM_MARKER_YOUNG;
++}
++
++static inline bool ccram_marker_dirty_pte(pte_t pte)
++{
++	return swp_offset(softleaf_from_pte(pte)) & CCRAM_MARKER_DIRTY;
++}
++
+ #ifdef CONFIG_CCRAM_SYSRAM
+ struct ccram_store *ccram_store_create(int nid);
+ int ccram_store_destroy(struct ccram_store *s);
+@@ -47,16 +108,42 @@ int ccram_store_load(struct ccram_store *s, u32 id, struct page *dst);
+ int ccram_store_free(struct ccram_store *s, u32 id);
+ struct ccram_obj *ccram_obj_get(struct ccram_store *s, u32 id);
+ void ccram_obj_put(struct ccram_store *s, struct ccram_obj *o);
++void ccram_obj_ref(struct ccram_obj *o);
+ void ccram_store_stats(struct ccram_store *s, struct ccram_store_stats *out);
++void ccram_store_note_demote(struct ccram_store *s);
++void ccram_store_note_promote(struct ccram_store *s);
+ int ccram_store_selftest(int nid);
+ int ccram_compress_mode_now(void);
+ struct ccram_store *ccram_live_store_now(void);
++/* Residency (Phase 2B): fault a marker back into a private page. */
++vm_fault_t ccram_marker_fault(struct vm_fault *vmf);
++/* Residency: drop one marker reference (zap path). */
++void ccram_marker_zap(softleaf_t entry);
++/* Residency: fork-copy a marker (preserve + bump ref). True if handled. */
++bool ccram_marker_fork(pte_t orig_pte, struct mm_struct *dst_mm,
++		       unsigned long addr, pte_t *dst_pte);
++/* Residency: demote caller selection (anon order-0 mapped non-KSM). */
++unsigned int ccram_demote_store(struct list_head *list);
+ #else
+ static inline struct ccram_store *ccram_store_create(int nid) { return NULL; }
+ static inline int ccram_store_destroy(struct ccram_store *s) { return 0; }
+ static inline int ccram_store_selftest(int nid) { return 0; }
+ static inline int ccram_compress_mode_now(void) { return CCRAM_COMPRESS_OFF; }
+ static inline struct ccram_store *ccram_live_store_now(void) { return NULL; }
++static inline vm_fault_t ccram_marker_fault(struct vm_fault *vmf)
++{
++	return VM_FAULT_SIGBUS;
++}
++static inline void ccram_marker_zap(pte_t pte) { }
++static inline bool ccram_marker_fork(pte_t orig_pte, struct mm_struct *dst_mm,
++				     unsigned long addr, pte_t *dst_pte)
++{
++	return false;
++}
++static inline unsigned int ccram_demote_store(struct list_head *list)
++{
++	return 0;
++}
+ #endif
+ 
+ #endif /* _LINUX_CCRAM_STORE_H */
+diff --git a/include/linux/leafops.h b/include/linux/leafops.h
+index 992cd8bd8..ef5387bea 100644
+--- a/include/linux/leafops.h
++++ b/include/linux/leafops.h
+@@ -444,6 +444,24 @@ static inline bool softleaf_is_guard_marker(softleaf_t entry)
+ 	return softleaf_to_marker(entry) & PTE_MARKER_GUARD;
+ }
+ 
++/**
++ * softleaf_is_ccram_marker() - Is this leaf entry a CCRAM object marker?
++ * @entry: Leaf entry.
++ *
++ * CCRAM-specific (AKADATA Phase 2B): upper offset bits carry the object
++ * id and are intentionally NOT part of this test, mirroring the other
++ * marker predicates.
++ *
++ * Returns: true if the leaf entry carries the CCRAM marker bit.
++ */
++static inline bool softleaf_is_ccram_marker(softleaf_t entry)
++{
++	if (!softleaf_is_marker(entry))
++		return false;
++
++	return softleaf_to_marker(entry) & PTE_MARKER_CCRAM;
++}
++
+ /**
+  * softleaf_is_uffd_wp_marker() - Is this leaf entry a userfautlfd write protect
+  * marker?
+diff --git a/include/linux/swapops.h b/include/linux/swapops.h
+index 8cfc966ea..854a9e6db 100644
+--- a/include/linux/swapops.h
++++ b/include/linux/swapops.h
+@@ -297,7 +297,15 @@ typedef unsigned long pte_marker;
+  * PROT_NONE, rather than if they were a memory hole or equivalent.
+  */
+ #define  PTE_MARKER_GUARD			BIT(2)
+-#define  PTE_MARKER_MASK			(BIT(3) - 1)
++/*
++ * CCRAM compressed-object marker (AKADATA CCRAM Phase 2B): a non-present
++ * PTE identifying a software-compressed page held in the CCRAM object
++ * store.  Upper offset bits carry the u32 object id; see
++ * include/linux/ccram_store.h.  Like the other markers this is an
++ * explicitly allocated bit, not a reused encoding.
++ */
++#define  PTE_MARKER_CCRAM			BIT(3)
++#define  PTE_MARKER_MASK			(BIT(4) - 1)
+ 
+ static inline swp_entry_t make_pte_marker_entry(pte_marker marker)
+ {
+diff --git a/mm/Makefile b/mm/Makefile
+index 8bbc584d6..d8d097525 100644
+--- a/mm/Makefile
++++ b/mm/Makefile
+@@ -99,6 +99,7 @@ obj-$(CONFIG_MIGRATION) += migrate.o
+ obj-$(CONFIG_CRAM) += cram.o
+ obj-$(CONFIG_CCRAM_SYSRAM) += ccram_sysram.o
+ obj-$(CONFIG_CCRAM_SYSRAM) += ccram_store.o
++obj-$(CONFIG_CCRAM_SYSRAM) += ccram_residency.o
+ obj-$(CONFIG_NUMA) += memory-tiers.o
+ obj-$(CONFIG_DEVICE_MIGRATION) += migrate_device.o
+ obj-$(CONFIG_TRANSPARENT_HUGEPAGE) += huge_memory.o khugepaged.o
+diff --git a/mm/ccram_residency.c b/mm/ccram_residency.c
+new file mode 100644
+index 000000000..9f0820010
+--- /dev/null
++++ b/mm/ccram_residency.c
+@@ -0,0 +1,201 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * mm/ccram_residency.c - CCRAM Phase 2B residency: markers, fault-in,
++ * lifecycle.  (Demote-store path appended separately.)
++ *
++ * CCRAM — AKADATA LIMITED adaptation of Meta CRAM (Saphira-original
++ * code, GPL-2.0-only; Meta's CRAM mechanism used as-is).
++ *
++ * A demoted anonymous page lives on as a CCRAM store object referenced
++ * by non-present PTE markers (PTE_MARKER_CCRAM + A/D bits + u32 id).
++ * This file discharges those markers back into ordinary private pages
++ * on fault and maintains the object references across fork/zap.  It
++ * never allocates from the tier and never touches CRAM placement.
++ *
++ * Locking constitution (see CCRAM-PHASE2B-DESIGN.md): the store lock
++ * is a leaf under the page-table lock.  This file takes the store
++ * lock only with no PTL held (lookup phases) or after PTL release;
++ * rmap paths use lock-free atomics only.  Never the reverse.
++ */
++
++#include <linux/mm.h>
++#include <linux/mmzone.h>
++#include <linux/oom.h>
++#include "internal.h"
++#include <linux/gfp.h>
++#include <linux/rmap.h>
++#include <linux/swap.h>
++#include <linux/swapops.h>
++#include <linux/leafops.h>
++#include <linux/mempolicy.h>
++#include <linux/memcontrol.h>
++#include <linux/userfaultfd_k.h>
++#include <linux/mmu_notifier.h>
++#include <linux/highmem.h>
++#include <linux/string.h>
++#include <linux/atomic.h>
++#include <linux/numa.h>
++#include <linux/nodemask.h>
++#include <linux/cram.h>
++#include <linux/init.h>
++#include <linux/kernel.h>
++#include <linux/mm_inline.h>
++
++#include <linux/ccram_store.h>
++
++/*
++ * ccram_marker_fault - discharge a CCRAM marker into a private page.
++ *
++ * Mirrors do_anonymous_page discipline at order-0, anon-only scope:
++ * shared mappings are refused (markers must never exist there; a
++ * demote-side filter guarantees it), uffd-missing is delegated, and
++ * anything unexpected fails closed with SIGBUS — never a bad page.
++ */
++vm_fault_t ccram_marker_fault(struct vm_fault *vmf)
++{
++	struct vm_area_struct *vma = vmf->vma;
++	struct mm_struct *mm = vma->vm_mm;
++	unsigned long addr = vmf->address;
++	struct ccram_store *s;
++	struct ccram_obj *o;
++	struct folio *folio;
++	pte_t entry;
++	u32 id;
++	bool writable;
++	vm_fault_t ret = 0;
++
++	if (vma->vm_flags & VM_SHARED)
++		return VM_FAULT_SIGBUS;
++	s = ccram_live_store_now();
++	if (!s)
++		return VM_FAULT_SIGBUS;
++	if (!ccram_marker_test_pte(vmf->orig_pte))
++		return VM_FAULT_SIGBUS;
++	id = ccram_marker_id_pte(vmf->orig_pte);
++	o = ccram_obj_get(s, id);
++	if (!o)
++		return VM_FAULT_SIGBUS;
++	ret = vmf_anon_prepare(vmf);
++	if (ret)
++		goto out_put;
++	if (pte_alloc(mm, vmf->pmd)) {
++		ret = VM_FAULT_OOM;
++		goto out_put;
++	}
++	folio = vma_alloc_folio(GFP_HIGHUSER_MOVABLE, 0, vma, addr);
++	if (!folio) {
++		ret = VM_FAULT_OOM;
++		goto out_put;
++	}
++	if (mem_cgroup_charge(folio, mm, GFP_HIGHUSER_MOVABLE)) {
++		folio_put(folio);
++		ret = VM_FAULT_OOM;
++		goto out_put;
++	}
++	if (ccram_store_load(s, id, &folio->page)) {
++		/* Corrupt or unreadable backing: never install. */
++		folio_put(folio);
++		ccram_obj_put(s, o);
++		return VM_FAULT_SIGBUS;
++	}
++	vmf->pte = pte_offset_map_lock(mm, vmf->pmd, addr, &vmf->ptl);
++	if (!vmf->pte)
++		goto release;
++	if (vmf_pte_changed(vmf)) {
++		/* Raced: someone else installed first.  Our page and
++		 * object ref are simply dropped; their install stands. */
++		update_mmu_tlb(vma, addr, vmf->pte);
++		goto release;
++	}
++	ret = check_stable_address_space(mm);
++	if (ret)
++		goto release;
++	if (userfaultfd_missing(vma)) {
++		pte_unmap_unlock(vmf->pte, vmf->ptl);
++		folio_put(folio);
++		ccram_obj_put(s, o);
++		return handle_userfault(vmf, VM_UFFD_MISSING);
++	}
++	/* Fresh private page: writable iff this fault may write. */
++	writable = (vmf->flags & FAULT_FLAG_WRITE) && (vma->vm_flags & VM_WRITE);
++	entry = mk_pte(&folio->page, vma->vm_page_prot);
++	entry = pte_sw_mkyoung(entry);
++	if (writable)
++		entry = pte_mkwrite(pte_mkdirty(entry), vma);
++	if (pte_uffd_wp(vmf->orig_pte))
++		entry = pte_mkuffd_wp(entry);
++	folio_add_new_anon_rmap(folio, vma, addr, RMAP_EXCLUSIVE);
++	folio_add_lru_vma(folio, vma);
++	set_pte_at(mm, addr, vmf->pte, entry);
++	update_mmu_cache(vma, addr, vmf->pte);
++	add_mm_counter(mm, MM_ANONPAGES, 1);
++	pte_unmap_unlock(vmf->pte, vmf->ptl);
++	ccram_obj_put(s, o);
++	ccram_store_note_promote(s);
++	return 0;
++release:
++	if (vmf->pte)
++		pte_unmap_unlock(vmf->pte, vmf->ptl);
++	/* Charge is released automatically when the folio is freed. */
++	folio_put(folio);
++out_put:
++	ccram_obj_put(s, o);
++	return ret;
++}
++
++/*
++ * ccram_marker_zap - drop one marker reference (munmap/exit path).
++ * Mirrors swap-entry zap accounting: the page is already unmapped, so
++ * no mm counter references it (like the uffd markers, unlike swap).
++ * A missing object means refcount corruption elsewhere; proceeding to
++ * clear is still safe (nothing to leak: it is already gone).
++ */
++void ccram_marker_zap(softleaf_t entry)
++{
++	struct ccram_store *s = ccram_live_store_now();
++	struct ccram_obj *o;
++	u32 id;
++
++	if (!s)
++		return;
++	id = (u32)(swp_offset(entry) >> CCRAM_MARKER_ID_SHIFT);
++	o = ccram_obj_get(s, id);
++	if (!o)
++		return;
++	/* Drop the lookup ref and the marker's own ref. */
++	ccram_obj_put(s, o);
++	ccram_obj_put(s, o);
++}
++
++/*
++ * ccram_marker_fork - copy a marker to the child, sharing the object.
++ * The full original PTE is preserved verbatim (the id lives in upper
++ * offset bits that copy_pte_marker() would drop).  Each fault later
++ * materializes its own private page, so sharing is COW-correct.
++ * True when the entry was ours (handled either way, gracefully).
++ */
++bool ccram_marker_fork(pte_t orig_pte, struct mm_struct *dst_mm,
++		       unsigned long addr, pte_t *dst_pte)
++{
++	softleaf_t entry = softleaf_from_pte(orig_pte);
++	struct ccram_store *s;
++	struct ccram_obj *o;
++	u32 id;
++
++	if (!softleaf_is_ccram_marker(entry))
++		return false;
++	s = ccram_live_store_now();
++	if (s) {
++		id = (u32)(swp_offset(entry) >> CCRAM_MARKER_ID_SHIFT);
++		o = ccram_obj_get(s, id);
++		if (o) {
++			/* Child shares; ref covers the new marker. */
++			set_pte_at(dst_mm, addr, dst_pte, orig_pte);
++			return true;
++		}
++	}
++	/* Object gone (refcount bug elsewhere): copy verbatim anyway.
++	 * A later fault/zap on the dangling id fails closed safely. */
++	set_pte_at(dst_mm, addr, dst_pte, orig_pte);
++	return true;
++}
+diff --git a/mm/ccram_store.c b/mm/ccram_store.c
+index 23669cef5..edc17f676 100644
+--- a/mm/ccram_store.c
++++ b/mm/ccram_store.c
+@@ -132,6 +132,8 @@ struct ccram_store {
+ 	u64 ncompress_ops;
+ 	u64 ndecompress_ops;
+ 	u64 nfail;
++	u64 ndemote;
++	u64 npromote;
+ };
+ 
+ /* Object metadata: identity, sizes, integrity, backing map, lifetime.
+@@ -623,6 +625,26 @@ void ccram_store_stats(struct ccram_store *s, struct ccram_store_stats *out)
+ 	out->ncompress_ops = s->ncompress_ops;
+ 	out->ndecompress_ops = s->ndecompress_ops;
+ 	out->nfail = s->nfail;
++	out->ndemote = s->ndemote;
++	out->npromote = s->npromote;
++	spin_unlock_irqrestore(&s->lock, flags);
++}
++
++void ccram_store_note_demote(struct ccram_store *s)
++{
++	unsigned long flags;
++
++	spin_lock_irqsave(&s->lock, flags);
++	s->ndemote++;
++	spin_unlock_irqrestore(&s->lock, flags);
++}
++
++void ccram_store_note_promote(struct ccram_store *s)
++{
++	unsigned long flags;
++
++	spin_lock_irqsave(&s->lock, flags);
++	s->npromote++;
+ 	spin_unlock_irqrestore(&s->lock, flags);
+ }
+ 
+@@ -897,6 +919,8 @@ static int ccram_stats_show(struct seq_file *m, void *v)
+ 		   st.ncomp, st.nraw);
+ 	seq_printf(m, "compress_ops: %llu decompress_ops: %llu failures: %llu\n",
+ 		   st.ncompress_ops, st.ndecompress_ops, st.nfail);
++	seq_printf(m, "demotions: %llu promotions: %llu\n",
++		   st.ndemote, st.npromote);
+ 	if (st.stored_bytes)
+ 		seq_printf(m, "ratio_logical_stored_per mille: %llu\n",
+ 			   st.logical_bytes * 1000 / st.stored_bytes);
+diff --git a/mm/memory.c b/mm/memory.c
+index b62daebd8..82eea2832 100644
+--- a/mm/memory.c
++++ b/mm/memory.c
+@@ -48,6 +48,7 @@
+ #include <linux/hugetlb.h>
+ #include <linux/mman.h>
+ #include <linux/swap.h>
++#include <linux/ccram_store.h>
+ #include <linux/highmem.h>
+ #include <linux/pagemap.h>
+ #include <linux/memremap.h>
+@@ -1034,6 +1035,15 @@ copy_nonpresent_pte(struct mm_struct *dst_mm, struct mm_struct *src_mm,
+ 			return -EBUSY;
+ 		return -ENOENT;
+ 	} else if (softleaf_is_marker(entry)) {
++		/*
++		 * CCRAM object marker (AKADATA Phase 2B): the id lives in
++		 * the upper offset bits that copy_pte_marker() would drop,
++		 * so preserve the full entry and bump the object ref here.
++		 * Parent and child then share the object; each fault
++		 * materializes its own private page.
++		 */
++		if (ccram_marker_fork(pte, dst_mm, addr, dst_pte))
++			return 0;
+ 		pte_marker marker = copy_pte_marker(entry, dst_vma);
+ 
+ 		if (marker)
+@@ -1780,6 +1790,14 @@ static inline int zap_nonpresent_ptes(struct mmu_gather *tlb,
+ 		 */
+ 		if (!vma_is_anonymous(vma) && !zap_drop_markers(details))
+ 			return 1;
++	} else if (softleaf_is_ccram_marker(entry)) {
++		/*
++		 * CCRAM object marker (AKADATA Phase 2B): drop exactly one
++		 * object reference, mirroring swap-entry accounting.  No mm
++		 * counter references the (already unmapped) page, like the
++		 * uffd markers above.
++		 */
++		ccram_marker_zap(entry);
+ 	} else if (softleaf_is_guard_marker(entry)) {
+ 		/*
+ 		 * Ordinary zapping should not remove guard PTE
+@@ -4644,6 +4662,12 @@ static vm_fault_t handle_pte_marker(struct vm_fault *vmf)
+ 	if (marker & PTE_MARKER_GUARD)
+ 		return VM_FAULT_SIGSEGV;
+ 
++	/* CCRAM compressed object (AKADATA Phase 2B): fault it back into
++	 * a private page.  Falls through to SIGBUS below on any failure,
++	 * never installs a bad page. */
++	if (marker & PTE_MARKER_CCRAM)
++		return ccram_marker_fault(vmf);
++
+ 	if (softleaf_is_uffd_wp_marker(entry))
+ 		return pte_marker_handle_uffd_wp(vmf);
+ 
+-- 
+2.55.0
+

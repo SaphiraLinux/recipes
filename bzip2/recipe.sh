@@ -1,7 +1,7 @@
 #!/bin/sh
 pkgname=bzip2
 pkgver=1.0.8
-pkgrel=5
+pkgrel=6
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='High-quality block-sorting file compressor'
 license='bzip2-1.0.6'
@@ -21,6 +21,17 @@ recipe_build() {
 }
 recipe_install() {
 	make -C "$SRC" PREFIX="$PKGDEST/usr" install
+	# Upstream's install bakes absolute $(PREFIX)/bin link targets into
+	# the bzcmp/bzegrep/bzfgrep/bzless aliases (old builder payloads
+	# shipped literal /build/... targets, dangling on every host).
+	# Installed payloads must never reference /build (makepkg refuses
+	# them); rewrite as same-directory relative links.
+	for link_target in "bzcmp:bzdiff" "bzegrep:bzgrep" "bzfgrep:bzgrep" "bzless:bzmore"; do
+		link=${link_target%%:*}
+		target=${link_target##*:}
+		rm -f "$PKGDEST/usr/bin/$link"
+		ln -s "$target" "$PKGDEST/usr/bin/$link"
+	done
 	install -m 0755 "$SRC/libbz2.so.1.0.8" "$PKGDEST/usr/lib/"
 	ln -sf libbz2.so.1.0.8 "$PKGDEST/usr/lib/libbz2.so.1.0"
 	ln -sf libbz2.so.1.0.8 "$PKGDEST/usr/lib/libbz2.so.1"

@@ -1,0 +1,88 @@
+#!/sbin/openrc-run
+# saphira-firstboot: interactive first-boot account/identity setup.
+#
+# Runs only while /etc/saphira-firstboot-required exists (written at
+# assembly when root ships locked, removed when the wizard completes).
+# Without the marker this service is a successful no-op, so enabling
+# it in the boot path is safe on every machine.
+#
+# WHERE IT RUNS: the image places this service in the boot runlevel, so
+# the intended sequence is the ordinary one - bootloader, kernel, real
+# root, init, sysinit (devfs, sysfs, dmesg, cgroups), then the boot
+# runlevel's platform work, and only then the wizard. The ordering
+# below is what makes that true: the wizard waits for the boot-level
+# services that the operator would otherwise watch start around it.
+#
+#   modules, procfs, sysctl   device enumeration and kernel state are
+#                             settled before the wizard looks for
+#                             network interfaces at all
+#   root, localmount, fsck    filesystem work is finished
+#   seedrng                   entropy is available, so password hashing
+#                             and host-key generation cannot stall
+#   keymaps, termencoding,    the console encoding and layout the wizard
+#   save-termencoding         prompts on are the ones the boot leaves
+#   bootmisc, mtab, hostname, ordinary platform state
+#   hwclock, loopback, swap,  ordinary platform state
+#   saphira-fhs-converge      the layout migration the package owns
+#
+# A name that is not present in a given image's boot runlevel is simply
+# not ordered against; these are ordering hints, not requirements, so a
+# minimal profile is not broken by listing services it does not ship.
+#
+# It is NOT in sysinit. Running there put the wizard on screen before
+# the platform work had finished, which is exactly the "wizard appears
+# halfway through boot" complaint: boot messages were still pending
+# behind it. It is also placed after every other boot-runlevel service,
+# so the console has finished printing before the wizard clears it.
+#
+# It blocks its own runlevel: start() runs the wizard in the foreground
+# and returns only when setup completes (or is cancelled). Runlevels
+# are strictly ordered, so the default runlevel - gettys, sshd,
+# firewall, the network service - starts only after setup finishes, and
+# nothing can interleave output with the password, account and network
+# prompts.
+#
+# A foreground interactive setup can only work this way because the
+# service opts out of openrc-run's 60-second start timeout
+# (WAIT_TIMEOUT in openrc-run.c SIGKILLs the service script):
+# keyword -timeout below waits indefinitely, which is what a human
+# answering questions needs. There is deliberately no remote path
+# into an unconfigured machine.
+
+description="Saphira first-boot account and identity setup"
+
+command="/sbin/saphira-firstboot"
+
+depend() {
+	after modules procfs sysctl root localmount fsck seedrng
+	after keymaps termencoding save-termencoding
+	after bootmisc mtab hostname hwclock loopback swap binfmt
+	after saphira-fhs-converge
+	keyword -timeout
+}
+
+start() {
+	# Successful no-op once the marker is gone, and deliberately
+	# silent: this runs on every ordinary boot, which must go
+	# straight to the login prompt. (The old start_pre returned 1
+	# here, marking the service failed and printing a line into
+	# every boot log - there was nothing to do, so it is not a
+	# failure.)
+	if [ ! -e /etc/saphira-firstboot-required ]; then
+		return 0
+	fi
+	ebegin "Saphira first-boot setup (console)"
+	# At-boot handover signal for the wizard: only a boot-path run
+	# reboots after consuming the marker (see SAPHIRA_FIRSTBOOT_AT_BOOT
+	# in saphira-firstboot). Manual runs leave it unset.
+	export SAPHIRA_FIRSTBOOT_AT_BOOT=1
+	"$command" < /dev/console > /dev/console 2>&1
+	eend $?
+}
+
+stop() {
+	# Nothing to stop: the setup is a foreground one-shot. An
+	# explicit no-op keeps ordinary shutdowns free of a stop line
+	# for a service that never did anything.
+	return 0
+}

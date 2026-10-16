@@ -1,7 +1,10 @@
 #!/bin/sh
 pkgname=dbus
 pkgver=1.16.0
-pkgrel=7
+# r8: messagebus home /var/run/dbus -> /var/empty (platform no-home
+# idiom; the old home made installs chown a live socket dir, failing
+# closed in unprivileged install-test roots).
+pkgrel=8
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='D-Bus message bus system'
 license='GPL-2.0-or-later AFL-2.1'

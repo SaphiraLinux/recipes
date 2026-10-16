@@ -1,0 +1,27 @@
+#!/sbin/openrc-run
+
+description="libvirt virtualization interface driver (virtinterfaced)"
+
+# libvirt's modular daemons do not daemonize, so supervise-daemon owns the
+# real process and there is no pidfile to track.
+#
+# virtinterfaced runs as root: this package configures -Dqemu_user=root
+# -Dqemu_group=root, so it must NOT be given a User= here.
+command="/usr/sbin/virtinterfaced"
+supervisor="supervise-daemon"
+
+# Saphira is not usrmerged and /var/run is a real directory, never a
+# /run alias: the daemons are built with -Drunstatedir=/var/run, so the
+# socket directory must exist here before the daemon starts. This
+# shadows the upstream-installed script, which creates no rundir.
+start_pre()
+{
+	checkpath -d -o root:root -m 0755 /var/run/libvirt
+}
+
+depend()
+{
+	need localmount
+	use net
+	after firewall
+}

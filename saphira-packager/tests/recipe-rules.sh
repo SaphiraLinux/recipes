@@ -111,6 +111,43 @@ grep -Eq '^group frr 125$' "$frr_fragment" || {
 	exit 1
 }
 
+# dhcpcd owns its service identity (dhcpcd:157). It drops privileges to
+# this user before doing anything else and refuses to run without it, so
+# an image carrying no such account could not run DHCP at all. The gap
+# was invisible because dhcpcd daemonises: the parent exits 0 and the
+# privileged child dies afterwards, so the failure never reached the
+# exit status anybody checked and nothing red appeared in the boot log.
+dhcpcd_fragment=$source_root/dhcpcd/files/accounts.d/dhcpcd
+[ -f "$dhcpcd_fragment" ] || {
+	printf '%s\n' 'dhcpcd fragment is missing (dhcpcd identity unowned; DHCP cannot start)' >&2
+	exit 1
+}
+grep -Eq '^user dhcpcd 157 dhcpcd /var/lib/dhcpcd /sbin/nologin$' "$dhcpcd_fragment" || {
+	printf '%s\n' 'dhcpcd fragment does not declare user dhcpcd 157' >&2
+	exit 1
+}
+grep -Eq '^group dhcpcd 157$' "$dhcpcd_fragment" || {
+	printf '%s\n' 'dhcpcd fragment does not declare group dhcpcd 157' >&2
+	exit 1
+}
+grep -q 'accounts.d/dhcpcd' "$source_root/dhcpcd/recipe.sh" || {
+	printf '%s\n' 'dhcpcd recipe does not install its accounts.d fragment' >&2
+	exit 1
+}
+
+# Declared service identities must not collide. Two packages claiming one
+# uid is a silent identity conflict decided by install order.
+identity_ids=$(cat "$source_root"/*/files/accounts.d/* 2>/dev/null |
+	awk '/^user [^ ]+ [0-9]+ / { print $2, $3 }' |
+	sort -k2,2n)
+dup_ids=$(printf '%s\n' "$identity_ids" | awk '{ count[$2]++; names[$2]=names[$2] " " $1 }
+	END { for (id in count) if (count[id] > 1) print id ":" names[id] }')
+if [ -n "$dup_ids" ]; then
+	printf 'FAIL: service identity uid collision: %s\n' "$dup_ids" >&2
+	exit 1
+fi
+printf '%s\n' 'ok       no duplicate service identity uids'
+
 # Man hierarchy navigability: every page carries all eight required
 # sections, contains ASCII only (groff-clean output), and every
 # `name (section)` reference anywhere resolves to a shipped page

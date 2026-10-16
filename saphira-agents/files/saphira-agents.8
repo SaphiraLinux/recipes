@@ -1,0 +1,93 @@
+.TH SAPHIRA-AGENTS 8 "October 2026" "Saphira Linux" "System Administration"
+.SH NAME
+saphira-agents \- install coding agents and provider SDKs from npm
+.SH SYNOPSIS
+.B saphira-agents
+.RI [ --setup " | " --list " | " --installed " | " --update " | " --help ]
+.SH DESCRIPTION
+.B saphira-agents
+installs terminal coding agents and model provider SDKs: npm
+packages, vendor standalone release artefacts (hash-verified), and
+PyPI packages where a backend exists. Only agents proven to install
+and execute on Saphira appear; anything else is omitted rather than
+offered. It is the operator-driven,
+interactive front to the fast-moving npm agent ecosystem; the stable
+Saphira foundation underneath it is the
+.BR saphira-agents (7)
+meta-package.
+.PP
+Every run starts by choosing a scope. Per-user scope (the default)
+installs under
+.IR $HOME/.local .
+Global scope installs machine-wide into
+.I /usr
+and requires root; its binaries are shared by all users while each
+user's authentication, configuration and sessions stay per-user.
+Some packages restrict which scopes are offered: Claude Code, for
+example, is per-user-only because Anthropic warns against installing
+it with sudo npm.
+.PP
+Install policy is per package, not uniform. Packages whose postinstall
+step was inspected and proven necessary carry a narrow
+.I --allow-scripts=<package>
+approval; packages with no lifecycle scripts install plainly. There
+is no blanket script approval. The same policy drives initial
+installs and
+.B --update
+runs alike.
+.SH OPTIONS
+.TP
+.BR --setup
+Run the interactive installer (per-user scope by default; global
+scope under root where package policy permits it).
+.TP
+.BR --list
+Show installable selections with their npm package names, permitted
+scopes, and script-approval notes.
+.TP
+.BR --installed
+Show packages recorded by saphira-agents, per scope, cross-checked
+against what is actually present (a manually removed package reads
+"(missing)").
+.TP
+.BR --update
+Reinstall every recorded package of the current context (global when
+run as root, per-user otherwise) at its current upstream release,
+using the same per-package policy as installation.
+.TP
+.BR --help ", " -h
+Show usage and exit.
+.SH FILES
+.TP
+.I /var/lib/saphira-agents/state
+Global install records: timestamp, scope, selection, npm package,
+installed version.
+.TP
+.I ~/.local/share/saphira-agents/state
+Per-user install records, same format.
+.SH EXIT STATUS
+.TP
+.B 0
+Success (including "nothing selected" and "nothing recorded").
+.TP
+.B 1
+Usage error, validation failure, refused scope, or at least one
+package operation failed.
+.SH EXAMPLES
+.TP
+Install interactively (per-user default):
+.B saphira-agents --setup
+.TP
+Install machine-wide (as root):
+.B sudo saphira-agents --setup
+.TP
+Audit and refresh:
+.B saphira-agents --installed
+.br
+.B saphira-agents --update
+.SH SEE ALSO
+.BR npm (1)
+.PP
+Upstream install requirements change; the encoded per-package policy
+reflects what was inspected at packaging time. Provider credentials
+are never stored or configured by this tool.

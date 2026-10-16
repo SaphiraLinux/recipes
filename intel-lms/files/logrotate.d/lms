@@ -1,0 +1,16 @@
+# LMS logs through syslog; rsyslog (when installed) writes
+# /var/log/lms.log and holds it open, so HUP it after rotation.
+# Upstream's invoke-rc.d postrotate does not exist on Saphira.
+/var/log/lms.log
+{
+	rotate 4
+	daily
+	missingok
+	notifempty
+	compress
+	delaycompress
+	sharedscripts
+	postrotate
+		[ -f /var/run/rsyslogd.pid ] && /bin/kill -HUP $(cat /var/run/rsyslogd.pid) || true
+	endscript
+}

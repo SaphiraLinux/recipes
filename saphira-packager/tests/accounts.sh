@@ -538,13 +538,13 @@ if as_root "$R5" "$test_root/sysbad" > "$test_root/17c.log" 2>&1; then
 	printf '%s\n' 'malformed sysusers stanza unexpectedly accepted (ensure)' >&2
 	exit 1
 fi
-grep 'sysusers takes no fields' "$test_root/17c.log" >/dev/null
+grep 'sysusers takes no arguments' "$test_root/17c.log" >/dev/null
 as_root "$R5" --disable "$test_root/sysonly" > "$test_root/17d.log" 2>&1
 if as_root "$R5" --disable "$test_root/sysbad" > "$test_root/17e.log" 2>&1; then
 	printf '%s\n' 'malformed sysusers stanza unexpectedly accepted (disable)' >&2
 	exit 1
 fi
-grep 'sysusers takes no fields' "$test_root/17e.log" >/dev/null
+grep 'sysusers takes no arguments' "$test_root/17e.log" >/dev/null
 
 [ "$host_before" = "$(sha256sum /etc/passwd /etc/group)" ]
 printf '%s\n' 'account reconciler unit tests (rootless): creation, idempotency, serialization, conflict refusal, range refusal, reserved-identity refusal, local convergence, credential refusal, disable/restore, idempotent disable, absent no-op, disable foreign retention (user/group/primary/mixed), state retention, reinstall convergence, file ownership/mode, file idempotency, file failure closure, file disable retention, fifo ownership, legacy auto-repair, sysusers stanza tolerance: OK'

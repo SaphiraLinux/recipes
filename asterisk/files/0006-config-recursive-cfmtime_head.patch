@@ -1,0 +1,47 @@
+--- a/main/config.c
++++ b/main/config.c
+@@ -115,6 +115,18 @@
+ /*! Cached file mtime list. */
+ static AST_LIST_HEAD_STATIC(cfmtime_head, cache_file_mtime);
+ 
++/* SAPHIRA-MUSL: cfmtime_head is statically initialized to a plain
++ * non-recursive mutex on Linux, but config_text_file_load() re-enters
++ * it when a cached unchanged file's includes are rechecked (proven
++ * self-deadlock: two nested takes by the loading thread, zero
++ * unlocks). Upstream's structure requires recursive semantics, so
++ * initialize it here; called once from main() before any config is
++ * read (no config consumer runs before main). */
++void ast_config_init(void)
++{
++	ast_mutex_init(&cfmtime_head.lock);
++}
++
+ static int init_appendbuf(void *data)
+ {
+ 	struct ast_str **str = data;
+--- a/include/asterisk/config.h
++++ b/include/asterisk/config.h
+@@ -752,6 +752,8 @@
+  * \brief Register config engine
+  * \retval 1 Always
+  */
++void ast_config_init(void);
++
+ int ast_config_engine_register(struct ast_config_engine *newconfig);
+ 
+ /*!
+--- a/main/asterisk.c
++++ b/main/asterisk.c
+@@ -3655,6 +3655,12 @@
+ 	}
+ 	ast_mainpid = getpid();
+ 
++	/* SAPHIRA-MUSL: initialize subsystem locks that upstream leaves
++	 * statically plain but uses re-entrantly (see ast_config_init,
++	 * load_pbx/conlock, load_modules/module_list). Must precede any
++	 * config read; nothing consumes configs before main(). */
++	ast_config_init();
++
+ 	/* Process command-line options that affect asterisk.conf load. */
+ 	while ((c = getopt(argc, argv, getopt_settings)) != -1) {
+ 		switch (c) {

@@ -1,0 +1,24 @@
+# saphira-pbx-mcp runtime identity (canonical, fixed): user
+# saphira-pbx-mcp UID 155, primary group saphira-pbx-mcp GID 155,
+# home /var/empty (the network half is stateless), shell nologin.
+# Only the `mcp serve` network frontend runs as this identity: the
+# daemon starts as root (bind, key material, root-only state) and
+# drops the frontend itself after fork; the backend stays root.
+# UID/GID 155 is the first free ID above asterisk 154, inside the
+# preferred 0..199 range - never reuse it for another identity.
+# State directories: the backend owns /var/lib/saphira-pbx, mode
+# 0711 (traverse without list, never relaxed): the asterisk identity
+# must reach generated configuration it owns at 0640, while listing
+# and all other access stay denied; DB/WAL/SHM stay 0600 root.
+# Proven: 0700 made every generation unreadable to the daemon
+# (pbx_config declined at boot, all reloads failed).
+# /etc/saphira-pbx holds the transport config; /etc/saphira-pbx/tls
+# is group-traversable so the staged key (root:saphira-pbx-mcp 0640,
+# never world-visible) stays readable to the service group. Each leaf
+# is reconciled by the platform reconciler (never walked), hence
+# every leaf is declared explicitly.
+user saphira-pbx-mcp 155 saphira-pbx-mcp /var/empty /sbin/nologin
+group saphira-pbx-mcp 155
+dir /var/lib/saphira-pbx 0711 root root
+dir /etc/saphira-pbx 0750 root root
+dir /etc/saphira-pbx/tls 0750 root saphira-pbx-mcp

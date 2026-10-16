@@ -11,3 +11,7 @@ __pycache__/
 codex.history.md
 
 
+
+*.x509
+!wireless-regdb/files/saphira-regdb.x509
+usb.ids

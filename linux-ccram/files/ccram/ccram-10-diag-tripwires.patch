@@ -1,0 +1,177 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: AKADATA LIMITED <linux@saphira.vm2.uk>
+Date: Mon, 12 Oct 2026 13:30:00 +0000
+Subject: [PATCH] ccram: diagnostic preempt-state tripwires (r10 diagnostic only)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+DIAGNOSTIC BUILD ONLY -- not for release, not for merge. Narrowly
+scoped tripwires around the Phase-2B demote path to locate the FIRST
+preempt-count corruption (0x7fffffxx pattern observed on r9 under
+ZFS/zvol reclaim) instead of debugging later scheduling-while-atomic
+victims. Captures raw preempt_count, in_task(), irqs_disabled(),
+PID/comm and folio identity at entry, every exit and the internal
+boundaries (rmap walk, PTE callback, mmu-notifier, TLB flush). First
+mismatch emits one diagnostic stack and latches a kill-switch that
+stops further CCRAM demotion (fail closed, no warning flood). No
+behavioural, eligibility, THP, ARC, ZFS or reclaim-policy change.
+---
+ mm/ccram_residency.c | 68 +++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 68 insertions(+)
+
+--- a/mm/ccram_residency.c
++++ b/mm/ccram_residency.c
+@@ -28,6 +28,10 @@
+ #include "internal.h"
+ #include <linux/gfp.h>
+ #include <linux/rmap.h>
++#include <linux/sched.h>
++#include <linux/preempt.h>
++#include <linux/atomic.h>
++#include <linux/irqflags.h>
+ #include <linux/swap.h>
+ #include <linux/swapops.h>
+ #include <linux/leafops.h>
+@@ -219,14 +223,65 @@
+ 
+ /* --- demote-store path (Phase 2B/2) ---------------------------------- */
+ 
++/* --- diagnostic preempt-state tripwires (r10 diagnostic only) -------- */
++
++struct ccram_trip_state {
++	int pc;
++	bool task;
++	bool irq;
++};
++
+ struct ccram_demote_ctx {
+ 	struct ccram_store *store;
+ 	struct ccram_obj *obj;	/* stored object, owner ref held */
+ 	u32 id;
+ 	int replaced;		/* mappings converted so far */
+ 	bool failed;
++	struct ccram_trip_state trip;	/* entry baseline for tripwires */
+ };
+ 
++/* Latched on first mismatch: one diagnostic stack, then demotion stops. */
++static atomic_t ccram_trip_fired = ATOMIC_INIT(0);
++
++static void ccram_trip_snap(struct ccram_trip_state *t)
++{
++	t->pc = preempt_count();
++	t->task = in_task();
++	t->irq = irqs_disabled();
++}
++
++static void ccram_trip_fire(const char *where,
++			    const struct ccram_trip_state *base,
++			    int expc, struct folio *folio, u32 id)
++{
++	struct ccram_trip_state now;
++
++	ccram_trip_snap(&now);
++	pr_warn("ccram-trip: FIRST state change at %s: pc %d->%d (expected %+d) task %d->%d irq %d->%d pid %d (%s) folio pfn %#lx id %u\n",
++		where, base->pc, now.pc, expc, base->task, now.task,
++		base->irq, now.irq, current->pid, current->comm,
++		folio ? folio_pfn(folio) : 0UL, id);
++	dump_stack();
++}
++
++/*
++ * Compare current preempt state against the entry baseline. _dpc is the
++ * documented expected preempt delta for the region (0 outside locks, 1
++ * while the PTL is held: spin_lock disables preemption once on
++ * non-RT). in_task()/irqs_disabled() must always match the baseline.
++ */
++#define CCRAM_TRIP_AT(_ctx, _folio, _where, _dpc) do {\
++	struct ccram_trip_state __now;\
++	ccram_trip_snap(&__now);\
++	if (__now.pc != (_ctx)->trip.pc + (_dpc) ||\
++	    __now.task != (_ctx)->trip.task ||\
++	    __now.irq != (_ctx)->trip.irq) {\
++		if (!atomic_xchg(&ccram_trip_fired, 1))\
++			ccram_trip_fire(_where, &(_ctx)->trip, _dpc,\
++				_folio, (_ctx)->id);\
++	}\
++} while (0)
++
+ /* Eligibility for software-compressed demote.  Narrow by construction:
+  * anonymous, order-0, mapped, non-KSM, non-swapcache, no writeback,
+  * not already CRAM-resident, unpinned, compress mode on with a live
+@@ -265,6 +320,7 @@
+ 	DEFINE_FOLIO_VMA_WALK(pvmw, folio, vma, address, 0);
+ 	struct mm_struct *mm = vma->vm_mm;
+ 	struct mmu_notifier_range range;
++	CCRAM_TRIP_AT(ctx, folio, "replace-entry", 0);
+ 
+ 	/* Shared mappings keep POSIX shared visibility: never convert. */
+ 	if (vma->vm_flags & VM_SHARED) {
+@@ -274,6 +330,7 @@
+ 	mmu_notifier_range_init(&range, MMU_NOTIFY_CLEAR, 0, mm,
+ 				address, address + PAGE_SIZE);
+ 	mmu_notifier_invalidate_range_start(&range);
++	CCRAM_TRIP_AT(ctx, folio, "post-notifier-start", 0);
+ 	while (!ctx->failed && page_vma_mapped_walk(&pvmw)) {
+ 		pte_t pteval, marker;
+ 
+@@ -292,6 +349,7 @@
+ 		flush_cache_range(vma, address, address + PAGE_SIZE);
+ 		pteval = get_and_clear_ptes(mm, address, pvmw.pte, 1);
+ 		flush_tlb_range(vma, address, address + PAGE_SIZE);
++		CCRAM_TRIP_AT(ctx, folio, "replace-in-ptl", 1);
+ 		if (pte_dirty(pteval))
+ 			folio_mark_dirty(folio);
+ 		folio_remove_rmap_pte(folio, &folio->page, vma);
+@@ -307,6 +365,7 @@
+ 	}
+ 	page_vma_mapped_walk_done(&pvmw);
+ 	mmu_notifier_invalidate_range_end(&range);
++	CCRAM_TRIP_AT(ctx, folio, "replace-exit", 0);
+ 	return !ctx->failed;
+ }
+ 
+@@ -381,6 +440,10 @@
+ 	struct folio *folio, *tmp;
+ 	unsigned int nr_stored = 0;
+ 
++	pr_info_once("ccram: DIAGNOSTIC preempt tripwires active (r10 diagnostic build, not for release)\n");
++	if (unlikely(atomic_read(&ccram_trip_fired)))
++		return 0;
++
+ 	if (ccram_compress_mode_now() != CCRAM_COMPRESS_LZ4 || !s)
+ 		return 0;
+ 	list_for_each_entry_safe(folio, tmp, list, lru) {
+@@ -405,6 +468,7 @@
+ 		 * between isolate and here must not slip through. */
+ 		if (!ccram_demote_eligible(folio))
+ 			goto next_unlocked;
++		ccram_trip_snap(&ctx.trip);
+ 		ret = ccram_store_page(s, &folio->page, GFP_NOFS, &id);
+ 		if (ret)
+ 			goto next_unlocked;
+@@ -421,11 +485,14 @@
+ 		}
+ 		ctx.obj = o;
+ 		ctx.id = id;
++		CCRAM_TRIP_AT(&ctx, folio, "pre-walk", 0);
+ 		rmap_walk(folio, &rwc);
++		CCRAM_TRIP_AT(&ctx, folio, "post-walk", 0);
+ 		if (ctx.failed || !ctx.replaced || folio_mapped(folio)) {
+ 			/* Anything short of fully unmapped rolls back;
+ 			 * the original page is untouched throughout. */
+ 			ccram_demote_rollback(&ctx, folio);
++			CCRAM_TRIP_AT(&ctx, folio, "post-rollback", 0);
+ 			ccram_obj_put(s, o);
+ 			ccram_store_free(s, id);
+ 			goto next_unlocked;
+@@ -438,6 +505,7 @@
+ 		folio_unlock(folio);
+ 		folio_put(folio);
+ 		list_del_init(&folio->lru);
++		CCRAM_TRIP_AT(&ctx, folio, "demote-success", 0);
+ 		ccram_store_note_demote(s);
+ 		nr_stored++;
+ 		continue;
+-- 
+2.55.0

@@ -2,7 +2,12 @@
 
 pkgname=coreutils
 pkgver=9.7
-pkgrel=3
+pkgrel=5
+# r5: supersede the unreproducible r4 (built from a tree state with no
+# commit; pkgrel=4 appears nowhere in history). Payload unchanged from
+# r3; this revision exists so the repository carries coreutils whose
+# provenance is the current tree. Ground-truth images must not install
+# an artifact no commit can reproduce.
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='GNU core utilities (Genesis base, /bin layout)'
 license='GPL-3.0-or-later'

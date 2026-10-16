@@ -9,9 +9,11 @@
 #   /lib is separate from /usr/lib; /lib64 and /usr/lib64 are forbidden.
 # - A shipped unit/script must reference an executable by the path its
 #   OWNING RECIPE actually installs it to.
-# - Never create a usrmerge symlink (/bin -> /usr/bin and friends).
+# - Never create a usrmerge symlink (/bin -> /usr/bin and friends),
+#   in either direction: /usr/bin/<tool> -> ../../bin/<tool> reached
+#   installed hosts as unowned fossils with no tree source.
 #
-# Two incidents locked in here, both of which reached a shipped payload
+# Three incidents locked in here, two of which reached a shipped payload
 # and could only be caught at boot:
 #
 #   coreutils is --bindir=/bin, so install/mkdir/rm/cat/cp/mv/ln/kill
@@ -25,6 +27,13 @@
 #   hostapd.service pointed ExecStart at /usr/sbin/hostapd while its own
 #   hostapd@.service and hostapd.initd used /usr/bin/hostapd. Self-
 #   inconsistent inside one package.
+#
+#   ~25 unowned /usr/bin/<coreutils> -> ../../bin/<name> links (true,
+#   ls, rm and kin) found live on egg and minimer. Image-era fossils
+#   with no tree source at all: coreutils was always --bindir=/bin,
+#   and no recipe, installer, migration or builder output ever created
+#   them. Check 6 below refuses the shape at source so the layer can
+#   never be reintroduced; the live fossils were removed once by hand.
 #
 # usage: non-usrmerge.sh (operates on the source tree it lives in)
 
@@ -91,6 +100,7 @@ definitions_list()
 {
 	for pattern in \
 		"$source_root"/*/files/*.service \
+		"$source_root"/*/files/*.service.d/* \
 		"$source_root"/*/files/*.initd \
 		"$source_root"/*/files/*.timer \
 		"$source_root"/*/files/*.path \
@@ -383,10 +393,74 @@ find "$source_root" -path "$source_root/.git" -prune -o \
 		done
 done
 
+# --- 7. Check 6: no reverse bin-compat aliases (/usr/bin -> /bin) ---
+#
+# Check 3 above catches links written INTO a distinct tree pointing into
+# its usr counterpart. The mirror image reached installed hosts too:
+# ~25 unowned /usr/bin/<coreutils> -> ../../bin/<name> links (true, ls,
+# rm and kin) found live on egg and minimer, image-era fossils with no
+# tree source (coreutils was always --bindir=/bin; git log -S is empty;
+# makepkg manufactures nothing). Either direction normalises the
+# merged-world model, so both are refused at source. Live fossils owned
+# by no package are removed once by the operator; this stops recurrence.
+#
+# /bin/true must come from the packaged path, so the coreutils bindir
+# pin below locks it: nothing in the tree ships /usr/bin/true.
+grep -Fq -- '--bindir=/bin' "$source_root/coreutils/recipe.sh" ||
+	report 'coreutils lost --bindir=/bin (/bin/true is the packaged path; nothing ships /usr/bin/true)'
+
+reverse_link()
+{
+	# $1 = file, $2 = label for the message. Mirror of usrmerge_link
+	# for the opposite direction.
+	awk -v label="$2" '
+		# Only lines that create a link.
+		$0 !~ /ln[ \t]+(-[a-zA-Z]+[ \t]+)*-?[a-z]*n?[a-z]*f?[a-z]*[ \t]/ { next }
+		# The link must be written INTO usr/bin|usr/sbin (via a root
+		# var as recipes/installers stage it, or as a literal host
+		# path as fakeroot does build-time).
+		{
+			into_usr = 0
+			if (match($0, /(\$PKGDEST|\$ROOTFS|\$target)(\/)?\/usr\/(bin|sbin)\//)) into_usr = 1
+			if (match($0, /(^|[ \t\047"])(\/usr\/(bin|sbin)\/)/)) into_usr = 1
+			if (!into_usr) next
+		}
+		# ...and must POINT INTO a distinct bin|sbin tree. lib/share/
+		# targets (go, ccache, kernel pointers, dev names) never match.
+		$0 !~ /(\.\.\/)+(s?bin)\// && $0 !~ /(^|[ \t\047"])\/s?bin\// { next }
+		# The sanctioned shebang shim (saphira-bootstrap on targets,
+		# fakeroot host-side at build time), and only it.
+		$0 ~ /\/usr\/bin\/env/ { next }
+		# A comment is not a link.
+		$0 ~ /^[ \t]*#/ { next }
+		{ printf "%s: line %d: %s\n", label, FNR, $0 }
+	' "$1"
+}
+
+for recipe in "$source_root"/*/recipe.sh; do
+	[ -f "$recipe" ] || continue
+	pkg=$(basename "$(dirname "$recipe")")
+	reverse_link "$recipe" "$pkg recipe.sh" | while IFS= read -r line; do
+		report "reverse bin alias: $line"
+	done
+done
+
+find "$source_root" -path "$source_root/.git" -prune -o \
+	-type f -path "*/files/*" -print | sort | while IFS= read -r payload; do
+	case $payload in
+		*/lib64/*|*.patch|*.diff) continue ;;
+	esac
+	pkg=${payload#"$source_root/"}; pkg=${pkg%%/*}
+	rel=${payload#"$source_root/$pkg/files/"}
+	reverse_link "$payload" "$pkg files/$rel" | while IFS= read -r line; do
+		report "reverse bin alias: $line"
+	done
+done
+
 failures=$(wc -l < "$violations")
 if [ "$failures" -gt 0 ]; then
 	printf '%s\n' "non-usrmerge: $failures violation(s); see RECIPE_RULES.md 'Non-usrmerged filesystem policy'" >&2
 	exit 1
 fi
 
-printf '%s\n' 'non-usrmerge: OK (executable paths, usrmerge symlinks, lib64, ldconfig, /var/run aliases)'
+printf '%s\n' 'non-usrmerge: OK (executable paths, usrmerge symlinks, reverse bin aliases, lib64, ldconfig, /var/run aliases)'

@@ -1,0 +1,31 @@
+#!/sbin/openrc-run
+# Asterisk PBX daemon (OpenRC). Mirrors files/asterisk.service: foreground
+# process under supervise-daemon, asterisk:asterisk identity, /run state.
+
+description="Asterisk PBX and telephony daemon"
+
+command="/usr/sbin/asterisk"
+command_args="-f -C /etc/asterisk/asterisk.conf"
+command_user="asterisk:asterisk"
+pidfile="/run/asterisk/asterisk.pid"
+supervisor="supervise-daemon"
+
+depend()
+{
+	use net logger dns
+	after firewall
+}
+
+start_pre()
+{
+	checkpath -d -m 0755 -o asterisk:asterisk \
+		/run/asterisk \
+		/var/cache/asterisk \
+		/var/lib/asterisk \
+		/var/log/asterisk \
+		/var/spool/asterisk
+	# Asterisk has no offline config-test entry point (unlike dovecot
+	# configtest); a bad configuration fails the daemon start itself,
+	# which supervise-daemon reports. Only assert the owned config dir.
+	checkpath -d -m 0755 -o root:root /etc/asterisk
+}

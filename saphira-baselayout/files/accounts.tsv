@@ -71,5 +71,22 @@ ftp	user	18	ftp	/srv/ftp	/sbin/nologin	-
 ftp	group	18	-	-	-	-
 proxyto	user	19	proxyto	/var/empty	/sbin/nologin	-
 proxyto	group	19	-	-	-	-
+# Device-owner groups referenced by shipped udev rules and tmpfiles
+# fragments (no corresponding users: purely device ownership). Without
+# them every boot logs "Unknown group" and the nodes fall back to the
+# wrong group - notably /dev/rtc0 (clock) and /dev/kvm (kvm). IDs live
+# in 157-163: the 100-123 service block is taken, 124/126/132 are owned
+# by published repo packages (hostapd, breathgslb, qmail - the repo
+# gate gives published packages no reason to move, so the seed
+# vacates), 127-131 and 144-145 are systemd sysusers pins, and the
+# rest below 157 is repo-claimed. Verified against the live
+# reservations table before assigning; stay far below the human range.
+cdrom	group	157	-	-	-	-
+tape	group	158	-	-	-	-
+dialout	group	159	-	-	-	-
+kvm	group	160	-	-	-	-
+render	group	161	-	-	-	-
+sgx	group	162	-	-	-	-
+clock	group	163	-	-	-	-
 nobody	user	65534	nobody	/var/empty	/sbin/nologin	-
 nobody	group	65534	-	-	-	-

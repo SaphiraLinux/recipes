@@ -29,7 +29,37 @@ pkgver=1.0
 # identity-less fragments) plus the legacy-gate namespace fix: a
 # legacy user's primary GID is a reference, not a group-namespace
 # history claim, so paired user+group sidecars publish.
-pkgrel=72
+pkgrel=77
+# r76: sanctioned identity renumbers (identity-transitions data
+# file): the history census stays fail-closed except for an
+# explicitly declared package/kind/name/old/new/introducing-NVR
+# transition, consumed with an audit notice (polkitd 127->156).
+# The data file ships beside repo_db.py like the library itself.
+# r75: promote-path declaration parity (extract_declarations carries
+# the sysusers mechanism flag and derives caps; receipts use the
+# manifest schema with accounts/fhs/caps; fragment_carriers covers
+# all three channels so fhs-only/caps-only packages extract; migrate
+# census check scoped to accounts carriers). Without it no fhs.d or
+# caps.d carrier - and no dynamic-only sysusers package - could ever
+# traverse promotion, while publishing accepted them: the quoted
+# systemd-262-r5 refusal class (proven by the new promote-repo
+# regression: static/dynamic-sysusers + fhs traverse, collision
+# refusal leaves the destination byte-identical with no premature
+# success wording).
+# r74: same-lineage Unix-ID moves (gate allows same package+name with
+# a new ID; apply rebinds; abandoned binding updates in place).
+# Without it no published identity can ever change its ID again:
+# polkitd 127->156 and systemd-network 147->127 both deadlocked
+# (proven live on both generations). Moves onto anyone's ID, live or
+# tombstoned, still fail; unrelated hijacks still fail. Residual hole
+# (moved-from IDs leave no tombstone; name-keyed ledger) is
+# documented in repo_db.py and needs a doctrine item, not silence.
+# r73: promote-repo transaction ordering (copies land first under final
+# names so the gate reads exactly what would commit; gate refusal
+# removes the copies before dying, so the live index/db stay
+# byte-identical; ledger commit, then index install, then promoted
+# prints and journal - never before. Proven by the r5/r27 promotion
+# leaving files+index live with no ledger rows).
 # r72: merge line (hotfix r62-r66 semantics ported onto the r71 line:
 # caps.d declarations + ensure-caps callers, LAYOUT_ALLOW usr/etc-var-com
 # refusal + --no-scripts seed assembly with fhs.d convergence, fhs
@@ -119,6 +149,7 @@ recipe_install()
 	install -d "$DESTDIR/usr/lib/saphira-packager"
 	install -m 644 "$RECIPE_DIR/files/repo-index.sh" "$DESTDIR/usr/lib/saphira-packager/repo-index.sh"
 	install -m 644 "$RECIPE_DIR/files/repo_db.py" "$DESTDIR/usr/lib/saphira-packager/repo_db.py"
+	install -m 644 "$RECIPE_DIR/files/identity-transitions" "$DESTDIR/usr/lib/saphira-packager/identity-transitions"
 	install -m 755 "$RECIPE_DIR/files/saphira-repo-migrate" "$DESTDIR/usr/bin/saphira-repo-migrate"
 	install -m 755 "$RECIPE_DIR/files/saphira-repo-state" "$DESTDIR/usr/bin/saphira-repo-state"
 	install -m 755 "$RECIPE_DIR/files/seed-repo" "$DESTDIR/usr/bin/seed-repo"

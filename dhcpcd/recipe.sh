@@ -1,6 +1,18 @@
 pkgname=dhcpcd
 pkgver=10.5.2
-pkgrel=1
+pkgrel=2
+# r2: declare the service identity. dhcpcd drops privileges to this user
+# before it does anything else and refuses to run without it, so an image
+# carrying no `dhcpcd` account could not run DHCP at all - and, because
+# the failure surfaced as a daemonised client's silent death, it did so
+# with nothing in the boot log to show for it. Upstream's install target
+# creates no account, the recipe installed with a bare `make install`,
+# and there is no sysusers.d fragment anywhere in the closure to replay,
+# so the identity was simply unowned. This is the gap already fixed for
+# frr, lldpd and mysql: the package relies on a service account the
+# package never declared. uid 157, the next free slot above the declared
+# 100-199 package tier. Asserted by saphira-packager/tests/recipe-rules.sh
+# and by saphira-network/tests/dhcpcd-startup.sh.
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='dhcpcd DHCP/DHCPv6 client with IA_PD delegation (PPP WAN support)'
 license=BSD-2-Clause
@@ -25,4 +37,18 @@ recipe_build()
 recipe_install()
 {
 	make DESTDIR="$PKGDEST" install
+	# Service identity. dhcpcd drops privileges to this user before it
+	# does anything else and refuses to run without it. Upstream's
+	# install target creates no account and there is no sysusers.d
+	# fragment in the closure, so without this the identity was
+	# unowned and DHCP silently could not start on any image.
+	install -D -m 0644 "$RECIPE_DIR/files/accounts.d/dhcpcd" \
+		"$PKGDEST/usr/share/saphira/accounts.d/dhcpcd"
+	install -d -m 0755 "$PKGDEST/var/lib/dhcpcd"
+	for p in usr/share/saphira/accounts.d/dhcpcd; do
+		[ -e "$PKGDEST/$p" ] || {
+			echo "ERROR: dhcpcd payload is missing $p" >&2
+			return 1
+		}
+	done
 }

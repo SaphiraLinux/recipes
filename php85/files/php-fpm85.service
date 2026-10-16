@@ -10,7 +10,7 @@ LimitNOFILE=65535
 # socket from an unclean shutdown are cleared before each start: the
 # master recreates both, and ExecStartPre runs only when the service
 # is (re)starting, never against a live master.
-ExecStartPre=/usr/bin/install -d -m 0755 -o php-fpm -g php-fpm /var/run/php-fpm85
+ExecStartPre=/bin/install -d -m 0755 -o php-fpm -g php-fpm /var/run/php-fpm85
 ExecStartPre=/bin/rm -f /var/run/php-fpm85/php-fpm85.pid /var/run/php-fpm85/www.sock
 ExecStart=/usr/sbin/php-fpm85 -F -y /etc/php85/php-fpm.conf
 ExecReload=/bin/kill -USR2 $MAINPID

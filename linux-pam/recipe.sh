@@ -2,7 +2,9 @@
 
 pkgname=linux-pam
 pkgver=1.7.2
-pkgrel=3
+# r4: add the -dev split (PAM headers) that polkit's pam auth framework
+# needs. No upstream change; headers already installed, only unpackaged.
+pkgrel=4
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="Pluggable Authentication Modules (limits, unix auth for system services)"
 license="GPL-2.0-or-later"
@@ -45,6 +47,8 @@ makedepends="
 # systemd-dev providers in the tree - re-enable as those land);
 # openssl left at upstream default (disabled) for pam_timestamp;
 # examples off (payload hygiene).
+subpackages="$pkgname-dev"
+
 recipe_build()
 {
 	# Prefer libxcrypt explicitly at configure time; see the patch.

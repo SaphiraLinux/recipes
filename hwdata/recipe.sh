@@ -13,13 +13,32 @@ url='https://pci-ids.ucw.cz/ https://www.linux-usb.org/usb.ids'
 #   pci.ids https://raw.githubusercontent.com/pciutils/pciids/master/pci.ids
 #   usb.ids http://www.linux-usb.org/usb.ids
 # Data files, not release tarballs; refresh = re-download + sha256 + pkgrel.
+# Reproducible staging: exact bytes pinned below, staged through $SRC
+# (under /build) with sha256 verification. Existing files/ inputs are
+# kept until the staged path is proven; do not delete them. The public
+# mirror never carries usb.ids (latin-1, fails strict UTF-8 gate);
+# it stays ignored/untracked by decision, not as a generated binary.
+pci_ids_vendor=https://raw.githubusercontent.com/pciutils/pciids/master/pci.ids
+pci_ids_sha256=b63f063ea3427516e5af68cab4c84abf8562a89fd0afbc7e0b94fd50408e3f22
+usb_ids_vendor=https://www.linux-usb.org/usb.ids
+usb_ids_sha256=f5a48b0cc8dae1607c2f0bae6b8dc13f2ecef69dbeaeaf34b4be8e280d34dba4
 
 # Also generate the udev hwdb fragment for USB vendor/model names
 # (usb.ids -> 20-usb-vendor-model.hwdb, same mapping systemd's hwdb
 # tooling produces). Target runs: udevadm hwdb --update
 recipe_build()
 {
-	python3 - "$RECIPE_DIR/files/usb.ids" > "$SRC/20-usb-vendor-model.hwdb" <<'PYGEN'
+	# Stage exact pinned bytes through $SRC (under /build) with
+	# verification; fails closed on drift. Downloads would land here
+	# as well (curl to $SRC + sha256 -c), but files/ inputs are kept
+	# until that path is proven, so copy + verify for now.
+	STAGED_PCI="$SRC/pci.ids"
+	STAGED_USB="$SRC/usb.ids"
+	cp "$RECIPE_DIR/files/pci.ids" "$STAGED_PCI"
+	cp "$RECIPE_DIR/files/usb.ids" "$STAGED_USB"
+	echo "$pci_ids_sha256  $STAGED_PCI" | sha256sum -c -
+	echo "$usb_ids_sha256  $STAGED_USB" | sha256sum -c -
+	python3 - "$STAGED_USB" > "$SRC/20-usb-vendor-model.hwdb" <<'PYGEN'
 import sys
 out = sys.stdout
 vendor = None
@@ -53,8 +72,8 @@ PYGEN
 recipe_install()
 {
 	install -d "$PKGDEST/usr/share/hwdata"
-	install -m 0644 "$RECIPE_DIR/files/pci.ids" "$PKGDEST/usr/share/hwdata/pci.ids"
-	install -m 0644 "$RECIPE_DIR/files/usb.ids" "$PKGDEST/usr/share/hwdata/usb.ids"
+	install -m 0644 "$SRC/pci.ids" "$PKGDEST/usr/share/hwdata/pci.ids"
+	install -m 0644 "$SRC/usb.ids" "$PKGDEST/usr/share/hwdata/usb.ids"
 	install -d "$PKGDEST/usr/lib/udev/hwdb.d"
 	install -m 0644 "$SRC/20-usb-vendor-model.hwdb" \
 		"$PKGDEST/usr/lib/udev/hwdb.d/"

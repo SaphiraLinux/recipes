@@ -1,0 +1,332 @@
+From 122d367e9e36eebb8418d13bf116da8bf5e48404 Mon Sep 17 00:00:00 2001
+From: AKADATA LIMITED <linux@saphira.vm2.uk>
+Date: Mon, 12 Oct 2026 07:36:27 +0000
+Subject: [PATCH 2/2] ccram: demote-store path with rmap unmap (Phase 2B/2)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Part of CCRAM — AKADATA LIMITED adaptation of Meta CRAM (see
+CRAM.PROVENANCE in linux-saphira-meta-cram; Saphira-original code,
+GPL-2.0-only).
+
+Eligible anonymous order-0 folios (mapped, non-KSM, unpinned, with a
+live lz4 store) are compressed into the tier store ahead of
+cram_migrate_to(); anything else — and everything when compression is
+off — flows into today's migrate-placement path untouched.  Mappings
+are replaced under PTL with full mmu_notifier/TLB/rmap discipline
+(mirroring the migration-entry installer); aborts roll back through a
+second walk, so failure always leaves the original page valid.  No
+per-mapping state is recorded (bounded by construction); refcounts
+cover fork-shared markers; zap/exit/munmap drain through the Phase
+2B/1 hooks.
+---
+ mm/ccram_residency.c | 235 +++++++++++++++++++++++++++++++++++++++++++
+ mm/ccram_store.c     |   8 ++
+ mm/vmscan.c          |  14 ++-
+ 3 files changed, 256 insertions(+), 1 deletion(-)
+
+diff --git a/mm/ccram_residency.c b/mm/ccram_residency.c
+index 9f0820010..8e49ec32a 100644
+--- a/mm/ccram_residency.c
++++ b/mm/ccram_residency.c
+@@ -21,6 +21,9 @@
+ #include <linux/mm.h>
+ #include <linux/mmzone.h>
+ #include <linux/oom.h>
++#include <linux/pgtable.h>
++#include <linux/cacheflush.h>
++#include <linux/pagewalk.h>
+ #include "internal.h"
+ #include <linux/gfp.h>
+ #include <linux/rmap.h>
+@@ -199,3 +202,235 @@ bool ccram_marker_fork(pte_t orig_pte, struct mm_struct *dst_mm,
+ 	set_pte_at(dst_mm, addr, dst_pte, orig_pte);
+ 	return true;
+ }
++
++/* --- demote-store path (Phase 2B/2) ---------------------------------- */
++
++/* --- demote-store path (Phase 2B/2) ---------------------------------- */
++
++struct ccram_demote_ctx {
++	struct ccram_store *store;
++	struct ccram_obj *obj;	/* stored object, owner ref held */
++	u32 id;
++	int replaced;		/* mappings converted so far */
++	bool failed;
++};
++
++/* Eligibility for software-compressed demote.  Narrow by construction:
++ * anonymous, order-0, mapped, non-KSM, non-swapcache, no writeback,
++ * not already CRAM-resident, unpinned, compress mode on with a live
++ * store.  Everything else stays on the caller's list for today's
++ * migrate-placement path, untouched. */
++static bool ccram_demote_eligible(struct folio *folio)
++{
++	if (!folio_test_anon(folio) || folio_test_large(folio))
++		return false;
++	if (!folio_mapped(folio) || folio_test_ksm(folio))
++		return false;
++	if (folio_test_swapcache(folio) || folio_test_writeback(folio))
++		return false;
++	if (folio_is_cram(folio))
++		return false;
++	if (folio_maybe_dma_pinned(folio))
++		return false;
++	if (ccram_compress_mode_now() != CCRAM_COMPRESS_LZ4)
++		return false;
++	if (!ccram_live_store_now())
++		return false;
++	return true;
++}
++
++/* Replace one present mapping with a CCRAM marker, atomically under
++ * PTL.  Anything not exactly convertible aborts the whole folio; the
++ * caller rolls back through a second walk, so no per-mapping state is
++ * recorded here and no bound can overflow.  Races resolve by PTL
++ * atomicity: vanished mappings are skipped (their remover accounted
++ * them), changed ones abort. */
++static bool ccram_rmap_replace_one(struct folio *folio,
++				   struct vm_area_struct *vma,
++				   unsigned long address, void *arg)
++{
++	struct ccram_demote_ctx *ctx = arg;
++	DEFINE_FOLIO_VMA_WALK(pvmw, folio, vma, address, 0);
++	struct mm_struct *mm = vma->vm_mm;
++	struct mmu_notifier_range range;
++
++	/* Shared mappings keep POSIX shared visibility: never convert. */
++	if (vma->vm_flags & VM_SHARED) {
++		ctx->failed = true;
++		return false;
++	}
++	mmu_notifier_range_init(&range, MMU_NOTIFY_CLEAR, 0, mm,
++				address, address + PAGE_SIZE);
++	mmu_notifier_invalidate_range_start(&range);
++	while (!ctx->failed && page_vma_mapped_walk(&pvmw)) {
++		pte_t pteval, marker;
++
++		pteval = ptep_get(pvmw.pte);
++		if (!pte_present(pteval)) {
++			/* Raced zap/COW already owns this outcome; skip it.
++			 * rmap/mapcount already account the removal. */
++			continue;
++		}
++		if (pte_pfn(pteval) != folio_pfn(folio) ||
++		    pte_special(pteval) || pte_devmap(pteval) ||
++		    pte_uffd_wp(pteval) || (vma->vm_flags & VM_LOCKED)) {
++			ctx->failed = true;
++			break;
++		}
++		flush_cache_range(vma, address, address + PAGE_SIZE);
++		pteval = get_and_clear_ptes(mm, address, pvmw.pte, 1);
++		flush_tlb_range(vma, address, address + PAGE_SIZE);
++		if (pte_dirty(pteval))
++			folio_mark_dirty(folio);
++		folio_remove_rmap_pte(folio, &folio->page, vma);
++		dec_mm_counter(mm, MM_ANONPAGES);
++		marker = swp_entry_to_pte(ccram_marker_entry(
++				ctx->id, pte_young(pteval), pte_dirty(pteval)));
++		set_pte_at(mm, address, pvmw.pte, marker);
++		/* One more owner: this marker.  Lock-free atomic; the
++		 * demote op holds the owner ref throughout, so the
++		 * object cannot vanish under us. */
++		ccram_obj_ref(ctx->obj);
++		ctx->replaced++;
++	}
++	page_vma_mapped_walk_done(&pvmw);
++	mmu_notifier_invalidate_range_end(&range);
++	return !ctx->failed;
++}
++
++/* Rollback: convert our markers back to present PTEs after an abort.
++ * A second rmap walk re-resolves everything safely (no stale VMA or
++ * table assumptions).  Markers already consumed by a racing fault/zap
++ * are skipped: those paths balanced their own refs.  Restored PTEs use
++ * minimal safe protection (read-only clean young); a later write takes
++ * the normal COW fault.  The original folio was never modified, so no
++ * data is at stake, only placement. */
++static bool ccram_rmap_rollback_one(struct folio *folio,
++				    struct vm_area_struct *vma,
++				    unsigned long address, void *arg)
++{
++	struct ccram_demote_ctx *ctx = arg;
++	DEFINE_FOLIO_VMA_WALK(pvmw, folio, vma, address, 0);
++	struct mm_struct *mm = vma->vm_mm;
++
++	while (page_vma_mapped_walk(&pvmw)) {
++		pte_t pteval, restored;
++
++		pteval = ptep_get(pvmw.pte);
++		if (pte_present(pteval) ||
++		    !ccram_marker_test_pte(pteval) ||
++		    ccram_marker_id_pte(pteval) != ctx->id)
++			continue;
++		flush_cache_range(vma, address, address + PAGE_SIZE);
++		get_and_clear_ptes(mm, address, pvmw.pte, 1);
++		flush_tlb_range(vma, address, address + PAGE_SIZE);
++		restored = mk_pte(&folio->page, vma->vm_page_prot);
++		restored = pte_sw_mkyoung(restored);
++		folio_add_anon_rmap_pte(folio, &folio->page, vma,
++					address, 0);
++		add_mm_counter(mm, MM_ANONPAGES, 1);
++		set_pte_at(mm, address, pvmw.pte, restored);
++		update_mmu_cache(vma, address, pvmw.pte);
++		ccram_obj_put(ctx->store, ctx->obj);
++	}
++	page_vma_mapped_walk_done(&pvmw);
++	return true;
++}
++
++static void ccram_demote_rollback(struct ccram_demote_ctx *ctx,
++				  struct folio *folio)
++{
++	struct rmap_walk_control rwc = {
++		.rmap_one = ccram_rmap_rollback_one,
++		.arg = ctx,
++	};
++
++	rmap_walk(folio, &rwc);
++}
++
++/*
++ * ccram_demote_store - compress eligible folios into the tier store.
++ *
++ * Consumes @list entries it stores (folio freed, markers installed);
++ * anything else stays for the caller's migrate-placement path with the
++ * original page valid.  Returns the stored count for reclaim
++ * accounting.  Async-safe: trylock only, NORETRY allocations, bounded
++ * walks, no mm or filesystem locks taken.
++ *
++ * Reference discipline per folio: store_page() returns with the owner
++ * ref held; each installed marker takes one more; exit drops the
++ * lookup ref from the initial get plus the owner ref via free().
++ * Rollback first removes every installed marker (dropping those refs),
++ * so all exits balance exactly.
++ */
++unsigned int ccram_demote_store(struct list_head *list)
++{
++	struct ccram_store *s = ccram_live_store_now();
++	struct folio *folio, *tmp;
++	unsigned int nr_stored = 0;
++
++	if (ccram_compress_mode_now() != CCRAM_COMPRESS_LZ4 || !s)
++		return 0;
++	list_for_each_entry_safe(folio, tmp, list, lru) {
++		struct ccram_demote_ctx ctx = {
++			.store = s,
++			.replaced = 0,
++			.failed = false,
++		};
++		struct rmap_walk_control rwc = {
++			.rmap_one = ccram_rmap_replace_one,
++			.arg = &ctx,
++		};
++		struct ccram_obj *o;
++		u32 id;
++		int ret;
++
++		if (!ccram_demote_eligible(folio))
++			continue;
++		if (!folio_trylock(folio))
++			continue;
++		/* Re-check under lock: KSM merge, unmap, or mode change
++		 * between isolate and here must not slip through. */
++		if (!ccram_demote_eligible(folio))
++			goto next_unlocked;
++		ret = ccram_store_page(s, &folio->page, GFP_NOFS, &id);
++		if (ret)
++			goto next_unlocked;
++		if (id >= CCRAM_MARKER_ID_MAX) {
++			/* Encoding bound (26 bits against 58 carried):
++			 * unreachable in practice; fail closed, keep page. */
++			ccram_store_free(s, id);
++			goto next_unlocked;
++		}
++		o = ccram_obj_get(s, id);
++		if (!o) {
++			ccram_store_free(s, id);
++			goto next_unlocked;
++		}
++		ctx.obj = o;
++		ctx.id = id;
++		rmap_walk(folio, &rwc);
++		if (ctx.failed || !ctx.replaced || folio_mapped(folio)) {
++			/* Anything short of fully unmapped rolls back;
++			 * the original page is untouched throughout. */
++			ccram_demote_rollback(&ctx, folio);
++			ccram_obj_put(s, o);
++			ccram_store_free(s, id);
++			goto next_unlocked;
++		}
++		/* Fully unmapped: drop both held refs (get + owner; the
++		 * latter via free which also erases), free the original
++		 * to the buddy, consume the list entry. */
++		ccram_obj_put(s, o);
++		ccram_store_free(s, id);
++		folio_unlock(folio);
++		folio_put(folio);
++		list_del_init(&folio->lru);
++		ccram_store_note_demote(s);
++		nr_stored++;
++		continue;
++next_unlocked:
++		folio_unlock(folio);
++	}
++	return nr_stored;
++}
+diff --git a/mm/ccram_store.c b/mm/ccram_store.c
+index edc17f676..1e139692e 100644
+--- a/mm/ccram_store.c
++++ b/mm/ccram_store.c
+@@ -571,6 +571,14 @@ static bool __obj_erase_locked(struct ccram_store *s, struct ccram_obj *o)
+ 	return true;
+ }
+ 
++/* Bare refcount bump for paths that already resolved the object
++ * (demote markers take refs without a new lookup).  Lock-free atomic;
++ * the caller guarantees the object cannot vanish (owner ref held). */
++void ccram_obj_ref(struct ccram_obj *o)
++{
++	atomic_inc(&o->refcnt);
++}
++
+ void ccram_obj_put(struct ccram_store *s, struct ccram_obj *o)
+ {
+ 	unsigned long flags;
+diff --git a/mm/vmscan.c b/mm/vmscan.c
+index e3c5a2e72..118be8a08 100644
+--- a/mm/vmscan.c
++++ b/mm/vmscan.c
+@@ -63,6 +63,7 @@
+ #include <asm/div64.h>
+ 
+ #include <linux/swapops.h>
++#include <linux/ccram_store.h>
+ #include <linux/sched/sysctl.h>
+ 
+ #include "internal.h"
+@@ -1595,7 +1596,18 @@ static unsigned int shrink_folio_list(struct list_head *folio_list,
+ 
+ 	/* Migrate folios selected for CRAM demotion */
+ 	if (!list_empty(&cram_folios)) {
+-		unsigned int nr_crammed = 0;
++		unsigned int nr_crammed = 0, nr_stored = 0;
++
++		/*
++		 * CCRAM software compression first (AKADATA Phase 2B):
++		 * eligible anonymous folios are compressed into the tier
++		 * store and unmapped, consuming them from the list.  The
++		 * remainder — and everything when compression is off —
++		 * flows into today's migrate-placement path unchanged.
++		 */
++		nr_stored = ccram_demote_store(&cram_folios);
++		nr_reclaimed += nr_stored;
++		stat->nr_demoted += nr_stored;
+ 
+ 		cram_migrate_to(&cram_folios, pgdat->node_id, MIGRATE_ASYNC,
+ 				MR_DEMOTION, &nr_crammed);
+-- 
+2.55.0
+

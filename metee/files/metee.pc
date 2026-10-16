@@ -1,0 +1,9 @@
+prefix=/usr
+libdir=/usr/lib
+includedir=/usr/include
+
+Name: metee
+Description: Intel ME TEE client library (CSE/CSME/GSC over MEI)
+Version: 6.2.6
+Libs: -L${libdir} -lmetee
+Cflags: -I${includedir}

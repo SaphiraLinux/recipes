@@ -1,0 +1,19 @@
+[Unit]
+Description=Saphira PBX MCP bearer-auth transport
+After=network.target
+
+[Service]
+Type=simple
+# Runs as root by design, not omission: the daemon binds the port,
+# reads the TLS key material, opens the root-only state, then drops
+# its network half to saphira-pbx-mcp (UID/GID 155) itself after
+# fork. There is deliberately no User= here; a User= would break key
+# and state access before the drop. The frontend holds no authority
+# of its own: every request re-authenticates through the token
+# tables in the root backend.
+ExecStart=/usr/sbin/saphira-pbx mcp serve --config /etc/saphira-pbx/mcp.conf
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

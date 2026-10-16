@@ -1,0 +1,27 @@
+# asterisk runtime identity (canonical, fixed): user asterisk UID 154,
+# primary group asterisk GID 154, home /var/lib/asterisk (astdb +
+# working directory). Required by the shipped service units
+# (asterisk.service User=/Group=, asterisk.initd command_user) and the
+# packaged asterisk.conf directory map. UID/GID 154 is the first free
+# ID above the highest allocated packaged identity (153), inside the
+# preferred 0..199 range - never reuse it for another identity.
+# State directories below mirror what `make install` creates so the
+# unprivileged daemon can write voicemail/recordings/logs/astdb; each
+# leaf is reconciled by the platform reconciler (never walked), hence
+# every writable leaf is declared explicitly.
+user asterisk 154 asterisk /var/lib/asterisk /sbin/nologin
+group asterisk 154
+dir /var/lib/asterisk 0755 asterisk asterisk
+dir /var/cache/asterisk 0755 asterisk asterisk
+dir /var/spool/asterisk 0755 asterisk asterisk
+dir /var/spool/asterisk/dictate 0755 asterisk asterisk
+dir /var/spool/asterisk/meetme 0755 asterisk asterisk
+dir /var/spool/asterisk/monitor 0755 asterisk asterisk
+dir /var/spool/asterisk/system 0755 asterisk asterisk
+dir /var/spool/asterisk/tmp 0755 asterisk asterisk
+dir /var/spool/asterisk/voicemail 0755 asterisk asterisk
+dir /var/spool/asterisk/recording 0755 asterisk asterisk
+dir /var/log/asterisk 0755 asterisk asterisk
+dir /var/log/asterisk/cdr-csv 0755 asterisk asterisk
+dir /var/log/asterisk/cdr-custom 0755 asterisk asterisk
+dir /var/log/asterisk/cel-custom 0755 asterisk asterisk

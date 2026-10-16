@@ -5,7 +5,7 @@
 
 pkgname=mariadb
 pkgver=11.8.8
-pkgrel=2
+pkgrel=3
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="MariaDB client programs, client library and tools"
 license="GPL-2.0-or-later"
@@ -92,9 +92,14 @@ recipe_install()
 	# ship from the mariadb-server recipe (which depends on this
 	# client package). Leaving them here would co-own the same paths
 	# from two package names and the publication gate would refuse.
-	# Mirror mariadb-server's keep-list exactly.
+	# Mirror mariadb-server's keep-list exactly, including the mysql_*
+	# compat aliases: mysql_upgrade/mysql_install_db point at the
+	# server-owned mariadb-upgrade/mariadb-install-db, so the aliases
+	# ship from mariadb-server beside their targets, never dangling
+	# from this package.
 	rm -f "$PKGDEST/usr/sbin/mariadbd" "$PKGDEST/usr/sbin/mysqld" \
-		"$PKGDEST/usr/bin/mariadb-install-db" "$PKGDEST/usr/bin/mariadb-upgrade"
+		"$PKGDEST/usr/bin/mariadb-install-db" "$PKGDEST/usr/bin/mariadb-upgrade" \
+		"$PKGDEST/usr/bin/mysql_upgrade" "$PKGDEST/usr/bin/mysql_install_db"
 	# Upstream make install also drops a default server.cnf: the tuned
 	# one ships from mariadb-server, so leaving this would co-own
 	# etc/my.cnf.d/server.cnf from two packages (proven by the r2

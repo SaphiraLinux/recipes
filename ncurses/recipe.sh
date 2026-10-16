@@ -1,7 +1,10 @@
 #!/bin/sh
 pkgname=ncurses
 pkgver=6.5
-pkgrel=10
+# r11: ship termcap.pc (Libs -ltermcap) alongside the libtermcap.so
+# dev link: readline.pc Requires termcap, and fwupd's readline probe
+# fails closed without it. Payload addition, revision bumps.
+pkgrel=11
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='Terminal text UI library with wide-character support'
 license='MIT'
@@ -87,6 +90,20 @@ Description: ncurses library (non-wide compat name)
 Version: ${version}
 Requires:
 Libs: -L${libdir} -lncursesw
+Cflags: -I${includedir}
+PCEOF
+	cat > "$PKGDEST/usr/lib/pkgconfig/termcap.pc" <<'PCEOF'
+prefix=/usr
+exec_prefix=${prefix}
+libdir=${prefix}/lib
+includedir=${prefix}/include
+major_version=6
+version=6.5.20240629
+Name: termcap
+Description: termcap emulation over ncursesw
+Version: ${version}
+Requires:
+Libs: -L${libdir} -ltermcap
 Cflags: -I${includedir}
 PCEOF
 	ln -sf libncursesw.so "$PKGDEST/usr/lib/libcurses.so"

@@ -2,7 +2,7 @@
 
 pkgname=chrony
 pkgver=4.8
-pkgrel=5
+pkgrel=6
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="NTP client and server"
 license="GPL-2.0-or-later"

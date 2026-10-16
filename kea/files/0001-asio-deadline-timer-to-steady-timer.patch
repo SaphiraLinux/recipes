@@ -1,0 +1,97 @@
+From: Saphira <saphira@vm2.uk>
+Date: Tue, 13 Oct 2026 00:00:00 +0000
+Subject: [PATCH] asio: deadline_timer -> steady_timer for Boost >= 1.87
+
+Boost 1.87 removed boost::asio::deadline_timer (deprecated since 1.66
+in favour of steady_timer); Boost 1.91 ships no system library target
+at all, so kea builds header-only here (see the meson modules change
+in the recipe). Migrate the three remaining deadline_timer uses to
+steady_timer:
+
+- steady_timer takes the same io_context& constructor argument, so
+  construction sites are unchanged;
+- expires_from_now(posix_time) becomes expires_after(std::chrono);
+- cancel()/async_wait() signatures are identical.
+
+Upstream status: kea 3.0.2 predates the removal; this is a Saphira
+porting patch, not an upstream backport.
+
+--- a/src/lib/asiodns/io_fetch.cc
++++ b/src/lib/asiodns/io_fetch.cc
+@@ -25,6 +25,7 @@
+ #include <boost/scoped_ptr.hpp>
+ #include <boost/date_time/posix_time/posix_time_types.hpp>
+ 
++#include <chrono>
+ #include <functional>
+ #include <unistd.h>             // for some IPC/network system calls
+ #include <netinet/in.h>
+@@ -67,7 +68,7 @@
+     OutputBufferPtr               msgbuf;            // Wire buffer for question
+     OutputBufferPtr               received;          // Received data put here
+     IOFetch::Callback*            callback;          // Called on I/O Completion
+-    boost::asio::deadline_timer   timer;             // Timer to measure timeouts
++    boost::asio::steady_timer     timer;             // Timer to measure timeouts
+     IOFetch::Protocol             protocol;          // Protocol being used
+     size_t                        cumulative;        // Cumulative received amount
+     size_t                        expected;          // Expected amount of data
+@@ -227,7 +228,7 @@
+         // If we timeout, we stop, which cancels outstanding I/O operations and
+         // shuts down everything.
+         if (data_->timeout != -1) {
+-            data_->timer.expires_from_now(boost::posix_time::milliseconds(
++            data_->timer.expires_after(std::chrono::milliseconds(
+                 data_->timeout));
+             data_->timer.async_wait(std::bind(&IOFetch::stop, *this,
+                 TIME_OUT));
+--- a/src/lib/asiolink/interval_timer.cc
++++ b/src/lib/asiolink/interval_timer.cc
+@@ -16,6 +16,7 @@
+ #include <exceptions/exceptions.h>
+ 
+ #include <atomic>
++#include <chrono>
+ #include <functional>
+ #include <mutex>
+ 
+@@ -88,7 +89,7 @@
+     IOServicePtr io_service_;
+ 
+     /// @brief The asio timer.
+-    boost::asio::deadline_timer timer_;
++    boost::asio::steady_timer timer_;
+ 
+     /// @brief Controls how the timer behaves after expiration.
+     IntervalTimer::Mode mode_;
+@@ -141,7 +142,7 @@
+ IntervalTimerImpl::update() {
+     try {
+         // Update expire time to (current time + interval_).
+-        timer_.expires_from_now(boost::posix_time::millisec(long(interval_)));
++        timer_.expires_after(std::chrono::milliseconds(long(interval_)));
+         // Reset timer.
+         // Pass a function bound with a shared_ptr to this.
+         timer_.async_wait(std::bind(&IntervalTimerImpl::callback,
+--- a/src/lib/asiolink/interval_timer.h
++++ b/src/lib/asiolink/interval_timer.h
+@@ -18,9 +18,9 @@
+ class IntervalTimerImpl;
+ 
+ /// \brief The \c IntervalTimer class is a wrapper for the ASIO
+-/// \c boost::asio::deadline_timer class.
++/// \c boost::asio::steady_timer class.
+ ///
+-/// This class is implemented to use \c boost::asio::deadline_timer as interval
++/// This class is implemented to use \c boost::asio::steady_timer as interval
+ /// timer.
+ ///
+ /// \c setup() sets a timer to expire on (now + interval), a call back
+@@ -87,7 +87,7 @@
+     /// This destructor never throws an exception.
+     ///
+     /// On the destruction of this class the timer will be canceled
+-    /// inside \c boost::asio::deadline_timer.
++    /// inside \c boost::asio::steady_timer.
+     ~IntervalTimer();
+     //@}
+ 

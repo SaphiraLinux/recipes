@@ -1,0 +1,18 @@
+--- a/init.d/bootmisc.in
++++ b/init.d/bootmisc.in
+@@ -183,9 +183,13 @@
+ 		fi
+ 	done
+ 
++	# Saphira is non-usrmerged with a split /run vs /var/run design:
++	# /var/run and /var/lock are real, persistent directories, never
++	# aliases of /run. The upstream migration above replaced the real
++	# directories with symlinks on every boot (an empty real /var/run
++	# rmdir's cleanly, then gets symlinked - proven on 0.2.1). Never
++	# migrate on Saphira; only clean the underlying /run.
+ 	if [ "$RC_UNAME" = Linux -a -d /run ]; then
+-		migrate_to_run	/var/lock /run/lock
+-		migrate_to_run	/var/run /run
+ 		clean_run
+ 	fi
+ 

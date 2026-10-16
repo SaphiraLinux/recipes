@@ -5,7 +5,7 @@
 
 pkgname=mariadb-server
 pkgver=11.8.8
-pkgrel=5
+pkgrel=6
 # (r3 /var/run + tmpfiles.d + fhs.d runtime migration adopted from
 # hotfix/var-packaging-bug-var-run-isnot-run.)
 # r5: merge line (r4 non-usrmerged unit paths + r3 runtime migration
@@ -82,8 +82,13 @@ recipe_install()
 	saved=$BUILDDIR/server-split
 	install -d "$saved/usr/bin" "$saved/usr/sbin"
 	mv "$PKGDEST/usr/sbin/mariadbd" "$saved/usr/sbin/"
-	for command in mariadb-install-db mariadb-upgrade; do
-		test ! -e "$PKGDEST/usr/bin/$command" || \
+	# The mysql_* compat aliases point at the two server tools kept
+	# here; keep the aliases beside their targets so neither package
+	# ships a dangling link (the client recipe drops the same paths).
+	for command in mariadb-install-db mariadb-upgrade \
+		mysql_upgrade mysql_install_db; do
+		test ! -e "$PKGDEST/usr/bin/$command" && \
+			test ! -L "$PKGDEST/usr/bin/$command" || \
 			mv "$PKGDEST/usr/bin/$command" "$saved/usr/bin/"
 	done
 	rm -rf "$PKGDEST"/*

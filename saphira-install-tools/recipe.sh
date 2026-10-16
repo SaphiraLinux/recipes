@@ -2,7 +2,23 @@
 
 pkgname=saphira-install-tools
 pkgver=0.1
-pkgrel=18
+pkgrel=21
+# r21: assembly writes /etc/.updated LAST (factory-state stamp): fresh
+# targets skip first-boot ConditionNeedsUpdate units (notably
+# systemd-hwdb-update, whose database ships prebuilt) instead of
+# redoing that work during initial configuration, while later package
+# upgrades still refire them exactly once.
+# r20: replay caps.d fragments at assembly (ensure-caps --root):
+# --no-scripts installs never converge file capabilities and APK
+# records no xattr state, so capability-needing payloads (ping)
+# installed dead - proven by non-root ping failing in 0.2.1.
+# r19: two assembly defects proven by the 0.2.1 clean-root builds:
+#   bootstrap cds into the empty target before invoking apk (apk
+#   resolves a token against CWD first, so any profile intention
+#   sharing its name with a CWD directory died "X: Is a directory");
+#   the assembler skips accounts.d/*.legacy sidecars in the identity
+#   replay (ensure-identity loads them itself via $FRAGMENT.legacy;
+#   feeding dbus.legacy as a fragment killed systemd assembly).
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='Saphira image/install tooling (bootstrap, chroot, genfstab, assembler, installer, imager) and install profiles'
 license='BUSL-1.1'

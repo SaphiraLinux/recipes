@@ -1,0 +1,68 @@
+From df8734876e4d43f44dd635c0f955d02966dd5f3d Mon Sep 17 00:00:00 2001
+From: AKADATA LIMITED <linux@saphira.vm2.uk>
+Date: Mon, 12 Oct 2026 07:43:22 +0000
+Subject: [PATCH] ccram: residency compile fixes (local pte-changed helper,
+ drop devmap)
+
+vmf_pte_changed() is file-static in mm/memory.c: replicate its exact
+logic locally.  pte_devmap() does not exist in this tree; anonymous
+order-0 present PTEs cannot be device-mapped and the pfn-equality
+check already constrains the match.  hugetlb.h for the TLB-flush
+macros.  Saphira-original, GPL-2.0-only.
+---
+ mm/ccram_residency.c | 18 +++++++++++++++---
+ 1 file changed, 15 insertions(+), 3 deletions(-)
+
+diff --git a/mm/ccram_residency.c b/mm/ccram_residency.c
+index 8e49ec32a..0fb192f6e 100644
+--- a/mm/ccram_residency.c
++++ b/mm/ccram_residency.c
+@@ -20,6 +20,7 @@
+ 
+ #include <linux/mm.h>
+ #include <linux/mmzone.h>
++#include <linux/hugetlb.h>
+ #include <linux/oom.h>
+ #include <linux/pgtable.h>
+ #include <linux/cacheflush.h>
+@@ -54,6 +55,17 @@
+  * demote-side filter guarantees it), uffd-missing is delegated, and
+  * anything unexpected fails closed with SIGBUS — never a bad page.
+  */
++/* Local replica of mm/memory.c's file-static vmf_pte_changed():
++ * true when the faulting PTE no longer matches what faulted (someone
++ * else installed first). */
++static bool ccram_vmf_pte_changed(struct vm_fault *vmf)
++{
++	if (vmf->flags & FAULT_FLAG_ORIG_PTE_VALID)
++		return !pte_same(ptep_get(vmf->pte), vmf->orig_pte);
++
++	return !pte_none(ptep_get(vmf->pte));
++}
++
+ vm_fault_t ccram_marker_fault(struct vm_fault *vmf)
+ {
+ 	struct vm_area_struct *vma = vmf->vma;
+@@ -104,7 +116,7 @@ vm_fault_t ccram_marker_fault(struct vm_fault *vmf)
+ 	vmf->pte = pte_offset_map_lock(mm, vmf->pmd, addr, &vmf->ptl);
+ 	if (!vmf->pte)
+ 		goto release;
+-	if (vmf_pte_changed(vmf)) {
++	if (ccram_vmf_pte_changed(vmf)) {
+ 		/* Raced: someone else installed first.  Our page and
+ 		 * object ref are simply dropped; their install stands. */
+ 		update_mmu_tlb(vma, addr, vmf->pte);
+@@ -272,8 +284,8 @@ static bool ccram_rmap_replace_one(struct folio *folio,
+ 			continue;
+ 		}
+ 		if (pte_pfn(pteval) != folio_pfn(folio) ||
+-		    pte_special(pteval) || pte_devmap(pteval) ||
+-		    pte_uffd_wp(pteval) || (vma->vm_flags & VM_LOCKED)) {
++		    pte_special(pteval) || pte_uffd_wp(pteval) ||
++		    (vma->vm_flags & VM_LOCKED)) {
+ 			ctx->failed = true;
+ 			break;
+ 		}
+-- 
+2.55.0
+

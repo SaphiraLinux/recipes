@@ -38,14 +38,14 @@ origin=shadow
 repo=saphira
 url=https://github.com/shadow-maint/shadow
 shadow_sha256=2a029091d2c2f116f51b3a817ec16e7da22310a6c8116394457483c668c84b36
-# linux-pam: linked at build (headers ship in the single-output
-# package, no -dev split) and needed at runtime by login/su/passwd.
+# linux-pam: linked at build (headers in linux-pam-dev since the r4
+# -dev split) and needed at runtime by login/su/passwd.
 depends="libxcrypt acl attr libbsd libmd linux-pam saphira-pambase"
 # libcap is a makedepends-only input: it provides setcap/getcap, which
 # --with-fcaps needs at install time to set and then VERIFY the helpers'
 # privileges. shadow does not link libcap (configure never sets LIBCAP),
 # so it is deliberately not a runtime dependency.
-makedepends="autoconf automake libcap libtool gettext libxcrypt-dev acl-dev attr-dev libbsd-dev libmd-dev linux-pam gcc make pkgconf"
+makedepends="autoconf automake libcap libtool gettext libxcrypt-dev acl-dev attr-dev libbsd-dev libmd-dev linux-pam linux-pam-dev gcc make pkgconf"
 subpackages="$pkgname-dev $pkgname-doc"
 recipe_build() {
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$RECIPE_DIR/files/shadow-4.17.3.tar.gz"

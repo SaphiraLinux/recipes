@@ -1,0 +1,57 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: AKADATA LIMITED <linux@saphira.vm2.uk>
+Date: Mon, 12 Oct 2026 17:30:00 +0000
+Subject: [PATCH] ccram: single-ownership PTL cleanup in demote walks (r12 fix)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Fix the double pte_unmap+spin_unlock on naturally-exhausted rmap walks.
+page_vma_mapped_walk() terminal paths already run the internal
+not_found() cleanup (pte_unmap + spin_unlock) before returning false,
+without nulling pvmw fields; calling page_vma_mapped_walk_done()
+afterwards releases the same PTL/unmap a second time. Stock rmap_walk
+callbacks (try_to_unmap_one/try_to_migrate_one) never
+done-after-exhaustion for exactly this reason: done() runs only when
+breaking out of the walk with the PTL held. Mirror that convention:
+replace_one dones only on the in-loop break; rollback (which has no
+break) drops its done entirely. Tripwires retained for validation.
+---
+ mm/ccram_residency.c | 13 +++++++++++++++++++++++++++++++++
+ 1 file changed, 11 insertions(+), 2 deletions(-)
+
+--- a/mm/ccram_residency.c
++++ b/mm/ccram_residency.c
+@@ -382,9 +382,16 @@
+ 		ccram_obj_ref(ctx->obj);
+ 		ctx->replaced++;
+ 	}
+ 	CCRAM_TRIP_AT_TOL(ctx, folio, "pre-walk-done");
+-	page_vma_mapped_walk_done(&pvmw);
++	/* Release the PTL only when breaking out with it held. Natural
++	 * exhaustion needs no done(): the terminating walk call already
++	 * ran the internal not_found() cleanup, so calling done() again
++	 * would unmap+unlock twice. Stock rmap_walk callbacks
++	 * (try_to_unmap_one/try_to_migrate_one) never done-after-exhaustion
++	 * for exactly this reason. */
++	if (ctx->failed)
++		page_vma_mapped_walk_done(&pvmw);
+ 	CCRAM_TRIP_AT(ctx, folio, "post-walk-done", 0);
+ 	mmu_notifier_invalidate_range_end(&range);
+ 	CCRAM_TRIP_AT(ctx, folio, "pre-range-end", 0);
+ 	CCRAM_TRIP_AT(ctx, folio, "replace-exit", 0);
+@@ -425,9 +432,11 @@
+ 		set_pte_at(mm, address, pvmw.pte, restored);
+ 		update_mmu_cache(vma, address, pvmw.pte);
+ 		ccram_obj_put(ctx->store, ctx->obj);
+ 	}
+-	page_vma_mapped_walk_done(&pvmw);
++	/* No done() here: natural exhaustion already ran the internal
++	 * not_found() cleanup (pte_unmap + spin_unlock); calling done()
++	 * again would release twice. See replace_one above. */
+ 	return true;
+ }
+ 
+ static void ccram_demote_rollback(struct ccram_demote_ctx *ctx,
+-- 
+2.55.0

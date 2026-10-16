@@ -62,6 +62,12 @@
 #   pass 2 executes everything else, both in file order. Repeats
 #   converge with no further changes.
 set -eu
+# Non-usrmerged PATH, set here rather than in any caller: this tool
+# runs from makepkg-generated install callers (apk's minimal PATH),
+# the boot-convergence service (systemd unit PATH without /bin:/sbin,
+# proven by dirname-not-found on first boot), and --check audits.
+# Core tools (dirname, mkdir, chown) live in /bin on Saphira.
+export PATH=/usr/bin:/bin:/usr/sbin:/sbin
 
 die() { printf 'ensure-fhs: %s\n' "$*" >&2; if [ "${CHECK:-0}" -eq 1 ]; then exit 2; else exit 1; fi; }
 report() { printf 'ensure-fhs: %s\n' "$*" >&2; }
@@ -202,38 +208,38 @@ uid_of() {
 	case $1 in
 	root | 0) printf '0'; return 0 ;;
 	esac
-	if [ -z "$ROOT" ]; then
-		id -u "$1" 2>/dev/null || return 1
-	else
-		db=$ROOT/etc/passwd
-		[ -f "$db" ] || return 1
-		while IFS=: read -r name _ uid _ _ _ _ || [ -n "$name" ]; do
-			if [ "$name" = "$1" ]; then
-				printf '%s' "$uid"
-				return 0
-			fi
-		done <"$db"
-		return 1
-	fi
+	# Always the target root's own database: empty ROOT means the
+	# current root (chrooted apk hooks, live boot). No id/getent:
+	# host NSS must never decide target identities, and the tools may
+	# be absent from minimal closures.
+	db=${ROOT:-}/etc/passwd
+	[ -f "$db" ] || return 1
+	while IFS=: read -r name _ uid _ _ _ _ || [ -n "$name" ]; do
+		if [ "$name" = "$1" ]; then
+			printf '%s' "$uid"
+			return 0
+		fi
+	done <"$db"
+	return 1
 }
 
 gid_of() {
 	case $1 in
 	root | 0) printf '0'; return 0 ;;
 	esac
-	if [ -z "$ROOT" ]; then
-		getent group "$1" 2>/dev/null | cut -d: -f3 || id -g "$1" 2>/dev/null || return 1
-	else
-		db=$ROOT/etc/group
-		[ -f "$db" ] || return 1
-		while IFS=: read -r name _ gid _ || [ -n "$name" ]; do
-			if [ "$name" = "$1" ]; then
-				printf '%s' "$gid"
-				return 0
-			fi
-		done <"$db"
-		return 1
-	fi
+	# Same as uid_of. Previously `getent group | cut` here: when
+	# getent is absent cut succeeds empty, masking the `id -g`
+	# fallback and yielding `chown 81:` failures (proven on dbus and
+	# polkit installs in install-test roots).
+	db=${ROOT:-}/etc/group
+	[ -f "$db" ] || return 1
+	while IFS=: read -r name _ gid _ || [ -n "$name" ]; do
+		if [ "$name" = "$1" ]; then
+			printf '%s' "$gid"
+			return 0
+		fi
+	done <"$db"
+	return 1
 }
 
 resolve_owner() {

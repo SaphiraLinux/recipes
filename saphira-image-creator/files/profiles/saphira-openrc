@@ -1,0 +1,84 @@
+# Saphira 0.2.1 base system, OpenRC target (product: Saphira).
+#
+# Intentions ONLY. The package manager owns dependency closure; never
+# enumerate resolved dependencies here (saphira-profiles(5)). Anything
+# saphira-base already owns (bash, ca-certificates, coreutils, musl,
+# accounts/shadow, baselayout, apk-tools, util-linux) is deliberately
+# NOT repeated below.
+#
+# The kernel is pinned by LINE, not by version: saphira-kernel-7.2.3 is
+# a per-kver co-installable identity, so naming it is a bare-package
+# intention (recipe-rules.sh compliant) that still selects the known-good
+# 7.2.3 line.
+#
+# ZFS is NOT in a clean image. It was here in r14 and it was wrong: a
+# base Saphira image carries no filesystem driver the distribution does
+# not use, and ZFS on a root filesystem is a deliberate flavour
+# decision - root on ZFS, built and shipped as such - not something a
+# clean image happens to acquire because a kernel module package was
+# convenient to depend on. The saphira-zfs-* recipes stay in the
+# catalogue for that flavour; they are simply not seeded here.
+#
+# Product identity is package-owned: saphira-release ships
+# /etc/os-release identifying Saphira Linux 0.2.1 (see the release
+# package spec in the 0.2.1 plan). The systemd twin of this profile
+# names saphirad-release instead; the init choice is therefore visible
+# inside the running system, not just in build data.
+#
+# Each entry earns its place:
+#
+#   saphira-base        libc/loader, shell (bash), core runtime, account
+#                       and package tooling, CA trust, FHS/permissions.
+#                       The foundation; never re-enumerated.
+#   saphira-kernel-7.2.3
+#                       the kernel and its modules, 7.2.3 line. Boot is
+#                       impossible without it.
+#   saphira-release     product identity (Saphira Linux 0.2.1).
+#   openrc              the init system for this target.
+#   grub                the bootloader. Deliberately explicit: a bootable
+#                       image carries its own bootloader, and later kernel
+#                       upgrades need it.
+#   e2fsprogs           fsck.ext4/mkfs.ext4 for the ext4 root filesystem.
+#   openssh             remote administration, client and server.
+#   saphira-network     the supported network-configuration framework
+#                       (static per-interface files, DHCP when configured).
+#                       Owns the iproute2 dependency, so iproute2 is not
+#                       named here.
+#   dhcpcd              DHCP client, used by saphira-network only when a
+#                       config selects DHCP. The boot-test network is DHCP.
+#   nftables            firewalling.
+#   acpid               ACPI power-button handling (virsh shutdown and
+#                       the physical button power the machine off
+#                       cleanly; without it the guest only halts).
+#   vim                 the base editor.
+#   iputils             ping and friends. A base host with no ping is not
+#                       administrable; proposed explicitly, kept deliberately.
+#   tzdata              a server with no timezone cannot reason about
+#                       logs, certificates or scheduling.
+#
+# Deliberately absent, each a decision rather than an oversight:
+#   - chrony (time sync is a service/role, not a base prerequisite);
+#   - bind (running DNS services are a role; resolver support is musl
+#     plus saphira-network-written resolv.conf, already covered);
+#   - dosfstools (vfat is a UEFI/ESP need; the 0.2.1 BIOS seed carries
+#     no FAT filesystem. UEFI profiles add it back);
+#   - ca-certificates (already inside saphira-base);
+#   - iproute2 (owned by the saphira-network dependency);
+#   - a graphical stack of any kind (see the headless policy);
+#   - compilers, headers, *-dev, Perl, Python, PHP, databases,
+#     QEMU/libvirt, saphira-tools, install/image tooling: builder-side
+#     or role material, never base.
+saphira-base
+saphira-kernel-7.2.3
+saphira-release
+openrc
+grub
+e2fsprogs
+openssh
+saphira-network
+dhcpcd
+nftables
+acpid
+vim
+iputils
+tzdata

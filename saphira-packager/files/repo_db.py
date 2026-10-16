@@ -441,9 +441,16 @@ def census(apk_bin: str, repo_dir: str | Path) -> dict[str, dict]:
 
 
 def fragment_carriers(census_data: dict[str, dict]) -> list[str]:
+    # Any declaration channel counts: accounts.d identities, fhs.d
+    # migrations, caps.d capabilities. A carrier of only one channel
+    # still needs its declarations extracted — otherwise an fhs-only
+    # package (no accounts fragment by design) would never have its
+    # migrations recorded, and promotion could never derive its
+    # receipt.
     return sorted(
         filename for filename, info in census_data.items()
-        if any(f.startswith(FRAGMENT_PREFIX) for f in info["files"])
+        if any(f.startswith((FRAGMENT_PREFIX, FHS_FRAGMENT_PREFIX, CAPS_FRAGMENT_PREFIX))
+               for f in info["files"])
     )
 
 
@@ -549,7 +556,8 @@ def extract_declarations(apk_bin: str, repo_dir: str | Path, filenames: list[str
         # receipts, and migration preconditions fail closed live).
         frag_files = sorted({f[len(FRAGMENT_PREFIX):] for f in info["files"]
                              if f.startswith(FRAGMENT_PREFIX) and not f.endswith(".legacy")})
-        merged: dict = {"users": [], "groups": [], "dirs": [], "files": []}
+        merged: dict = {"users": [], "groups": [], "dirs": [], "files": [],
+                        "sysusers": False}
         native_parsed = False
         for frag in frag_files:
             path = frag_dir / frag
@@ -561,6 +569,15 @@ def extract_declarations(apk_bin: str, repo_dir: str | Path, filenames: list[str
             decl, _notices = mk.parse_accounts_fragment(path)
             for key in ("users", "groups", "dirs", "files"):
                 merged[key].extend(decl[key])
+            # The sysusers stanza is a declaration in its own right (the
+            # mechanism, not a census): carry the flag so a derived
+            # receipt matches what the build manifest would record. A
+            # dynamic-only sysusers package declares zero static IDs,
+            # and without the flag its derived receipt would declare
+            # nothing while the payload ships the fragment — the exact
+            # mismatch the publish gate refuses.
+            if decl.get("sysusers", False):
+                merged["sysusers"] = True
             # Native sysusers identities ride the same isolated install,
             # gated on the installed fragment's sysusers stanza (the
             # same opt-in as build time): the shipped confs are parsed
@@ -591,6 +608,24 @@ def extract_declarations(apk_bin: str, repo_dir: str | Path, filenames: list[str
             for key in ("dirs", "replaces", "removals"):
                 merged_fhs[key].extend(fhs_decl[key])
         merged["fhs"] = merged_fhs
+        # File capabilities ride the same isolated install, same
+        # attribution. Parsed only (target-ownership is enforced by
+        # the file gate and the caps coherence check, exactly as on
+        # the manifest path).
+        caps_frag_dir = root / CAPS_FRAGMENT_PREFIX
+        caps_files = sorted({f[len(CAPS_FRAGMENT_PREFIX):] for f in info["files"]
+                             if f.startswith(CAPS_FRAGMENT_PREFIX)})
+        merged_caps: dict[str, list] = {"caps": []}
+        for frag in caps_files:
+            path = caps_frag_dir / frag
+            if not path.is_file():
+                raise RepoDbError(
+                    f"{filename} lists caps fragment {frag} but it did not install "
+                    "(rebuild and re-publish the package)"
+                )
+            caps_decl = mk.parse_caps_fragment(path)
+            merged_caps["caps"].extend(caps_decl["caps"])
+        merged["caps"] = merged_caps
         decls[filename] = merged
     return decls
 
@@ -774,6 +809,24 @@ def upsert_reservation(conn: sqlite3.Connection, kind: str, name: str, numeric_i
         )
         return
     if row["numeric_id"] != numeric_id or row["owning_package"] != package:
+        if row["owning_package"] == package:
+            # Same-lineage ID move (the gate allowed it in
+            # reservation_hit): rebind the name to the new ID and keep
+            # it ACTIVE. first_nvr stays anchored at origin, last_nvr
+            # advances. The moved-from ID keeps no tombstone (the ledger
+            # is name-keyed) - known residual hole, see the r74 recipe
+            # note; a future claimant for it still faces review and the
+            # union checks.
+            conn.execute(
+                "UPDATE reservations SET numeric_id=?, status='ACTIVE', last_nvr=?,"
+                " declaration_sha256=? WHERE kind=? AND name=?",
+                (numeric_id, nvr, decl_sha, kind, name),
+            )
+            notices.append(
+                f"reservation moved: {kind} {name} {row['numeric_id']}->{numeric_id}"
+                f" ({package} {nvr}; IDs never recycle to unrelated identities)"
+            )
+            return
         raise RepoDbError(
             f"reservation mismatch: {kind} {name} historically "
             f"{row['owning_package']} ID {row['numeric_id']} ({row['status']}), "
@@ -1447,7 +1500,10 @@ def check_reservations(conn: sqlite3.Connection,
                        staged: list[tuple[str, str, dict]]) -> None:
     """Eternal ledger enforcement for the staged set: a staged declaration
     touching a TOMBSTONED binding is refused unless it is the same package
-    lineage reclaiming its canonical ID."""
+    lineage reclaiming its canonical ID. A same-lineage ID *move* (same
+    package and name, new ID) is allowed: the apply phase rebinds the
+    name and the move is announced in the notices. Moves onto any ID
+    held by another binding, live or tombstoned, still fail below."""
     for owner, package, decl in staged:
         for entry in decl.get("groups", []):
             reservation_hit(conn, "group", entry["name"], int(entry["gid"]), package, owner)
@@ -1467,10 +1523,17 @@ def reservation_hit(conn: sqlite3.Connection, kind: str, name: str, numeric_id: 
     if own is not None:
         if own["numeric_id"] == numeric_id and own["owning_package"] == package:
             return  # live binding or legitimate same-lineage reclaim
-        raise RepoDbError(
-            f"reservation refusal: {kind} {name} ({owner}) conflicts with "
-            f"{own['status']} reservation ({own['owning_package']} ID {own['numeric_id']})"
-        )
+        if own["owning_package"] != package:
+            raise RepoDbError(
+                f"reservation refusal: {kind} {name} ({owner}) conflicts with "
+                f"{own['status']} reservation ({own['owning_package']} ID {own['numeric_id']})"
+            )
+        # Same-lineage ID move (same package and name, new ID): allowed
+        # here; the apply phase rebinds the name. Falls through to the
+        # ID-held check so a move onto anyone's ID still fails.
+    row = conn.execute(
+        "SELECT name, owning_package, status FROM reservations"
+        " WHERE kind=? AND numeric_id=? AND name!=?", (kind, numeric_id, name)).fetchone()
     if row is not None:
         raise RepoDbError(
             f"reservation refusal: {kind} {name} ({owner}) wants ID {numeric_id}, "
@@ -1510,6 +1573,53 @@ def release_db_lock(repo_dir: str | Path) -> None:
 # --reconcile --from-history, full audit on the append-only archive)
 # ---------------------------------------------------------------------------
 
+TRANSITIONS_FILENAME = "identity-transitions"
+
+
+def load_transitions(path: str | Path | None = None) -> dict[tuple[str, str, str], tuple[int, int, str]]:
+    """Load sanctioned Unix-identity renumbers.
+
+    Returns {(package, kind, name): (old_id, new_id, superseding_nvr)}.
+    Default source is the ``identity-transitions`` file beside this
+    module (source tree and installed location alike); a missing file
+    means no exemptions, never a refusal. Any malformed line refuses
+    here, before any audit runs. There is deliberately no wildcard,
+    range, or default-allow form: unlisted changes still fail closed
+    in derive_ledger.
+    """
+    src = Path(path) if path is not None else Path(__file__).with_name(TRANSITIONS_FILENAME)
+    if not src.is_file():
+        return {}
+    out: dict[tuple[str, str, str], tuple[int, int, str]] = {}
+    token = re.compile(r"^[A-Za-z0-9._+-]+$")
+    for lineno, raw in enumerate(src.read_text(encoding="utf-8").splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split()
+        where = f"{src}:{lineno}"
+        if len(parts) != 6:
+            raise RepoDbError(f"{where}: expected 6 fields, got {len(parts)}")
+        package, kind, name, old, new, nvr = parts
+        if kind not in ("user", "group"):
+            raise RepoDbError(f"{where}: kind must be user or group, got {kind!r}")
+        if token.fullmatch(package) is None or token.fullmatch(name) is None:
+            raise RepoDbError(f"{where}: bad package or identity name")
+        try:
+            old_id, new_id = int(old), int(new)
+        except ValueError:
+            raise RepoDbError(f"{where}: ids must be decimal, got {old!r} {new!r}")
+        if old_id < 0 or new_id < 0 or old_id == new_id:
+            raise RepoDbError(f"{where}: ids must be distinct non-negative integers")
+        if not nvr.startswith(package + "-"):
+            raise RepoDbError(f"{where}: nvr {nvr!r} does not belong to package {package!r}")
+        key = (package, kind, name)
+        if key in out:
+            raise RepoDbError(f"{where}: duplicate transition for {package} {kind} {name}")
+        out[key] = (old_id, new_id, nvr)
+    return out
+
+
 def _ordered_versions(apk_bin: str, versions: list[str]) -> list[str]:
     def cmp(a: str, b: str) -> int:
         if apk_newer(apk_bin, a, b):
@@ -1521,10 +1631,47 @@ def _ordered_versions(apk_bin: str, versions: list[str]) -> list[str]:
     return sorted(versions, key=cmp_to_key(cmp))
 
 
+def _consume_transition(transitions: dict, notices: list, package: str,
+                        kind: str, name: str, old_id: int, new_id: int,
+                        owner: str, first: str,
+                        bindings: dict, key: tuple[str, str],
+                        cell: list) -> bool:
+    """Exact-match a sanctioned renumber from load_transitions().
+
+    All six coordinates must agree: package, kind, identity name, old
+    id, new id, and the NVR introducing the new id. On match, record
+    continuity (original first owner kept, new cell adopted) plus an
+    audit notice, and return True. Anything else returns False and
+    the caller raises exactly as before: reversed, unrelated, and
+    second-renumber histories never match.
+    """
+    allow = transitions.get((package, kind, name))
+    if allow is None:
+        return False
+    want_old, want_new, want_nvr = allow
+    if want_old != old_id or want_new != new_id or want_nvr != owner:
+        return False
+    notices.append(
+        f"sanctioned identity transition: {kind} {name} "
+        f"{old_id} -> {new_id} at {owner} (package {package})"
+    )
+    bindings[key] = [first, owner, cell]
+    return True
+
+
 def derive_ledger(apk_bin: str, census_data: dict, declarations: dict,
-                  notices: list[str]) -> list[tuple]:
+                  notices: list[str],
+                  transitions: dict[tuple[str, str, str], tuple[int, int, str]] | None = None) -> list[tuple]:
     """Walk every package name oldest-to-newest; bindings that vanish in a
-    later version tombstone (IDs never recycle). Returns reservation rows."""
+    later version tombstone (IDs never recycle). Returns reservation rows.
+
+    A UID/GID change matching an explicit sanctioned transition
+    (package, kind, name, old id, new id, introducing NVR — see
+    load_transitions) is recorded as continuity with an audit notice
+    instead of refusing. Anything else still fails closed.
+    """
+    if transitions is None:
+        transitions = load_transitions()
     by_name: dict[str, list[str]] = {}
     for _filename, info in census_data.items():
         by_name.setdefault(info["name"], []).append(info["version"])
@@ -1542,7 +1689,10 @@ def derive_ledger(apk_bin: str, census_data: dict, declarations: dict,
                     bindings[key] = [owner, owner, cell]
                 else:
                     first, _, old = bindings[key]
-                    if old[1] != cell[1]:
+                    if old[1] != cell[1] and not _consume_transition(
+                            transitions, notices, name,
+                            key[0], entry["name"], old[1], cell[1], owner,
+                            first, bindings, key, cell):
                         raise RepoDbError(
                             f"history inconsistent: group {entry['name']} was GID "
                             f"{old[1]} then GID {cell[1]} ({owner})"
@@ -1555,7 +1705,10 @@ def derive_ledger(apk_bin: str, census_data: dict, declarations: dict,
                     bindings[key] = [owner, owner, cell]
                 else:
                     first, _, old = bindings[key]
-                    if old[1] != cell[1]:
+                    if old[1] != cell[1] and not _consume_transition(
+                            transitions, notices, name,
+                            key[0], entry["name"], old[1], cell[1], owner,
+                            first, bindings, key, cell):
                         raise RepoDbError(
                             f"history inconsistent: user {entry['name']} was UID "
                             f"{old[1]} then UID {cell[1]} ({owner})"

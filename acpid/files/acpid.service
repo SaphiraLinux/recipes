@@ -1,0 +1,13 @@
+[Unit]
+Description=ACPI event daemon
+After=network.target
+Documentation=man:acpid(8)
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/acpid --foreground --socketfile /var/run/acpid.socket
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

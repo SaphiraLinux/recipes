@@ -123,7 +123,19 @@ recipe_build()
 	patch -Np1 -i "$RECIPE_DIR/files/cfg80211-regdb-freedom.patch"
 	cp "$RECIPE_DIR/files/config-${kernel_version}-akadata" "$SRC/linux-${kernel_version}/.config"
 	mkdir -p "$SRC/linux-${kernel_version}/certs/regdb"
-	cp "$RECIPE_DIR/files/saphira-regdb.x509" "$SRC/linux-${kernel_version}/certs/regdb/saphira-regdb.x509"
+	# Canonical regdb trust anchor: single copy in wireless-regdb/files/,
+	# staged through $SRC (under /build) with sha256 verification.
+	# Preserved bytes (sha256 118f8bf6bb8220bb23a8d3cb58359760976b5ba086376cdbc34db9a6d38afc07);
+	# regenerating would break regulatory.db verification. Legacy
+	# per-recipe files/ copies are removed; do not re-vendor.
+	REGDB_CANONICAL="$RECIPE_DIR/../wireless-regdb/files/saphira-regdb.x509"
+	REGDB_SHA="118f8bf6bb8220bb23a8d3cb58359760976b5ba086376cdbc34db9a6d38afc07"
+	[ -f "$REGDB_CANONICAL" ] || { echo "ERROR: canonical regdb cert missing at $REGDB_CANONICAL" >&2; return 1; }
+	echo "$REGDB_SHA  $REGDB_CANONICAL" | sha256sum -c - || return 1
+	STAGED_REGDB="$SRC/saphira-regdb.x509"
+	cp "$REGDB_CANONICAL" "$STAGED_REGDB"
+	echo "$REGDB_SHA  $STAGED_REGDB" | sha256sum -c - || return 1
+	cp "$STAGED_REGDB" "$SRC/linux-${kernel_version}/certs/regdb/saphira-regdb.x509"
 	cp "$KEY" "$SRC/linux-${kernel_version}/certs/module-signing.pem"
 	chmod 600 "$SRC/linux-${kernel_version}/certs/module-signing.pem"
 

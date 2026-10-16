@@ -1,4 +1,21 @@
 # linux-ccram: CCRAM Phase 1 test kernel (7.2.9 + CRAM series + sysram backend).
+#
+# STATUS: PAUSED / EXPERIMENTAL / DO NOT PUBLISH (operator freeze 2026-10-12).
+#
+# Reason:
+# - unresolved preempt_count corruption (0x7fffffxx) under KVM/THP
+#   reclaim path; double-release fix (r12) did not eliminate it
+# - meaningful compression ratio not yet measured
+# - logical_bytes accounting currently invalid (zero while pages exist)
+# - order-0 implementation does not meaningfully exercise THP-heavy
+#   workloads (the entire 6G VM collapses to THP)
+# - tier residency demonstrated only at trivial volume (~1-3% of 8GiB)
+#
+# Sources intentionally retained for future work (resume-from-state):
+# vendor tarball + sha256 pins, full patch series, configs, provenance
+# docs. Nothing removed. A build requires the maintainer-only override
+# below so an ordinary repository build cannot accidentally republish it.
+#
 # Boots as a normal Saphira host with an N_MEMORY_PRIVATE tier carved from
 # ordinary DRAM (uncompressed - this is a functional backend, not
 # compressed RAM) managed by CRAM. Installs alongside every other kernel
@@ -11,7 +28,16 @@
 pkgname=linux-ccram
 kernel_version=${SAPHIRA_CCRAM_KERNEL_VERSION:-7.2.9}
 pkgver=${kernel_version//-/_}
-pkgrel=7
+pkgrel=12
+
+#  DISABLED PACKAGE
+disabled=yes
+
+
+# r12: FIX (ccram-12-double-release-fix.patch: single-ownership PTL
+# cleanup in demote walks; proven double unmap+unlock on every
+# naturally-exhausted walk). Tripwires retained for validation.
+# Published r9/r10/r11 bytes untouched.
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="CCRAM Phase 1 test kernel ${kernel_version} (sysram private-node CRAM tier, uncompressed)"
 license=GPL-2.0-only
@@ -136,6 +162,14 @@ check_ccram_resolved_extras()
 
 recipe_build()
 {
+	# Experimental freeze gate: refuse ordinary builds so this paused
+	# research branch can never be republished by accident. Maintainer
+	# resume only: CCRAM_EXPERIMENTAL=1 buildpkg linux-ccram
+	if [ "${CCRAM_EXPERIMENTAL:-0}" != "1" ]; then
+		echo "ERROR: linux-ccram is PAUSED / EXPERIMENTAL (see STATUS header)." >&2
+		echo "Refusing to build without the maintainer override CCRAM_EXPERIMENTAL=1." >&2
+		return 1
+	fi
 	KEY=/keys/module-signing.pem
 	if [ ! -e "$KEY" ]; then
 		echo "ERROR: module signing key not exposed at $KEY (builder key configuration?)" >&2
@@ -168,7 +202,19 @@ recipe_build()
 	cp "$RECIPE_DIR/files/config-${kernel_version}-ccram-akadata" "$SRC/linux-${kernel_version}/.config"
 	check_ccram_config_delta "$SRC/linux-${kernel_version}/.config" || return 1
 	mkdir -p "$SRC/linux-${kernel_version}/certs/regdb"
-	cp "$RECIPE_DIR/files/saphira-regdb.x509" "$SRC/linux-${kernel_version}/certs/regdb/saphira-regdb.x509"
+	# Canonical regdb trust anchor: single copy in wireless-regdb/files/,
+	# staged through $SRC (under /build) with sha256 verification.
+	# Preserved bytes (sha256 118f8bf6bb8220bb23a8d3cb58359760976b5ba086376cdbc34db9a6d38afc07);
+	# regenerating would break regulatory.db verification. Legacy
+	# per-recipe files/ copies are removed; do not re-vendor.
+	REGDB_CANONICAL="$RECIPE_DIR/../wireless-regdb/files/saphira-regdb.x509"
+	REGDB_SHA="118f8bf6bb8220bb23a8d3cb58359760976b5ba086376cdbc34db9a6d38afc07"
+	[ -f "$REGDB_CANONICAL" ] || { echo "ERROR: canonical regdb cert missing at $REGDB_CANONICAL" >&2; return 1; }
+	echo "$REGDB_SHA  $REGDB_CANONICAL" | sha256sum -c - || return 1
+	STAGED_REGDB="$SRC/saphira-regdb.x509"
+	cp "$REGDB_CANONICAL" "$STAGED_REGDB"
+	echo "$REGDB_SHA  $STAGED_REGDB" | sha256sum -c - || return 1
+	cp "$STAGED_REGDB" "$SRC/linux-${kernel_version}/certs/regdb/saphira-regdb.x509"
 	cp "$KEY" "$SRC/linux-${kernel_version}/certs/module-signing.pem"
 	chmod 600 "$SRC/linux-${kernel_version}/certs/module-signing.pem"
 

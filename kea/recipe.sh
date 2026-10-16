@@ -2,7 +2,7 @@
 
 pkgname=kea
 pkgver=3.0.2
-pkgrel=2
+pkgrel=3
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="ISC Kea DHCPv4, DHCPv6, DHCP-DDNS and control-agent servers"
 license="MPL-2.0"
@@ -30,17 +30,31 @@ makedepends="
     meson
     ninja
     openssl-dev
+    perl
     pkgconf
     python3
+    readline-dev
 "
 
 recipe_build()
 {
+	# Boost 1.87 removed deadline_timer; Boost 1.91 ships no system
+	# library either. Saphira port to steady_timer + header-only
+	# system (verified: applies clean, -Np1).
+	patch -Np1 -d "$SRC" -i "$RECIPE_DIR/files/0001-asio-deadline-timer-to-steady-timer.patch"
 	# boost 1.91+ removed BOOST_STATIC_ASSERT; use standard C++ static_assert
 	find "$SRC/src" -name '*.cc' -exec sed -i \
 		's/BOOST_STATIC_ASSERT(/static_assert(/g' {} +
 	find "$SRC/src" -name '*.cc' -exec sed -i \
 		's/boost::posix_time::millisec/boost::posix_time::milliseconds/g' {} +
+	# Boost.System is header-only since 1.69 and Boost 1.91 ships no
+	# system library target at all (b2 rejects --with=system), so
+	# meson's modules: ['system'] probe can never succeed here. kea's
+	# boost::system uses are header-compatible and the boost_headers
+	# loop below still enforces their presence; drop only the library
+	# lookup.
+	sed -i "s/dependency('boost', version: '>=1.66', modules: \['system'\])/dependency('boost', version: '>=1.66')/" \
+		"$SRC/meson.build"
 	# mysql/postgresql backends enabled per feature policy (mariadb, libpq in
 	# the native universe); krb5/netconf stay off (BLOCKED_BY_krb5, sysrepo).
 	meson setup "$BUILDDIR" "$SRC" \

@@ -1,0 +1,22 @@
+--- a/channels/chan_unistim.c
++++ b/channels/chan_unistim.c
+@@ -7086,6 +7086,19 @@
+ int load_module(void)
+ {
+ 	int res;
++	static int devicelock_inited = 0;
++
++	/* SAPHIRA-MUSL: devicelock is AST_MUTEX_DEFINE_STATIC (plain
++	 * non-recursive on Linux) but reload_config() holds it across
++	 * finish_bookmark(), which locks it again (proven self-deadlock:
++	 * two nested takes, zero unlocks, boot stalls here). Upstream
++	 * relies on recursive semantics (as documented for conlock).
++	 * Initialize recursive once; load_module is the first possible
++	 * user (monitor thread starts at its end). */
++	if (!devicelock_inited) {
++		ast_mutex_init(&devicelock);
++		devicelock_inited = 1;
++	}
+ 
+ 	if (!(global_cap = ast_format_cap_alloc(AST_FORMAT_CAP_FLAG_DEFAULT))) {
+ 		goto buff_failed;

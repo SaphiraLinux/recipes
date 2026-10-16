@@ -1,4 +1,7 @@
-#!/usr/bin/env bash
+#!/bin/bash
+# Non-usrmerged interpreter path: /usr/bin/env does not exist on
+# Saphira (coreutils installs env to /bin). Same for saphira-firstboot
+# and apply-network.sh.
 
 set -euo pipefail
 umask 077
@@ -12,7 +15,11 @@ ROOTFS=${1:?derived rootfs path is required}
 ACCOUNTS=${2:?accounts.tsv path is required}
 ROOT=${SAPHIRA_ROOT:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)}
 
-[[ $ROOTFS == "$ROOT/out/stage4/rootfs" ]] ||
+# The installer target is the only accepted rootfs: the historical
+# Stage4 source-tree clause is retired with the generation-zero
+# bootstrap, and no staging path may appear in shipped tooling, not
+# even in comments. An explicitly opted-in installer target sets
+# SAPHIRA_INSTALLER_ROOT; everything else is refused.
 [[ ${SAPHIRA_INSTALLER_ROOT:-} == "$ROOTFS" && -n $ROOTFS ]] ||
 	{ printf 'apply-accounts: unsafe rootfs: %s\n' "$ROOTFS" >&2; exit 1; }
 test -d "$ROOTFS" || {
@@ -182,12 +189,19 @@ chmod 0700 "$ROOTFS/root"
 # one script that assembles the root filesystem. The fix for a path
 # problem is the path, never a usrmerge symlink.
 install -d -m 0700 "$ROOTFS/var/lib/saphira-firstboot"
+# The loopback seed belongs in the directory saphira-network actually
+# reads. Left in /etc/network.d it is only reached through the legacy
+# compatibility fallback, and the moment the wizard writes a real
+# interface file into /etc/saphira-network.d the owner stops consulting
+# the fallback at all - taking loopback down with it, which is not
+# optional: local resolution and several boot-time services assume it.
+install -d -m 0755 "$ROOTFS/etc/saphira-network.d"
 if test -f "$ROOT/stage4/config/network.d/00-loopback.conf"; then
 	install -D -m 0644 "$ROOT/stage4/config/network.d/00-loopback.conf" \
-		"$ROOTFS/etc/network.d/00-loopback.conf"
+		"$ROOTFS/etc/saphira-network.d/00-loopback.conf"
 else
 	install -D -m 0644 "$ROOTFS/usr/share/saphira/00-loopback.conf" \
-		"$ROOTFS/etc/network.d/00-loopback.conf"
+		"$ROOTFS/etc/saphira-network.d/00-loopback.conf"
 fi
 if test "$firstboot_required" = 1; then
 	install -m 0600 /dev/null "$ROOTFS/etc/saphira-firstboot-required"

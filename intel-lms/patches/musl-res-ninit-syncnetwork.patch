@@ -1,0 +1,18 @@
+--- a/UNS/SharedStaticIPService/SyncNetworkDataLinux.cpp
++++ b/UNS/SharedStaticIPService/SyncNetworkDataLinux.cpp
+@@ -523,7 +523,15 @@
+ #else
+ 	struct __res_state dns_state;
+ 	memset(&dns_state, 0 , sizeof(dns_state));
++#ifdef __GLIBC__
+ 	res_ninit(&dns_state);
++#else
++	/* musl provides no reentrant res_ninit(); snapshot the global
++	 * resolver state instead. This call site only reads nsaddr_list,
++	 * so sharing the backing data is safe. */
++	res_init();
++	dns_state = _res;
++#endif
+ 	for (int i = 0; i < MAXNS; i++)
+ 		if (dns_state.nsaddr_list[i].sin_addr.s_addr)
+ 			param->dns.push_back(inet_ntoa(dns_state.nsaddr_list[i].sin_addr));

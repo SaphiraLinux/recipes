@@ -1,0 +1,17 @@
+#!/sbin/openrc-run
+# polkit authorization manager (D-Bus activated; standalone start here).
+# Never enabled by default (dual-init policy).
+
+description="polkit authorization manager"
+
+command="/usr/lib/polkit-1/polkitd"
+command_args="--no-debug --replace"
+command_user="polkitd:polkitd"
+
+supervisor="supervise-daemon"
+
+depend()
+{
+	need dbus
+	use logger
+}

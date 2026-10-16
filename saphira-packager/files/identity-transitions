@@ -1,0 +1,22 @@
+# Sanctioned Unix-identity renumbers (one logical transition per line).
+#
+# Format (strict, whitespace-separated, exactly six fields):
+#   <package> <kind> <name> <old-id> <new-id> <superseding-nvr>
+# kind is `user` or `group`; ids are decimal; the nvr names the exact
+# package revision whose declaration carries the new id.
+#
+# The history census (derive_ledger) stays fail-closed: any UID/GID
+# change not matched EXACTLY here -- package, kind, name, old id,
+# new id, and the introducing NVR -- still refuses. A consumed
+# transition emits an audit notice. Malformed lines (wrong field
+# count, unknown kind, non-numeric ids, duplicate keys, nvr not
+# belonging to the named package) refuse at load, before any audit.
+# Historical APKs are never rewritten; this file only lets the
+# ledger REPRESENT a deliberate, reviewed renumber. There is no
+# wildcard, no range, and no "any future renumber" form.
+#
+# polkitd 127 -> 156 (r2, 2026-10-14): UID/GID 127 senior-held by
+# systemd-network (tombstoned since 261.2-r5); same deliberate act
+# in both namespaces, one entry each.
+polkit group polkitd 127 156 polkit-127-r2
+polkit user polkitd 127 156 polkit-127-r2

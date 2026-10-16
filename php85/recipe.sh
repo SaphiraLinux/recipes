@@ -5,7 +5,7 @@ pkgver=8.5.10
 # 8.5.10 complete-runtime monolith: CLI + FPM + OPcache + the full useful
 # shared-extension set in one package. php85 IS the default Saphira PHP,
 # so it owns the unversioned php/php-fpm command names as well.
-pkgrel=2
+pkgrel=3
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="PHP 8.5 language runtime: CLI, FPM, opcache and shared extensions"
 license="PHP-3.01"
@@ -193,7 +193,12 @@ recipe_install()
 	#
 	# The libargon2 incident lock: the base binary is built
 	# --with-password-argon2, so libargon2.so.1 MUST be linked.
-	readelf -d "$PKGDEST/usr/bin/php85" | grep -q 'libargon2\.so' ||
+	# Plain grep (no -q): same pipefail/SIGPIPE hazard documented
+	# for the OPcache proof above -- grep -q quits on the match while
+	# readelf is still writing, the producer dies of SIGPIPE, and a
+	# present library misreports as missing (proven flaky: 138/200
+	# false failures in a loop). Consuming grep is deterministic.
+	readelf -d "$PKGDEST/usr/bin/php85" | grep 'libargon2\.so' > /dev/null ||
 		{ printf 'php85: libargon2 missing from php85 DT_NEEDED\n' >&2; exit 1; }
 	payload_elfs="$PKGDEST/usr/bin/php85 $PKGDEST/usr/sbin/php-fpm85"
 	payload_elfs="$payload_elfs $(find "$PKGDEST/usr/lib" -name '*.so' 2>/dev/null)"

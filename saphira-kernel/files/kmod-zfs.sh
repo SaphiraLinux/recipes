@@ -12,14 +12,19 @@
 
 kmod_kver_full()
 {
-	# Prints KERNELRELEASE (VERSION.PATCHLEVEL.SUBLEVEL+EXTRAVERSION)
-	# for the staged tree in $1. Fails closed on unparseable Makefiles.
+	# Prints KERNELRELEASE (VERSION.PATCHLEVEL.SUBLEVEL+EXTRAVERSION+
+	# CONFIG_LOCALVERSION) for the staged tree in $1. Fails closed on
+	# unparseable Makefiles. The LOCALVERSION suffix matters: a tree
+	# built for 7.2.9-ccram must yield 7.2.9-ccram, not 7.2.9, or
+	# modules land under a release modprobe never looks at. Trees
+	# without a LOCALVERSION line behave exactly as before.
 	_kv=$(sed -n 's/^VERSION = //p' "$1/Makefile")
 	_kp=$(sed -n 's/^PATCHLEVEL = //p' "$1/Makefile")
 	_ks=$(sed -n 's/^SUBLEVEL = //p' "$1/Makefile")
 	_ke=$(sed -n 's/^EXTRAVERSION = //p' "$1/Makefile")
 	[ -n "$_kv" ] && [ -n "$_kp" ] && [ -n "$_ks" ] || return 1
-	printf '%s.%s.%s%s\n' "$_kv" "$_kp" "$_ks" "$_ke"
+	_kl=$(sed -n 's/^CONFIG_LOCALVERSION="//p' "$1/.config" 2>/dev/null | tr -d '"' || true)
+	printf '%s.%s.%s%s%s\n' "$_kv" "$_kp" "$_ks" "$_ke" "$_kl"
 }
 
 kmod_srcball()

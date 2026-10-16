@@ -38,6 +38,7 @@ usage()
 	cat >&2 <<USAGE
 usage:
   $PROG build --target TARGET --output IMAGE [options]
+  $PROG export --image IMAGE --output ROOTFS.tar.xz
   $PROG list-targets
   $PROG plan --target TARGET [--size SIZE]
   $PROG report --target TARGET [--role ROLE]...
@@ -49,6 +50,9 @@ build options:
   --repository PATH   repository index/Packages.adb to install from
   --hostname NAME     hostname written into the image (default saphira)
   --root-password PW  set the root password in the image
+  --netconf LIST    comma-separated IFACE:MODE (dhcp|off) written as
+                    /etc/saphira-network.d/10-image-IFACE.conf; empty
+                    (default) writes nothing
   --role NAME         add a role layer; repeatable
   --role-file PATH    add intentions from a file; repeatable
   --no-enable         do not enable the target's services in the image
@@ -399,10 +403,46 @@ require_host_tools()
 # set is ENABLED in the generated image, and whether PID 1 is even
 # consistent with what is on disk.
 
+# Proof/test network configuration, written into the image — never
+# a product default. $NETCONF is a comma-separated IFACE:MODE list
+# (--netconf eth0:dhcp); empty (the default) writes nothing, so a
+# production image carries only what the packages ship. One stanza
+# per interface; the saphira-network grammar takes a single INTERFACE
+# per file, hence one file per entry. IPv6 stays off, matching the
+# proven 0.2.1 proof configuration (link-local + tooling still
+# verified in the guest).
+write_image_netconf()
+{
+	# $1 mountpoint
+	mnt=$1
+	[ -n "${NETCONF:-}" ] || return 0
+	[ -d "$mnt/etc/saphira-network.d" ] ||
+		die "internal: no saphira-network.d in the image but --netconf was given"
+	oldifs=$IFS
+	IFS=,
+	# shellcheck disable=SC2162
+	for entry in $NETCONF; do
+		iface=${entry%%:*}
+		mode=${entry#*:}
+		case $iface in *[!A-Za-z0-9._+-]* | '') die "invalid --netconf interface: $entry" ;; esac
+		case $mode in dhcp|off) ;; *) die "invalid --netconf mode (dhcp|off): $entry" ;; esac
+		[ "$mode" = off ] && continue
+		cat > "$mnt/etc/saphira-network.d/10-image-$iface.conf" <<EOF
+TYPE=physical
+INTERFACE=$iface
+IPV4_MODE=dhcp
+IPV6_MODE=off
+EOF
+		chmod 0644 "$mnt/etc/saphira-network.d/10-image-$iface.conf"
+	done
+	IFS=$oldifs
+}
+
 prepare_init()
 {
 	# $1 mountpoint
 	mnt=$1
+	write_image_netconf "$mnt"
 	case $INIT in
 	openrc)
 		# /etc/inittab is the mechanism that makes /sbin/init be
@@ -426,6 +466,56 @@ INITTAB
 		# conventional multi-user level; a `nonetwork` host is a
 		# deliberate per-image change, not a default.
 		mkdir -p "$mnt/etc/runlevels/default"
+		# Platform infrastructure, enabled by the image itself: no
+		# profile enumerates base-owned plumbing, and installing the
+		# package must never auto-enable anything. The FHS
+		# convergence service belongs in the boot runlevel, before
+		# ordinary services start; without it a historical /var/run
+		# alias present anywhere is never converged (proven by a
+		# 0.2.1 guest that kept the symlink into first boot).
+		if [ -f "$mnt/etc/init.d/saphira-fhs-converge" ]; then
+			mkdir -p "$mnt/etc/runlevels/boot"
+			ln -sfn /etc/init.d/saphira-fhs-converge \
+				"$mnt/etc/runlevels/boot/saphira-fhs-converge"
+		fi
+		# Firstboot account/identity setup: runs only while its
+		# assembly-written marker exists, otherwise a no-op. Placed in
+		# the BOOT runlevel, ordered after the boot-level services
+		# the unit's depend() lists, so the intended sequence is the
+		# ordinary one: bootloader, kernel, real root, init, sysinit,
+		# boot-level platform work, and only then the wizard on a
+		# console that has finished printing.
+		#
+		# It is deliberately NOT in sysinit, which is where an earlier
+		# revision put it to win the console. That produced the "wizard
+		# halfway through boot" experience: sysinit is devfs, sysfs,
+		# dmesg and cgroups, so the wizard appeared while ordinary
+		# boot messages were still pending behind it, and it raced
+		# device discovery for its interface list. The interleaved
+		# prompts that motivated the move were caused by services in a
+		# runlevel starting concurrently, which the unit's `after`
+		# dependencies prevent; the runlevel itself was never the
+		# problem.
+		#
+		# Blocking is still what gives it exclusive ownership:
+		# runlevels are strictly ordered, so the default runlevel -
+		# gettys, sshd, firewall, the network service - starts only
+		# after setup completes.
+		if [ -f "$mnt/etc/init.d/saphira-firstboot" ]; then
+			mkdir -p "$mnt/etc/runlevels/boot"
+			ln -sfn /etc/init.d/saphira-firstboot \
+				"$mnt/etc/runlevels/boot/saphira-firstboot"
+		fi
+		# Serial console instance (not enabled): Saphira ships no
+		# serial getty at all (no serial hardware generally; VGA
+		# gettys cover login). Enabling a getty here would race the
+		# wizard for the same port (proven:
+		# interleaved prompts with input going to the wrong
+		# reader). The agetty template takes its port from the
+		# instance name.
+		if [ -f "$mnt/etc/init.d/agetty" ]; then
+			ln -sfn agetty "$mnt/etc/init.d/agetty.ttyS0"
+		fi
 		;;
 	systemd)
 		# The sysvinit table must NOT be present on a systemd target:
@@ -438,10 +528,105 @@ INITTAB
 			die "internal: image carries both an OpenRC init tree and" \
 			    "/etc/inittab but targets systemd; refusing to guess"
 		fi
-		# Default target for a server.
+		# Default target for a server. This must be the target
+		# itself, not a .wants directory: a dangling default.target
+		# leaves PID 1 without an initial transaction (proven by a
+		# 0.2.1 image whose link named a nonexistent
+		# /lib/...multi-user.target.wants directory).
 		mkdir -p "$mnt/etc/systemd/system"
-		ln -sfn /lib/systemd/system/multi-user.target.wants \
+		ln -sfn /usr/lib/systemd/system/multi-user.target \
 			"$mnt/etc/systemd/system/default.target"
+		# Platform infrastructure, enabled by the image itself (same
+		# reason as the openrc branch above: no profile enumerates
+		# base-owned plumbing). Guarded by presence so profiles
+		# without a package skip cleanly. sshd: remote
+		# administration. fhs-converge: the early-boot layout
+		# migration, without which the image can never self-heal a
+		# historical alias. No serial getty here: Saphira ships none
+		# (no serial hardware generally), so the wizard
+		# exclusively owns the port while it runs.
+		if [ -x "$mnt/usr/bin/systemctl" ]; then
+			units=
+			[ -f "$mnt/usr/lib/systemd/system/saphira-fhs-converge.service" ] &&
+				units="$units saphira-fhs-converge.service"
+			[ -f "$mnt/usr/lib/systemd/system/saphira-firstboot.service" ] &&
+				units="$units saphira-firstboot.service"
+			[ -f "$mnt/usr/lib/systemd/system/sshd.service" ] &&
+				units="$units sshd.service"
+			[ -f "$mnt/usr/lib/systemd/system/systemd-networkd.service" ] &&
+				units="$units systemd-networkd.service"
+			[ -f "$mnt/usr/lib/systemd/system/systemd-networkd-wait-online.service" ] &&
+				units="$units systemd-networkd-wait-online.service"
+			if [ -n "$units" ]; then
+				# shellcheck disable=SC2086
+				"$chroot_command" "$mnt" /usr/bin/systemctl --root=/ enable $units ||
+					die "systemctl --root enable failed: $units"
+			fi
+		fi
+		# Upstream systemd-firstboot would also trigger (it fires
+		# whenever /etc/machine-id is missing) and prompt for
+		# locale/timezone/hostname/root-password on the same
+		# console, colliding with saphira-firstboot, which owns
+		# first boot on Saphira. Mask it; locale/timezone are
+		# post-install concerns, hostname is baked at build.
+		if [ -f "$mnt/usr/lib/systemd/system/systemd-firstboot.service" ] && [ -x "$mnt/usr/bin/systemctl" ]; then
+			"$chroot_command" "$mnt" /usr/bin/systemctl --root=/ mask systemd-firstboot.service ||
+				die "systemctl --root mask failed: systemd-firstboot.service"
+		fi
+		# Never auto-start on SaphiraD targets, even though the
+		# packages are installed: acpid (logind owns power events)
+		# and saphira-network (networkd owns the base NIC). Both
+		# were found enabled after first boot despite never being
+		# enabled at build (symlinks dated 43s after the build-time
+		# ones) - some first-boot path enables them, and masking
+		# is robust against any enabler while staying loud if one
+		# fights it. Roles enable explicitly (unmask first).
+		if [ -x "$mnt/usr/bin/systemctl" ]; then
+			for unit in acpid.service saphira-network.service; do
+				if [ -f "$mnt/usr/lib/systemd/system/$unit" ]; then
+					"$chroot_command" "$mnt" /usr/bin/systemctl --root=/ mask "$unit" ||
+						die "systemctl --root mask failed: $unit"
+				fi
+			done
+		fi
+		# Firstboot boot gate (normal-boot dependency structure, never a
+		# boot mode): while the assembly-written marker exists, the
+		# whole operational transaction waits for setup; without the
+		# marker the condition-skipped unit costs nothing. Two drop-ins, both
+		# image-owned platform plumbing like the masks above:
+		#   multi-user.target Wants+After firstboot: multi-user is the
+		#     default target, so everything an operator meets - getty
+		#     target and the gettys under it, sshd, and every other
+		#     operational unit it pulls - starts only after the wizard
+		#     completes. Wants, not Requires: a failed setup must not
+		#     fail the boot (the marker is kept and setup retries next
+		#     boot); an After-only wait releases on failure and on
+		#     condition-skip alike.
+		#   nftables After firstboot: it carries DefaultDependencies=no
+		#     with only After=modules-load, so a gate placed at or
+		#     above sysinit would not hold it and its status line would
+		#     print mid-wizard. (networkd shares the flag but is a
+		#     wizard prerequisite that must run first; wait-online is
+		#     dormant because nothing pulls network-online.target.)
+		#
+		# The gate is on multi-user.target and NOT on basic.target. The
+		# unit now carries systemd's default dependencies, so it is
+		# itself ordered after basic.target - after sysinit, paths,
+		# slices, sockets and the platform services that constitute
+		# essential boot and platform setup. Gating basic.target would
+		# reverse that: it would pull the wizard forward, ahead of the
+		# platform work, which is precisely the "wizard halfway through
+		# boot" behaviour this placement exists to avoid. The
+		# firstboot-after-fhs-converge ordering is in the shipped unit
+		# itself, where it belongs, so no drop-in is needed for it.
+		if [ -f "$mnt/usr/lib/systemd/system/saphira-firstboot.service" ]; then
+			mkdir -p "$mnt/etc/systemd/system/multi-user.target.d" \
+				"$mnt/etc/systemd/system/nftables.service.d"
+			printf '[Unit]\nWants=saphira-firstboot.service\nAfter=saphira-firstboot.service\n' \
+				> "$mnt/etc/systemd/system/multi-user.target.d/10-firstboot-gate.conf"
+			printf '[Unit]\nAfter=saphira-firstboot.service\n' \
+				> "$mnt/etc/systemd/system/nftables.service.d/10-firstboot-order.conf"
+		fi
 		;;
 	esac
 }
@@ -500,6 +685,44 @@ enable_services()
 	# descriptor keeps the loop in the current shell.
 	units=
 	services=
+	# services-off.d/$INIT lists units that are never auto-enabled on
+	# that init even when profiled (same optional-data contract as
+	# services.d: absent file means nothing is skipped). Resolved
+	# here, not at startup, because $INIT is only known per target.
+	skipped_units=
+	off_file=
+	if [ -n "${SAPHIRA_IMAGE_SERVICES_OFF:-}" ]; then
+		off_file=$SAPHIRA_IMAGE_SERVICES_OFF/$INIT
+	elif [ -f "$bindir/services-off.d/$INIT" ]; then
+		off_file=$bindir/services-off.d/$INIT
+	elif [ -n "$datadir" ] && [ -f "$datadir/services-off.d/$INIT" ]; then
+		off_file=$datadir/services-off.d/$INIT
+	fi
+	if [ -n "$off_file" ]; then
+		# Flattened to one space-separated line: the matcher
+		# below wraps the list in spaces, which only works when
+		# entries are space- (not newline-) separated.
+		skipped_units=$(awk '
+			{ line = $0; sub(/#.*$/, "", line); gsub(/^[ \t]+|[ \t]+$/, "", line) }
+			line == "" { next }
+			{ print line }
+		' "$off_file" | tr '\n' ' ')
+	fi
+	skip_unit()
+	{
+		# $1 candidate (unit base name or service name). Uses its
+		# own variable (skip_base): callers keep using $base after
+		# the call, so this must not clobber it.
+		case $1 in '') return 1 ;; esac
+		case " $skipped_units " in
+		*" $1 "*) return 0 ;;
+		esac
+		skip_base=${1%.service}
+		case " $skipped_units " in
+		*" $skip_base "*) return 0 ;;
+		esac
+		return 1
+	}
 	pkglist=$work/enabled-packages
 	awk '
 		{ line = $0; sub(/#.*$/, "", line); gsub(/^[ \t]+|[ \t]+$/, "", line) }
@@ -518,12 +741,14 @@ enable_services()
 					base=${unit##*/}
 					case $base in
 					*.service | *.socket | *.timer | *.mount | *.path)
+						skip_unit "$base" && continue
 						units="$units $base"
 						;;
 					esac
 				done
 			fi
 			if [ -d "$mnt/etc/init.d" ] && [ -f "$mnt/etc/init.d/$svc" ]; then
+				skip_unit "$svc" && continue
 				services="$services $svc"
 			fi
 		done
@@ -550,6 +775,35 @@ enable_services()
 		done
 		;;
 	esac
+	# Prove the exclusions held, on either init: a skipped unit must
+	# have no *enabling* symlink in the image. Mask symlinks (to
+	# /dev/null) do not count - they are the stronger form of the
+	# same intent, placed by prepare_init. (A services-off entry
+	# that silently fails to exclude is worse than none - proven by
+	# saphira-network reaching a live image despite its file.)
+	if [ -n "$skipped_units" ]; then
+		for skip in $skipped_units; do
+			case $skip in
+			*/*) die "internal: services-off entry is not a unit name: $skip" ;;
+			esac
+			if [ "$INIT" = systemd ]; then
+				for suffix in "" .service .socket .timer; do
+					found=$(find "$mnt/etc/systemd/system" -name "$skip$suffix" 2>/dev/null || true)
+					for link in $found; do
+						if [ "$(readlink "$link")" != /dev/null ]; then
+							die "services-off violated: $skip is enabled in the image ($link)"
+						fi
+					done
+				done
+			else
+				for rl in boot default sysinit nonetwork; do
+					if [ -e "$mnt/etc/runlevels/$rl/$skip" ] || [ -L "$mnt/etc/runlevels/$rl/$skip" ]; then
+						die "services-off violated: $skip is enabled in runlevel $rl"
+					fi
+				done
+			fi
+		done
+	fi
 }
 
 # --- measurement -------------------------------------------------------
@@ -710,6 +964,8 @@ cmd_build()
 			--hostname=*) hostname=${1#*=}; shift ;;
 			--root-password) root_password=${2:?missing PASSWORD}; shift 2 ;;
 			--root-password=*) root_password=${1#*=}; shift ;;
+			--netconf) netconf=${2:?missing NETCONF}; shift 2 ;;
+			--netconf=*) netconf=${1#*=}; shift ;;
 			--role) roles="$roles ${2:?missing ROLE}"; shift 2 ;;
 			--role=*) roles="$roles ${1#*=}" ; shift ;;
 			--role-file) role_files="$role_files ${2:?missing FILE}"; shift 2 ;;
@@ -730,6 +986,7 @@ cmd_build()
 	# Validate the size once, up front.
 	size_bytes "$SIZE" >/dev/null
 	ENABLE=$enable
+	NETCONF=${netconf:-}
 	require_canonical_path
 	require_host_tools
 
@@ -817,15 +1074,16 @@ cmd_build()
 	mount -o noatime "$rootdev" "$mnt" || die 'cannot mount root'
 	mounted=1
 
+	# NOTE: the ESP is formatted here but mounted only AFTER the
+	# install below: saphira-install refuses a non-empty target,
+	# and a mounted ESP (even an empty fresh FAT) trips that guard.
+	# grub-install - which genuinely needs the ESP mounted - runs
+	# after the install step.
 	if [ "$BOOT" = uefi ]; then
 		# The ESP is a real, separate, FAT filesystem that the firmware
-		# reads. It is mounted at the FHS path and grub-install writes
-		# its payload there.
+		# reads.
 		mkfs.vfat -F 32 -n SaphiraESP "$bootdev" ||
 			die 'cannot format the EFI System Partition'
-		mkdir -p "$mnt/boot/efi"
-		mount "$bootdev" "$mnt/boot/efi" || die 'cannot mount the ESP'
-		esp_mounted=1
 	fi
 
 	# The canonical path: saphira-install -> saphira-assemble-rootfs.
@@ -873,13 +1131,152 @@ cmd_build()
 		"$install_command" --target "$mnt" --profile "$profile_name" ||
 		die 'installation into image failed'
 
+# Kernel command line repair, AFTER assembly, BEFORE grub-mkconfig.
+# Two build-host contaminations must not ship:
+#   root=<build loop>  grub-mkconfig probes the mounted root, which at
+#     build time is a loop device (root=/dev/loop0p2). The deployed
+#     image boots as vda/sda/nvme — the kernel panics on the loop
+#     name (proven: guest idle-halted, no root). The GPT PARTUUID is
+#     stable across all of those, needs no initramfs, and is known
+#     here via blkid. grub-mkconfig emits GRUB_CMDLINE_LINUX after
+#     its own probed root=, and the kernel takes the LAST root=, so
+#     appending the PARTUUID form wins without fighting the probe.
+#   init=<one init>    the baselayout default names the systemd
+#     binary, which is wrong on an OpenRC target (and redundant on
+#     a systemd one: both payloads ship a real /sbin/init, which is
+#     the kernel's own default). Strip every init= token for both.
+#   getty autospawn  systemd's getty-generator spawns a serial getty
+#     for every kernel console= (proven: it HUP-killed the firstboot
+#     wizard fighting it for /dev/console). No serial getty may exist
+#     at all (Saphira ships none), so systemd targets disable the
+#     generator here.
+fix_kernel_cmdline()
+{
+	# $1 mountpoint, $2 root partition device
+	mnt=$1
+	rootdev=$2
+	partuuid=$(blkid -s PARTUUID -o value -- "$rootdev") ||
+		die "cannot read PARTUUID of $rootdev"
+	[ -n "$partuuid" ] || die "empty PARTUUID for $rootdev"
+	getty_opt=
+	# Systemd-only kernel arguments, added here rather than shipped in the
+	# packaged default, so an OpenRC target never carries them:
+	#   systemd.getty_auto=0  no getty generator autospawn (the wizard and
+	#                         the explicit agetty services own the console)
+	#   systemd.imds=no       Saphira is not a cloud image; in auto mode
+	#                         the IMDS generator still opens the hardware
+	#                         database every boot and logs a failed lookup.
+	# Both are meaningless without systemd, and a systemd argument on an
+	# OpenRC cmdline is target leakage that reads as a defect in
+	# /proc/cmdline.
+	[ "$INIT" = systemd ] && getty_opt=" systemd.getty_auto=0 systemd.imds=no"
+	defgrub=$mnt/etc/default/grub
+	[ -f "$defgrub" ] || die "internal: no /etc/default/grub in the image"
+	# Strip any root=/init= the packaged default carries, then append
+	# the deployment-stable root=. Portable sed, single backup-free
+	# edit of the image copy (the package conffile stays untouched).
+	python3 - "$defgrub" "$partuuid" "$getty_opt" <<'PY' || die 'cannot repair GRUB_CMDLINE_LINUX'
+import re
+import sys
+path, partuuid, getty_opt = sys.argv[1], sys.argv[2], sys.argv[3]
+text = open(path, encoding="utf-8").read()
+lines = text.splitlines(keepends=True)
+found = False
+for i, line in enumerate(lines):
+    if re.match(r'\s*GRUB_CMDLINE_LINUX=', line):
+        m = re.search(r'"(.*)"', line)
+        if not m:
+            raise SystemExit(f"unparseable GRUB_CMDLINE_LINUX: {line!r}")
+        tokens = [t for t in m.group(1).split()
+                  if not t.startswith("root=") and not t.startswith("init=")]
+        tokens.append(f"root=PARTUUID={partuuid}")
+        if getty_opt:
+            tokens.append(getty_opt.strip())
+        lines[i] = f'GRUB_CMDLINE_LINUX="{" ".join(tokens)}"\n'
+        found = True
+if not found:
+    raise SystemExit("GRUB_CMDLINE_LINUX not present in /etc/default/grub")
+open(path, "w", encoding="utf-8").write("".join(lines))
+PY
+}
+
 	# Init preparation, AFTER assembly so the packages are present.
 	prepare_init "$mnt"
 	enable_services "$mnt" "$profile_root/$profile_name"
+	fix_kernel_cmdline "$mnt" "$rootdev"
 
-	# Bootloader, from INSIDE the target: core image, modules and the
+	# Bootloader finalization, AFTER grub-mkconfig, on the generated file.
+# One thing grub-mkconfig cannot do on its own:
+#   root=<build loop>  grub-mkconfig probes the mounted build root, so
+#     every linux line carries the build-host loop device
+#     (root=/dev/loopNp2, N varying with host state). The kernel takes
+#     the LAST root=, and fix_kernel_cmdline's appended PARTUUID wins
+#     - but the stale token still ships, shows up in /proc/cmdline,
+#     and reads as a release defect. Strip every root= token from
+#     every linux line and leave exactly one deployment-stable
+#     root=PARTUUID (the image's own GPT GUID, via blkid).
+# Nothing else is rewritten: there is ONE normal Saphira boot path.
+# Firstboot is an init-level concern (the running system detects its
+# own marker), never a bootloader selection - no second menuentry,
+# no marker-conditional default, no special kernel command line.
+finalize_bootloader()
+{
+	# $1 mountpoint, $2 root partition device
+	mnt=$1
+	rootdev=$2
+	partuuid=$(blkid -s PARTUUID -o value -- "$rootdev") ||
+		die "cannot read PARTUUID of $rootdev"
+	[ -n "$partuuid" ] || die "empty PARTUUID for $rootdev"
+	python3 - "$mnt/boot/grub/grub.cfg" "$partuuid" <<'PY' || die 'cannot finalize grub.cfg'
+import re
+import sys
+path, partuuid = sys.argv[1], sys.argv[2]
+lines = open(path, encoding="utf-8").read().splitlines(keepends=True)
+
+def rewrite_linux(line):
+    m = re.match(r'(\s*linux\s+\S+)(.*)$', line.rstrip("\n"))
+    if not m:
+        return line
+    head, args = m.group(1), m.group(2)
+    tokens = [t for t in args.split() if not t.startswith("root=")]
+    tokens.append(f"root=PARTUUID={partuuid}")
+    return f"{head} {' '.join(tokens)}\n"
+
+for i, line in enumerate(lines):
+    if re.match(r"\s*linux\s", line):
+        lines[i] = rewrite_linux(line)
+
+open(path, "w", encoding="utf-8").write("".join(lines))
+PY
+	# The generated file must carry exactly one root= per linux line
+	# (the PARTUUID form) and no build-loop leakage. There is exactly
+	# one boot path: a firstboot menuentry, a marker-conditional
+	# default, or a firstboot unit selection on any kernel command
+	# line is refused (firstboot is init-level, never a boot mode).
+	fb_count=$("$chroot_command" "$mnt" /bin/sh -c "
+		grep -cE 'first-boot setup|saphira-firstboot.target' /boot/grub/grub.cfg || true")
+	[ "$fb_count" = 0 ] || die "grub.cfg carries firstboot boot-mode artefacts ($fb_count matches)"
+	loop_count=$("$chroot_command" "$mnt" /bin/sh -c "
+		grep -E '^\s*linux\s' /boot/grub/grub.cfg |
+		tr ' ' '\n' | grep -c '^root=/dev/loop' || true")
+	[ "$loop_count" = 0 ] || die "build loop device leaked into grub.cfg ($loop_count root=/dev/loop tokens)"
+	part_count=$("$chroot_command" "$mnt" /bin/sh -c "
+		grep -E '^\s*linux\s' /boot/grub/grub.cfg |
+		tr ' ' '\n' | grep -c '^root=PARTUUID=' || true")
+	linux_count=$("$chroot_command" "$mnt" /bin/sh -c "
+		grep -cE '^\s*linux\s' /boot/grub/grub.cfg || true")
+	[ "$part_count" = "$linux_count" ] ||
+		die "grub.cfg linux lines lack exactly one root=PARTUUID each ($part_count PARTUUID over $linux_count linux lines)"
+}
 	# platform payload all come from the same grub package, so a host and
-	# target version mismatch is impossible.
+	# target version mismatch is impossible. The ESP is mounted here,
+	# after the install (which refuses a non-empty target) and only
+	# for the bootloader step that needs it.
+	if [ "$BOOT" = uefi ]; then
+		mkdir -p "$mnt/boot/efi"
+		mount "$bootdev" "$mnt/boot/efi" || die 'cannot mount the ESP'
+		esp_mounted=1
+	fi
 	grub_args=
 	[ "$BOOT" = bios ] && grub_args="--target=i386-pc --recheck"
 	[ "$BOOT" = uefi ] && grub_args="--target=x86_64-efi --efi-directory=/boot/efi --removable --recheck"
@@ -891,6 +1288,7 @@ cmd_build()
 	test -s "$mnt/boot/grub/grub.cfg" || die 'grub.cfg is empty'
 	grep -q 'vmlinuz' "$mnt/boot/grub/grub.cfg" ||
 		die 'grub.cfg has no kernel entry: the image would not boot'
+	finalize_bootloader "$mnt" "$rootdev"
 
 	report_closure "$mnt"
 
@@ -908,6 +1306,104 @@ cmd_build()
 	cleanup 0
 }
 
+# --- rootfs export ----------------------------------------------------
+
+find_free_nbd()
+{
+	# First /dev/nbdN with no qemu-nbd attached (kernel exposes the
+	# holder pid; 0 means free).
+	modprobe nbd 2>/dev/null || true
+	n=0
+	while test "$n" -lt 16; do
+		if [ -b "/dev/nbd$n" ] && test "$(cat "/sys/block/nbd$n/pid" 2>/dev/null || echo 1)" = 0; then
+			printf '/dev/nbd%s\n' "$n"
+			return 0
+		fi
+		n=$((n + 1))
+	done
+	return 1
+}
+#
+# Packs the root filesystem of a finished image into a distributable
+# bootstrap tarball. The image itself is the source of truth (export
+# reads the built QCOW2, never a build workspace), so the archive is
+# byte-consistent with the proven image. Volatile and machine-unique
+# state is excluded by an explicit list; anything excluded here must
+# be recreatable at first boot (firstboot mints machine-id, openssh
+# first-start mints host keys, the daemons own their runtime dirs).
+cmd_export()
+{
+	image= output=
+	while test $# -gt 0; do
+		case $1 in
+			--image) image=${2:?missing IMAGE}; shift 2 ;;
+			--image=*) image=${1#*=}; shift ;;
+			--output) output=${2:?missing OUTPUT}; shift 2 ;;
+			--output=*) output=${1#*=}; shift ;;
+			*) usage ;;
+		esac
+	done
+	[ -n "$image" ] || usage
+	[ -n "$output" ] || usage
+	case $output in *.tar.xz) ;; *) die "output must end in .tar.xz: $output" ;; esac
+	test -f "$image" || die "image not found: $image"
+	test ! -e "$output" || die "output exists: $output (remove it first)"
+	test "$(id -u)" -eq 0 || die 'root privileges are required (nbd mount)'
+
+	tmpbase=$(saphira_tmpdir)
+	mkdir -p "$tmpbase" || die "cannot create scratch under $tmpbase"
+	work=$(mktemp -d "$tmpbase/saphira-export.XXXXXX") ||
+		die 'cannot create export workspace'
+	mnt=$work/mnt
+	mkdir -p "$mnt" || die 'cannot create mountpoint'
+	nbd=
+	cleanup_export()
+	{
+		mountpoint -q "$mnt" && umount "$mnt"
+		[ -n "$nbd" ] && qemu-nbd --disconnect "$nbd"
+		rm -rf -- "$work"
+	}
+	trap 'cleanup_export' EXIT HUP INT TERM
+	nbd=$(find_free_nbd) || die 'no free nbd device'
+	qemu-nbd --read-only --connect="$nbd" "$image" ||
+		die "cannot attach $image"
+	partprobe "$nbd" >/dev/null 2>&1
+	sleep 2
+	rootpart=
+	for part in "$nbd"p*; do
+		[ -b "$part" ] || continue
+		mount -o ro "$part" "$mnt" 2>/dev/null || continue
+		if [ -f "$mnt/etc/os-release" ] && [ -x "$mnt/sbin/init" ]; then
+			rootpart=$part
+			break
+		fi
+		umount "$mnt"
+	done
+	[ -n "$rootpart" ] || die "no root filesystem found in $image"
+	tar -cJpf "$output" --numeric-owner --xattrs --acls \
+		--exclude='./proc/*' --exclude='./sys/*' \
+		--exclude='./dev/*' --exclude='./run/*' --exclude='./tmp/*' \
+		--exclude='./var/log/journal/*' --exclude='./var/cache/apk/*' \
+		--exclude='./var/lib/dhcpcd/*' --exclude='./var/lib/systemd/network/*' \
+		--exclude='./var/lib/saphira-firstboot/.iface-*' \
+		--exclude='./var/lib/saphira-firstboot/.merged.*' \
+		--exclude='./var/lib/saphira-firstboot/.network.*' \
+		--exclude='./var/lib/saphira-firstboot/.active.*' \
+		--exclude='./var/lib/saphira-firstboot/.pending-user.*' \
+		--exclude='./var/lib/saphira-firstboot/.completed.*' \
+		--exclude='./var/lib/saphira-firstboot/.iface-index.*' \
+		--exclude='./etc/machine-id' --exclude='./var/lib/dbus/machine-id' \
+		--exclude='./etc/ssh/ssh_host_*' \
+		--exclude='./root/.ash_history' --exclude='./home/*/.ash_history' \
+		--exclude='./etc/*.lock' --exclude='./var/lib/seedrng' \
+		-C "$mnt" . || die "rootfs archive failed: $output"
+	sha256sum "$output" | sed "s| .*|  $(basename "$output")|" > "$output.sha256" ||
+		die "cannot write $output.sha256"
+	cleanup_export
+	trap - EXIT HUP INT TERM
+	printf '%s: exported %s (+ .sha256)\n' "$PROG" "$output"
+}
+
 # --- dispatch ---------------------------------------------------------
 
 test "${1:-}" = "" && usage
@@ -915,6 +1411,7 @@ action=$1
 shift
 case $action in
 build) cmd_build "$@" ;;
+export) cmd_export "$@" ;;
 plan) cmd_plan "$@" ;;
 report) cmd_report "$@" ;;
 list-targets) list_targets ;;

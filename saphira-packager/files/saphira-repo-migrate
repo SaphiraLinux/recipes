@@ -163,7 +163,16 @@ def build_database(rdb: object, config: dict, repo: str, out_db: Path,
         declarations = rdb.extract_declarations(apk, repo_dir, carriers, tmp)
     for filename in carriers:
         decl = declarations[filename]
-        if not decl.get("users") and not decl.get("groups"):
+        # The parseable-declaration requirement applies to accounts.d
+        # carriers only: an fhs-only or caps-only package ships no
+        # identity fragment by design (its channel is validated by
+        # extraction itself, which fails closed on missing or
+        # malformed fragments).
+        ships_accounts = any(
+            f.startswith(rdb.FRAGMENT_PREFIX) and not f.endswith(".legacy")
+            for f in census_data[filename]["files"]
+        )
+        if ships_accounts and not decl.get("users") and not decl.get("groups") and not decl.get("sysusers"):
             raise MigrateError(
                 f"{filename} ships an accounts.d fragment with no parseable "
                 "declaration (rebuild and re-publish the package)"

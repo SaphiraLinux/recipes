@@ -2,7 +2,13 @@
 
 pkgname=pciutils
 pkgver=3.15.0
-pkgrel=1
+# r2: no upstream change; produce the pciutils-dev split (libpci
+# headers) that flashrom's internal/PCI programmers need. The r1 build
+# predates the split, so only the main package reached the repository.
+# r3: run upstream install-lib so headers, .pc and the .so link actually
+# land in the payload (plain install ships none of them; the -dev split
+# came out empty at r2).
+pkgrel=3
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='PCI bus utilities (lspci, setpci) - device names and vid:pid via pci.ids'
 license='GPL-2.0-or-later'
@@ -39,6 +45,12 @@ recipe_build()
 recipe_install()
 {
 	make -C "$SRC" install SHARED=yes ZLIB=yes PCI_COMPRESSED_IDS=0 \
+		PREFIX=/usr LIBDIR=/usr/lib \
+		IDSDIR=/usr/share/hwdata MANDIR=/usr/share/man \
+		DESTDIR="$PKGDEST"
+	# install-lib adds the libpci headers, .pc file and .so link that
+	# the -dev split is made of (plain install omits all three).
+	make -C "$SRC" install-lib SHARED=yes ZLIB=yes PCI_COMPRESSED_IDS=0 \
 		PREFIX=/usr LIBDIR=/usr/lib \
 		IDSDIR=/usr/share/hwdata MANDIR=/usr/share/man \
 		DESTDIR="$PKGDEST"

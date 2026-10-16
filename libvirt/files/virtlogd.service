@@ -3,6 +3,8 @@ Description=libvirt virtualization log daemon (virtlogd)
 Documentation=man:virtlogd(8)
 After=network-online.target nftables.service
 Wants=network-online.target
+# Umbrella membership: stop/restart of libvirtd.service propagates here.
+PartOf=libvirtd.service
 
 [Service]
 # Mirrors files/virtlogd.initd.
@@ -15,11 +17,11 @@ Wants=network-online.target
 # -Dqemu_user=root -Dqemu_group=root.
 Type=notify
 NotifyAccess=main
+ExecStartPre=+/bin/install -d -o root -g root -m 0755 /var/run/libvirt
 ExecStart=/usr/sbin/virtlogd
-# /run/libvirt holds one socket per driver plus the sandbox and qemu
-# directories.
-RuntimeDirectory=libvirt
-RuntimeDirectoryMode=0755
+# /var/run/libvirt holds one socket per driver plus the sandbox and qemu
+# directories (Saphira: ordinary-daemon sockets live under /var/run, and
+# /var/run is a real directory, never a /run alias).
 # NEVER Restart=: virtlogd and virtlockd hold state that a
 # restart mid-operation can leave inconsistent. A crash here needs
 # operator attention, not a retry loop.
@@ -35,7 +37,7 @@ RuntimeDirectoryMode=0755
 ProtectHome=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
-ReadWritePaths=/run/libvirt /var/lib/libvirt
+ReadWritePaths=/var/run/libvirt /var/lib/libvirt
 RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6
 
 [Install]

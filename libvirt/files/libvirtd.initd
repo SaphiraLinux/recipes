@@ -1,0 +1,54 @@
+#!/sbin/openrc-run
+
+description="Saphira libvirt virtualization stack (modular daemon umbrella)"
+
+# Umbrella over the modular daemons, NOT a daemon itself: this package
+# builds with -Dlibvirtd=disabled, so no monolithic libvirtd binary
+# exists and this script never executes one. It restores the stable
+# operator contract (start/stop/restart/status libvirtd) by delegating
+# to the member services through OpenRC's own service controller:
+#   rc-service libvirtd start    starts every member now
+#   rc-service libvirtd stop     stops the whole stack
+#   rc-service libvirtd restart  restarts the whole stack
+#   rc-service libvirtd status   one top-level state for the stack
+# Nothing is added to a runlevel at install; the operator explicitly
+# chooses rc-update add libvirtd. /sbin/service is OpenRC's own
+# frontend (openrc installs to /sbin on Saphira, non-usrmerged).
+LIBVIRT_SERVICES="virtlogd virtlockd virtqemud virtstoraged virtnetworkd virtnodedevd virtsecretd virtproxyd virtinterfaced virtnwfilterd"
+
+depend()
+{
+	need localmount
+	use net
+	after firewall
+}
+
+start()
+{
+	ebegin "Starting Saphira libvirt stack"
+	# virtlogd/virtlockd first: they hold state consumers depend on.
+	for s in $LIBVIRT_SERVICES; do
+		/sbin/service $s start || { eend 1; return 1; }
+	done
+	eend 0
+}
+
+stop()
+{
+	ebegin "Stopping Saphira libvirt stack"
+	st=0
+	# Reverse order: logd/lockd stop last.
+	for s in virtnwfilterd virtinterfaced virtproxyd virtsecretd virtnodedevd virtnetworkd virtstoraged virtqemud virtlockd virtlogd; do
+		/sbin/service $s stop || st=1
+	done
+	eend $st
+}
+
+status()
+{
+	st=0
+	for s in $LIBVIRT_SERVICES; do
+		/sbin/service $s status || st=$?
+	done
+	return $st
+}

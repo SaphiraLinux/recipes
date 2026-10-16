@@ -2,7 +2,14 @@
 
 pkgname=openssh
 pkgver=10.5_p1
-pkgrel=3
+pkgrel=5
+# r5: sshd OpenRC first-start host-key generation (ssh-keygen -A in
+# start_pre before sshd -t; idempotent, never replaces keys), matching
+# the systemd unit's ExecStartPre semantics. Without it sshd cannot
+# start on a fresh OpenRC system (remote-access blocking, boot
+# unaffected). Proven by openssh/tests/sshd-hostkeys.sh (fails on the
+# old initd with 'no hostkeys available', passes with 4 key types and
+# stable hashes on the new one).
 # r2: sshd service joins the shared stacks (include system-remote-login
 # from saphira-pambase) instead of a private 4-stack pam_unix.
 # Payload change, revision bumps.
@@ -38,6 +45,7 @@ makedepends="
     gcc
     make
     libmd-dev
+    linux-pam-dev
     openssl-dev
     pkgconf
     zlib-dev

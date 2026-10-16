@@ -24,7 +24,22 @@ pkgver=262
 # exactly what exposed this. Payload change: real 0755 copy of
 # usr/lib/systemd/systemd at sbin/init, usr/sbin/init removed,
 # -Dsplit-bin=true pinned explicitly).
-pkgrel=4
+# r6: systemd-network UID back to 127 (reclaims the canonical ID
+# through the documented same-lineage path); env-drop and pam-dev
+# fixes retained. Payload vs r4: those two fixes only. (r5's 147
+# experiment: seniority re-examined - systemd holds 127 continuously
+# since 261.2-r5, polkit claimed it 2026-10-12 - and the hatched
+# tombstone reserves 127 for the systemd lineage eternally. polkitd
+# vacates to 156 in polkit r2. r5 stays published in hatchling as
+# superseded history.)
+# r5: drop usr/lib/environment.d/99-environment.conf (upstream shim
+# linking ../../../etc/environment, which no Saphira package creates:
+# a dangling link in every clean root. Same strict-complement rule as
+# the hwdb fragment: do not ship paths whose target nobody owns).
+# Also makedepends linux-pam -> linux-pam-dev (the pam r4 -dev split
+# moved the headers; same breakage shadow already hit).
+# And -Dsystemd-network-uid 127 -> 147: REVERTED (see r6 above).
+pkgrel=6
 # r17: ldconfig disabled (musl has no ldconfig workflow): -Dldconfig=false
 # so neither units/ldconfig.service nor its sysinit.target.wants link is
 # installed. Payload change, bumps.
@@ -86,7 +101,7 @@ makedepends="
     libbpf-dev
     libseccomp-dev
     libucontext-dev
-    linux-pam
+    linux-pam-dev
     saphira-kernel-headers
     lz4-dev
     make
@@ -277,7 +292,8 @@ recipe_install()
 	# dual ownership). systemd-hwdb update still compiles it: it reads
 	# every fragment in /usr/lib/udev/hwdb.d regardless of owner.
 	for path in \
-		usr/lib/udev/hwdb.d/20-usb-vendor-model.hwdb; do
+		usr/lib/udev/hwdb.d/20-usb-vendor-model.hwdb \
+		usr/lib/environment.d/99-environment.conf; do
 		rm -rf -- "$PKGDEST"/$path
 	done
 	# Account layer is sysusers-native, not a fragment census: the

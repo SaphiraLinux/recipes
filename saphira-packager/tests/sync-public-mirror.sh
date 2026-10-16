@@ -42,6 +42,29 @@ assert not archive("a.patch") and not archive("a.initd")
 assert not archive("a.tar.gz.sha256") and not archive("a.tar.gz.asc")
 assert not archive("a.sh") and not archive("recipe.sh")
 
+# Payload excludes: canonical cert + usb.ids by basename (covers legacy
+# per-recipe copies and the single canonical alike).
+assert module.is_payload_excluded("wireless-regdb/files/saphira-regdb.x509")
+assert module.is_payload_excluded("saphira-kernel/files/saphira-regdb.x509")
+assert module.is_payload_excluded("hwdata/files/usb.ids")
+assert not module.is_payload_excluded("good-pkg/files/fix.patch")
+assert not module.is_payload_excluded("good-pkg/recipe.sh")
+
+# Content magic: gzip masters / tag snapshots are archives even with
+# misleading or missing extensions; DER/latin-1 are not archives
+# (they are barred by payload excludes, not by magic).
+assert module.content_kind(b"\x1f\x8b\x08\x00\x00\x00") == "archive"
+assert module.content_kind(b"BZh91AY&SY") == "archive"
+assert module.content_kind(b"\x7fELF\x02\x01") == "elf"
+assert module.content_kind(b"\x30\x82\x05\xf5") == ""
+assert module.content_kind(b"#\n#\tList") == ""
+
+# Private patterns: keeper-colon/git-at fail closed, with the single
+# operator-accepted shampoo exception.
+assert ("keeper" + ":") in module.PRIVATE_PATTERNS
+assert ("git" + "@") in module.PRIVATE_PATTERNS
+assert ("git" + "@github.com:SaphiraLinux/shampoo.git") in module.PRIVATE_PATTERN_EXCEPTIONS
+
 expand = module.expand_vars
 assert expand("v${pkgver}.tar.gz", {"pkgver": "1.0"}) == "v1.0.tar.gz"
 assert expand("v$pkgver.tar.gz", {"pkgver": "1.0"}) == "v1.0.tar.gz"
@@ -223,5 +246,118 @@ if "$sync" "$src" "$test_root/pub" --live-repo "$live" \
 	exit 1
 fi
 grep -q 'uncommitted state' "$test_root/dirty.err"
+
+# --- regression: disguised archives, payload excludes, private refs --------
+# --- stale excluded payload must FAIL, .git must survive --------------------
+# Fresh clone + source additions that mirror the real 12-finding outage:
+# gzip tag snapshots with no extension (iniparser v4.3.2 / ndctl v85 style),
+# gzip "master" snapshots (pppd/rp-pppoe style), DER cert (regdb.x509 style),
+# latin-1 usb.ids style, and keeper-colon/git-at private refs.
+mkclone
+src_disc=$src/disc-pkg
+mkdir -p "$src_disc/files"
+# gzip with no extension (tag snapshot) + its .sha256 sidecar (must ship)
+python3 -c "import gzip; gzip.open('$src_disc/files/v4.3.2','wb').write(b'disguised-archive-bytes')"
+printf 'x  v4.3.2\n' > "$src_disc/files/v4.3.2.sha256"
+python3 -c "import gzip; gzip.open('$src_disc/files/master','wb').write(b'disguised-master-bytes')"
+printf 'x  master\n' > "$src_disc/files/master.sha256"
+# DER-style cert bytes (not gzip/ELF, so only the payload-exclude bars it)
+printf 'fake-cert-bytes-not-archive' > "$src_disc/files/saphira-regdb.x509"
+printf 'x  saphira-regdb.x509\n' > "$src_disc/files/saphira-regdb.x509.sha256"
+# latin-1 usb.ids style (0xb4 fails strict UTF-8; gate must flag via payload exclude)
+python3 -c "open('$src_disc/files/usb.ids','wb').write(b'# usb\n\xb4latin1\n')"
+printf 'x  usb.ids\n' > "$src_disc/files/usb.ids.sha256"
+cat > "$src_disc/recipe.sh" <<'RECIPE'
+#!/bin/sh
+pkgname=disc-pkg
+pkgver=1.0
+pkgrel=1
+pkgdesc='Disguised payload fixture'
+license='MIT'
+origin=disc-pkg
+repo=main
+url=https://example.invalid/disc
+depends=""
+makedepends=""
+recipe_build() { :; }
+recipe_install() { :; }
+RECIPE
+git -C "$src" -c user.name=t -c user.email=t@t add -A
+git -C "$src" -c user.name=t -c user.email=t commit -qm 'disguised payload fixture'
+"$sync" "$src" "$test_root/pub" --live-repo "$live" \
+	--exclude-recipe withheld-pkg --message "disc sync" > "$test_root/disc.out" 2>&1
+# Archives + payload excludes must be absent; sidecars + recipe must ship.
+test ! -e "$test_root/pub/disc-pkg/files/v4.3.2"
+test ! -e "$test_root/pub/disc-pkg/files/master"
+test ! -e "$test_root/pub/disc-pkg/files/saphira-regdb.x509"
+test ! -e "$test_root/pub/disc-pkg/files/usb.ids"
+test -f "$test_root/pub/disc-pkg/files/v4.3.2.sha256"
+test -f "$test_root/pub/disc-pkg/files/master.sha256"
+test -f "$test_root/pub/disc-pkg/recipe.sh"
+# .git survives the clear + export cycle.
+test -d "$test_root/pub/.git"
+test -f "$test_root/pub/.git/HEAD"
+# A keeper-colon/git-at string inside .git must NOT fail the gate (pruned).
+K=keeper; K="$K:"; printf "%s should-be-ignored-in-git\n" "$K" > "$test_root/pub/.git/keeper-should-be-ignored"
+"$sync" "$src" "$test_root/pub" --live-repo "$live" \
+	--exclude-recipe withheld-pkg > "$test_root/gitprune.out" 2>&1
+grep -q 'no changes' "$test_root/gitprune.out"
+rm -f "$test_root/pub/.git/keeper-should-be-ignored"
+# Stale excluded payload committed in public history must FAIL loudly.
+# Public-only top dir (no source counterpart) is preserved via snapshot,
+# exactly how rsync --exclude without --delete-excluded lingered stale
+# copies under exclusion cover in the manual tool.
+mkdir -p "$test_root/pub/stale-payload/files"
+printf 'stale-cert\n' > "$test_root/pub/stale-payload/files/saphira-regdb.x509"
+printf 'stale-usb\n' > "$test_root/pub/stale-payload/files/usb.ids"
+python3 -c "import gzip; gzip.open('$test_root/pub/stale-payload/files/v4.3.2','wb').write(b'stale-archive')"
+git -C "$test_root/pub" -c user.name=t -c user.email=t add -A
+git -C "$test_root/pub" -c user.name=t -c user.email=t commit -qm 'stale payload leak'
+if "$sync" "$src" "$test_root/pub" --live-repo "$live" \
+	--exclude-recipe withheld-pkg > "$test_root/stalepayload.out" 2> "$test_root/stalepayload.err"; then
+	printf '%s\n' 'stale payload unexpectedly passed' >&2
+	exit 1
+fi
+grep -q 'excluded payload present' "$test_root/stalepayload.err"
+grep -q 'archive present (magic)' "$test_root/stalepayload.err"
+mkclone
+"$sync" "$src" "$test_root/pub" --live-repo "$live" \
+	--exclude-recipe withheld-pkg --message "disc sync" >/dev/null 2>&1
+# Private-location patterns fail closed (keeper-colon + git-at), with the single
+# shampoo exception accepted loudly.
+mkdir -p "$test_root/pub/stalepriv"
+K=keeper; K="$K:"; printf 'mirror %s/internal/repo.git at abc\n' "$K" > "$test_root/pub/stalepriv/note.txt"
+git -C "$test_root/pub" -c user.name=t -c user.email=t add -A
+git -C "$test_root/pub" -c user.name=t -c user.email=t commit -qm 'private leak'
+if "$sync" "$src" "$test_root/pub" --live-repo "$live" \
+	--exclude-recipe withheld-pkg > "$test_root/priv.out" 2> "$test_root/priv.err"; then
+	printf '%s\n' 'private pattern unexpectedly passed' >&2
+	exit 1
+fi
+K=keeper; K="$K:"; grep -q "private pattern '$K'" "$test_root/priv.err"
+mkclone
+"$sync" "$src" "$test_root/pub" --live-repo "$live" \
+	--exclude-recipe withheld-pkg --message "disc sync" >/dev/null 2>&1
+# git-at SSH form fails except for the accepted shampoo exception.
+G=git; G="$G@"; printf 'gitsource="%sgithub.com:example/private.git"\n' "$G" > "$test_root/pub/stalepriv2.txt"
+git -C "$test_root/pub" -c user.name=t -c user.email=t add -A
+git -C "$test_root/pub" -c user.name=t -c user.email=t commit -qm 'ssh leak'
+if "$sync" "$src" "$test_root/pub" --live-repo "$live" \
+	--exclude-recipe withheld-pkg > "$test_root/ssh.out" 2> "$test_root/ssh.err"; then
+	printf '%s\n' 'ssh pattern unexpectedly passed' >&2
+	exit 1
+fi
+G=git; G="$G@"; grep -q "private pattern '$G'" "$test_root/ssh.err"
+# Accepted exception does not fail (public-only location, kept via snapshot).
+mkclone
+"$sync" "$src" "$test_root/pub" --live-repo "$live" \
+	--exclude-recipe withheld-pkg --message "disc sync" >/dev/null 2>&1
+mkdir -p "$test_root/pub/staleallowed"
+G=git; G="$G@"; printf 'gitsource="%sgithub.com:SaphiraLinux/shampoo.git"\n' "$G" > "$test_root/pub/staleallowed/allowed.txt"
+git -C "$test_root/pub" -c user.name=t -c user.email=t add -A
+git -C "$test_root/pub" -c user.name=t -c user.email=t commit -qm 'allowed exception'
+"$sync" "$src" "$test_root/pub" --live-repo "$live" \
+	--exclude-recipe withheld-pkg > "$test_root/allowed.out" 2>&1
+grep -q 'accepted exception' "$test_root/allowed.out"
 
 printf '%s\n' 'sync-public-mirror export, exclusion, and leakage-gate tests: OK'

@@ -1,0 +1,32 @@
+--- a/main/ast_expr2.y
++++ b/main/ast_expr2.y
+@@ -266,6 +266,14 @@
+ 
+ typedef void *yyscan_t;
+ 
++/* SAPHIRA-MUSL: __P() is the BSD prototype macro from <sys/cdefs.h>,
++ * which musl does not ship. Without it every forward declaration below
++ * is a syntax error and (with GCC >= 14) every use is an implicit-
++ * declaration error. Plain fallback: prototypes are native C. */
++#ifndef __P
++#define __P(x) x
++#endif
++
+ struct parse_io
+ {
+ 	char *string;
+--- a/main/ast_expr2.c
++++ b/main/ast_expr2.c
+@@ -345,6 +345,12 @@
+ 
+ typedef void *yyscan_t;
+ 
++/* SAPHIRA-MUSL (mirrors ast_expr2.y): __P() is the BSD prototype macro
++ * from <sys/cdefs.h>, which musl does not ship. Plain fallback. */
++#ifndef __P
++#define __P(x) x
++#endif
++
+ struct parse_io
+ {
+ 	char *string;

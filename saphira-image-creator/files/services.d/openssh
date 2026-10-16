@@ -1,0 +1,7 @@
+# Init services provided by the openssh package.
+#
+# The daemon is named sshd, not openssh, so the package-name ==
+# service-name assumption would enable nothing for this package
+# (proven by a 0.2.1 OpenRC image that shipped sshd stopped).
+# Naming openssh in a profile now enables sshd.
+sshd

@@ -1,6 +1,36 @@
-#!/usr/bin/env bash
+#!/bin/bash
+# Non-usrmerged interpreter and PATH: /usr/bin/env does not exist on
+# Saphira, and the boot services that invoke this wizard run with a
+# bare PATH. All helpers used here live in /bin, /sbin or /usr/*.
 
 set -euo pipefail
+export PATH=/usr/bin:/bin:/usr/sbin:/sbin
+
+# Survival traps FIRST, before anything else can be interrupted:
+# a console competitor (notably an auto-spawned getty taking over
+# the port) can hang up this session at any moment, including during
+# the first hundred milliseconds. HUP is ignored outright.
+#
+# INT is NOT an abort. A Ctrl-C during setup means the operator wants to
+# go back one step - it must never terminate the transaction and leave
+# the machine half-configured. The handler records a back-request,
+# which read_setup turns into a step backwards. TERM/QUIT/TSTP still
+# refuse to end a setup in progress: those are a console competitor
+# hanging up, not an operator changing their mind, and they must not
+# abort either.
+nav_back=
+nav_back_request()
+{
+	nav_back=1
+	printf '\nGoing back one step.\n' >&2
+}
+setup_signal()
+{
+	printf '\nFirst-boot setup cannot be interrupted; please complete the current step.\n' >&2
+}
+trap '' HUP
+trap nav_back_request INT
+trap setup_signal TERM QUIT TSTP
 
 test "$(id -u)" -eq 0 || {
 	printf 'saphira-firstboot: must be run as root\n' >&2
@@ -16,19 +46,91 @@ root_dir=${root_dir:-/}
 completed=$state_dir/completed
 pending_user=$state_dir/pending-user
 active=$state_dir/active
+# Declared here, not where it is created: cleanup() runs on every exit
+# path, including one taken long before the index file exists.
+iface_index_tmp=
 
 test -x "$network_apply" || {
 	printf 'saphira-firstboot: network helper is absent: %s\n' "$network_apply" >&2
 	exit 1
 }
-if test -e "$completed"; then
-	printf 'Saphira firstboot has already completed.\n' >&2
-	exit 1
-fi
+
+# THE COMPLETION RULE
+#
+# The root password is the commit point. Firstboot runs only until it is
+# set, and setting it spends the marker permanently: from that instant
+# the machine must never be offered setup again, whatever else is still
+# unconfigured. Nothing after this point may re-arm the marker.
+#
+# This is a deliberate change from the previous contract, which spent the
+# marker only after EVERY step had succeeded. That contract is exactly
+# what turned a late failure into an unbreakable loop: a machine whose
+# network apply failed was told "setup will run again on the next boot",
+# rebooted into setup, failed the same way, and did so forever, with no
+# network to fix it from another host. The acceptance machine did
+# exactly that. A commit point has to be a fact about the machine, not a
+# summary of how the wizard's own steps went, and "root has a password"
+# is the one fact that is both true and sufficient.
+root_password_set()
+{
+	local field
+	field=$(awk -F: '$1 == "root" { print $2; exit }' \
+		"$root_dir/etc/shadow" 2>/dev/null || true)
+	case $field in
+	'' | '!'* | '*'*) return 1 ;;
+	esac
+	return 0
+}
+
+# Spend the marker and record completion, idempotently: spending an
+# already-spent marker is success, not failure. The record is written
+# first, so a crash in the window between the two leaves a machine that
+# is done rather than one that silently starts over.
+commit_completion()
+{
+	local temporary
+	test -e "$marker" || return 0
+	install -d -m 0700 "$state_dir"
+	temporary=$(mktemp "$state_dir/.completed.XXXXXX")
+	chmod 0600 "$temporary"
+	printf 'completed\n' > "$temporary"
+	mv -f "$temporary" "$completed"
+	rm -f -- "$marker"
+	test ! -e "$marker" || {
+		printf 'saphira-firstboot: the setup marker could not be removed\n' >&2
+		return 1
+	}
+	return 0
+}
+
+# The marker is the authority on whether setup is still owed, so it is
+# checked first: once it is spent, an ordinary boot does nothing at all,
+# silently and successfully.
 test -e "$marker" || {
 	printf 'Saphira first-boot configuration is already complete.\n'
+	# Nothing to do (marker consumed, or a manual run on a
+	# configured machine): exit quietly. There is exactly one boot
+	# path, so a reboot here would loop forever - never reboot.
 	exit 0
 }
+
+# SELF-HEAL. The root password is set, so by the rule above setup is
+# over regardless of what the marker says. Spend it and leave. This is
+# precisely the state a machine that finished setup and then failed a
+# later step reaches, and the only correct response to it is to spend
+# the marker - never to show the welcome screen again and never to ask
+# for a password the operator has already set.
+if root_password_set; then
+	commit_completion || exit 1
+	printf 'Saphira first-boot configuration is already complete.\n'
+	exit 0
+fi
+
+if test -e "$completed"; then
+	printf 'Saphira firstboot has already completed.\n' >&2
+	printf 'saphira-firstboot: setup marker was not consumed; refusing to reconfigure.\n' >&2
+	exit 1
+fi
 
 install -d -m 0700 "$state_dir"
 if test "${SAPHIRA_NETWORK_SKIP_OWNERSHIP:-0}" = 1; then
@@ -45,34 +147,221 @@ fi
 transaction_tmp=$(mktemp "$state_dir/.active.XXXXXX")
 chmod 0600 "$transaction_tmp"
 mv -f "$transaction_tmp" "$active"
+# Own the console exclusively: a getty on the same port would steal
+# input and interleave output (proven: wizard and agetty answering
+# each other's prompts). Saphira ships no serial getty (there is
+# generally no serial hardware; VGA gettys cover login), so these
+# stops are defensive no-ops kept for image variants that add one.
+# A cancelled run keeps its marker and re-runs next boot.
+claim_console()
+{
+	if command -v rc-service >/dev/null 2>&1; then
+		rc-service agetty.ttyS0 stop >/dev/null 2>&1 || true
+	elif command -v systemctl >/dev/null 2>&1; then
+		systemctl stop 'serial-getty@ttyS0.service' >/dev/null 2>&1 || true
+	fi
+}
+claim_console
+# Terminal setup: firstboot owns the console from here on, and the
+# console line is configured to match the console actually attached.
+# A kernel VT delivers Backspace as 0x7f and its default erase is
+# '^?'; a serial console's terminal usually delivers '^H' (proven on
+# a real consumer serial console: with the wrong character every
+# Backspace echoes literally). passwd, read, and the confirmation
+# prompts all honour the line's erase character, so setting it once
+# covers every prompt. An undetectable console is left untouched:
+# the kernel default is already correct for a VT. Best-effort by
+# design - a console that cannot be configured must not abort setup.
+active_console=$(cat "$root_dir/sys/class/tty/console/active" 2>/dev/null || true)
+active_console=${active_console##* }
+case $active_console in
+ttyS*|ttyAMA*|ttyUSB*|ttyXRUSB*|hvc*|xvc*)
+	stty erase '^H' < /dev/console > /dev/console 2>&1 || true
+	;;
+tty[0-9]*|vt*)
+	stty erase '^?' < /dev/console > /dev/console 2>&1 || true
+	;;
+esac
+# The operator must be able to read every prompt: kernel messages
+# (e.g. a link-change event during network setup) print
+# asynchronously and would overwrite the line being typed. Quiet the
+# console loglevel for the interactive window only; cleanup()
+# restores it. By the time this service runs (first in sysinit,
+# foreground), the kernel's own boot output is already on screen.
+saved_loglevel=$(cat /proc/sys/kernel/printk 2>/dev/null || true)
+if test -n "$saved_loglevel"; then
+	printf '1\n' > /proc/sys/kernel/printk 2>/dev/null || true
+fi
+# Firstboot identity: product names come from the installed product
+# identity (Saphira vs SaphiraD) and are shown on the welcome screen
+# before anything is asked.
+#
+# The braces around each sed matter. `sed ... | head -1` under
+# `set -euo pipefail` is a trapdoor: when sed cannot open the file it
+# exits non-zero, pipefail promotes that to the whole pipeline, and the
+# assignment fails - so under set -e the wizard dies HERE, silently, on
+# any root that has no /etc/os-release. It is the same class of invisible
+# abort that stranded a machine in setup forever: no message, no marker
+# movement, just a process that stopped. Reading an optional file must
+# never be able to end the transaction.
+pretty_name=$( { sed -n 's/^PRETTY_NAME="\(.*\)"$/\1/p' \
+	"$root_dir/etc/os-release" 2>/dev/null || true; } | head -1)
+test -n "$pretty_name" || pretty_name='Saphira Linux'
+base_name=$( { sed -n 's/^NAME="\(.*\)"$/\1/p' \
+	"$root_dir/etc/os-release" 2>/dev/null || true; } | head -1)
+test -n "$base_name" || base_name='Saphira Linux'
 network_state=$(mktemp "$state_dir/.network.XXXXXX")
 chmod 0600 "$network_state"
 repository_file=${SAPHIRA_FIRSTBOOT_REPOSITORIES_FILE:-/etc/apk/repositories}
 cleanup()
 {
-	rm -f -- "$network_state" "$active"
+	rm -f -- "$network_state" "$active" "$iface_index_tmp"
+	if test -n "$saved_loglevel"; then
+		printf '%s\n' "$saved_loglevel" > /proc/sys/kernel/printk 2>/dev/null || true
+	fi
 }
 trap cleanup EXIT
-setup_signal()
-{
-	printf '\nFirst-boot setup cannot be interrupted; please complete the current step.\n' >&2
-}
-trap setup_signal INT TERM HUP QUIT TSTP
 
 read_setup()
 {
 	local variable=$1
-	while ! IFS= read -r "$variable"; do
+	while :; do
+		# A signal arriving during the read interrupts it, so the
+		# handler's back-request is honoured before the answer is
+		# read at all.
+		nav_back=
+		if IFS= read -r "$variable"; then
+			case $variable in
+			q|Q)
+				# Back is a first-class answer in this wizard:
+				# a mistaken mode must be recoverable without
+				# rebooting and without feeding the rest of the
+				# flow bogus values.
+				nav_back=1
+				return 1
+				;;
+			esac
+			return 0
+		fi
+		if test -n "$nav_back"; then
+			return 1
+		fi
 		printf '\nEnd-of-file is not a valid setup response; please enter a value.\n' >&2
 	done
 }
 
+# Back-navigation plumbing: nav_back_request is installed with the
+# traps at the top of this file, and read_setup turns its flag into a
+# step backwards.
 set_password()
 {
 	local account=$1
 	while ! passwd "$account"; do
-		printf 'Password setup was interrupted or failed; please try again.\n' >&2
+		# The root password is the commit point, so before it is set
+		# there is nothing else to do and asking again is the only
+		# correct answer. Every later password is best-effort: a
+		# failure there is reported and recorded, never retried
+		# forever and never re-armed.
+		if test "${2:-}" = mandatory; then
+			printf 'Password setup was interrupted or failed; please try again.\n' >&2
+			continue
+		fi
+		printf '\nPassword setup for %s was interrupted or failed.\n' "$account" >&2
+		return 1
 	done
+	return 0
+}
+
+# Steps that may still be incomplete once the root password is set.
+# Recorded as they happen and printed as an explicit statement at the
+# end, so the operator is told exactly what is not configured on a
+# machine that setup will never revisit.
+declare -a unfinished_steps
+record_unfinished()
+{
+	unfinished_steps+=("$1: $2")
+	printf '\nNOT COMPLETED - %s: %s\n' "$1" "$2" >&2
+}
+
+# Bounded retry: the initial attempt plus at most two retries. q or
+# Ctrl-C skips immediately rather than being read as another answer.
+# Unbounded retry is not an option here - the previous contract retried
+# by re-running setup on the next boot, forever - and neither is
+# swallowing a failure, so give-up is recorded and reported.
+run_step()
+{
+	local label=$1 answer
+	shift
+	local attempt=1 max_attempts=3
+	while :; do
+		if "$@"; then
+			return 0
+		fi
+		if test "$attempt" -ge "$max_attempts"; then
+			record_unfinished "$label" "failed after $max_attempts attempts"
+			return 1
+		fi
+		printf '\n%s failed. Retry? [%d of %d left, q to skip] ' \
+			"$label" "$((max_attempts - attempt))" "$((max_attempts - 1))" >&2
+		if read_setup answer; then
+			case $answer in
+			y|Y) ;;
+			*) record_unfinished "$label" 'skipped at the operator request'
+			   return 1 ;;
+			esac
+		else
+			# q, or Ctrl-C (which read_setup reports as a back
+			# request): skip now rather than re-run.
+			record_unfinished "$label" 'skipped at the operator request'
+			return 1
+		fi
+		attempt=$((attempt + 1))
+	done
+}
+
+# Presentation helpers: plain console text only (no curses, no
+# terminfo dependency - firstboot runs before any TERM is
+# meaningful). Rules are built at 80 columns and sliced; a heading
+# underlines with its own width.
+heading()
+{
+	local title=$1 line
+	line=$(printf -- '-%.0s' {1..80})
+	printf '\n%s\n%s\n\n' "$title" "${line:0:${#title}}"
+}
+
+center()
+{
+	local text=$1 pad
+	pad=$(( (60 - ${#text}) / 2 ))
+	test "$pad" -ge 0 || pad=0
+	printf '%*s%s\n' "$pad" '' "$text"
+}
+
+welcome()
+{
+	local line
+	line=$(printf '=%.0s' {1..60})
+	# Clear the console first: the screen still holds the kernel's
+	# and sysinit services' boot output, and the welcome must be the
+	# first thing the operator reads. ANSI position+clear is
+	# understood by VTs and serial terminals alike.
+	printf '\033[H\033[2J'
+	printf '%s\n' "$line"
+	center "$pretty_name"
+	center 'Initial System Setup'
+	printf '%s\n\n' "$line"
+	printf 'Welcome to %s.\n\n' "$base_name"
+	printf 'This is the first boot of this system.\n\n'
+	printf 'Before %s can be used, a few initial settings are needed:\n\n' "$base_name"
+	printf '  \342\200\242 Set the local root password\n'
+	printf '  \342\200\242 Create the first administrator account\n'
+	printf '  \342\200\242 Configure network connectivity\n'
+	printf '  \342\200\242 Configure DNS\n'
+	printf '  \342\200\242 Confirm the package repository\n\n'
+	printf 'No passwords or user accounts have been preconfigured.\n\n'
+	printf 'Press Enter to begin.\n'
+	read_setup _begin
 }
 
 install_shell_defaults()
@@ -81,23 +370,72 @@ install_shell_defaults()
 	home=$root_dir/home/$username
 	group=$(id -gn "$username")
 	install -d -m 0700 "$root_dir/root" "$home"
-	install -m 0644 "$root_dir/etc/skel/.bashrc" "$root_dir/root/.bashrc"
-	install -m 0644 "$root_dir/etc/skel/.profile" "$root_dir/root/.profile"
-	install -m 0644 "$root_dir/etc/skel/.bashrc" "$home/.bashrc"
-	install -m 0644 "$root_dir/etc/skel/.profile" "$home/.profile"
-	chown 0:0 "$root_dir/root/.bashrc" "$root_dir/root/.profile"
-	chown "$username:$group" "$home/.bashrc" "$home/.profile"
+	# The skel templates are the source for a new home directory. If
+	# they are absent this must not abort the whole transaction: a
+	# missing dotfile is cosmetic, and treating it as fatal is exactly
+	# what left the marker armed and the machine stuck re-offering
+	# setup after a run that had in fact finished everything else.
+	for template in .bashrc .profile; do
+		if test -f "$root_dir/etc/skel/$template"; then
+			install -m 0644 "$root_dir/etc/skel/$template" "$root_dir/root/$template"
+			install -m 0644 "$root_dir/etc/skel/$template" "$home/$template"
+		fi
+	done
+	chown 0:0 "$root_dir/root/.bashrc" "$root_dir/root/.profile" 2>/dev/null || true
+	chown "$username:$group" "$home/.bashrc" "$home/.profile" 2>/dev/null || true
+	return 0
+}
+
+ensure_machine_id()
+{
+	# Every cloned installation must carry its own machine identity:
+	# images ship without one, and the first boot that completes
+	# firstboot mints it. systemd and D-Bus both consume
+	# /etc/machine-id; matching the 32-lowercase-hex shape both
+	# require. Re-runs are no-ops (identity is minted once).
+	local id_file=$root_dir/etc/machine-id
+	local current=
+	test -f "$id_file" && current=$(cat "$id_file" 2>/dev/null || true)
+	case $current in
+	????????????????????????????????)
+		case $current in *[!0-9a-f]*);; *) return 0 ;; esac ;;
+	esac
+	current=$(tr -d '-' < /proc/sys/kernel/random/uuid 2>/dev/null || true)
+	case $current in
+	????????????????????????????????) ;;
+	*) printf 'saphira-firstboot: cannot mint machine identity\n' >&2; return 1 ;;
+	esac
+	printf '%s\n' "$current" > "$id_file"
+	chmod 0444 "$id_file"
+	if test -d "$root_dir/var/lib/dbus" && test ! -e "$root_dir/var/lib/dbus/machine-id"; then
+		ln -s /etc/machine-id "$root_dir/var/lib/dbus/machine-id"
+	fi
+}
+
+ensure_ssh_host_keys()
+{
+	# SSH host keys are per-installation identity: the pristine image
+	# ships none, and sshd cannot serve until they exist. Generate
+	# them here, after the accounts and identity are established and
+	# before the marker is consumed, so a completed first boot yields
+	# a system fully ready for remote access. Best-effort by design:
+	# sshd's own init script runs `ssh-keygen -A` at first start, so
+	# a failure here is repaired later, never fatal.
+	test "$root_dir" = / || return 0
+	test -x /usr/bin/ssh-keygen || return 0
+	/usr/bin/ssh-keygen -A >/dev/null 2>&1 ||
+		printf 'Warning: SSH host keys could not be generated; sshd will generate them on first start.\n' >&2
 }
 
 IPV4_MODE=off IPV4_CIDR= IPV4_GATEWAY=
 IPV6_MODE=off IPV6_CIDR= IPV6_GATEWAY=
 DNS_SERVERS=9.9.9.9 DNS_SEARCH=
-REPOSITORY_URL=https://packages.saphira.vm2.uk/hatchling
+REPOSITORY_URL=https://packages.saphira.vm2.uk/hatched
 
 write_network_state()
 {
 	{
-		printf 'TYPE=%s\nINTERFACE=%s\n' physical eth0
+		printf 'TYPE=%s\nINTERFACE=%s\n' physical "$INTERFACE"
 		printf 'IPV4_MODE=%s\nIPV4_CIDR=%s\nIPV4_GATEWAY=%s\nIPV4_METRIC=\n' \
 			"$IPV4_MODE" "$IPV4_CIDR" "$IPV4_GATEWAY"
 		printf 'IPV6_MODE=%s\nIPV6_CIDR=%s\nIPV6_GATEWAY=%s\nIPV6_METRIC=\n' \
@@ -113,19 +451,187 @@ validate_network_state()
 	"$network_apply" validate "$network_state"
 }
 
+# Live init detection (runtime truth, never installed-file inference):
+# /run/systemd/system exists only when systemd is PID 1 right now.
+uses_systemd()
+{
+	test -d "$root_dir/run/systemd/system"
+}
+
+# True when launched by the boot path (the OpenRC init script or the
+# systemd unit set SAPHIRA_FIRSTBOOT_AT_BOOT=1); false for manual runs
+# in an ordinary booted system. Only an at-boot run reboots after
+# consuming the marker - a manual setup must never reboot a live
+# machine. Explicit environment, never a kernel-command-line probe:
+# there is exactly one boot path and no boot-mode selection.
+at_boot()
+{
+	test "${SAPHIRA_FIRSTBOOT_AT_BOOT:-0}" = 1
+}
+
+list_interfaces()
+{
+	# Physical wired Ethernet only: ARPHRD_ETHER (type 1) AND a real
+	# backing device (/sys/class/net/<iface>/device symlink). Tunnel
+	# and stacked devices cannot be addressed by the configuration
+	# applied here - erspan/gretap report type 1 but have no device
+	# link, and offering DHCP on erspan0 fails the whole activation
+	# (proven on hardware). lo is never offered. Wi-Fi is filtered
+	# by the caller, not here.
+	local sysfs=${SYSFS_NET_DIR:-$root_dir/sys/class/net}
+	local entry name iftype
+	for entry in "$sysfs"/*; do
+		name=${entry##*/}
+		case $name in ''|\*|lo) continue ;; esac
+		test -e "$entry" || continue
+		iftype=$(cat "$entry/type" 2>/dev/null || true)
+		test "$iftype" = 1 || continue
+		test -e "$entry/device" || continue
+		printf '%s\n' "$name"
+	done
+}
+
+is_wireless()
+{
+	test -d "${SYSFS_NET_DIR:-$root_dir/sys/class/net}/$1/wireless"
+}
+
+# Network backend selected the same way: systemd targets configure
+# wired NICs through networkd drop-ins (the saphira-network service
+# is not enabled there); OpenRC targets use the saphira framework.
+apply_interface_now()
+{
+	if uses_systemd; then
+		local unit_dir=$root_dir/etc/systemd/network
+		install -d -m 0755 "$unit_dir"
+		{
+			printf '[Match]\nName=%s\n\n[Network]\n' "$INTERFACE"
+			if test "$IPV4_MODE" = dhcp && test "$IPV6_MODE" = dhcp; then
+				printf 'DHCP=yes\n'
+			elif test "$IPV4_MODE" = dhcp; then
+				printf 'DHCP=ipv4\n'
+			elif test "$IPV6_MODE" = dhcp; then
+				printf 'DHCP=ipv6\n'
+			fi
+			if test "$IPV4_MODE" = static; then
+				printf 'Address=%s\n' "$IPV4_CIDR"
+				test -z "$IPV4_GATEWAY" || printf 'Gateway=%s\n' "$IPV4_GATEWAY"
+			fi
+			if test "$IPV6_MODE" = static; then
+				printf 'Address=%s\n' "$IPV6_CIDR"
+				test -z "$IPV6_GATEWAY" || printf 'Gateway=%s\n' "$IPV6_GATEWAY"
+			fi
+			test -z "$DNS_SERVERS" || printf 'DNS=%s\n' "$DNS_SERVERS"
+		} > "$unit_dir/10-firstboot-$INTERFACE.network"
+		chmod 0644 "$unit_dir/10-firstboot-$INTERFACE.network"
+		# Reload without any bus dependency (the wizard must work
+		# regardless of what else is up yet), so networkctl/systemctl
+		# cannot be relied on: signal the already-running daemon
+		# directly instead.
+		# networkd reloads its configuration on SIGHUP with the same
+		# reconfigure semantics. Bus-free PID lookup (kill is a shell
+		# builtin, no procps dependency).
+		if test "$root_dir" = /; then
+			reloaded=0
+			for procdir in /proc/[0-9]*; do
+				test "$(cat "$procdir/comm" 2>/dev/null)" = systemd-networkd || continue
+				kill -HUP "${procdir#/proc/}" 2>/dev/null && reloaded=1
+			done
+			test "$reloaded" = 1 || return 1
+		fi
+	else
+		while ! "$network_apply" apply "$network_state"; do
+			printf 'Network configuration was interrupted or failed; please retry the setup.\n' >&2
+			return 1
+		done
+	fi
+}
+
+# Address-mode selection, one family at a time, IPv6 first.
+#
+# Neither menu has a default. An empty answer re-prompts: the address
+# mode is an explicit operator decision and is never inferred, so a
+# machine can never quietly decide its own addressing from whatever
+# happens to answer on the wire. DHCP and DHCPv6 are offered only as
+# selections. SLAAC is the kernel's own IPv6 autoconfiguration
+# (router advertisements), not a client, and it is IPv6-only.
+choose_ipv4_mode()
+{
+	local interface=$1 choice
+	while :; do
+		printf 'IPv4 on %s:\n\n' "$interface"
+		printf '  [1] Static\n'
+		printf '  [2] DHCP\n'
+		printf '  [3] Disabled\n\n'
+		printf 'Choose the IPv4 mode [1-3] (q to go back): '
+		read_setup choice || return 1
+		case $choice in
+		1) IPV4_MODE=static; IPV4_CIDR= IPV4_GATEWAY=
+		   ask_family IPv4 || return 1
+		   return 0 ;;
+		2) IPV4_MODE=dhcp; IPV4_CIDR= IPV4_GATEWAY=; return 0 ;;
+		3) IPV4_MODE=off; IPV4_CIDR= IPV4_GATEWAY=; return 0 ;;
+		'')
+			printf 'An IPv4 mode must be chosen; an empty answer changes nothing.\n' >&2 ;;
+		*) printf 'Choose 1, 2, or 3.\n' >&2 ;;
+		esac
+	done
+}
+
+# IPv6 is optional, and the question that decides it has no default
+# either: an empty answer re-prompts rather than quietly choosing "no".
+configure_ipv6()
+{
+	local interface=$1 choice
+	while :; do
+		printf 'Configure IPv6 on %s? [y/n] (q to go back): ' "$interface"
+		read_setup choice || return 1
+		case $choice in
+		[Yy])
+			while :; do
+				printf 'IPv6 on %s:\n\n' "$interface"
+				printf '  [1] Static\n'
+				printf '  [2] SLAAC (router advertisements)\n'
+				printf '  [3] DHCPv6\n'
+				printf '  [4] Disabled\n\n'
+				printf 'Choose the IPv6 mode [1-4] (q to go back): '
+				read_setup choice || return 1
+				case $choice in
+				1) IPV6_MODE=static; IPV6_CIDR= IPV6_GATEWAY=
+				   ask_family IPv6 || return 1
+				   return 0 ;;
+				2) IPV6_MODE=slaac; IPV6_CIDR= IPV6_GATEWAY=; return 0 ;;
+				3) IPV6_MODE=dhcp; IPV6_CIDR= IPV6_GATEWAY=; return 0 ;;
+				4) IPV6_MODE=off; IPV6_CIDR= IPV6_GATEWAY=; return 0 ;;
+				'')
+					printf 'An IPv6 mode must be chosen; an empty answer changes nothing.\n' >&2 ;;
+				*) printf 'Choose 1, 2, 3, or 4.\n' >&2 ;;
+				esac
+			done ;;
+		[Nn])
+			# "No" means IPv6 is off for this interface. That is an
+			# explicit answer, not an inference.
+			IPV6_MODE=off; IPV6_CIDR= IPV6_GATEWAY=; return 0 ;;
+		'')
+			printf 'Answer y or n; an empty answer changes nothing.\n' >&2 ;;
+		*) printf 'Answer y or n.\n' >&2 ;;
+		esac
+	done
+}
+
 ask_family()
 {
+	# Returns 0 when a valid static address and gateway are in place,
+	# 1 when the operator asked to go back (q or Ctrl-C) and the mode
+	# menu must be shown again. A blank address is never a silent
+	# "disabled": Static was chosen explicitly, so it re-prompts.
 	local family=$1 address gateway
 	while :; do
-		printf '%s address and CIDR prefix (blank for not configured): ' "$family"
-		read_setup address
+		printf '%s address with CIDR prefix (q to go back): ' "$family"
+		read_setup address || return 1
 		if test -z "$address"; then
-			if test "$family" = IPv4; then
-				IPV4_MODE=off IPV4_CIDR= IPV4_GATEWAY=
-			else
-				IPV6_MODE=off IPV6_CIDR= IPV6_GATEWAY=
-			fi
-			return
+			printf 'A static %s address is required; choose Disabled if this family has no address.\n' "$family" >&2
+			continue
 		fi
 		if test "$family" = IPv4; then
 			"$network_apply" validate-ipv4-cidr "$address" || {
@@ -133,13 +639,16 @@ ask_family()
 				continue
 			}
 			while :; do
-				printf 'IPv4 gateway: '
-				read_setup gateway
-				if test -n "$gateway" && "$network_apply" validate-ipv4 "$gateway"; then
-					IPV4_MODE=static IPV4_CIDR=$address IPV4_GATEWAY=$gateway
-					if validate_network_state; then return; fi
+				printf 'IPv4 gateway (blank for none, q to go back): '
+				read_setup gateway || return 1
+				if test -n "$gateway" &&
+					! "$network_apply" validate-ipv4 "$gateway"; then
+					printf 'Enter a valid IPv4 gateway inside the configured prefix, or leave it blank.\n' >&2
+					continue
 				fi
-				printf 'Enter a valid IPv4 gateway inside the configured prefix.\n' >&2
+				IPV4_MODE=static IPV4_CIDR=$address IPV4_GATEWAY=$gateway
+				if validate_network_state; then return 0; fi
+				printf 'IPv4 configuration was rejected; check the address and gateway.\n' >&2
 			done
 		else
 			"$network_apply" validate-ipv6-cidr "$address" || {
@@ -147,13 +656,16 @@ ask_family()
 				continue
 			}
 			while :; do
-				printf 'IPv6 gateway: '
-				read_setup gateway
-				if test -n "$gateway" && "$network_apply" validate-ipv6 "$gateway"; then
-					IPV6_MODE=static IPV6_CIDR=$address IPV6_GATEWAY=$gateway
-					if validate_network_state; then return; fi
+				printf 'IPv6 gateway (blank for none, q to go back): '
+				read_setup gateway || return 1
+				if test -n "$gateway" &&
+					! "$network_apply" validate-ipv6 "$gateway"; then
+					printf 'Enter a valid IPv6 gateway inside the configured prefix, or leave it blank.\n' >&2
+					continue
 				fi
-				printf 'Enter a valid IPv6 gateway inside the configured prefix.\n' >&2
+				IPV6_MODE=static IPV6_CIDR=$address IPV6_GATEWAY=$gateway
+				if validate_network_state; then return 0; fi
+				printf 'IPv6 configuration was rejected; check the address and gateway.\n' >&2
 			done
 		fi
 	done
@@ -193,19 +705,32 @@ write_repository()
 	trap - RETURN
 }
 
+print_dns_provider()
+{
+	local number=$1 name=$2 provider_data dns4 dns6
+	provider_data=$("$network_apply" dns-provider "$number")
+	IFS='|' read -r dns4 dns6 <<< "$provider_data"
+	printf '  %s. %s\n' "$number" "$name"
+	if test -n "$dns4"; then
+		printf '       IPv4: %s\n' "$dns4"
+	fi
+	if test -n "$dns6"; then
+		printf '       IPv6: %s\n' "$dns6"
+	fi
+}
+
 choose_dns()
 {
 	local choice provider_data dns4 dns6 custom4 custom6
 	while :; do
-		printf '%s\n' \
-			'DNS provider:' \
-			'  1. Quad9' \
-			'  2. Cloudflare' \
-			'  3. OpenDNS / Cisco Umbrella' \
-			'  4. Custom'
-		printf 'Choice: '
+		printf 'Choose the DNS provider for this system:\n\n'
+		print_dns_provider 1 'Quad9'
+		print_dns_provider 2 'Cloudflare'
+		print_dns_provider 3 'OpenDNS / Cisco Umbrella'
+		printf '  4. Custom DNS servers\n\n'
+		printf 'Choice [1]: '
 		read_setup choice
-		case $choice in
+		case ${choice:-1} in
 			1|2|3)
 				provider_data=$("$network_apply" dns-provider "$choice")
 				IFS='|' read -r dns4 dns6 <<< "$provider_data"
@@ -213,9 +738,9 @@ choose_dns()
 				return
 				;;
 			4)
-				printf 'Custom IPv4 DNS servers (space-separated): '
+				printf '\nCustom IPv4 DNS servers (space-separated): '
 				read_setup custom4
-				printf 'Custom IPv6 DNS servers (space-separated): '
+				printf 'Custom IPv6 DNS servers (space-separated, blank for none): '
 				read_setup custom6
 				if test -z "$custom4$custom6" ||
 					! validate_dns_list ipv4 "$custom4" ||
@@ -238,6 +763,15 @@ is_safe_full_name()
 	[[ $value != *[![:print:]]* && $value != *:* ]]
 }
 
+user_exists()
+{
+	# Local passwd lookup without getent (musl systems may not ship
+	# it): exact first-field match against the target root's database.
+	local name=$1
+	awk -F: -v name="$name" '$1 == name { found=1; exit } END { exit !found }' \
+		"$root_dir/etc/passwd" 2>/dev/null
+}
+
 is_safe_username()
 {
 	local value=$1
@@ -246,34 +780,52 @@ is_safe_username()
 		test "$value" != root
 }
 
-printf 'Set the root password.\n'
-set_password root
+welcome
 
+heading 'Root password'
+printf 'Set the local root password (used for administration and recovery).\n\n'
+set_password root mandatory
+
+# THE COMMIT POINT. The root password is set, so setup is over and the
+# marker is spent here, permanently. Every step below is best-effort: it
+# can fail, be retried a bounded number of times, be skipped, and be
+# recorded as unconfigured - but it can never re-arm the marker, and the
+# machine will never be offered setup again.
+commit_completion || {
+	printf '\nSaphira first-boot setup cannot record its own completion; refusing to continue.\n' >&2
+	exit 1
+}
+rm -f -- "$pending_user"
+printf '\nRoot password set: first-boot setup is complete and will not run again.\n'
+printf 'The remaining steps configure this machine; a failure below is reported and left for you to finish, never re-run as setup.\n\n'
+
+heading 'Administrator account'
+printf 'Create the first administrator account for this system.\n\n'
 if test -s "$pending_user"; then
 	username=$(<"$pending_user")
 	if ! is_safe_username "$username"; then
 			printf 'saphira-firstboot: protected pending username is invalid\n' >&2
 			exit 1
 	fi
-	getent passwd "$username" >/dev/null 2>&1 || {
+	user_exists "$username" || {
 		printf 'saphira-firstboot: pending operator account is absent\n' >&2
 		exit 1
 	}
 	printf 'Resuming configuration for administrator account %s.\n' "$username"
 else
-	printf 'Login name for the administrator account: '
+	printf 'Username: '
 	while :; do
 		read_setup username
 		if ! is_safe_username "$username"; then
 			printf 'Use 1-32 lowercase letters, digits, underscores, and hyphens; start with a letter or underscore.\n' >&2
 		else
-			if getent passwd "$username" >/dev/null 2>&1; then
+			if user_exists "$username"; then
 				printf 'That account already exists.\n' >&2
 			else
 				break
 			fi
 		fi
-		printf 'Login name for the administrator account: '
+		printf 'Username: '
 	done
 fi
 
@@ -291,28 +843,137 @@ if ! test -s "$pending_user"; then
 	mv -f "$pending_tmp" "$pending_user"
 fi
 
-if ! getent passwd "$username" >/dev/null 2>&1; then
-	while ! useradd -m -c "$full_name" -s /bin/bash -G wheel "$username"; do
-		printf 'Administrator account creation was interrupted or failed; please try again.\n' >&2
-	done
+if ! user_exists "$username"; then
+	run_step "Administrator account ($username)" \
+		useradd -m -c "$full_name" -s /bin/bash -G wheel "$username" || true
 fi
-set_password "$username"
+printf '\nSet a password for administrator %s.\n\n' "$username"
+run_step "Administrator password ($username)" set_password "$username" || true
 
-printf '\nNetwork Configuration\n'
-printf 'Configure eth0 using static addressing.\n'
-ask_family IPv4
-ask_family IPv6
+heading 'Network configuration'
+printf 'Configure the wired network interfaces of this system.\n\n'
+configured_ifaces=
+disabled_ifaces=
+all_ifaces=
+failed_ifaces=
+iface_index_tmp=$(mktemp "$state_dir/.iface-index.XXXXXX")
+chmod 0600 "$iface_index_tmp"
+: > "$iface_index_tmp"
+# Every detected interface is configured in turn. IPv4 is asked first,
+# then whether IPv6 is wanted at all, then the IPv6 mode. q or Ctrl-C at
+# any step goes back one: from an address or gateway prompt to that
+# family's mode menu, from the IPv6 gate back to the IPv4 mode, and from
+# the first step of an interface back to the previous interface's
+# configuration. Going back discards that interface's answer and
+# re-asks it, so a mistake is recoverable without rebooting and without
+# feeding the rest of the flow bogus values. Nothing is applied until
+# every interface has been walked.
+interfaces=($(list_interfaces))
+total=${#interfaces[$(@)]}
+declare -a walked_name walked_kind
+index=0
+while test "$index" -lt "$total"; do
+	INTERFACE=${interfaces[$index]}
+	if is_wireless "$INTERFACE"; then
+		if command -v wpa_supplicant >/dev/null 2>&1; then
+			printf 'Wireless interface %s: automatic setup is not implemented; configure it after first boot.\n' "$INTERFACE"
+		else
+			printf 'Wireless interface %s: skipped (Wi-Fi needs the optional wireless packages).\n' "$INTERFACE"
+		fi
+		index=$((index + 1))
+		continue
+	fi
+	IPV4_MODE=off IPV4_CIDR= IPV4_GATEWAY=
+	IPV6_MODE=off IPV6_CIDR= IPV6_GATEWAY=
+	if ! choose_ipv4_mode "$INTERFACE"; then
+		if test "$index" -gt 0; then
+			# Back to the previous interface: drop what was recorded
+			# for it so it is asked afresh, exactly once.
+			unset 'walked_name[$((index - 1))]'
+			unset 'walked_kind[$((index - 1))]'
+			printf 'Back to the previous interface.\n'
+			index=$((index - 1))
+			continue
+		fi
+		printf 'Nothing before the first interface; staying here.\n'
+		continue
+	fi
+	if ! configure_ipv6 "$INTERFACE"; then
+		printf 'Back to the IPv4 mode for %s.\n' "$INTERFACE"
+		continue
+	fi
+	# Disabled for both families means exactly that: Saphira leaves this
+	# interface alone. No configuration file is written for it, so
+	# nothing on the system ever reconfigures it.
+	if test "$IPV4_MODE" = off && test "$IPV6_MODE" = off; then
+		printf 'Leaving %s unconfigured.\n' "$INTERFACE"
+		walked_name[$index]=$INTERFACE
+		walked_kind[$index]=disabled
+	else
+		validate_network_state
+		iface_state=$state_dir/.iface-$INTERFACE
+		cp -f "$network_state" "$iface_state"
+		chmod 0600 "$iface_state"
+		walked_name[$index]=$INTERFACE
+		walked_kind[$index]=configured
+	fi
+	index=$((index + 1))
+done
+
+# One pass over what was actually walked builds the index the summary
+# and the apply phase both read, so an interface that was revisited
+# appears exactly once.
+: > "$iface_index_tmp"
+all_ifaces=
+configured_ifaces=
+disabled_ifaces=
+i=0
+while test "$i" -lt "$total"; do
+	if test -n "${walked_name[$i]:-}"; then
+		printf '%s\n' "${walked_name[$i]}" >> "$iface_index_tmp"
+		all_ifaces="$all_ifaces ${walked_name[$i]}"
+		case ${walked_kind[$i]} in
+		configured) configured_ifaces="$configured_ifaces ${walked_name[$i]}" ;;
+		disabled) disabled_ifaces="$disabled_ifaces ${walked_name[$i]}" ;;
+		esac
+	fi
+	i=$((i + 1))
+done
+test -n "$configured_ifaces" || {
+	printf 'No network interfaces were configured; continuing without network changes.\n' >&2
+}
+heading 'DNS'
+printf 'DNS servers resolve hostnames; the search domain is optional.\n\n'
 choose_dns
 while :; do
-	printf 'DNS search domain (optional): '
+	printf 'Search domain (blank for none): '
 	read_setup DNS_SEARCH
 	if "$network_apply" validate-domain "$DNS_SEARCH"; then break; fi
 	printf 'Enter a valid DNS search suffix or leave it blank.\n' >&2
 done
-validate_network_state
+# DNS choice lands after interface collection, so refresh every
+# staged per-interface state with the final servers/search values,
+# validating the merged file directly (globals still hold the last
+# interface's values and must not leak across interfaces).
+for INTERFACE in $configured_ifaces; do
+	iface_state=$state_dir/.iface-$INTERFACE
+	merged_tmp=$(mktemp "$state_dir/.merged.XXXXXX")
+	chmod 0600 "$merged_tmp"
+	{
+		printf 'TYPE=physical\nINTERFACE=%s\n' "$INTERFACE"
+		sed -n '/^IPV4_MODE=/p;/^IPV4_CIDR=/p;/^IPV4_GATEWAY=/p;/^IPV4_METRIC=/p;/^IPV6_MODE=/p;/^IPV6_CIDR=/p;/^IPV6_GATEWAY=/p;/^IPV6_METRIC=/p' "$iface_state"
+		printf 'DNS_SERVERS=%s\nDNS_SEARCH=%s\n' "$DNS_SERVERS" "$DNS_SEARCH"
+	} > "$merged_tmp"
+	"$network_apply" validate "$merged_tmp"
+	mv -f "$merged_tmp" "$iface_state"
+	chmod 0600 "$iface_state"
+done
 
+heading 'Package repository'
+printf 'Packages are installed and updated from an APK repository.\n'
+printf 'Keep the default unless instructed otherwise.\n\n'
 while :; do
-	printf 'APK repository URL [%s]: ' "$REPOSITORY_URL"
+	printf 'Repository URL [%s]: ' "$REPOSITORY_URL"
 	read_setup repository_answer
 	if test -n "$repository_answer"; then
 		REPOSITORY_URL=$repository_answer
@@ -321,32 +982,133 @@ while :; do
 	printf 'Enter a valid HTTPS APK repository URL.\n' >&2
 done
 
-printf '\nNetwork summary\n'
-printf 'Interface:       eth0\n'
-printf 'IPv4:            %s\n' "${IPV4_CIDR:-not configured}"
-printf 'IPv4 gateway:    %s\n' "${IPV4_GATEWAY:-not configured}"
-printf 'IPv6:            %s\n' "${IPV6_CIDR:-not configured}"
-printf 'IPv6 gateway:    %s\n' "${IPV6_GATEWAY:-not configured}"
-printf 'DNS:             %s\n' "$DNS_SERVERS"
-printf 'Search domain:   %s\n' "${DNS_SEARCH:-none}"
-printf 'APK repository:  %s\n' "$REPOSITORY_URL"
-printf 'Apply this configuration? [y/N] '
-	read_setup answer
-case $answer in
-	y|Y) ;;
-	*) printf 'First-boot configuration cancelled.\n'; exit 1 ;;
+heading 'Summary'
+printf '  Root password:      set\n'
+if test -n "$full_name"; then
+	printf '  Administrator:      %s (%s)\n' "$username" "$full_name"
+else
+	printf '  Administrator:      %s\n' "$username"
+fi
+for INTERFACE in $all_ifaces; do
+	iface_state=$state_dir/.iface-$INTERFACE
+	if test ! -f "$iface_state"; then
+		printf '  Interface %s:       IPv4 disabled, IPv6 disabled (left unconfigured)\n' "$INTERFACE"
+		continue
+	fi
+	v4mode=$(sed -n 's/^IPV4_MODE=//p' "$iface_state")
+	v4cidr=$(sed -n 's/^IPV4_CIDR=//p' "$iface_state")
+	v4gw=$(sed -n 's/^IPV4_GATEWAY=//p' "$iface_state")
+	v6mode=$(sed -n 's/^IPV6_MODE=//p' "$iface_state")
+	v6cidr=$(sed -n 's/^IPV6_CIDR=//p' "$iface_state")
+	v6gw=$(sed -n 's/^IPV6_GATEWAY=//p' "$iface_state")
+	printf '  Interface %s:       IPv4 %s, IPv6 %s\n' "$INTERFACE" "$v4mode" "$v6mode"
+	if test "$v4mode" = static; then
+		printf '    IPv4 address:     %s via %s\n' "$v4cidr" "${v4gw:-none}"
+	fi
+	if test "$v6mode" = static; then
+		printf '    IPv6 address:     %s via %s\n' "$v6cidr" "${v6gw:-none}"
+	fi
+	if test "$v6mode" = slaac; then
+		printf '    IPv6 address:     from router advertisements (kernel SLAAC)\n'
+	fi
+done
+test -n "$all_ifaces" || printf '  Interfaces:         none detected\n'
+printf '  DNS servers:        %s\n' "$DNS_SERVERS"
+printf '  Search domain:      %s\n' "${DNS_SEARCH:-none}"
+printf '  Package repository: %s\n' "$REPOSITORY_URL"
+printf '\nApply this configuration and continue? [Y/n] '
+read_setup answer
+apply_configuration=1
+case ${answer:-Y} in
+y|Y) ;;
+*)
+	# Post-commit, so declining cannot re-arm anything. The root
+	# password is already set: this machine is simply left without the
+	# configuration it was offered, and is told so plainly rather than
+	# being sent back through setup on every boot from now on.
+	apply_configuration=0
+	record_unfinished 'Network, DNS and package repository' \
+		'declined at the confirmation prompt'
+	printf '\nConfiguration declined. Nothing below was applied.\n'
+	;;
 esac
 
-while ! "$network_apply" apply "$network_state"; do
-	printf 'Network configuration was interrupted or failed; please retry the setup.\n' >&2
-done
+if test "$apply_configuration" = 1; then
+	printf '\nApplying the configuration...\n'
 
-write_repository
-install_shell_defaults
+	for INTERFACE in $configured_ifaces; do
+		iface_state=$state_dir/.iface-$INTERFACE
+		cp -f "$iface_state" "$network_state"
+		chmod 0600 "$network_state"
+		# Reload globals from the staged per-interface state. Explicit
+		# per-key assignment (no eval): values were strictly validated
+		# at staging time, and this keeps it that way.
+		IPV4_MODE=off IPV4_CIDR= IPV4_GATEWAY=
+		IPV6_MODE=off IPV6_CIDR= IPV6_GATEWAY=
+		DNS_SERVERS= DNS_SEARCH=
+		while IFS= read -r line || test -n "$line"; do
+			case $line in
+			TYPE=physical) ;;
+			INTERFACE=*) INTERFACE=${line#INTERFACE=} ;;
+			IPV4_MODE=*) IPV4_MODE=${line#IPV4_MODE=} ;;
+			IPV4_CIDR=*) IPV4_CIDR=${line#IPV4_CIDR=} ;;
+			IPV4_GATEWAY=*) IPV4_GATEWAY=${line#IPV4_GATEWAY=} ;;
+			IPV4_METRIC=*) ;;
+			IPV6_MODE=*) IPV6_MODE=${line#IPV6_MODE=} ;;
+			IPV6_CIDR=*) IPV6_CIDR=${line#IPV6_CIDR=} ;;
+			IPV6_GATEWAY=*) IPV6_GATEWAY=${line#IPV6_GATEWAY=} ;;
+			IPV6_METRIC=*) ;;
+			DNS_SERVERS=*) DNS_SERVERS=${line#DNS_SERVERS=} ;;
+			DNS_SEARCH=*) DNS_SEARCH=${line#DNS_SEARCH=} ;;
+			*) printf 'saphira-firstboot: corrupt staged network state\n' >&2; exit 1 ;;
+			esac
+		done < "$iface_state"
+		# The machine is already committed: an apply failure is retried a
+		# bounded number of times, can be skipped, and is recorded. It
+		# never re-arms setup and never aborts the transaction, because
+		# re-running setup on the next boot is what left the acceptance
+		# machine stuck in a loop it could not fix without a network.
+		run_step "Network ($INTERFACE)" apply_interface_now || true
+	done
 
-completed_tmp=$(mktemp "$state_dir/.completed.XXXXXX")
-chmod 0600 "$completed_tmp"
-printf 'completed\n' > "$completed_tmp"
-mv -f "$completed_tmp" "$completed"
-rm -f -- "$pending_user" "$marker"
-printf 'First-boot configuration complete for %s.\n' "$username"
+fi # apply_configuration
+
+# Everything from here on is best-effort: the root password is set and
+# the marker is already spent, so these steps can fail, be retried a
+# bounded number of times, be skipped, and be recorded as unconfigured -
+# and none of them may re-arm setup.
+run_step 'Package repository' write_repository || true
+run_step 'Login shell defaults' install_shell_defaults || true
+run_step 'Machine identity' ensure_machine_id || true
+# Best-effort by design: sshd's own first start runs ssh-keygen -A, so a
+# failure here is repaired later and must not be reported as an
+# incomplete setup step.
+ensure_ssh_host_keys || true
+
+if test "${#unfinished_steps[@]}" -eq 0; then
+	printf 'Initial setup is complete for %s.\n' "$username"
+else
+	printf '\nInitial setup is complete for %s, but these steps are NOT configured:\n' "$username"
+	for entry in "${unfinished_steps[@]}"; do
+		printf '  - %s\n' "$entry"
+	done
+	printf '\nSetup will not run again. Finish the items above by hand; on this system:\n'
+	printf '  rc-service saphira-network restart   # network\n'
+	printf '  passwd <user>                        # a password that was skipped\n'
+	printf '  saphira-firstboot cannot be re-armed: the root password is already set.\n'
+fi
+# Handoff: the marker is consumed above, so the next boot is an
+# ordinary boot straight to the login prompt. When this run itself
+# was launched by the boot path, reboot now - that reboot IS the
+# handover into the configured system, not a retry. Manual runs in an
+# ordinary booted system just exit (no reboot of a live machine).
+# Force reboot is bus-less (no message bus is required); sync first
+# for the fresh journal. If reboot is unavailable, print and exit -
+# the next manual reboot boots normally.
+if at_boot; then
+	printf 'The system will restart now; log in as %s afterwards.\n' "$username"
+	sync
+	reboot -f >/dev/null 2>&1 || printf 'Please reboot to continue.\n'
+else
+	printf 'Log in as %s.\n' "$username"
+fi

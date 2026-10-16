@@ -125,6 +125,15 @@ else
 	install -m 0644 /etc/apk/repositories "$target/etc/apk/repositories"
 fi
 
+# Neutral ground before invoking apk: apk resolves a token against the
+# current directory FIRST, so a profile intention that shares its name
+# with a directory under CWD (every recipe directory when invoked from
+# /recipes: saphira-base, grub, vim, ...) dies with "X: Is a directory"
+# instead of installing the package. The fresh target is empty by
+# construction, so no token can ever collide there. This also makes the
+# relative --keys-dir below resolve to the keys just staged into the
+# target, which is what it always meant.
+cd "$target" || die 'cannot enter target directory'
 "$apk_command" --root "$target" --initdb \
 	--keys-dir etc/apk/keys \
 	--repositories-file "$target/etc/apk/repositories" add --no-scripts $packages

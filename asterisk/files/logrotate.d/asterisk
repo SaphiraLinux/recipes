@@ -1,0 +1,20 @@
+# Log rotation for the asterisk daemon's file logging. Adapted from
+# upstream contrib/scripts/asterisk.logrotate (same schedule/retention
+# and `logger reload` signalling) with two deliberate corrections:
+# the create identity is asterisk:asterisk (upstream says root:root,
+# which would lock the unprivileged daemon out of its own logs after
+# rotation), and the postrotate tolerates a stopped daemon.
+# Inert without logrotate installed (no depends on logrotate).
+/var/log/asterisk/*.log /var/log/asterisk/queue_log {
+	weekly
+	missingok
+	rotate 52
+	compress
+	delaycompress
+	notifempty
+	create 640 asterisk asterisk
+	sharedscripts
+	postrotate
+		/usr/sbin/asterisk -rx 'logger reload' > /dev/null 2>&1 || true
+	endscript
+}

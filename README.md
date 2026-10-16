@@ -22,6 +22,37 @@ The eventual foundational package set is init-neutral. “@base” is only a con
 - `saphira-base-openrc`: `saphira-base`, OpenRC, and Saphira defaults.
 - `saphira-base-systemd`: `saphira-base`, systemd, and Saphira-d defaults.
 
+## Boot architecture
+
+The Saphira boot path is deliberately minimal and has no early userspace:
+
+    kernel -> real ext4 root filesystem -> /sbin/init
+
+Everything the kernel needs before that is built in (`=y`), not a module:
+ext4, virtio block/PCI/net/console, devtmpfs, the 8250 console driver. Images
+ship no initrd and no initramfs, and none is generated, referenced or
+troubleshoted. An initrd may become appropriate later for a configuration
+that genuinely requires early userspace - notably a ZFS root - and that is
+separate future work, not a current defect to fix.
+
+The kernel names exactly one console, the VGA (`console=tty0`), so
+`/dev/console` is always the console a machine's operator can see and type
+on. Firstboot is driven entirely through `/dev/console` (OpenRC init script
+redirection, systemd `TTYPath`), which is why a second `console=ttyS0` on
+the packaged command line was a real defect: on hardware without a serial
+port it left firstboot with no visible console at all. A deployment that
+genuinely has a serial console adds `console=ttyS0` to its own kernel line.
+
+Firstboot itself is an init-level service in the ordinary boot sequence -
+GRUB, kernel, real root, init, essential boot and platform setup, a clean
+console, firstboot, and only then login and the services that need a
+configured identity and network. It is never a boot mode, and its address
+mode for every interface is an explicit operator choice: DHCP and DHCPv6
+are selections, never defaults, and an empty answer never changes a
+decision. `dhcpcd` ships as an available capability, is never enabled or
+started just by being installed, and never writes the resolver. The
+normative rules are in `RECIPE_RULES.md`.
+
 ## Artifacts and administration
 
 Successful unsigned artifacts are promoted to a visible `*-ready` transaction below the configured incoming directory; successful build scratch is removed. Failed workspaces retain a trusted `FAILED` marker. Unmarked workspace collisions are refused.

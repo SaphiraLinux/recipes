@@ -1,0 +1,11 @@
+--- a/UNS/PortForwardingService/LMEConnection.cpp
++++ b/UNS/PortForwardingService/LMEConnection.cpp
+@@ -189,7 +189,7 @@
+ 	{
+ 		if (_devNotify != NULL)
+ 		{
+-			if (_devNotify(_devNotifyParam, &_notifyHandle, static_cast<HANDLE>(NULL), false))
++			if (_devNotify(_devNotifyParam, &_notifyHandle, static_cast<HANDLE>(0) /* HANDLE is int on Linux; nullptr does not convert */, false))
+ 				_notifyHandle = NULL;
+ 		}
+ 

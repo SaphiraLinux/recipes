@@ -1,137 +1,167 @@
 pkgname=saphira-kernel-source-7.2.2
 pkgver=1
-pkgrel=1
+pkgrel=2
 pkgarch=${SAPHIRA_ARCH:-x86_64}
-pkgdesc='Saphira kernel 7.2.2 external-module build tree (Kbuild: Makefile, Module.symvers, generated headers, modpost, sign-file)'
+pkgdesc='Saphira kernel 7.2.2 source tree (upstream 7.2.2 + Saphira x86-64-v3 patch; no build output)'
 license='GPL-2.0-only'
 origin=saphira-kernel-source-7.2.2
 repo=saphira
 url=https://saphira.vm2.uk/
 
-# BUILD-SIDE ONLY. This package exists so an out-of-tree module (saphira-zfs-7.2.2,
-# nvidia-open-7.2.2, saphira-drbd9-7.2.2) can be compiled against THIS kernel's
-# exact configuration. It is deliberately NOT a dependency of saphira-kernel,
-# saphira-kernel-headers or any runtime profile, so no installed rootfs and no
-# published image ever carries it.
+# r2: STOP BUILDING THE KERNEL TO PACKAGE ITS SOURCE.
 #
-# It exists because saphira-kernel used to ship this tree in its own payload
-# (d2e581d, +1648 MiB and +77,655 files), which grew every installed rootfs to
-# roughly 3 GiB. The corrective r10 removed it from the runtime package
-# outright. That left out-of-tree module builds with no tree to build against,
-# and the answer is a separate build-side package rather than putting build
-# content back into a runtime one.
+# r1 was assembled from a USED KERNEL BUILD TREE, not from source. buildpkg-single
+# runs recipe_build and recipe_install against one $SRC, and r1's recipe_build ran
+# `make olddefconfig && make -j$(nproc)` there before recipe_install copied that
+# same directory into the payload. install_prepared_tree() then pruned a DENYLIST
+# of the names someone remembered, so everything it did not name shipped:
 #
-# What an external module build actually reads, and therefore what this ships:
-#   Makefile                 the kbuild entry point
-#   .config                  the configuration the kernel was built with
-#   Module.symvers           exported symbols (and CRCs, where enabled)
-#   include/generated/**     autoconf.h and every compiler-derived header
-#   include/config/kernel.release
-#   scripts/mod/modpost      symbol resolution for the module
-#   scripts/sign-file        module signing
-#   scripts/, arch/          the kbuild machinery itself
-# plus the kernel source, which an external build compiles against. That source
-# is the bulk of the size and cannot be pruned away, which is precisely why this
-# is a package nobody installs on a running system.
+#     Module.symvers      .config              vmlinux.unstripped
+#     arch/x86/boot/bzImage                      boot/compressed/vmlinux.bin*
+#     include/config/    (2,395 entries)       include/generated/
+#     scripts/sign-file  scripts/mod/modpost   tools/objtool/fixdep   (built host tools)
+#     lib/lib.a          lib.a x4              usr/gen_init_cpio
+#     modules.order      (834 entries)         .tmp_missing-syscalls
 #
-# Renamed from saphira-kernel-devel-7.2.2 (same payload contract;
-# identity follows the versioned kernel family, origin tracks identity).
-# install_prepared_tree already removes build intermediates (*.o, *.cmd, *.ko,
-# built-in.a, vmlinux, System.map, .tmp_vmlinux*), the module signing PRIVATE
-# key, Documentation, and the standalone userspace bulk of tools/.
+# Measured on the published saphira-kernel-source-7.2.2-1-r1.apk: 353,120,683 bytes
+# compressed, installed-size 1,713,546,224. On 7.2.2 the payload carried 82,890 paths, of
+# which 3,410 were absent from the upstream tarball entirely. A clean upstream 7.2.2
+# tarball is 160,089,944 bytes.
+#
+# THE INVARIANT THIS RECIPE NOW ENFORCES
+#
+#     kernel build tree  !=  kernel source package input
+#
+# Nothing here compiles. There is no build tree in this workspace for build
+# output to leak from, so the invariant is STRUCTURAL rather than defended by a
+# prune list. A prune list is what failed: it is correct only for the names
+# somebody thought of at the time, and every future kernel release adds build
+# outputs nobody has seen yet.
+#
+# WHAT THIS PACKAGE IS, AND WHAT IT IS NOT
+#
+# It is upstream 7.2.2 source plus the one deliberate Saphira source patch
+# (files/x86-64-v3.patch: -march=x86-64-v3 for the shipped CPU baseline). It is
+# verified against the same vendored tarball and the same sha256 pin that
+# saphira-kernel-7.2.2 compiles, so "the source for this kernel" is an assertion
+# about bytes rather than about a filename.
+#
+# It is NOT an external-module build tree, and no longer claims to be. r1 shipped
+# Module.symvers, .config and include/generated/ so that an out-of-tree module
+# could be compiled against this exact configuration; that is precisely the set of
+# things a SOURCE package must not contain, because they are all build output.
+# Shipping them made the package 2.4x larger and made it a build tree with a
+# source archive stapled on. If an external-module build against a live config is
+# wanted, the builder prepares its own tree from the vendored tarball and the
+# canonical config file; that is a build-time concern and it does not belong in a
+# repository payload.
+#
+# Nothing depends on this package: saphira-zfs-7.2.2, nvidia-open-7.2.2 and
+# saphira-drbd9-7.2.2 all depend on the RUNTIME saphira-kernel-7.2.2, and this
+# package is deliberately not a dependency of any runtime profile, so no
+# installed rootfs and no published image ever carries it.
+#
+# Renamed from saphira-kernel-devel-7.2.2 (same intent, versioned kernel-family
+# identity; origin tracks identity).
 
 depends=""
-# Inherited wholesale from saphira-kernel rather than curated separately.
-# The devel tree compiles the same kernel, so it needs the same toolchain
-# inputs -- elfutils-dev for gelf.h, which tools/objtool includes; pahole
-# for CONFIG_DEBUG_INFO_BTF; zlib-dev for tools/bpf/resolve_btfids. A
-# hand-picked subset is how the build died on a missing gelf.h.
+# No compiler is involved: nothing is built, so there is no gcc, no pahole, no
+# elfutils, no binutils, no kernel UAPI headers to satisfy. r1 carried the whole
+# saphira-kernel makedepends closure (14 packages, most of it unused) purely
+# because it compiled a kernel in order to ship that kernel's source.
+#
+# What is genuinely needed: read the vendored tarball, verify it, extract it,
+# apply one patch, copy a tree.
 makedepends="
-  bc
-  binutils
-  kmod
-  elfutils-dev
-  bison
-  m4
-  flex
+  coreutils
   gawk
-  gcc
-  openssl-dev
-  make
-  perl
-  pahole
-  zlib-dev
-  kmod
+  patch
+  tar
+  xz
+  gzip
+  zstd
 "
-# The module signing key is build-time only and is exposed read-only by the
-# builder at the fixed path below. It is never staged, never copied into
-# /recipes, and install_prepared_tree removes it from the payload.
-SAPHIRA_MODULE_KEY_DEFAULT=/keys/module-signing.pem
+# The vendored archive is the same verified tarball saphira-kernel-7.2.2 compiles.
+# Read as the sibling recipe's vendored copy rather than fetched again, so the two
+# cannot drift: the sha256 below is cross-checked against saphira-kernel-7.2.2's
+# own pin at build time, which is the assertion that this tree and the running
+# kernel are the same kernel rather than two builds of a similar name.
 
 recipe_build()
 {
 	export TAR_OPTIONS=--no-same-owner
-	# Builder-exposed read-only module signing key, same fixed path
-	# saphira-kernel uses. Absent key must fail closed, never sign nothing.
-	KEY=/keys/module-signing.pem
-	[ -r "$KEY" ] || {
-		echo "ERROR: module signing key not readable at $KEY" >&2
+
+	KVER=7.2.2
+	KBASE="$RECIPE_DIR/../saphira-kernel-$KVER/files/linux-$KVER"
+	KBALL="$KBASE.tar.xz"
+	# 7.3-rc1 is a .tar.gz (torvalds cgit snapshot); the rest are .tar.xz.
+	[ -f "$KBALL" ] || KBALL="$KBASE.tar.gz"
+	[ -f "$KBALL" ] || {
+		echo "ERROR: no vendored linux-$KVER.tar.xz or .tar.gz" >&2
 		return 1
 	}
-
-	# 7.3-rc1 is a .tar.gz (torvalds cgit snapshot); the rest are .tar.xz.
-	# Same fallback saphira-kernel uses, rather than hardcoding one spelling.
-	KBALL="$RECIPE_DIR/../saphira-kernel-7.2.2/files/linux-7.2.2.tar.xz"
-	[ -f "$KBALL" ] || KBALL="$RECIPE_DIR/../saphira-kernel-7.2.2/files/linux-7.2.2.tar.gz"
-	[ -f "$KBALL" ] || { echo "ERROR: no vendored linux-7.2.2.tar.xz" >&2; return 1; }
-	# Same archive and same sha256 pin as saphira-kernel. If these ever
-	# diverge the devel tree and the running kernel stop being the same
-	# kernel, which is the one thing this package exists to guarantee.
 	# Verify the archive against its own sidecar, without parsing it.
 	(cd "$(dirname "$KBALL")" && sha256sum -c "$(basename "$KBALL").sha256") ||
 		{ echo "ERROR: $(basename "$KBALL") failed its sha256 sidecar" >&2; return 1; }
-	# And prove it is the SAME archive saphira-kernel pins. The two recipes
-	# reading one vendored file is already shared, but a shared path is not a
-	# shared hash: this is the assertion that the devel tree and the running
-	# kernel are the same kernel rather than two builds of a similar name.
+	# And prove it is the SAME archive saphira-kernel-7.2.2 pins. The two
+	# recipes reading one vendored file is already shared, but a shared path
+	# is not a shared hash: this is the assertion that the source package and
+	# the running kernel are the same kernel.
 	kernel_sha=$(grep -m1 "^sha256=" \
-		"$RECIPE_DIR/../saphira-kernel-7.2.2/recipe.sh" | cut -d= -f2)
-	side_sha=$(awk 'NR==1{print $1}' "$(dirname "$KBALL")/linux-7.2.2.tar.xz.sha256")
+		"$RECIPE_DIR/../saphira-kernel-$KVER/recipe.sh" | cut -d= -f2)
+	side_sha=$(awk 'NR==1{print $1}' "$KBALL.sha256")
 	[ -n "$kernel_sha" ] && [ "$kernel_sha" = "$side_sha" ] || {
-		echo "ERROR: source tree archive does not match saphira-kernel-7.2.2 pin" >&2
+		echo "ERROR: source tree archive does not match saphira-kernel-$KVER pin" >&2
 		echo "  saphira-kernel: ${kernel_sha:-<none>}" >&2
 		echo "  sidecar:        ${side_sha:-<none>}" >&2
 		return 1
 	}
 
-	mkdir -p "$SRC/linux-7.2.2"
-	tar --no-same-owner -C "$SRC/linux-7.2.2" --strip-components=1 -xf "$KBALL"
-	cd "$SRC/linux-7.2.2"
+	# A FRESH extraction into a directory of its own. Deliberately NOT $SRC:
+	# $SRC is the shared recipe workspace, and $BUILDDIR is where a build
+	# would live if this recipe built anything. Neither is used here, and
+	# keeping the pristine tree in its own directory is what makes "this
+	# package was never staged from a build tree" checkable rather than
+	# merely asserted.
+	PRISTINE="$BUILDDIR/pristine/linux-$KVER"
+	rm -rf "$BUILDDIR/pristine"
+	mkdir -p "$PRISTINE"
+	tar --no-same-owner -C "$PRISTINE" --strip-components=1 -xf "$KBALL"
+	[ -f "$PRISTINE/Makefile" ] || {
+		echo "ERROR: extracted tree has no Makefile: $PRISTINE" >&2
+		return 1
+	}
 
-	patch -Np1 -i "$RECIPE_DIR/../saphira-kernel-7.2.2/files/x86-64-v3.patch"
-	# The SAME canonical config file saphira-kernel builds from. Shared by
-	# path, not copied, so the two cannot drift.
-	cp "$RECIPE_DIR/../saphira-kernel-7.2.2/files/config-7.2.2-akadata" "$SRC/linux-7.2.2/.config"
+	# The one intentional Saphira source patch. This is the ONLY modification
+	# made to upstream source, and it is a deliberate architecture decision
+	# (the shipped CPU baseline), not packaging fallout.
+	patch -Np1 --no-backup-if-mismatch -d "$PRISTINE" -i \
+		"$RECIPE_DIR/../saphira-kernel-$KVER/files/x86-64-v3.patch" ||
+		{ echo "ERROR: x86-64-v3.patch did not apply" >&2; return 1; }
 
-	mkdir -p "$SRC/linux-7.2.2/certs/regdb"
-	cp "$RECIPE_DIR/../saphira-kernel-7.2.2/files/saphira-regdb.x509" \
-	   "$SRC/linux-7.2.2/certs/regdb/saphira-regdb.x509"
-	cp "$KEY" "$SRC/linux-7.2.2/certs/module-signing.pem"
-	chmod 600 "$SRC/linux-7.2.2/certs/module-signing.pem"
-
-	make olddefconfig
-	make -j${JOBS:-$(nproc)}
+	# Deliberately NOT done here, and each omission is load-bearing:
+	#   - no .config            a source package carries no configuration
+	#   - no certs/regdb, no signing key   key material is build-time only
+	#   - no make olddefconfig   nothing is compiled
+	#   - no make                see the header: this is the whole fix
+	#
+	# Verify the staged input BEFORE it reaches the payload, so a
+	# contamination ever introduced here fails the build naming the file
+	# rather than shipping.
+	. "$RECIPE_DIR/../saphira-kernel/files/kernel-source-tree.sh"
+	check_source_tree_pure "$PRISTINE"
 }
 
 recipe_install()
 {
-	. "$RECIPE_DIR/../saphira-kernel-7.2.2/files/install-kernel-layout.sh"
-	KREL=$(kernel_layout_release "$SRC/linux-7.2.2")
-	install_prepared_tree "$SRC/linux-7.2.2" "$PKGDEST/usr/src/linux-7.2.2-saphira"
-	# No /lib/modules/build link here, deliberately. That link belongs to
+	KVER=7.2.2
+	. "$RECIPE_DIR/../saphira-kernel/files/kernel-source-tree.sh"
+	# install_clean_source_tree verifies the input, copies, then verifies the
+	# destination, so both the source of truth and the copy are proven clean.
+	install_clean_source_tree "$BUILDDIR/pristine/linux-$KVER" \
+		"$PKGDEST/usr/src/linux-$KVER-saphira"
+	# No /lib/modules/<rel>/build link, deliberately. That link belongs to
 	# saphira-kernel, which owns the module directory; this package ships no
 	# modules at all, and install_module_build_link correctly refuses a tree
-	# with no /lib/modules/<rel> beneath it. A build-side consumer points KSRC
-	# at /usr/src/linux-7.2.2-saphira directly, which is unambiguous and does
-	# not pretend this package owns a module tree it does not have.
+	# with no /lib/modules/<rel> beneath it.
 }

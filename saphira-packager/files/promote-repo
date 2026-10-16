@@ -110,9 +110,20 @@ if [ -f "$to_dir/repository.db" ]; then
 fi
 
 mkdir -p -- "${SAPHIRA_TMPDIR:-/build/tmp}"
+workspace=""
+# shellcheck disable=SC2086
+trap 'if [ -n "$db_lock_held" ]; then rmdir -- "$db_lock_held/repository.db.lock" 2>/dev/null || true; fi; if [ -n "$workspace" ]; then if [ -f "$workspace/staged-files" ]; then while IFS= read -r f || [ -n "$f" ]; do [ -n "$f" ] && rm -f -- "$to_dir/$f"; done < "$workspace/staged-files"; fi; rm -rf -- "$workspace"; fi' EXIT HUP INT TERM
 workspace=$(mktemp -d "${SAPHIRA_TMPDIR:-/build/tmp}/promote-repo.XXXXXX")
-trap 'if [ -n "$db_lock_held" ]; then rmdir -- "$db_lock_held/repository.db.lock" 2>/dev/null || true; fi; rm -rf -- "$workspace"' EXIT HUP INT TERM
+: > "$workspace/staged-files" || die "cannot create staging ledger"
 
+# Phase 1 — validate and place. Copies land under their final names so
+# the gate below reads exactly what would be committed (same bytes the
+# index and ledger will reference), but the index and database are not
+# touched yet: unindexed files are invisible to resolvers, and any gate
+# refusal removes the copies before dying, leaving the live repository
+# byte-identical. (A kill between copy and rollback leaves orphan files
+# that are equally invisible; the next audit gates whatever is on disk,
+# and the trap above rolls them back on signal/exit paths.)
 for nvr in "$@"; do
 	printf '%s' "$nvr" | grep -Eq "$NVR_RE" || die "invalid NVR (expected name-version-rN): $nvr"
 	source_apk=$from_dir/$nvr.apk
@@ -128,32 +139,37 @@ for nvr in "$@"; do
 		fi
 		die "published filename is immutable and has different content: $nvr (destination $to wins; no promotion performed)"
 	fi
-	# Exact-byte copy via the publishing temporary pattern; never rebuild.
-	temporary=$to_dir/$nvr.apk.promoting-$(date -u +%Y%m%dT%H%M%SZ)-$$
-	[ ! -e "$temporary" ] || die "promotion temporary already exists: $temporary"
-	cp -p -- "$source_apk" "$temporary"
-	"$SAPHIRA_APK" verify --keys-dir "$trust_dir" "$temporary" \
-		|| { rm -f -- "$temporary"; die "copied package fails verification: $temporary"; }
-	mv -- "$temporary" "$dest_apk"
+	cp -p -- "$source_apk" "$dest_apk" \
+		|| die "cannot place $nvr into $to"
+	"$SAPHIRA_APK" verify --keys-dir "$trust_dir" "$dest_apk" \
+		|| { rm -f -- "$dest_apk"; die "placed copy fails verification: $nvr (removed; live index/db unchanged)"; }
 	normalize_ownership "$dest_apk"
+	printf '%s\n' "$nvr.apk" >> "$workspace/staged-files" \
+		|| { rm -f -- "$dest_apk"; die "cannot record staged file"; }
 	promoted=$((promoted + 1))
 	promoted_nvrs+=("$nvr")
-	printf 'promote-repo: promoted %s: %s -> %s\n' "$nvr" "$from" "$to"
-	printf '{"ts":"%s","action":"promoted","from":"%s","to":"%s","nvr":"%s","sha256":"%s"}\n' \
-		"$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$from" "$to" "$nvr" "$(sha256sum "$dest_apk" | cut -d' ' -f1)" \
-		>> "$journal"
-	normalize_ownership "$journal"
+	printf 'promote-repo: staged %s for promotion (%s -> %s)\n' "$nvr" "$from" "$to"
 done
 
 if [ "$promoted" -gt 0 ]; then
+	# Phase 2+3 — gate, ledger commit, then index. The python block
+	# gates the staged set and, only on success, applies the ledger
+	# transaction; the regenerated index is installed after it, so a
+	# gate refusal can only leave staged files behind (removed below),
+	# never a live index advertising uncommitted packages. A crash
+	# between the ledger commit and the index install leaves
+	# db-without-index (invisible, heals on the next run); the reverse
+	# order would leave index-without-db, which is exactly the debris
+	# shape this sequencing exists to prevent.
+	rollback_staged()
+	{
+		while IFS= read -r f || [ -n "$f" ]; do
+			[ -n "$f" ] && rm -f -- "$to_dir/$f"
+		done < "$workspace/staged-files"
+		: > "$workspace/staged-files"
+	}
 	adb=$workspace/Packages.adb
 	tar=$workspace/APKINDEX.tar.gz
-	# shellcheck disable=SC2046
-	repo_generate_index "$SAPHIRA_APK" "$adb" "$tar" "$sign_key" "$trust_dir" \
-		$(find "$to_dir" -maxdepth 1 -name '*.apk' -print) \
-		|| die "destination index regeneration failed for $to"
-	repo_install_index "$to_dir" "$adb" "$tar"
-	normalize_ownership "$to_dir/Packages.adb" "$to_dir/APKINDEX.tar.gz"
 	# The destination ledger travels with the promotion: same writer
 	# lock, same library, same apply semantics as sign-apk-repo (newest
 	# recompute, tombstone advances, loud notices). No database yet
@@ -162,8 +178,8 @@ if [ "$promoted" -gt 0 ]; then
 		# The lock was taken before the first copy, above; assert it is
 		# still ours rather than acquiring it a second time.
 		[ -n "$db_lock_held" ] || die "internal: writer lock was not held before mutation"
-		"$SAPHIRA_PYTHON" - "$repo_db_lib" "$SAPHIRA_APK" "$to_dir" \
-			"${promoted_nvrs[@]}" <<'PY' || die "repository.db promotion sync failed for $to (see above)"
+	"$SAPHIRA_PYTHON" - "$repo_db_lib" "$SAPHIRA_APK" "$to_dir" \
+		"${promoted_nvrs[@]}" <<'PY' || { rollback_staged; die "promotion refused or failed (staged files removed; live index/db unchanged; see above)"; }
 import json
 import os
 import sys
@@ -203,7 +219,7 @@ carriers = []
 for nvr in nvrs:
     dumped = rdb.dump_package(apk, os.path.join(to_dir, nvr + ".apk"))
     filename = nvr + ".apk"
-    if any(f.startswith(rdb.FRAGMENT_PREFIX) for f in dumped["files"]):
+    if any(f.startswith((rdb.FRAGMENT_PREFIX, rdb.FHS_FRAGMENT_PREFIX, rdb.CAPS_FRAGMENT_PREFIX)) for f in dumped["files"]):
         carriers.append(filename)
 with tempfile.TemporaryDirectory(prefix="promote-repo-extract-", dir=_promote_tmp_base) as tmp:
     decls = rdb.extract_declarations(apk, to_dir, carriers, tmp)
@@ -211,10 +227,28 @@ receipts = {}
 for nvr in nvrs:
     filename = nvr + ".apk"
     dumped = rdb.dump_package(apk, os.path.join(to_dir, filename))
+    # Manifest-schema receipts: the gate compares payload presence
+    # against these declarations in both directions (fragment without
+    # declaration, and declaration without fragment, both refuse).
+    # Every declaration channel the manifest path records must be
+    # represented here, or carriers of that channel can never
+    # traverse promotion: sysusers (mechanism flag, independent of
+    # how many static IDs the confs parse to), fhs migrations, and
+    # file capabilities. extract_declarations derives all of them
+    # from the same isolated install the gate trusts.
+    decl = decls.get(filename, {})
     receipts[filename] = {
         "name": dumped["name"],
         "version": dumped["version"],
-        "accounts": decls.get(filename, {"users": [], "groups": [], "dirs": [], "files": []}),
+        "accounts": {
+            "users": decl.get("users", []),
+            "groups": decl.get("groups", []),
+            "dirs": decl.get("dirs", []),
+            "files": decl.get("files", []),
+            "sysusers": decl.get("sysusers", False),
+        },
+        "fhs": decl.get("fhs", {"dirs": [], "replaces": [], "removals": []}),
+        "caps": decl.get("caps", {"caps": []}),
     }
 receipts_path = os.path.join(_promote_tmp_base, "staged-accounts.json")
 with open(receipts_path, "w", encoding="utf-8") as stream:
@@ -243,12 +277,31 @@ for notice in notices:
 print(f"promote-repo: repository.db transaction committed:"
       f" {len(staged)} promoted package(s) applied")
 PY
-		normalize_ownership "$to_dir/repository.db"
-		rmdir -- "$to_dir/repository.db.lock" 2>/dev/null || true
-		db_lock_held=""
+	normalize_ownership "$to_dir/repository.db"
+	rmdir -- "$to_dir/repository.db.lock" 2>/dev/null || true
+	db_lock_held=""
+	# Committed: the staged files are now live payload, so clear the
+	# rollback ledger (the EXIT trap must not remove them) before the
+	# index references them.
+	: > "$workspace/staged-files"
+	# shellcheck disable=SC2046
+	repo_generate_index "$SAPHIRA_APK" "$adb" "$tar" "$sign_key" "$trust_dir" \
+		$(find "$to_dir" -maxdepth 1 -name '*.apk' -print) \
+		|| die "destination index regeneration failed for $to (packages+ledger committed; rerun promote-repo for an already-present refresh)"
+	repo_install_index "$to_dir" "$adb" "$tar"
+	normalize_ownership "$to_dir/Packages.adb" "$to_dir/APKINDEX.tar.gz"
+	# Announcements last: nothing is called "promoted", journaled, or
+	# counted until files, ledger, and index are all committed.
+	for nvr in "${promoted_nvrs[@]}"; do
+		printf 'promote-repo: promoted %s: %s -> %s\n' "$nvr" "$from" "$to"
+		printf '{"ts":"%s","action":"promoted","from":"%s","to":"%s","nvr":"%s","sha256":"%s"}\n' \
+			"$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$from" "$to" "$nvr" "$(sha256sum "$to_dir/$nvr.apk" | cut -d' ' -f1)" \
+			>> "$journal"
+	done
+	normalize_ownership "$journal"
 	else
-		printf 'promote-repo: notice: no repository.db in %s (run saphira-repo-migrate %s)\n' \
-			"$to" "$to"
+		rollback_staged
+		die "no repository.db in $to (staged files removed; run saphira-repo-migrate $to first)"
 	fi
 fi
 

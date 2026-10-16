@@ -31,7 +31,7 @@
 #   - editors, mail, DNS, DHCP and web services: those are ROLE layers
 #     (see the role-* profiles), not part of a minimal boot.
 saphira-base
-saphira-kernel
+saphira-kernel-7.2.3
 openrc
 grub
 e2fsprogs

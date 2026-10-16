@@ -1,0 +1,24 @@
+--- a/res/res_prometheus.c
++++ b/res/res_prometheus.c
+@@ -972,6 +972,21 @@
+ 
+ static int load_module(void)
+ {
++	static int scrape_lock_inited = 0;
++
++	/* SAPHIRA-MUSL: scrape_lock is AST_MUTEX_DEFINE_STATIC (plain
++	 * non-recursive on Linux) but load_module holds it across
++	 * aco_process_config(), whose post-apply handler calls
++	 * prometheus_metric_unregister(), which takes scrape_lock again
++	 * (proven self-deadlock: two nested takes by the loading thread,
++	 * zero unlocks). Upstream's structure requires recursive semantics
++	 * here. Initialize recursive once; load_module is the first
++	 * possible user of this lock. */
++	if (!scrape_lock_inited) {
++		ast_mutex_init(&scrape_lock);
++		scrape_lock_inited = 1;
++	}
++
+ 	SCOPED_MUTEX(lock, &scrape_lock);
+ 
+ 	if (AST_VECTOR_INIT(&metrics, 64)) {

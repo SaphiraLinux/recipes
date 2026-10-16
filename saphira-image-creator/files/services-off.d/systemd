@@ -1,0 +1,16 @@
+# Units never auto-enabled on systemd targets, even when their
+# package is profiled.
+#
+# acpid: systemd-logind is the single ACPI event owner on SaphiraD
+# targets (verified: logind handles the power button and virsh
+# shutdown cleanly). acpid stays installed and available for roles
+# that need custom event handling, but enabling both would double-
+# handle every power event.
+#
+# saphira-network: systemd-networkd owns the base NIC on SaphiraD
+# targets through the vendor default (generic wired DHCP match). The
+# saphira framework service stays installed for roles and for
+# firstboot-driven static setups, but must not run alongside
+# networkd on the same interface.
+acpid
+saphira-network
