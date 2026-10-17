@@ -9,7 +9,11 @@ __pycache__/
 *.pyc
 
 codex.history.md
-
+.rtk
+.rtk/filters.toml
+CLAUDE.md
+CODEX.md
+AGENTS.md
 
 
 *.x509
