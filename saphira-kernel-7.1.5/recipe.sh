@@ -18,7 +18,12 @@ pkgname=saphira-kernel-7.1.5
 # automatic replacement.
 kernel_version=7.1.5
 pkgver=1
-pkgrel=1
+pkgrel=3
+# r3: build in DRM_BOCHS + DRM_QXL (QEMU std VGA and SPICE consoles
+# need builtin drivers; no initramfs to load them). Payload change.
+# r2: build in DRM_I915 + DRM_SIMPLEDRM (no early boot logs: i915 as a
+# module binds after the console handoff; fbcon/FBDEV already =y).
+# Payload change.
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="Saphira kernel 7.1.5 (x86-64-v3, signed modules, Saphira regdb trust)"
 license=GPL-2.0-only

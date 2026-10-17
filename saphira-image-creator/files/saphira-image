@@ -46,7 +46,20 @@ usage:
 build options:
   --target NAME       bios-openrc | bios-systemd | uefi-openrc | uefi-systemd
   --output PATH       image path; .raw or .qcow2
-  --size SIZE         minimum image size (default 2G)
+  --size SIZE         total capacity of the image or device (default 2G)
+  --allocate SIZE     how much of that capacity the initial partition
+                      layout occupies: an absolute size (40G) or a
+                      percentage of --size (60%). The remainder is left
+                      unallocated for later growth, so a 128G image with
+                      --allocate 10% is a 128G device whose partitions
+                      cover about 12.8G. Omitted, the partitions occupy
+                      the whole capacity, which is the historical
+                      behaviour.
+  --arch ARCH         target architecture: x86_64 (default) or aarch64.
+                      Selects the repository's architecture, the packages
+                      installed into the image, and the bootloader target
+                      platform. Refused for combinations the platform does
+                      not have, such as BIOS on aarch64.
   --repository PATH   repository index/Packages.adb to install from
   --hostname NAME     hostname written into the image (default saphira)
   --root-password PW  set the root password in the image
@@ -56,6 +69,10 @@ build options:
   --role NAME         add a role layer; repeatable
   --role-file PATH    add intentions from a file; repeatable
   --no-enable         do not enable the target's services in the image
+  --kernel-arg ARG    append ARG to GRUB_CMDLINE_LINUX in the image;
+                      repeatable. For what a deployment needs and the
+                      shipped default deliberately does not assume, such
+                      as console=ttyS0,115200 for a serial console
   --keep-work         retain the scratch workspace for diagnosis
 
 plan options:
@@ -168,6 +185,10 @@ resolve_target()
 	BOOT=$boot
 	INIT=$init
 	PROFILE=$profile
+	# Default applied here rather than at each entry point: plan, report
+	# and build all resolve a target, so all three get the same
+	# architecture without any of them remembering to.
+	ARCH=${arch:-x86_64}
 }
 
 # --- partition plan ---------------------------------------------------
@@ -212,6 +233,63 @@ size_bytes()
 	esac
 }
 
+# The architectures a target can be built for. This is a closed set on
+# purpose: an unknown --arch must be refused, never passed through to apk
+# or to the bootloader, because both would fail later and further from the
+# cause.
+known_arch()
+{
+	case $1 in
+	x86_64 | aarch64) return 0 ;;
+	esac
+	return 1
+}
+
+# BIOS is an x86 firmware concept. There is no BIOS firmware for aarch64,
+# so the combination is refused rather than silently producing something
+# unbootable.
+validate_arch()
+{
+	known_arch "$ARCH" ||
+		die "unsupported --arch: $ARCH (known: x86_64, aarch64)"
+	if [ "$ARCH" != x86_64 ] && [ "$BOOT" = bios ]; then
+		die "--arch $ARCH cannot boot BIOS: there is no BIOS firmware for $ARCH. Use a uefi target."
+	fi
+}
+
+# The initial partition footprint, as a byte count. Absolute sizes reuse
+# size_bytes so both options share one strict grammar and one set of
+# error messages; a percentage resolves against the USABLE capacity.
+#
+# Usable, not raw. The 1 MiB alignment gap at the front and the 1 MiB
+# GPT tail reserve at the end are not available to a partition, so a
+# percentage of the raw capacity asks for more than can ever be
+# allocated: "--allocate 100%" of 128G would demand 128G of partition
+# space inside a medium whose usable area is 128G minus 2 MiB, and would
+# be refused. That makes 100% impossible, when 100% must mean exactly
+# what omitting the option means today. Resolving against the usable
+# area makes the two coincide by construction.
+#
+# Resolving against the device rather than against "whatever is free" is
+# deliberate for the same reason: "60% of this 128G disk" is a statement
+# about the device the operator named, and it is the same number before
+# and after the disk is partitioned.
+allocate_bytes()
+{
+	case $1 in
+	*%)
+		percent=${1%\%}
+		case $percent in
+		'' | *[!0-9]*) die "invalid --allocate percentage: $1" ;;
+		esac
+		[ "$percent" -ge 1 ] && [ "$percent" -le 100 ] ||
+			die "--allocate percentage must be between 1 and 100: $1"
+		printf '%s' $(( $2 * percent / 100 ))
+		;;
+	*) size_bytes "$1" ;;
+	esac
+}
+
 partition_plan()
 {
 	# Emits an sfdisk script on stdout. Partition numbering is fixed:
@@ -245,7 +323,28 @@ partition_plan()
 	# a 4194304-sector image, one sector past the 4194270 limit. Reserve
 	# 1M at the tail, matching the 1M alignment used at the head.
 	gpt_tail=2048
-	available=$((total_sectors - first_sector - gpt_tail))
+	# --size is the CAPACITY; --allocate is how much of it the first
+	# partition layout occupies. Without --allocate the budget is the
+	# whole usable area, which reproduces the historical plan exactly.
+	#
+	# The tail reserve is taken from the end of the DEVICE, not the end
+	# of the budget: GPT keeps its backup partition-entry array and
+	# header in the final sectors of the medium, so an image with a
+	# partial allocation must still leave room for them past the last
+	# partition rather than inside the unallocated remainder.
+	usable_sectors=$((total_sectors - first_sector - gpt_tail))
+	if [ -n "$ALLOCATE" ]; then
+		usable_bytes=$((usable_sectors * 512))
+		alloc_bytes=$(allocate_bytes "$ALLOCATE" "$usable_bytes")
+		budget_sectors=$((alloc_bytes / 512))
+		[ "$budget_sectors" -ge 65536 ] ||
+			die "--allocate $ALLOCATE leaves too little room to partition"
+		[ "$budget_sectors" -le "$usable_sectors" ] ||
+			die "--allocate $ALLOCATE ($alloc_bytes bytes) does not fit in $SIZE after the 1M alignment gap and the 1M GPT tail reserve"
+	else
+		budget_sectors=$usable_sectors
+	fi
+	available=$budget_sectors
 	[ "$available" -ge 65536 ] ||
 		die "size $SIZE is too small: a bootable image needs at least 32M after the 1M alignment gap and 1M GPT tail reserve"
 
@@ -874,21 +973,28 @@ file_bytes()
 
 cmd_plan()
 {
-	TARGET= SIZE=
+	TARGET= SIZE= arch= ALLOCATE=
 	while test $# -gt 0; do
 		case $1 in
 			--target) TARGET=${2:?missing TARGET}; shift 2 ;;
 			--target=*) TARGET=${1#*=}; shift ;;
 			--size) SIZE=${2:?missing SIZE}; shift 2 ;;
 			--size=*) SIZE=${1#*=}; shift ;;
+			--arch) arch=${2:?missing ARCH}; shift 2 ;;
+			--arch=*) arch=${1#*=}; shift ;;
+			--allocate) ALLOCATE=${2:?missing ALLOCATE}; shift 2 ;;
+			--allocate=*) ALLOCATE=${1#*=}; shift ;;
 			*) usage ;;
 		esac
 	done
 	[ -n "$TARGET" ] || usage
 	resolve_target "$TARGET"
 	[ -n "$SIZE" ] || SIZE=2G
-	printf '# saphira-image plan: target=%s boot=%s init=%s profile=%s size=%s\n' \
-		"$TARGET" "$BOOT" "$INIT" "$PROFILE" "$SIZE"
+	# A plan for an architecture this platform cannot boot is not a
+	# plan, so the same validation the build runs is run here.
+	validate_arch
+	printf '# saphira-image plan: target=%s arch=%s boot=%s init=%s profile=%s size=%s allocate=%s\n' \
+		"$TARGET" "$ARCH" "$BOOT" "$INIT" "$PROFILE" "$SIZE" "${ALLOCATE:-all}"
 	PLAN_BUFFER=$(mktemp "${SAPHIRA_TMPDIR:-/build/tmp}/saphira-plan.XXXXXX") ||
 		die 'cannot create a scratch file for the partition plan'
 	trap 'rm -f -- "$PLAN_BUFFER"' EXIT HUP INT TERM
@@ -897,7 +1003,7 @@ cmd_plan()
 
 cmd_report()
 {
-	TARGET= SIZE= roles= role_files=
+	TARGET= SIZE= roles= role_files= ALLOCATE=
 	while test $# -gt 0; do
 		case $1 in
 			--target) TARGET=${2:?missing TARGET}; shift 2 ;;
@@ -948,7 +1054,7 @@ cmd_report()
 
 cmd_build()
 {
-	TARGET= output= size= repository= hostname= root_password=
+	TARGET= output= size= repository= hostname= root_password= kernel_args= arch= ALLOCATE=
 	roles= role_files= enable=1 keep_work=0
 	while test $# -gt 0; do
 		case $1 in
@@ -956,8 +1062,12 @@ cmd_build()
 			--target=*) TARGET=${1#*=}; shift ;;
 			--output) output=${2:?missing OUTPUT}; shift 2 ;;
 			--output=*) output=${1#*=}; shift ;;
+			--kernel-arg) kernel_args="$kernel_args ${2:?missing ARG}"; shift 2 ;;
+			--kernel-arg=*) kernel_args="$kernel_args ${1#*=}"; shift ;;
 			--size) size=${2:?missing SIZE}; shift 2 ;;
 			--size=*) size=${1#*=}; shift ;;
+			--arch) arch=${2:?missing ARCH}; shift 2 ;;
+			--arch=*) arch=${1#*=}; shift ;;
 			--repository) repository=${2:?missing REPOSITORY}; shift 2 ;;
 			--repository=*) repository=${1#*=}; shift ;;
 			--hostname) hostname=${2:?missing HOSTNAME}; shift 2 ;;
@@ -983,6 +1093,7 @@ cmd_build()
 
 	resolve_target "$TARGET"
 	SIZE=${size:-2G}
+	validate_arch
 	# Validate the size once, up front.
 	size_bytes "$SIZE" >/dev/null
 	ENABLE=$enable
@@ -1124,7 +1235,8 @@ cmd_build()
 	# saphira-assemble-rootfs, which owns rootfs assembly and the
 	# accounts.d / sysusers.d identity replay. Nothing here unpacks an
 	# APK or writes a package list of its own.
-	SAPHIRA_REPOSITORY="$repository" \
+	SAPHIRA_ARCH="$ARCH" \
+		SAPHIRA_REPOSITORY="$repository" \
 		SAPHIRA_PROFILE_ROOT="$profile_root" \
 		SAPHIRA_HOSTNAME="${hostname:-saphira}" \
 		SAPHIRA_ROOT_PASSWORD="$root_password" \
@@ -1170,15 +1282,19 @@ fix_kernel_cmdline()
 	# OpenRC cmdline is target leakage that reads as a defect in
 	# /proc/cmdline.
 	[ "$INIT" = systemd ] && getty_opt=" systemd.getty_auto=0 systemd.imds=no"
+	# Requested by --kernel-arg. set -u is in force, so it is always
+	# defined even when the option was never used.
+	KERNEL_ARGS=${KERNEL_ARGS:-}
 	defgrub=$mnt/etc/default/grub
 	[ -f "$defgrub" ] || die "internal: no /etc/default/grub in the image"
 	# Strip any root=/init= the packaged default carries, then append
 	# the deployment-stable root=. Portable sed, single backup-free
 	# edit of the image copy (the package conffile stays untouched).
-	python3 - "$defgrub" "$partuuid" "$getty_opt" <<'PY' || die 'cannot repair GRUB_CMDLINE_LINUX'
+	python3 - "$defgrub" "$partuuid" "$getty_opt" "$KERNEL_ARGS" <<'PY' || die 'cannot repair GRUB_CMDLINE_LINUX'
 import re
 import sys
 path, partuuid, getty_opt = sys.argv[1], sys.argv[2], sys.argv[3]
+extra = sys.argv[4].split()
 text = open(path, encoding="utf-8").read()
 lines = text.splitlines(keepends=True)
 found = False
@@ -1192,6 +1308,12 @@ for i, line in enumerate(lines):
         tokens.append(f"root=PARTUUID={partuuid}")
         if getty_opt:
             tokens.append(getty_opt.strip())
+        # Operator-requested arguments go last so they can override
+        # anything the default set. Duplicates are dropped: a repeated
+        # token in a kernel command line is legal but is a typo here.
+        for arg in extra:
+            if arg not in tokens:
+                tokens.append(arg)
         lines[i] = f'GRUB_CMDLINE_LINUX="{" ".join(tokens)}"\n'
         found = True
 if not found:
@@ -1203,6 +1325,7 @@ PY
 	# Init preparation, AFTER assembly so the packages are present.
 	prepare_init "$mnt"
 	enable_services "$mnt" "$profile_root/$profile_name"
+	KERNEL_ARGS=$kernel_args
 	fix_kernel_cmdline "$mnt" "$rootdev"
 
 	# Bootloader finalization, AFTER grub-mkconfig, on the generated file.
@@ -1277,9 +1400,14 @@ PY
 		mount "$bootdev" "$mnt/boot/efi" || die 'cannot mount the ESP'
 		esp_mounted=1
 	fi
+	# The bootloader platform follows BOTH the boot method and the
+	# architecture. i386-pc is x86 firmware; the EFI platform is named
+	# per architecture, so an aarch64 image needs aarch64-efi and not
+	# x86_64-efi. Getting this wrong installs a bootloader the firmware
+	# will not look for.
 	grub_args=
 	[ "$BOOT" = bios ] && grub_args="--target=i386-pc --recheck"
-	[ "$BOOT" = uefi ] && grub_args="--target=x86_64-efi --efi-directory=/boot/efi --removable --recheck"
+	[ "$BOOT" = uefi ] && grub_args="--target=$ARCH-efi --efi-directory=/boot/efi --removable --recheck"
 	# shellcheck disable=SC2086
 	"$chroot_command" "$mnt" /usr/sbin/grub-install $grub_args "$loop" ||
 		die "grub-install failed ($BOOT)"

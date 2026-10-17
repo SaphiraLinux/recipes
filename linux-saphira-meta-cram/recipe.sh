@@ -15,7 +15,10 @@ kernel_version=${SAPHIRA_CRAM_KERNEL_VERSION:-7.2.9}
 # 7.2.9 is stable so no translation applies; kept as the same expansion
 # the kernel recipe uses so a future -rc line behaves identically.
 pkgver=${kernel_version//-/_}
-pkgrel=1
+pkgrel=2
+# r2: build in i915/simpledrm/bochs/qxl + fbdev emulation (early
+# console and VM displays need builtin drivers; no initramfs).
+# Payload change.
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="Saphira CRAM test kernel ${kernel_version} (private NUMA nodes + compressed-RAM tier, hatchling only)"
 license=GPL-2.0-only

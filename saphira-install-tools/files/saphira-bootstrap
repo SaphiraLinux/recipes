@@ -41,6 +41,11 @@ target=$1
 profile=${2:-base}
 profile_root=${SAPHIRA_PROFILE_ROOT:-/usr/share/saphira/profiles}
 apk_command=${SAPHIRA_APK:-apk}
+# Which architecture to install. apk infers this from the running host by
+# default, which is exactly wrong when bootstrapping a foreign-architecture
+# image on this host (an aarch64 image assembled on an x86_64 builder).
+# Defaulting to x86_64 keeps every existing caller byte-identical.
+arch=${SAPHIRA_ARCH:-x86_64}
 
 case $profile in
 	*[^A-Za-z0-9._+-]*|'') die "invalid profile name: $profile" ;;
@@ -134,7 +139,7 @@ fi
 # relative --keys-dir below resolve to the keys just staged into the
 # target, which is what it always meant.
 cd "$target" || die 'cannot enter target directory'
-"$apk_command" --root "$target" --initdb \
+"$apk_command" --arch "$arch" --root "$target" --initdb \
 	--keys-dir etc/apk/keys \
 	--repositories-file "$target/etc/apk/repositories" add --no-scripts $packages
 # Package install scripts cannot run here: apk executes them chrooted in

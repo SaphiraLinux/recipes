@@ -11,7 +11,7 @@ set -u
 
 usage()
 {
-	printf 'usage: saphira-install --target TARGET --profile PROFILE [--reinstall] [--repository REPO] [--hostname NAME]\n' >&2
+	printf 'usage: saphira-install --target TARGET --profile PROFILE [--reinstall] [--repository REPO] [--hostname NAME] [--arch ARCH]\n' >&2
 	exit 2
 }
 
@@ -25,6 +25,7 @@ target=
 profile=
 reinstall=0
 repository=${SAPHIRA_REPOSITORY:-}
+arch=${SAPHIRA_ARCH:-x86_64}
 hostname=${SAPHIRA_HOSTNAME:-}
 while test $# -gt 0; do
 	case $1 in
@@ -37,6 +38,8 @@ while test $# -gt 0; do
 		--repository=*) repository=${1#*=}; shift ;;
 		--hostname) hostname=${2:?missing NAME}; shift 2 ;;
 		--hostname=*) hostname=${1#*=}; shift ;;
+		--arch) arch=${2:?missing ARCH}; shift 2 ;;
+		--arch=*) arch=${1#*=}; shift ;;
 		--) shift; break ;;
 		-*) usage ;;
 		*) usage ;;
@@ -77,7 +80,7 @@ if test -n "$hostname"; then
 	SAPHIRA_HOSTNAME="$hostname"
 	export SAPHIRA_HOSTNAME
 fi
-SAPHIRA_PROFILE_ROOT="$profile_root" SAPHIRA_REPOSITORY="$repository" \
+SAPHIRA_ARCH="$arch" SAPHIRA_PROFILE_ROOT="$profile_root" SAPHIRA_REPOSITORY="$repository" \
 	"$assembler_command" "$target" "$profile" ||
 	die 'rootfs assembly failed'
 

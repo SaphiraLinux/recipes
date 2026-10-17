@@ -111,7 +111,7 @@ grep -Eq '^group frr 125$' "$frr_fragment" || {
 	exit 1
 }
 
-# dhcpcd owns its service identity (dhcpcd:157). It drops privileges to
+# dhcpcd owns its service identity (dhcpcd:104). It drops privileges to
 # this user before doing anything else and refuses to run without it, so
 # an image carrying no such account could not run DHCP at all. The gap
 # was invisible because dhcpcd daemonises: the parent exits 0 and the
@@ -122,12 +122,12 @@ dhcpcd_fragment=$source_root/dhcpcd/files/accounts.d/dhcpcd
 	printf '%s\n' 'dhcpcd fragment is missing (dhcpcd identity unowned; DHCP cannot start)' >&2
 	exit 1
 }
-grep -Eq '^user dhcpcd 157 dhcpcd /var/lib/dhcpcd /sbin/nologin$' "$dhcpcd_fragment" || {
-	printf '%s\n' 'dhcpcd fragment does not declare user dhcpcd 157' >&2
+grep -Eq '^user dhcpcd 104 dhcpcd /var/lib/dhcpcd /sbin/nologin$' "$dhcpcd_fragment" || {
+	printf '%s\n' 'dhcpcd fragment does not declare user dhcpcd 104' >&2
 	exit 1
 }
-grep -Eq '^group dhcpcd 157$' "$dhcpcd_fragment" || {
-	printf '%s\n' 'dhcpcd fragment does not declare group dhcpcd 157' >&2
+grep -Eq '^group dhcpcd 104$' "$dhcpcd_fragment" || {
+	printf '%s\n' 'dhcpcd fragment does not declare group dhcpcd 104' >&2
 	exit 1
 }
 grep -q 'accounts.d/dhcpcd' "$source_root/dhcpcd/recipe.sh" || {

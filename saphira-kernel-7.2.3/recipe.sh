@@ -18,7 +18,9 @@ pkgname=saphira-kernel-7.2.3
 # automatic replacement.
 kernel_version=7.2.3
 pkgver=1
-pkgrel=2
+pkgrel=4
+# r4: build in DRM_BOCHS + DRM_QXL (QEMU std VGA and SPICE consoles
+# need builtin drivers; no initramfs to load them). Payload change.
 # r2: enable DRM_FBDEV_EMULATION (KMS drivers took over the VGA console
 # and showed nothing: proven blind on N100/i915 with efifb handoff and
 # no fbcon ever appearing). Payload change.

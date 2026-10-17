@@ -9,13 +9,12 @@ __pycache__/
 *.pyc
 
 codex.history.md
-.rtk
-.rtk/filters.toml
-CLAUDE.md
-CODEX.md
-AGENTS.md
 
+CALUDE.md
+*.md
 
 *.x509
 !wireless-regdb/files/saphira-regdb.x509
 usb.ids
+
+.grit

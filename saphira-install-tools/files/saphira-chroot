@@ -156,6 +156,58 @@ done
 set +f
 IFS=$old_ifs
 
+# Evidence collector for a target that cannot execute its own shell.
+#
+# A preflight that only says "the shell will not run" is not a
+# diagnosis. Everything needed to tell the common causes apart is
+# cheap and local: whether the shell resolves inside the target, whether
+# it is executable, WHICH ELF interpreter it asks for, whether that
+# loader is present and executable, which libraries it needs and whether
+# they resolve, what filesystem the target actually is, and what is
+# mounted over it. A shell that is present and executable but whose
+# loader is missing fails identically to one that is absent - and the
+# two call for completely different fixes.
+probe_target()
+{
+	_target=$1
+	printf 'saphira-chroot: --- target evidence for %s ---\n' "$_target" >&2
+
+	printf 'saphira-chroot: /bin/sh      : %s\n' \
+		"$(ls -ld "$_target/bin/sh" 2>&1)" >&2
+	printf 'saphira-chroot: readlink -f : %s\n' \
+		"$(readlink -f "$_target/bin/sh" 2>&1)" >&2
+
+	_real=$(readlink -f "$_target/bin/sh" 2>/dev/null)
+	if test -n "$_real"; then
+		printf 'saphira-chroot: shell stat  : mode=%s owner=%s size=%s\n' \
+			"$(stat -c '%A' "$_real" 2>&1)" \
+			"$(stat -c '%u:%g' "$_real" 2>&1)" \
+			"$(stat -c '%s' "$_real" 2>&1)" >&2
+		# The interpreter is the single most common cause: a shell
+		# installed before its loader, or one whose loader lives on a
+		# different filesystem that is not visible inside the target.
+		printf 'saphira-chroot: interp      : %s\n' \
+			"$(sed -n 's/.*interpreter: \([^]]*\)].*/\1/p' "$_real" 2>/dev/null | head -1)" >&2
+		_interp=$(sed -n 's/.*interpreter: \([^]]*\)].*/\1/p' "$_real" 2>/dev/null | head -1)
+		if test -n "$_interp"; then
+			if test -e "$_target$_interp"; then
+				printf 'saphira-chroot: loader     : present %s\n' \
+					"$(stat -c '%A' "$_target$_interp" 2>&1)" >&2
+			else
+				printf 'saphira-chroot: loader     : MISSING %s\n' "$_interp" >&2
+			fi
+		fi
+		printf 'saphira-chroot: ldd-in-tgt : %s\n' \
+			"$(chroot "$_target" /usr/bin/ldd "$_real" 2>&1 | tr '\n' '|')" >&2
+	fi
+
+	printf 'saphira-chroot: target fs   : %s\n' \
+		"$(stat -f -c '%T' "$_target" 2>&1)" >&2
+	printf 'saphira-chroot: mounts      :\n' >&2
+	"$mount_command" 2>/dev/null | grep -F "$_target" >&2 || true
+	printf 'saphira-chroot: --- end target evidence ---\n' >&2
+}
+
 shell_path=$target/bin/sh
 test -e "$shell_path" || test -L "$shell_path" ||
 	die 'target does not contain /bin/sh'
@@ -204,8 +256,28 @@ if test "${SAPHIRA_CHROOT_PLAN:-0}" = 1; then
 fi
 
 if test "${SAPHIRA_CHROOT_INNER:-0}" != 1; then
-	"$chroot_command" "$target" /bin/sh -c ':' >/dev/null 2>&1 ||
-		die 'target /bin/sh cannot be executed'
+	# The preflight discards BOTH streams and reports one generic
+	# sentence, which turns a specific, usually mundane failure into an
+	# unexplained one. It cost a long debugging session: "target /bin/sh
+	# cannot be executed" reads like a missing shell, when the shell is
+	# present, executable and correctly linked and the actual refusal
+	# came from somewhere else entirely. Capture the status and the real
+	# message, and keep a full evidence dump for the diagnosis.
+	work_probe=$(mktemp -d "${TMPDIR:-/tmp}/saphira-chroot-probe.XXXXXX") || work_probe=
+	chroot_stderr=$work_probe/preflight.err
+	if "$chroot_command" "$target" /bin/sh -c ':' 2>"$chroot_stderr"; then
+		preflight_status=0
+	else
+		preflight_status=$?
+		if test -n "${SAPHIRA_CHROOT_DIAG:-}"; then
+			printf 'saphira-chroot: PREFLIGHT FAILED status=%s target=%s\n' \
+				"$preflight_status" "$target" >&2
+			printf 'saphira-chroot: stderr: %s\n' \
+				"$(cat "$chroot_stderr" 2>/dev/null | tr '\n' '|')" >&2
+			probe_target "$target" >&2
+		fi
+		die "target /bin/sh cannot be executed (chroot exit $preflight_status${chroot_stderr:+: $(head -1 "$chroot_stderr" 2>/dev/null)})"
+	fi
 	export SAPHIRA_CHROOT_INNER=1
 	# Nesting. When this tool runs inside a Saphira chroot environment, that
 	# environment already owns a private mount namespace which is itself

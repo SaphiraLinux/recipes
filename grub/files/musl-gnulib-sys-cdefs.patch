@@ -1,0 +1,14 @@
+--- a/grub-core/lib/gnulib/getopt-cdefs.h
++++ b/grub-core/lib/gnulib/getopt-cdefs.h
+@@ -28,7 +28,10 @@
+ /* getopt-core.h and getopt-ext.h are shared with GNU libc, and expect
+    a number of the internal macros supplied to GNU libc's headers by
+    sys/cdefs.h.  Provide fallback definitions for all of them.  */
+-#if 1
++/* Shipped generated file hard-codes the configure result of a glibc
++   build host (#if 1). sys/cdefs.h is glibc-only; musl ships none,
++   and the fallback definitions below cover every macro used here.  */
++#ifdef __GLIBC__
+ # include <sys/cdefs.h>
+ #endif
+ 
