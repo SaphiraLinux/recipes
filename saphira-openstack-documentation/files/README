@@ -1,0 +1,37 @@
+Saphira OpenStack documentation
+===============================
+
+Saphira Linux — "It's so Simple it Hurts."
+
+OpenStack is famous for being hard to install. That reputation comes
+from procedures that assume you already know OpenStack. These guides
+invert that: each one takes a bare Saphira machine to a proven role
+in one sitting, explains WHY every step exists, and tells you what
+to do, what NOT to do, WHEN to do it, and when to leave it alone.
+
+Start here, then read the guide for your role:
+
+  openstack-controller.txt  the control plane (do this first, once)
+  openstack-compute.txt     hypervisors (do this per compute host)
+  openstack-storage.txt     volume hosts (read before touching disks)
+  openstack-pitfalls.txt    every failure from the first bring-up,
+                            each with symptom, cause, fix, and why
+
+The fastest path for any role is the setup script in its sibling
+package (saphira-openstack-controller, -compute, -storage). The
+guides explain what the scripts do and why, so when something
+differs on your hardware you know exactly which step to adapt.
+
+These guides assume Saphira packages, Saphira paths (/etc/neutron,
+/var/lib/nova, and friends), and curl as the API client. There is
+deliberately no python-openstackclient dependency: if you can curl,
+you can run a cloud.
+
+Conventions used throughout:
+  CTRL            the controller's IP (example lab: 172.16.0.133)
+  REGION          region name (example lab: RegionOne)
+  physnet1        provider physical network name (your lab may differ)
+  br-physnet1     OVS bridge carrying provider traffic
+  All passwords in the lab were one test value; yours must differ
+  per credential, and must be URL-safe (letters, digits, _ @ -)
+  because they are embedded in database URLs.

@@ -1,0 +1,30 @@
+Saphira OpenStack compute role (hypervisor)
+============================================
+
+Install this package on every machine that will run guest instances,
+then run, as root:
+
+    saphira-openstack-setup-compute
+
+It asks which controller to join, the service password, the provider
+physical-network name, the OVS bridge, and which NIC carries tenant
+traffic — then configures nova-compute and the neutron OVS/DHCP
+agents, fixes every privilege boundary they need, starts the full
+libvirt daemon set, builds the provider bridge, and tells you how to
+prove the controller sees the new hypervisor.
+
+Safety notes (also enforced by the script):
+  - virt_type is probed: kvm when /dev/kvm exists, qemu otherwise.
+    Never force kvm on a host without it; libvirt refuses the guest.
+  - Enslaving the NIC you ssh through moves your session onto the
+    bridge. The script makes you type YES for that. A dedicated
+    tenant NIC is always the calmer choice.
+  - Re-running is safe; existing config is kept unless --force.
+
+Verify later with:
+
+    saphira-openstack-setup-compute --check
+
+Full story (how-to, pitfalls, do and don't):
+saphira-openstack-documentation.
+Saphira Linux — "It's so Simple it Hurts."

@@ -1,0 +1,572 @@
+#!/bin/sh
+#
+# saphira-openstack-setup-controller — turn this machine into an
+# OpenStack controller node.
+#
+# Saphira Linux — "It's so Simple it Hurts."
+#
+# Interactive. Asks a handful of questions, writes every service
+# configuration, bootstraps the database and the identity service,
+# registers all endpoints, starts everything, and then PROVES each
+# service answers. Re-running is safe: existing configuration is kept
+# unless --force is given, and every phase verifies itself before the
+# next one begins.
+#
+# Non-interactive use (for agents): export the SAPHIRA_OS_* variables
+# listed below instead of answering prompts.
+#
+#   SAPHIRA_OS_CTRL_IP       controller address (default: first global IPv4)
+#   SAPHIRA_OS_REGION        region name (default: RegionOne)
+#   SAPHIRA_OS_CONSOLE_HOST  public hostname for console URLs (default:
+#                            openstack.akadata.uk — must be the TLS vhost)
+#   SAPHIRA_OS_ADMIN_PASS    admin password (asked, never defaulted)
+#   SAPHIRA_OS_SERVICE_PASS  service users password (asked, never defaulted)
+#   SAPHIRA_OS_DB_PASS       database password (asked, never defaulted)
+#
+# Modes:
+#   (no args)   full setup
+#   --check     verify-only: probe every endpoint, report, change nothing
+#   --force     overwrite existing configuration files
+#   --help      this text
+#
+# What this script does NOT do: it never enables anything at package
+# install time (that already happened before you ran it), it never
+# touches compute or storage nodes (see the sibling setup scripts),
+# and it never invents credentials — every password comes from you.
+
+set -u
+
+FORCE=0
+CHECK=0
+ANS=/etc/saphira-openstack/controller.env
+
+log() { printf '%s\n' "$*"; }
+die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+
+usage() {
+	sed -n '2,/^# Modes/p' "$0" | sed 's/^# \{0,1\}//'
+	exit 0
+}
+
+[ "$(id -u)" -eq 0 ] || die "run as root (this script writes service configuration)"
+
+for a in "$@"; do
+	case $a in
+		--force) FORCE=1 ;;
+		--check) CHECK=1 ;;
+		--help|-h) usage ;;
+		*) die "unknown argument: $a (see --help)" ;;
+	esac
+done
+
+# ---------------------------------------------------------------- probes
+
+probe() {
+	# probe <name> <curl-args...>: prints "<name>: CODE" or "<name>: DOWN"
+	name=$1; shift
+	code=$(curl -s -m 10 -o /dev/null -w '%{http_code}' "$@" 2>/dev/null) || code=000
+	log "$name: $code"
+	[ "$code" != 000 ] && [ "$code" != 400 ] && [ "$code" != 404 ]
+}
+
+get_token() {
+	# get_token <user> <pass> <project>: prints a scoped token, or nothing
+	curl -s -m 15 -X POST "http://$CTRL_IP:5000/v3/auth/tokens" \
+		-H 'Content-Type: application/json' \
+		-d "{\"auth\":{\"identity\":{\"methods\":[\"password\"],\"password\":{\"user\":{\"name\":\"$1\",\"domain\":{\"name\":\"Default\"},\"password\":\"$2\"}}},\"scope\":{\"project\":{\"name\":\"$3\",\"domain\":{\"name\":\"Default\"}}}}}" \
+		-D - -o /dev/null 2>/dev/null \
+		| grep -i '^X-Subject-Token:' | awk '{print $2}' | tr -d '\r'
+}
+
+if [ "$CHECK" -eq 1 ]; then
+	[ -f "$ANS" ] || die "no $ANS: this machine was never set up (run without --check first)"
+	# shellcheck disable=SC1090
+	. "$ANS"
+	fail=0
+	probe keystone "http://$CTRL_IP:5000/v3" || fail=1
+	probe glance "http://$CTRL_IP:9292/v2/images" || fail=1
+	probe placement "http://$CTRL_IP:8778/" || fail=1
+	probe nova "http://$CTRL_IP:8774/v2.1/servers" || fail=1
+	probe neutron "http://$CTRL_IP:9696/v2.0/networks" || fail=1
+	probe horizon "http://$CTRL_IP:8000/" || fail=1
+	[ "$fail" -eq 0 ] && log "controller: ALL SERVICES ANSWER" || die "controller: SOMETHING IS DOWN (see above)"
+	exit 0
+fi
+
+# ---------------------------------------------------------------- questions
+
+ask() {
+	# ask <VAR> <prompt> <default>: honours SAPHIRA_OS_* overrides
+	var=$1; prompt=$2; def=$3
+	envname="SAPHIRA_OS_$var"
+	eval "cur=\${$envname:-}"
+	if [ -n "${cur:-}" ]; then
+		eval "$var=\"\$cur\""
+		return
+	fi
+	printf '%s [%s]: ' "$prompt" "$def"
+	read -r val
+	eval "$var=\"\${val:-$def}\""
+}
+
+ask_secret() {
+	# ask_secret <VAR> <prompt>: no default, no echo, honours env override
+	var=$1; prompt=$2
+	envname="SAPHIRA_OS_$var"
+	eval "cur=\${$envname:-}"
+	if [ -n "${cur:-}" ]; then
+		eval "$var=\"\$cur\""
+		return
+	fi
+	printf '%s: ' "$prompt"
+	stty -echo 2>/dev/null || true
+	read -r val
+	stty echo 2>/dev/null || true
+	printf '\n'
+	[ -n "${val:-}" ] || die "a $prompt is required (nothing was entered)"
+	case $val in
+		*[!A-Za-z0-9_@-]*)
+			die "password must be URL-safe: letters, digits, _ @ - only (it is embedded in database URLs)" ;;
+	esac
+	eval "$var=\"\$val\""
+}
+
+DEF_IP=$(ip -o -4 addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)
+[ -n "${DEF_IP:-}" ] || DEF_IP=127.0.0.1
+
+log "Saphira OpenStack controller setup — six questions."
+ask CTRL_IP "controller IP address" "$DEF_IP"
+ask REGION "region name" "RegionOne"
+ask CONSOLE_HOST "public hostname serving the console (dashboard TLS vhost)" "openstack.akadata.uk"
+ask_secret ADMIN_PASS "admin password"
+ask_secret SERVICE_PASS "service users password (glance, nova, neutron, placement)"
+ask_secret DB_PASS "database password"
+
+mkdir -p /etc/saphira-openstack
+cat > "$ANS" <<EOF
+# Saphira OpenStack controller answers. Re-run the setup script to
+# change these; keep this file root-readable only.
+CTRL_IP=$CTRL_IP
+REGION=$REGION
+EOF
+chmod 0600 "$ANS"
+log "answers saved to $ANS (passwords are NOT stored: keep them somewhere safe)"
+
+# ---------------------------------------------------------------- helpers
+
+write_conf() {
+	# write_conf <path> <content>: refuses to clobber unless --force
+	path=$1
+	if [ -f "$path" ] && [ "$FORCE" -eq 0 ]; then
+		log "keep existing $path (use --force to overwrite)"
+		return 0
+	fi
+	[ -f "$path" ] && cp -a "$path" "$path.bak.$(date +%s)"
+	mkdir -p "$(dirname "$path")"
+	cat > "$path"
+	chmod 0640 "$path"
+	log "wrote $path"
+}
+
+authtoken_block() {
+	# authtoken_block <username>: the [keystone_authtoken] stanza every
+	# service needs, byte-identical everywhere (one shape, no drift)
+	user=$1
+	cat <<EOF
+[keystone_authtoken]
+www_authenticate_uri = http://$CTRL_IP:5000/v3
+auth_url = http://$CTRL_IP:5000/v3
+memcached_servers = 127.0.0.1:11211
+auth_type = password
+project_domain_name = Default
+user_domain_name = Default
+project_name = service
+username = $user
+password = $SERVICE_PASS
+EOF
+}
+
+# ---------------------------------------------------------------- phase 1: infrastructure
+
+log "== phase 1/7: infrastructure (mariadb, rabbitmq, memcached)"
+systemctl enable --now mariadb memcached 2>/dev/null || service mariadb start
+mysql -u root <<SQL
+CREATE DATABASE IF NOT EXISTS keystone;
+CREATE DATABASE IF NOT EXISTS glance;
+CREATE DATABASE IF NOT EXISTS placement;
+CREATE DATABASE IF NOT EXISTS placement_api;
+CREATE DATABASE IF NOT EXISTS nova;
+CREATE DATABASE IF NOT EXISTS nova_api;
+CREATE DATABASE IF NOT EXISTS nova_cell0;
+CREATE DATABASE IF NOT EXISTS neutron;
+GRANT ALL ON keystone.* TO 'keystone'@'localhost' IDENTIFIED BY '$DB_PASS';
+GRANT ALL ON keystone.* TO 'keystone'@'127.0.0.1' IDENTIFIED BY '$DB_PASS';
+GRANT ALL ON glance.* TO 'glance'@'localhost' IDENTIFIED BY '$DB_PASS';
+GRANT ALL ON glance.* TO 'glance'@'127.0.0.1' IDENTIFIED BY '$DB_PASS';
+GRANT ALL ON placement.* TO 'placement'@'localhost' IDENTIFIED BY '$DB_PASS';
+GRANT ALL ON placement.* TO 'placement'@'127.0.0.1' IDENTIFIED BY '$DB_PASS';
+GRANT ALL ON placement_api.* TO 'placement'@'localhost' IDENTIFIED BY '$DB_PASS';
+GRANT ALL ON placement_api.* TO 'placement'@'127.0.0.1' IDENTIFIED BY '$DB_PASS';
+GRANT ALL ON nova.* TO 'nova'@'localhost' IDENTIFIED BY '$DB_PASS';
+GRANT ALL ON nova.* TO 'nova'@'127.0.0.1' IDENTIFIED BY '$DB_PASS';
+GRANT ALL ON nova_api.* TO 'nova'@'localhost' IDENTIFIED BY '$DB_PASS';
+GRANT ALL ON nova_api.* TO 'nova'@'127.0.0.1' IDENTIFIED BY '$DB_PASS';
+GRANT ALL ON nova_cell0.* TO 'nova'@'localhost' IDENTIFIED BY '$DB_PASS';
+GRANT ALL ON nova_cell0.* TO 'nova'@'127.0.0.1' IDENTIFIED BY '$DB_PASS';
+GRANT ALL ON neutron.* TO 'neutron'@'localhost' IDENTIFIED BY '$DB_PASS';
+GRANT ALL ON neutron.* TO 'neutron'@'127.0.0.1' IDENTIFIED BY '$DB_PASS';
+FLUSH PRIVILEGES;
+SQL
+log "databases ready"
+
+# RabbitMQ: the openstack user needs full rights on /. On RabbitMQ 4.x
+# the transient_non_excl deprecation gate must be opened or every
+# oslo.messaging client fails at declare time.
+systemctl enable --now rabbitmq-server 2>/dev/null || service rabbitmq-server start
+sleep 5
+RBIN=$(find /usr/lib/rabbitmq -name rabbitmqctl -type f 2>/dev/null | head -1)
+[ -n "${RBIN:-}" ] || die "rabbitmqctl not found under /usr/lib/rabbitmq"
+RBUSER=$(stat -c %U /var/lib/rabbitmq 2>/dev/null || echo rabbitmq)
+sudo -n -u "$RBUSER" "$RBIN" -n rabbit@localhost add_user openstack "$SERVICE_PASS" 2>/dev/null || \
+	sudo -n -u "$RBUSER" "$RBIN" -n rabbit@localhost change_password openstack "$SERVICE_PASS"
+sudo -n -u "$RBUSER" "$RBIN" -n rabbit@localhost set_permissions -p / openstack '.*' '.*' '.*'
+if [ -d /etc/rabbitmq ]; then
+	grep -q transient_nonexcl_queues /etc/rabbitmq/rabbitmq.conf 2>/dev/null || \
+		printf 'deprecated_features.permit.transient_nonexcl_queues = true\n' >> /etc/rabbitmq/rabbitmq.conf
+fi
+log "rabbitmq ready (openstack user, vhost /, 4.x deprecation gate open)"
+
+# ---------------------------------------------------------------- phase 2: keystone
+
+log "== phase 2/7: keystone (identity)"
+write_conf /etc/keystone/keystone.conf <<EOF
+[database]
+connection = mysql+pymysql://keystone:$DB_PASS@127.0.0.1/keystone
+[token]
+provider = fernet
+EOF
+keystone-manage fernet_setup --keystone-user keystone --keystone-group keystone
+keystone-manage db_sync
+keystone-manage bootstrap --bootstrap-username admin \
+	--bootstrap-password "$ADMIN_PASS" \
+	--bootstrap-project-name admin \
+	--bootstrap-role-name admin \
+	--bootstrap-service-name keystone \
+	--bootstrap-region-id "$REGION" \
+	--bootstrap-admin-url "http://$CTRL_IP:5000/v3/" \
+	--bootstrap-public-url "http://$CTRL_IP:5000/v3/" \
+	--bootstrap-internal-url "http://$CTRL_IP:5000/v3/"
+systemctl enable --now keystone 2>/dev/null || service keystone start
+sleep 5
+ADMIN_TOKEN=$(get_token admin "$ADMIN_PASS" admin)
+[ -n "${ADMIN_TOKEN:-}" ] || die "keystone did not issue an admin token"
+log "keystone answers, admin token issued"
+
+# ---------------------------------------------------------------- phase 3: identity contents
+# Everything below speaks the v3 API with curl. There is deliberately
+# no python-openstackclient dependency: the controller must be
+# administrable with curl alone.
+
+log "== phase 3/7: projects, users, roles, services, endpoints"
+
+api() { # api <METHOD> <path> [data]: keystone call, prints body
+	method=$1; path=$2; data=${3:-}
+	if [ -n "$data" ]; then
+		curl -s -m 15 -X "$method" "http://$CTRL_IP:5000/v3/$path" \
+			-H "X-Auth-Token: $ADMIN_TOKEN" -H 'Content-Type: application/json' -d "$data"
+	else
+		curl -s -m 15 -X "$method" "http://$CTRL_IP:5000/v3/$path" \
+			-H "X-Auth-Token: $ADMIN_TOKEN"
+	fi
+}
+
+get_id() { # get_id <collection> <name>: prints first matching id
+	python3 -c "import json,sys; d=json.load(sys.stdin); print(d['$1'][0]['id'])" 2>/dev/null
+}
+
+ensure_project() {
+	id=$(api GET "projects?name=$1" | get_id projects) || true
+	if [ -z "${id:-}" ]; then
+		id=$(api POST projects "{\"project\":{\"name\":\"$1\",\"domain_id\":\"default\"}}" | python3 -c "import json,sys; print(json.load(sys.stdin)['project']['id'])")
+	fi
+	eval "$2=$id"
+}
+ensure_role() {
+	id=$(api GET "roles?name=$1" | get_id roles) || true
+	if [ -z "${id:-}" ]; then
+		id=$(api POST roles "{\"role\":{\"name\":\"$1\"}}" | python3 -c "import json,sys; print(json.load(sys.stdin)['role']['id'])")
+	fi
+	eval "$2=$id"
+}
+ensure_user() {
+	# ensure_user <name> <password> <VAR>
+	id=$(api GET "users?name=$1" | get_id users) || true
+	if [ -z "${id:-}" ]; then
+		id=$(api POST users "{\"user\":{\"name\":\"$1\",\"domain_id\":\"default\",\"password\":\"$2\"}}" | python3 -c "import json,sys; print(json.load(sys.stdin)['user']['id'])")
+	fi
+	eval "$3=$id"
+}
+grant() { # grant <project> <user> <role>: PUT assignment, 204 expected
+	code=$(curl -s -m 15 -o /dev/null -w '%{http_code}' -X PUT \
+		"http://$CTRL_IP:5000/v3/projects/$1/users/$2/roles/$3" \
+		-H "X-Auth-Token: $ADMIN_TOKEN")
+	[ "$code" = 204 ] || die "role grant failed ($code)"
+}
+ensure_service() {
+	# ensure_service <type> <name> <VAR>
+	id=$(api GET "services?type=$1" | get_id services) || true
+	if [ -z "${id:-}" ]; then
+		id=$(api POST services "{\"service\":{\"type\":\"$1\",\"name\":\"$2\"}}" | python3 -c "import json,sys; print(json.load(sys.stdin)['service']['id'])")
+	fi
+	eval "$3=$id"
+}
+ensure_endpoint() {
+	# ensure_endpoint <service> <interface> <url>
+	have=$(api GET "endpoints?service_id=$1&interface=$2" | python3 -c "import json,sys; print(len(json.load(sys.stdin)['endpoints']))")
+	if [ "${have:-0}" -eq 0 ]; then
+		api POST endpoints "{\"endpoint\":{\"service_id\":\"$1\",\"interface\":\"$2\",\"url\":\"$3\",\"region_id\":\"$REGION\"}}" >/dev/null
+	fi
+}
+
+ensure_project service SVC_PROJ
+ensure_project admin ADMIN_PROJ
+ADMIN_UID=$(api GET "users?name=admin" | get_id users)
+for r in admin member reader manager service; do
+	ensure_role "$r" "ROLE_$(echo "$r" | tr 'a-z' 'A-Z')"
+done
+for u in glance placement nova neutron; do
+	ensure_user "$u" "$SERVICE_PASS" "UID_$(echo "$u" | tr 'a-z' 'A-Z')"
+done
+# every service user gets admin (to manage its own resources) AND
+# service (so its service token passes service_token_roles checks —
+# without this, nova-to-neutron calls fail with an empty 401).
+for u in UID_GLANCE UID_PLACEMENT UID_NOVA UID_NEUTRON; do
+	eval "uid=\$$u"
+	grant "$SVC_PROJ" "$uid" "$ROLE_ADMIN"
+	grant "$SVC_PROJ" "$uid" "$ROLE_SERVICE"
+done
+grant "$ADMIN_PROJ" "$ADMIN_UID" "$ROLE_ADMIN"
+
+ensure_service identity keystone SVC_KEYSTONE
+ensure_service image glance SVC_GLANCE
+ensure_service placement placement SVC_PLACEMENT
+ensure_service compute nova SVC_NOVA
+ensure_service network neutron SVC_NEUTRON
+for iface in public internal admin; do
+	ensure_endpoint "$SVC_KEYSTONE" "$iface" "http://$CTRL_IP:5000/v3/"
+	ensure_endpoint "$SVC_GLANCE" "$iface" "http://$CTRL_IP:9292"
+	ensure_endpoint "$SVC_PLACEMENT" "$iface" "http://$CTRL_IP:8778"
+	ensure_endpoint "$SVC_NOVA" "$iface" "http://$CTRL_IP:8774/v2.1"
+	ensure_endpoint "$SVC_NEUTRON" "$iface" "http://$CTRL_IP:9696"
+done
+log "identity contents ready (services, endpoints, service-role grants)"
+
+# ---------------------------------------------------------------- phase 4: service configs + databases
+
+log "== phase 4/7: service configuration and database sync"
+
+write_conf /etc/glance/glance-api.conf <<EOF
+[database]
+connection = mysql+pymysql://glance:$DB_PASS@127.0.0.1/glance
+[glance_store]
+stores = file
+default_store = file
+filesystem_store_datadir = /var/lib/glance/images/
+$(authtoken_block glance)
+EOF
+
+write_conf /etc/placement/placement.conf <<EOF
+[database]
+connection = mysql+pymysql://placement:$DB_PASS@127.0.0.1/placement
+[placement_database]
+connection = mysql+pymysql://placement:$DB_PASS@127.0.0.1/placement_api
+$(authtoken_block placement)
+EOF
+
+write_conf /etc/nova/nova.conf <<EOF
+[DEFAULT]
+transport_url = rabbit://openstack:$SERVICE_PASS@$CTRL_IP:5672/
+log_dir = /var/log/nova
+[database]
+connection = mysql+pymysql://nova:$DB_PASS@127.0.0.1/nova
+[api_database]
+connection = mysql+pymysql://nova:$DB_PASS@127.0.0.1/nova_api
+[keystone_authtoken]
+www_authenticate_uri = http://$CTRL_IP:5000/v3
+auth_url = http://$CTRL_IP:5000/v3
+memcached_servers = 127.0.0.1:11211
+auth_type = password
+project_domain_name = Default
+user_domain_name = Default
+project_name = service
+username = nova
+password = $SERVICE_PASS
+[placement]
+auth_url = http://$CTRL_IP:5000/v3
+auth_type = password
+project_domain_name = Default
+user_domain_name = Default
+project_name = service
+username = placement
+password = $SERVICE_PASS
+region_name = $REGION
+[glance]
+auth_url = http://$CTRL_IP:5000/v3
+auth_type = password
+project_domain_name = Default
+user_domain_name = Default
+project_name = service
+username = glance
+password = $SERVICE_PASS
+region_name = $REGION
+[neutron]
+auth_url = http://$CTRL_IP:5000/v3
+auth_type = password
+project_domain_name = Default
+user_domain_name = Default
+project_name = service
+username = neutron
+password = $SERVICE_PASS
+region_name = $REGION
+[vnc]
+enabled = true
+novncproxy_host = 127.0.0.1
+novncproxy_port = 6080
+# The browser-facing console URL. Served over the controller's TLS
+# vhost (phase 6 wires nginx /vnc/ to the proxy); never a LAN URL.
+novncproxy_base_url = https://$CONSOLE_HOST/vnc/vnc_lite.html
+[oslo_concurrency]
+lock_path = /var/lib/nova/tmp
+EOF
+
+write_conf /etc/neutron/neutron.conf <<EOF
+[DEFAULT]
+transport_url = rabbit://openstack:$SERVICE_PASS@$CTRL_IP:5672/
+core_plugin = ml2
+log_dir = /var/log/neutron
+[database]
+connection = mysql+pymysql://neutron:$DB_PASS@127.0.0.1/neutron
+$(authtoken_block neutron)
+EOF
+
+write_conf /etc/neutron/plugins/ml2/ml2_conf.ini <<EOF
+[ml2]
+type_drivers = flat,vlan
+mechanism_drivers = openvswitch
+extension_drivers = port_security
+[ml2_type_flat]
+flat_networks = physnet1
+[securitygroup]
+enable_ipset = true
+EOF
+
+glance-manage db_sync
+placement-manage db_sync
+nova-manage api_db sync
+nova-manage cell_v2 map_cell0 --database_connection "mysql+pymysql://nova:$DB_PASS@127.0.0.1/nova_cell0"
+nova-manage cell_v2 create_cell --name cell1 --verbose
+nova-manage db sync
+neutron-db-manage --config-file /etc/neutron/neutron.conf \
+	--config-file /etc/neutron/plugins/ml2/ml2_conf.ini upgrade head
+log "databases synchronised (nova cell1 mapped)"
+
+# ---------------------------------------------------------------- phase 5: dashboard
+
+log "== phase 5/7: horizon (dashboard)"
+HSEC=$(head -c 48 /dev/urandom | od -An -tx1 | tr -d ' \n')
+write_conf /etc/horizon/local_settings.py <<EOF
+# Saphira horizon settings, written by saphira-openstack-setup-controller.
+SECRET_KEY = '$HSEC'
+OPENSTACK_HOST = "$CTRL_IP"
+OPENSTACK_KEYSTONE_URL = "http://$CTRL_IP:5000/v3"
+SESSION_ENGINE = 'django.contrib.sessions.backends.file'
+SESSION_FILE_PATH = '/var/lib/horizon/sessions'
+CACHES = {'default': {'BACKEND': 'django.core.cache.backends.locmem.LocMemCache'}}
+STATIC_ROOT = '/var/lib/horizon/static'
+AVAILABLE_REGIONS = [('http://$CTRL_IP:5000/v3', '$REGION')]
+OPENSTACK_KEYSTONE_MULTIDOMAIN_SUPPORT = False
+EOF
+mkdir -p /var/lib/horizon/sessions /var/lib/horizon/static
+chown -R horizon:horizon /var/lib/horizon/sessions /var/lib/horizon/static 2>/dev/null || true
+sudo -n -u horizon env PYTHONPATH=/etc/horizon \
+	DJANGO_SETTINGS_MODULE=openstack_dashboard.settings \
+	python3 -m django collectstatic --noinput || \
+	die "horizon collectstatic failed (branding and styling will be broken)"
+log "horizon configured (file sessions, collected static)"
+
+# ---------------------------------------------------------------- phase 6: console
+
+log "== phase 6/8: instance console (novncproxy behind TLS)"
+# noVNC web assets are not a Saphira package yet (openstack-novnc
+# pending): the proxy needs them at /usr/share/novnc. Refuse to
+# pretend otherwise.
+[ -f /usr/share/novnc/vnc_lite.html ] || \
+	die "noVNC assets missing at /usr/share/novnc (package pending) — console cannot work yet"
+mkdir -p /etc/systemd/system/nova-novncproxy.service.d
+printf '[Service]\nExecStart=\nExecStart=/usr/bin/nova-novncproxy --web /usr/share/novnc\n' \
+	> /etc/systemd/system/nova-novncproxy.service.d/saphira-openstack.conf
+chmod 0644 /etc/systemd/system/nova-novncproxy.service.d/saphira-openstack.conf
+systemctl daemon-reload
+# The browser must reach the console over the public TLS vhost, never
+# over a LAN URL. Proxy /vnc/ (HTTP + websocket upgrade) to the local
+# novncproxy.
+if [ -f /etc/nginx/conf.d/openstack.conf ] && ! grep -q 'location /vnc/' /etc/nginx/conf.d/openstack.conf; then
+	cp -a /etc/nginx/conf.d/openstack.conf "/etc/nginx/conf.d/openstack.conf.bak.$(date +%s)"
+	cat > /tmp/saphira-vncblock.txt <<'EOF'
+    location /vnc/ {
+        proxy_pass http://127.0.0.1:6080/;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_read_timeout 86400;
+        proxy_send_timeout 86400;
+    }
+EOF
+	# insert before the first closing brace (end of the 443 server block)
+	n=$(grep -n '^}$' /etc/nginx/conf.d/openstack.conf | head -1 | cut -d: -f1)
+	[ -n "${n:-}" ] || die "cannot find the end of the 443 server block in openstack.conf"
+	{ head -n $((n - 1)) /etc/nginx/conf.d/openstack.conf; cat /tmp/saphira-vncblock.txt; tail -n +"$n" /etc/nginx/conf.d/openstack.conf; } > /tmp/saphira-nginx-new.conf
+	cat /tmp/saphira-nginx-new.conf > /etc/nginx/conf.d/openstack.conf
+	rm -f /tmp/saphira-vncblock.txt /tmp/saphira-nginx-new.conf
+	nginx -t && systemctl reload nginx || \
+		die "nginx refused the /vnc/ block — restore the .bak and wire it by hand, then re-run"
+	log "nginx /vnc/ wired to novncproxy"
+fi
+
+# ---------------------------------------------------------------- phase 7: start + verify
+
+log "== phase 7/8: starting services"
+for s in glance placement nova-api nova-conductor nova-scheduler neutron-api neutron-rpc-server nova-novncproxy horizon; do
+	systemctl enable --now "$s" 2>/dev/null || service "$s" start
+done
+sleep 10
+
+log "== phase 8/8: verification (every service must answer)"
+fail=0
+probe keystone "http://$CTRL_IP:5000/v3" || fail=1
+TOKEN=$(get_token admin "$ADMIN_PASS" admin)
+[ -n "${TOKEN:-}" ] || { log "admin token: FAILED"; fail=1; }
+[ -n "${TOKEN:-}" ] && log "admin token: issued"
+for svc in \
+	"glance http://$CTRL_IP:9292/v2/images" \
+	"placement http://$CTRL_IP:8778/" \
+	"nova http://$CTRL_IP:8774/v2.1/servers" \
+	"neutron http://$CTRL_IP:9696/v2.0/networks"; do
+	set -- $svc
+	if [ -n "${TOKEN:-}" ]; then
+		code=$(curl -s -m 10 -o /dev/null -w '%{http_code}' -H "X-Auth-Token: $TOKEN" "$2")
+	else
+		code=000
+	fi
+	log "$1: $code"
+	case $code in 200|300) ;; *) fail=1 ;; esac
+done
+if [ "$fail" -eq 0 ]; then
+	log ""
+	log "controller ready. Next: run saphira-openstack-setup-compute on each"
+	log "hypervisor, pointing it at http://$CTRL_IP, then create a network,"
+	log "an image and a flavor — and boot. It's so Simple it Hurts."
+else
+	die "verification failed — read the codes above, fix, re-run (safe: existing config is kept)"
+fi

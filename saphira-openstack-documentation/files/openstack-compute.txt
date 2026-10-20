@@ -1,0 +1,98 @@
+Saphira OpenStack — the compute node (hypervisor)
+===================================================
+(How to join it. Do this per hypervisor, after the controller.)
+
+The compute node runs guests: nova-compute, the libvirt daemon set,
+and the neutron OVS + DHCP agents that wire tenant traffic. It holds
+no databases, no images, no identity — everything authoritative
+lives on the controller. A compute node is the simplest OpenStack
+machine there is, and every one of its failures is a privilege or a
+missing flag, never a mystery. This guide lists each one.
+
+DO run saphira-openstack-setup-compute. It asks four questions
+(controller IP, service password, provider network/bridge names,
+tenant NIC) and performs every phase below. This guide is what it
+does and why.
+
+WHAT TO DO, IN ORDER (and why each step exists)
+------------------------------------------------
+1. Install the role package, then join. nova.conf needs: transport
+   to the controller's rabbitmq, my_ip (THIS host, not the
+   controller), keystone_authtoken pointing at the controller,
+   placement/glance/neutron sections with the SERVICE credentials
+   (the hypervisor acts as those users — never as admin, never as
+   a human), state_path, lock_path, and [libvirt] virt_type.
+   (WHY service creds, not admin: least privilege, and rotation
+   does not strand your humans.)
+
+2. PROBE virt_type, do not declare it. If /dev/kvm exists, kvm;
+   otherwise qemu. (WHY: libvirt refuses the guest with
+   "does not support virt type 'kvm'" when KVM is absent — and on
+   virtualised lab hosts it usually IS absent. Forcing kvm is the
+   commonest unbootable-compute cause. WHEN NOT to use qemu: never
+   in production if KVM exists — emulation is orders of magnitude
+   slower. The probe chooses correctly; let it.)
+
+3. Write the two sudoers fragments (nova: privsep-helper +
+   nova-rootwrap; neutron: neutron-rootwrap* + privsep-helper) and
+   validate each with visudo -c. (WHY: both agent families escalate
+   per-command. Without them every spawn dies with
+   FailedToDropPrivileges. The fragments are the narrowest grant
+   that works — never ALL.)
+
+4. Configure the neutron agents AND launch them with their configs:
+   openvswitch_agent.ini MUST reach the OVS agent via --config-file
+   (without it the agent reports empty bridge_mappings and neutron
+   refuses every bind — see pitfalls #4), and neutron.conf MUST set
+   [AGENT] root_helper to neutron-rootwrap (the default bare 'sudo'
+   is denied by the very sudoers you just wrote — see #5).
+
+5. Start the FULL libvirt set: virtqemud, virtlogd, virtnodedevd,
+   virtsecretd. (WHY all four: guests fail mid-handshake when
+   virtlogd is missing, and the missing-socket errors read like
+   config corruption. WHEN: always, even if you think you only need
+   "qemu" — the driver leans on the set.)
+
+6. If the packaged virtqemud unit carries ProtectControlGroups=yes,
+   override it to no. (WHY: it mounts the cgroup tree read-only
+   inside the daemon and every guest start fails. See #8. WHEN NOT:
+   once the recipe is fixed the override is a no-op — the join
+   script checks first.)
+
+7. Build the provider bridge (ovs-vsctl add-br, add-port the tenant
+   NIC) with bridge_mappings "$PHYSNET:$BRIDGE" matching the
+   controller's flat_networks exactly. (WHY exact: one character of
+   drift and binding fails with "reported physical networks {}".
+   The names are a contract between two files on two machines.)
+
+8. Start nova-compute + both agents. Then, ON THE CONTROLLER:
+   nova-manage cell_v2 discover_hosts, list hypervisors (up), list
+   neutron agents (alive, mappings reported). THEN boot. (WHY
+   discover first: the scheduler cannot see a host it was never
+   introduced to, and the error blames "no valid host" as if your
+   flavors were wrong.)
+
+WHAT NOT TO DO
+---------------
+- Do NOT enslave your only ssh NIC without typing the YES the
+  script demands. It normally survives (your session rides the
+  bridge), but "normally" is doing heavy lifting in that sentence.
+  A dedicated tenant NIC is always calmer.
+- Do NOT run guests as root's libvirt session or hand-edit domain
+  XML to work around a nova error. Fix nova's config; the XML is a
+  symptom.
+- Do NOT copy another host's nova.conf wholesale. my_ip,
+  hostnames, and virt_type are per-host facts. Copy the SHAPE,
+  re-ask the QUESTIONS.
+- Do NOT skip the controller-side discover_hosts and then debug
+  the compute. Half of all "scheduler ignores my hypervisor"
+  reports end here.
+
+WHEN TO ADD ANOTHER COMPUTE (and when not to)
+----------------------------------------------
+Add one when guests contend for CPU/RAM, or when you want failure
+domains. Do NOT add one to fix a broken first compute — two broken
+hypervisors schedule nothing twice as fast. Prove ONE hypervisor
+boots (ACTIVE + lease, see the verify steps) before joining the
+second; the second then takes minutes because every lesson is
+already encoded.

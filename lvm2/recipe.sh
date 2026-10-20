@@ -6,10 +6,17 @@
 # later, drop --disable-udev_sync deliberately (an unknown spelling
 # would only warn under autoconf, so a wrong flag here fails safe
 # and loud at configure time, not silently).
+#
+# musl stdio: stdin/stdout/stderr are not assignable lvalues
+# (glibc-ism), and glibc-specific setlinebuf/linebuffer juggling in
+# toolcontext.c corrupts musl stdio (every tool segfaulted right
+# after fd setup; strace-proven). The musl-stdio-assign.patch covers
+# both (freopen + #ifdef __GLIBC__ guards, same approach as Alpine's
+# fix-stdio-usage.patch).
 
 pkgname=lvm2
 pkgver=2.03.39
-pkgrel=1
+pkgrel=2
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="Logical volume management"
 license="GPL-2.0-or-later LGPL-2.1-or-later"
@@ -41,9 +48,7 @@ recipe_build()
 {
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$RECIPE_DIR/files/v2_03_39.tar.gz"
 	echo "$sha256  $RECIPE_DIR/files/v2_03_39.tar.gz" | sha256sum -c -
-	# musl: stdin/stdout/stderr are not assignable lvalues (glibc-ism
-	# in _check_standard_fds: "assignment of read-only variable").
-	# freopen() reopens the stream in place and is portable to glibc.
+	# musl stdio patch (freopen + __GLIBC__ guards, see header).
 	patch -p1 -d "$SRC" < "$RECIPE_DIR/files/musl-stdio-assign.patch"
 	cd "$SRC"
 	./configure --prefix=/usr --sysconfdir=/etc --localstatedir=/var \

@@ -1,0 +1,232 @@
+#!/bin/sh
+#
+# saphira-openstack-setup-storage — prepare this machine as a cinder
+# LVM volume host (storage node) for an OpenStack controller.
+#
+# Saphira Linux — "It's so Simple it Hurts."
+#
+# Interactive. Asks which controller to serve, the credentials, and
+# which DISK to devote to volumes; creates the volume group, writes
+# cinder.conf, registers the cinder identity and the volumev3
+# endpoint on the controller, and then stops honestly at the one gate
+# that is not yet packaged: the iSCSI target daemon (tgt / open-iscsi
+# are not Saphira packages yet, so no host can export volumes today).
+#
+# Everything the script CAN do, it does and verifies. What it cannot
+# do, it names precisely instead of pretending.
+#
+# The cardinal rule, learned the expensive way: NEVER let LVM near a
+# disk you have not positively identified. One wrong pvcreate eats a
+# partition table. The script lists every disk, refuses anything
+# mounted or partitioned without a typed YES, and tells you how to
+# snapshot first.
+#
+# Non-interactive use (for agents): export SAPHIRA_OS_* variables.
+#   SAPHIRA_OS_CONTROLLER   controller IP (no default: you must say)
+#   SAPHIRA_OS_SERVICE_PASS service users password (asked, never defaulted)
+#   SAPHIRA_OS_ADMIN_PASS   admin password (asked: needed once, to register
+#                           the cinder user and endpoint on the controller)
+#   SAPHIRA_OS_DB_PASS      database password (asked: cinder needs its
+#                           database on the controller's mariadb)
+#   SAPHIRA_OS_VOLUME_DISK  disk for volumes, e.g. /dev/sdb (asked)
+#   SAPHIRA_OS_VOLUME_GROUP volume group name (default: cinder-volumes)
+#
+# Modes: (none) prepare | --check verify-only | --force overwrite | --help
+
+set -u
+
+FORCE=0
+CHECK=0
+
+log() { printf '%s\n' "$*"; }
+die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+
+[ "$(id -u)" -eq 0 ] || die "run as root (this script writes service configuration and touches disks)"
+
+for a in "$@"; do
+	case $a in
+		--force) FORCE=1 ;;
+		--check) CHECK=1 ;;
+		--help|-h) sed -n '2,/^# Modes/p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+		*) die "unknown argument: $a" ;;
+	esac
+done
+
+if [ "$CHECK" -eq 1 ]; then
+	if vgs --noheadings -o name 2>/dev/null | grep -qw cinder-volumes; then
+		log "volume group: present"
+	else
+		log "volume group: MISSING (run without --check to prepare)"
+	fi
+	which tgtadm >/dev/null 2>&1 && log "iscsi target: present" || log "iscsi target: MISSING (not yet packaged — volumes cannot export)"
+	systemctl is-active --quiet cinder-volume 2>/dev/null && log "cinder-volume: active" || log "cinder-volume: not active (expected until the target gate clears)"
+	exit 0
+fi
+
+ask() {
+	var=$1; prompt=$2; def=$3
+	eval "cur=\${SAPHIRA_OS_$var:-}"
+	if [ -n "${cur:-}" ]; then eval "$var=\"\$cur\""; return; fi
+	if [ -n "$def" ]; then
+		printf '%s [%s]: ' "$prompt" "$def"; read -r val
+		eval "$var=\"\${val:-$def}\""
+	else
+		printf '%s: ' "$prompt"; read -r val
+		[ -n "${val:-}" ] || die "$prompt is required"
+		eval "$var=\"\$val\""
+	fi
+}
+
+ask_secret() {
+	var=$1; prompt=$2
+	eval "cur=\${SAPHIRA_OS_$var:-}"
+	if [ -n "${cur:-}" ]; then eval "$var=\"\$cur\""; return; fi
+	printf '%s: ' "$prompt"
+	stty -echo 2>/dev/null || true; read -r val; stty echo 2>/dev/null || true
+	printf '\n'
+	[ -n "${val:-}" ] || die "a $prompt is required"
+	eval "$var=\"\$val\""
+}
+
+log "Saphira OpenStack storage prep."
+ask CONTROLLER "controller IP address" ""
+ask_secret ADMIN_PASS "controller admin password (one-time: registers cinder)"
+ask_secret SERVICE_PASS "service users password (must match the controller)"
+ask_secret DB_PASS "database password (must match the controller)"
+ask VOLUME_GROUP "volume group name" "cinder-volumes"
+
+log ""
+log "candidate disks (mounted or partitioned disks are dangerous):"
+lsblk -d -o NAME,SIZE,TYPE 2>/dev/null | head -10
+ask VOLUME_DISK "disk to devote to volumes (e.g. /dev/sdb)" ""
+[ -b "$VOLUME_DISK" ] || die "$VOLUME_DISK is not a block device"
+
+# Refuse anything that looks lived-on, unless the operator insists.
+if mount | grep -q "^$VOLUME_DISK" || lsblk -n -o MOUNTPOINT "$VOLUME_DISK" 2>/dev/null | grep -q /; then
+	log "WARNING: $VOLUME_DISK (or a partition of it) is MOUNTED."
+	log "Type YES to proceed anyway. Anything else aborts."
+	printf 'proceed? '; read -r yn
+	[ "$yn" = "YES" ] || die "aborted: pick an empty disk"
+fi
+if fdisk -l "$VOLUME_DISK" 2>/dev/null | grep -qE "^${VOLUME_DISK}[0-9p]"; then
+	log "NOTE: $VOLUME_DISK already carries a partition table."
+	log "pvcreate will claim it for LVM. Snapshot or back it up first."
+	log "Type YES to proceed."
+	printf 'proceed? '; read -r yn
+	[ "$yn" = "YES" ] || die "aborted"
+fi
+
+# ---------------------------------------------------------------- phase 1: LVM
+
+log "== phase 1/4: LVM volume group"
+if vgs "$VOLUME_GROUP" >/dev/null 2>&1; then
+	log "volume group $VOLUME_GROUP already exists: kept"
+else
+	pvcreate "$VOLUME_DISK" || die "pvcreate failed"
+	vgcreate "$VOLUME_GROUP" "$VOLUME_DISK" || die "vgcreate failed"
+	log "volume group $VOLUME_GROUP ready on $VOLUME_DISK"
+fi
+
+# ---------------------------------------------------------------- phase 2: cinder identity (on the controller)
+
+log "== phase 2/4: cinder identity and endpoint (via controller API)"
+ADMIN_TOKEN=$(curl -s -m 15 -X POST "http://$CONTROLLER:5000/v3/auth/tokens" \
+	-H 'Content-Type: application/json' \
+	-d "{\"auth\":{\"identity\":{\"methods\":[\"password\"],\"password\":{\"user\":{\"name\":\"admin\",\"domain\":{\"name\":\"Default\"},\"password\":\"$ADMIN_PASS\"}}},\"scope\":{\"project\":{\"name\":\"admin\",\"domain\":{\"name\":\"Default\"}}}}}" \
+	-D - -o /dev/null 2>/dev/null | grep -i '^X-Subject-Token:' | awk '{print $2}' | tr -d '\r')
+[ -n "${ADMIN_TOKEN:-}" ] || die "controller did not issue an admin token (wrong IP or password?)"
+
+CUID=$(curl -s -m 15 "http://$CONTROLLER:5000/v3/users?name=cinder" -H "X-Auth-Token: $ADMIN_TOKEN" \
+	| python3 -c "import json,sys; u=json.load(sys.stdin)['users']; print(u[0]['id'] if u else '')" 2>/dev/null)
+if [ -z "${CUID:-}" ]; then
+	CUID=$(curl -s -m 15 -X POST "http://$CONTROLLER:5000/v3/users" -H "X-Auth-Token: $ADMIN_TOKEN" \
+		-H 'Content-Type: application/json' \
+		-d "{\"user\":{\"name\":\"cinder\",\"domain_id\":\"default\",\"password\":\"$SERVICE_PASS\"}}" \
+		| python3 -c "import json,sys; print(json.load(sys.stdin)['user']['id'])")
+	log "cinder user created"
+else
+	log "cinder user exists: kept"
+fi
+SPROJ=$(curl -s -m 15 "http://$CONTROLLER:5000/v3/projects?name=service" -H "X-Auth-Token: $ADMIN_TOKEN" \
+	| python3 -c "import json,sys; print(json.load(sys.stdin)['projects'][0]['id'])")
+ADMIN_R=$(curl -s -m 15 "http://$CONTROLLER:5000/v3/roles?name=admin" -H "X-Auth-Token: $ADMIN_TOKEN" \
+	| python3 -c "import json,sys; print(json.load(sys.stdin)['roles'][0]['id'])")
+SVC_R=$(curl -s -m 15 "http://$CONTROLLER:5000/v3/roles?name=service" -H "X-Auth-Token: $ADMIN_TOKEN" \
+	| python3 -c "import json,sys; print(json.load(sys.stdin)['roles'][0]['id'])")
+MY_IP=$(ip -o -4 addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)
+curl -s -m 15 -o /dev/null -X PUT "http://$CONTROLLER:5000/v3/projects/$SPROJ/users/$CUID/roles/$ADMIN_R" -H "X-Auth-Token: $ADMIN_TOKEN"
+curl -s -m 15 -o /dev/null -X PUT "http://$CONTROLLER:5000/v3/projects/$SPROJ/users/$CUID/roles/$SVC_R" -H "X-Auth-Token: $ADMIN_TOKEN"
+VSVC=$(curl -s -m 15 "http://$CONTROLLER:5000/v3/services?type=volumev3" -H "X-Auth-Token: $ADMIN_TOKEN" \
+	| python3 -c "import json,sys; s=json.load(sys.stdin)['services']; print(s[0]['id'] if s else '')" 2>/dev/null)
+if [ -z "${VSVC:-}" ]; then
+	VSVC=$(curl -s -m 15 -X POST "http://$CONTROLLER:5000/v3/services" -H "X-Auth-Token: $ADMIN_TOKEN" \
+		-H 'Content-Type: application/json' -d '{"service":{"type":"volumev3","name":"cinderv3"}}' \
+		| python3 -c "import json,sys; print(json.load(sys.stdin)['service']['id'])")
+	for iface in public internal admin; do
+		curl -s -m 15 -o /dev/null -X POST "http://$CONTROLLER:5000/v3/endpoints" -H "X-Auth-Token: $ADMIN_TOKEN" \
+			-H 'Content-Type: application/json' \
+			-d "{\"endpoint\":{\"service_id\":\"$VSVC\",\"interface\":\"$iface\",\"url\":\"http://$MY_IP:8776/v3/%(project_id)s\",\"region_id\":\"RegionOne\"}}"
+	done
+	log "volumev3 service + endpoints registered (pointing at this host)"
+else
+	log "volumev3 service exists: kept"
+fi
+
+# ---------------------------------------------------------------- phase 3: cinder config
+
+log "== phase 3/4: cinder configuration"
+if [ -f /etc/cinder/cinder.conf ] && [ "$FORCE" -eq 0 ]; then
+	log "keep existing /etc/cinder/cinder.conf (use --force to overwrite)"
+else
+	[ -f /etc/cinder/cinder.conf ] && cp -a /etc/cinder/cinder.conf "/etc/cinder/cinder.conf.bak.$(date +%s)"
+	mkdir -p /etc/cinder
+	cat > /etc/cinder/cinder.conf <<EOF
+[DEFAULT]
+transport_url = rabbit://openstack:$SERVICE_PASS@$CONTROLLER:5672/
+auth_strategy = keystone
+my_ip = $MY_IP
+log_dir = /var/log/cinder
+enabled_backends = lvm
+[database]
+connection = mysql+pymysql://cinder:$DB_PASS@$CONTROLLER/cinder
+[keystone_authtoken]
+www_authenticate_uri = http://$CONTROLLER:5000/v3
+auth_url = http://$CONTROLLER:5000/v3
+memcached_servers = $CONTROLLER:11211
+auth_type = password
+project_domain_name = Default
+user_domain_name = Default
+project_name = service
+username = cinder
+password = $SERVICE_PASS
+[lvm]
+volume_driver = cinder.volume.drivers.lvm.LVMVolumeDriver
+volume_group = $VOLUME_GROUP
+target_protocol = iscsi
+target_helper = tgtadm
+[oslo_concurrency]
+lock_path = /var/lib/cinder/tmp
+EOF
+	chmod 0640 /etc/cinder/cinder.conf
+	log "wrote /etc/cinder/cinder.conf"
+fi
+log "NOTE: the controller also needs a 'cinder' database + grants for"
+log "mysql+pymysql://cinder@$CONTROLLER/cinder — create it there with"
+log "the same DB password before starting cinder-volume."
+
+# ---------------------------------------------------------------- phase 4: the honest gate
+
+log "== phase 4/4: iSCSI target gate"
+if which tgtadm >/dev/null 2>&1; then
+	log "tgtadm present: enabling cinder-volume"
+	systemctl enable --now cinder-volume 2>/dev/null || service cinder-volume start
+	log "storage node live. Create a volume to prove it."
+else
+	log ""
+	log "STOPPING HERE, HONESTLY: no iSCSI target daemon is installed"
+	log "(tgt / open-iscsi are not Saphira packages yet), so this host"
+	log "cannot export volumes. Everything else is ready: volume group,"
+	log "identity, endpoint, configuration. When the target packages"
+	log "land, install one and run this script again — it will pick up"
+	log "exactly here. Do NOT fake it with an unreviewed static binary."
+fi

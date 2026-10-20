@@ -1,0 +1,197 @@
+Saphira OpenStack — the pitfalls book
+=====================================
+(Every failure from the first bring-up. Read this BEFORE you need it.)
+
+Each entry: SYMPTOM (what you see), CAUSE (why it happens), FIX
+(what to do), WHY (so you understand it), WHEN (when it applies —
+and when it does not, so you don't "fix" healthy machines).
+
+#1. The empty 401: service token rejected
+  SYMPTOM: Server create returns 500 NeutronAdminCredential...;
+    packet capture shows nova -> neutron GET /v2.0/networks answered
+    401 with an EMPTY body. The same URL + same token via curl: 200.
+  CAUSE: Modern services attach their own X-Service-Token next to the
+    user token, and the receiver enforces service_token_roles on it.
+    The service users lack the `service` role, so the (perfectly
+    valid) service token is rejected. The user token was never the
+    problem — which is why curl "works" and nova "doesn't".
+  FIX: Grant the `service` role (it already exists) to every service
+    user on the service project, alongside their admin grant. Then
+    restart the sending service so it mints a fresh service token.
+  WHY: The 401 is about the SECOND token, which your curl never
+    sends. Two tokens, two checks; test both or test nothing.
+  WHEN: ANY service-to-service call on a modern cloud. WHEN NOT:
+    never "fix" this by disabling service_token_roles_required —
+    that removes the proof services give each other.
+
+#2. FailedToDropPrivileges: missing sudoers fragments
+  SYMPTOM: nova-compute (or a neutron agent) dies at first real work:
+    "privsep helper command exited non-zero (1)".
+  CAUSE: Both agent families escalate per-command through sudo, and
+    neither recipe ships the fragment: nova needs privsep-helper +
+    nova-rootwrap; neutron needs neutron-rootwrap* + privsep-helper.
+  FIX: Write the two-line fragment, chmod 0440, validate with
+    visudo -c. Narrowest grant that works — never ALL.
+  WHY: Exit 1 from the helper spawn is sudo refusing, not the helper
+    crashing. Read it as "permission to escalate: denied".
+  WHEN: every compute node, every neutron agent host. WHEN NOT: the
+    controller API services (gunicorn) never escalate — do not
+    sprinkle sudoers where no helper runs.
+
+#3. Agents time out: neutron-rpc-server is not running
+  SYMPTOM: OVS + DHCP agents log MessagingTimeout on every RPC call;
+    /v2.0/agents is empty; ports never bind.
+  CAUSE: The API is served by gunicorn, but NOTHING consumes agent
+    RPC until neutron-rpc-server runs. HTTP works, RPC doesn't — so
+    networks list fine while agents starve.
+  FIX: Start (and enable) neutron-rpc-server on the controller.
+  WHY: Neutron is two halves — HTTP API and RPC fabric. Gunicorn
+    replaced only the first half; the packaged rpc-server unit is
+    the second. HTTP-only testing hides this completely.
+  WHEN: every controller, always. WHEN NOT: never skip it "because
+    the API answers" — that test cannot see this failure.
+
+#4. Empty bridge mappings: agents launched without their configs
+  SYMPTOM: PortBindingFailed; neutron logs "agent reported physical
+    networks {}" although openvswitch_agent.ini is correct on disk.
+  CAUSE: The units launch the agents with NO --config-file, so the
+    plugin ini is never read. The file is right; the process never
+    opened it.
+  FIX: Launch with --config-file neutron.conf --config-file
+    <plugin ini>. (Until the packaged units carry the flags, use
+    drop-ins that check first and vanish harmlessly later.)
+  WHY: "Configured" means "loaded by the running process", not
+    "present on disk". Prove mappings via /v2.0/agents, never via
+    cat of the ini.
+  WHEN: OVS agent everywhere; same class of bug bites any agent
+    whose config lives outside the main conf.
+
+#5. root_helper: bare sudo is denied by design
+  SYMPTOM: dnsmasq (or any agent-spawned process) exits 1, silently,
+    in a spawn loop; manual runs of the same command work.
+  CAUSE: The default root_helper is bare 'sudo', but the agent's
+    sudoers only allows the filtered neutron-rootwrap facility —
+    so every spawn is denied. Manual runs work because YOU may sudo
+    anything; the agent may not.
+  FIX: Set [AGENT] root_helper to neutron-rootwrap with the shipped
+    config. That is the designed path — the filters exist for it.
+  WHY: "Works for me" (root) vs "works for the agent" (filtered)
+    are different claims. Always test AS the service user THROUGH
+    the configured helper.
+  WHEN: every neutron agent host. WHEN NOT: do not "fix" by
+    widening sudoers to ALL — you would delete the filter boundary
+    the package authors built.
+
+#6. Wrong virt_type: KVM forced where none exists
+  SYMPTOM: "Emulator does not support virt type 'kvm'"; instant
+    ERROR on every boot.
+  CAUSE: No /dev/kvm (virtualised lab hosts usually have none).
+  FIX: PROBE — kvm when /dev/kvm exists, qemu otherwise. Never
+    declare it by hand per host; let the join script decide.
+  WHY: The error names the emulator, not your config, so people
+    debug libvirt instead of looking at the device node.
+  WHEN: virtualised/lab hosts. WHEN NOT production with real KVM —
+    emulation is orders of magnitude slower; the probe already
+    chooses correctly, so this "when not" handles itself.
+
+#7. The missing daemons: virtlogd (and friends) not started
+  SYMPTOM: Guest start fails at handshake; "failed to connect socket
+    ... virtlogd-sock: No such file".
+  CAUSE: Only virtqemud was started. Guests need the set:
+    virtqemud, virtlogd, virtnodedevd, virtsecretd.
+  FIX: Enable + start all four, verify all four. Every boot needs
+    the set even if you think you only use "qemu".
+  WHY: The missing-socket errors read like corruption; they are
+    just absent daemons. Start the set, not the one.
+
+#8. ProtectControlGroups: packaged sandbox vs guest cgroups
+  SYMPTOM: "Failed to create v2 cgroup: Read-only file system";
+    QEMU dies right after the handshake.
+  CAUSE: The packaged virtqemud unit mounts the cgroup tree
+    read-only inside the daemon.
+  FIX: Override ProtectControlGroups to no (drop-in, checked, so it
+    no-ops once the recipe is fixed).
+  WHY: Sandboxing the hypervisor against the very tree it manages
+    is a packaging bug, not hardening. Hardening that breaks the
+    workload is downtime with extra steps.
+  WHEN: until the recipe is fixed. WHEN NOT: do not copy this
+    override to other daemons "just in case" — each unit's sandbox
+    stands on its own evidence.
+
+#9. Empty environ: helpers that cannot find 'ip'
+  SYMPTOM: Bare "FileNotFoundError: [Errno 2]" (NO filename!) from
+    privsep helpers doing netns ops; everything works when you run
+    it by hand.
+  CAUSE: Daemons scrub their environ; sudo had no secure_path, so
+    helpers inherited NO PATH and the C library's fallback
+    (:/bin:/usr/bin) has no 'ip'. Bare message = the posix_spawn
+    path, which omits the filename — a red herring that cost real
+    time. Hand-runs work because YOUR shell provides PATH.
+  FIX: Defaults secure_path in sudoers.d (platform fix — every
+    empty-env sudo benefits). Never chase the missing "file"; there
+    isn't one. The missing thing is PATH.
+  WHY: "Works by hand, fails as a daemon" is ALWAYS the
+    environment until proven otherwise. Diff the environ first.
+  WHEN: any root helper spawned from a scrubbed daemon. WHEN NOT:
+    do not set PATH per-unit to fix this — the daemon scrubs it
+    anyway; fix the layer that survives (sudo).
+
+#10. RabbitMQ 4.x: the transient queue gate  SYMPTOM: Agents/consumers fail at queue declare on a fresh
+    RabbitMQ 4.x, with errors about transient non-exclusive queues.
+  CAUSE: 4.x deprecates them; oslo.messaging still declares them.
+  FIX: deprecated_features.permit.transient_nonexcl_queues = true.
+  WHY: Version gates fail at the intersection of two projects'
+    assumptions. When messaging breaks on a version bump, read the
+    deprecation list before the code.
+  WHEN: RabbitMQ 4.x only. WHEN NOT: 3.x has no gate — version your
+    workarounds, don't accumulate them.
+
+#11. Console goes nowhere: LAN URL in a public browser
+  SYMPTOM: Horizon shows the instance, the console link points at
+    http://<lan-ip>:6080/... and the browser spins forever.
+  CAUSE: Three stacked gaps, all required: (a) nova-novncproxy was
+    never started; (b) noVNC web assets were never installed (the
+    proxy has no client to serve); (c) the console URL names a LAN
+    address no outside browser can reach. ALSO: the URL is minted by
+    nova-COMPUTE's novncproxy_base_url, not the controller's — fixing
+    the controller alone changes nothing.
+  FIX: Install noVNC assets at /usr/share/novnc; start
+    nova-novncproxy with --web pointing there; proxy /vnc/ through
+    the controller's TLS vhost (HTTP + websocket Upgrade, long
+    timeouts); set novncproxy_base_url on EVERY compute to the
+    https://<public-host>/vnc/vnc_lite.html form; restart
+    nova-compute; re-request the console URL and confirm the scheme
+    is https.
+  WHY: The console is a four-leg path (guest VNC -> compute port ->
+    proxy -> browser) and horizon only shows you the last leg's URL.
+    Debug legs in order: guest :5900 listening, proxy :6080 serving
+    the HTML, nginx /vnc/ proxying (200), then the minted URL.
+  WHEN: every cloud with browsers outside the rack (i.e. all of
+    them). WHEN NOT: a LAN-only lab COULD use the raw URL — but the
+    proxied form works there too, so keep one shape everywhere.
+    (Not IPv6, whatever the forum says: it is address reachability,
+    not address family.)
+
+GENERAL RULES (the whole book in one page)
+-------------------------------------------
+- Prove with the API, not with vibes: token, empty-lists, agents
+  table (alive + mappings), hypervisor (up), ACTIVE + lease. Each
+  layer has ONE command that proves it; run them in order and stop
+  at the first failure — the fault is AT that layer, never deeper.
+- "Works by hand" proves nothing about daemons. Re-run every
+  manual success AS the service user, THROUGH the configured
+  helper, WITH the daemon's environment. Three differences, three
+  classic failures (#5, #9, and every sudoers story).
+- Config on disk is not config loaded (#4). Process cmdline
+  (ps) and the service's own reporting (agents table) are truth;
+  files are hearsay until a process read them.
+- Fix the layer that survives (#9): per-unit env dies with the
+  daemon, sudoers/drop-ins persist. Prefer fixes that outlive
+  restarts.
+- Never widen a privilege boundary to dodge a failure (#1, #2,
+  #5). The boundary is load-bearing; grant the narrow role, use
+  the filtered facility, keep ALL out of it.
+- One hypervisor proven before two (#compute guide). Two broken
+  hypervisors schedule nothing twice as fast.
+- Disks are forever (#storage guide): pvcreate does not ask twice.
+  Snapshot first, YES in caps, never "temporary" production disks.

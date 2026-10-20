@@ -1,0 +1,319 @@
+#!/bin/sh
+#
+# saphira-openstack-setup-compute — join this machine to an OpenStack
+# controller as a working hypervisor (compute node).
+#
+# Saphira Linux — "It's so Simple it Hurts."
+#
+# Interactive. Asks which controller to join, which NIC carries tenant
+# traffic, and a few credentials; then writes nova-compute and neutron
+# agent configuration, fixes the privilege boundaries both agent
+# families need, starts the libvirt daemon set, enslaves the tenant
+# NIC to the provider bridge, and proves the controller sees a live
+# hypervisor with reporting agents.
+#
+# Every hard lesson from the first bring-up is encoded here, so you do
+# not have to re-learn it:
+#   - virt_type is PROBED (/dev/kvm present -> kvm, else qemu)
+#   - neutron agents are launched with their plugin configs (without
+#     --config-file they report empty bridge mappings and no port
+#     ever binds)
+#   - neutron's root_helper is set to neutron-rootwrap (the default
+#     bare 'sudo' fails: the agent may only run the filtered facility)
+#   - nova and neutron get their sudoers fragments (privsep dies
+#     without them)
+#   - the virt daemons (virtqemud, virtlogd, virtnodedevd,
+#     virtsecretd) are all started (guests fail at handshake when
+#     virtlogd is missing)
+#
+# Non-interactive use (for agents): export SAPHIRA_OS_* variables.
+#   SAPHIRA_OS_CONTROLLER   controller IP (no default: you must say)
+#   SAPHIRA_OS_CONSOLE_URL  browser-facing console base (default:
+#                           https://<controller>/vnc/vnc_lite.html)
+#   SAPHIRA_OS_SERVICE_PASS service users password (asked, never defaulted)
+#   SAPHIRA_OS_PHYSNET      provider physical network (default: physnet1)
+#   SAPHIRA_OS_BRIDGE       OVS bridge (default: br-physnet1)
+#   SAPHIRA_OS_TENANT_NIC   NIC to enslave for tenant traffic (asked)
+#
+# Modes: (none) join | --check verify-only | --force overwrite | --help
+
+set -u
+
+FORCE=0
+CHECK=0
+
+log() { printf '%s\n' "$*"; }
+die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+
+[ "$(id -u)" -eq 0 ] || die "run as root (this script writes service configuration)"
+
+for a in "$@"; do
+	case $a in
+		--force) FORCE=1 ;;
+		--check) CHECK=1 ;;
+		--help|-h) sed -n '2,/^# Modes/p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+		*) die "unknown argument: $a" ;;
+	esac
+done
+
+write_conf() {
+	path=$1
+	if [ -f "$path" ] && [ "$FORCE" -eq 0 ]; then
+		log "keep existing $path (use --force to overwrite)"
+		return 0
+	fi
+	[ -f "$path" ] && cp -a "$path" "$path.bak.$(date +%s)"
+	mkdir -p "$(dirname "$path")"
+	cat > "$path"
+	log "wrote $path"
+}
+
+dropin() {
+	# dropin <unit> <content>: installs a systemd override only when the
+	# packaged unit lacks the wanted directive (future-proof: once the
+	# recipes absorb these fixes, this becomes a silent no-op).
+	unit=$1; want=$2
+	if grep -q -- "$want" "/usr/lib/systemd/system/$unit" 2>/dev/null; then
+		log "packaged $unit already carries '$want': no drop-in"
+		return 0
+	fi
+	mkdir -p "/etc/systemd/system/$unit.d"
+	{
+		printf '[Service]\n'
+		cat
+	} > "/etc/systemd/system/$unit.d/saphira-openstack.conf"
+	chmod 0644 "/etc/systemd/system/$unit.d/saphira-openstack.conf"
+	log "drop-in for $unit ('$want')"
+}
+
+if [ "$CHECK" -eq 1 ]; then
+	fail=0
+	for s in nova-compute neutron-openvswitch-agent virtqemud virtlogd; do
+		if systemctl is-active --quiet "$s" 2>/dev/null; then
+			log "$s: active"
+		else
+			log "$s: NOT ACTIVE"; fail=1
+		fi
+	done
+	[ "$fail" -eq 0 ] && log "compute node: services up (agents must ALSO report on the controller: see the docs)" \
+		|| die "compute node: something is down"
+	exit 0
+fi
+
+# ---------------------------------------------------------------- questions
+
+ask() {
+	var=$1; prompt=$2; def=$3
+	eval "cur=\${SAPHIRA_OS_$var:-}"
+	if [ -n "${cur:-}" ]; then eval "$var=\"\$cur\""; return; fi
+	if [ -n "$def" ]; then
+		printf '%s [%s]: ' "$prompt" "$def"; read -r val
+		eval "$var=\"\${val:-$def}\""
+	else
+		printf '%s: ' "$prompt"; read -r val
+		[ -n "${val:-}" ] || die "$prompt is required"
+		eval "$var=\"\$val\""
+	fi
+}
+
+ask_secret() {
+	var=$1; prompt=$2
+	eval "cur=\${SAPHIRA_OS_$var:-}"
+	if [ -n "${cur:-}" ]; then eval "$var=\"\$cur\""; return; fi
+	printf '%s: ' "$prompt"
+	stty -echo 2>/dev/null || true; read -r val; stty echo 2>/dev/null || true
+	printf '\n'
+	[ -n "${val:-}" ] || die "a $prompt is required"
+	eval "$var=\"\$val\""
+}
+
+log "Saphira OpenStack compute join — five questions."
+ask CONTROLLER "controller IP address" ""
+ask CONSOLE_URL "console base URL (controller TLS vhost)" "https://$CONTROLLER/vnc/vnc_lite.html"
+ask_secret SERVICE_PASS "service users password (must match the controller)"
+ask PHYSNET "provider physical network name" "physnet1"
+ask BRIDGE "OVS bridge for provider traffic" "br-physnet1"
+log "network interfaces present:"
+ip -o link show | awk -F': ' '{print "  " $2}' | grep -v -e lo -e tap -e qbr -e qvo -e br- || true
+ask TENANT_NIC "NIC to enslave for tenant traffic (MUST NOT be your only ssh path unless you accept losing it)" ""
+
+if [ "$TENANT_NIC" = "$(ip route show default 2>/dev/null | awk '{print $5}' | head -1)" ]; then
+	log "WARNING: $TENANT_NIC is your default route. Enslaving it will"
+	log "move your ssh session onto the bridge (it normally survives,"
+	log "but a mistake here locks you out). Type YES to proceed."
+	printf 'proceed? '; read -r yn
+	[ "$yn" = "YES" ] || die "aborted: pick a dedicated tenant NIC or type YES"
+fi
+
+# ---------------------------------------------------------------- virt type probe
+
+if [ -e /dev/kvm ]; then
+	VIRT=kvm
+	log "KVM present (/dev/kvm): guests will use hardware acceleration"
+else
+	VIRT=qemu
+	log "no /dev/kvm: guests will use software emulation (slower, works)"
+fi
+
+# ---------------------------------------------------------------- phase 1: nova-compute config
+
+log "== phase 1/5: nova-compute configuration"
+MY_IP=$(ip -o -4 addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)
+write_conf /etc/nova/nova.conf <<EOF
+[DEFAULT]
+transport_url = rabbit://openstack:$SERVICE_PASS@$CONTROLLER:5672/
+my_ip = $MY_IP
+log_dir = /var/log/nova
+state_path = /var/lib/nova
+[keystone_authtoken]
+www_authenticate_uri = http://$CONTROLLER:5000/v3
+auth_url = http://$CONTROLLER:5000/v3
+memcached_servers = $CONTROLLER:11211
+auth_type = password
+project_domain_name = Default
+user_domain_name = Default
+project_name = service
+username = nova
+password = $SERVICE_PASS
+[placement]
+auth_url = http://$CONTROLLER:5000/v3
+auth_type = password
+project_domain_name = Default
+user_domain_name = Default
+project_name = service
+username = placement
+password = $SERVICE_PASS
+region_name = RegionOne
+[glance]
+auth_url = http://$CONTROLLER:5000/v3
+auth_type = password
+project_domain_name = Default
+user_domain_name = Default
+project_name = service
+username = glance
+password = $SERVICE_PASS
+region_name = RegionOne
+[neutron]
+auth_url = http://$CONTROLLER:5000/v3
+auth_type = password
+project_domain_name = Default
+user_domain_name = Default
+project_name = service
+username = neutron
+password = $SERVICE_PASS
+region_name = RegionOne
+[libvirt]
+virt_type = $VIRT
+[vnc]
+enabled = true
+server_listen = 0.0.0.0
+# Browser-facing console URL: served over the CONTROLLER's TLS vhost
+# (the controller proxies /vnc/ to its novncproxy). Never a LAN URL:
+# browsers outside the rack cannot reach one. Override with
+# SAPHIRA_OS_CONSOLE_URL when the dashboard hostname differs.
+novncproxy_base_url = $CONSOLE_URL
+[oslo_concurrency]
+lock_path = /var/lib/nova/tmp
+EOF
+chmod 0640 /etc/nova/nova.conf
+
+# nova may only escalate through its two helpers. Without this file,
+# every spawn dies with FailedToDropPrivileges.
+printf '%s\n' "nova ALL=(root) NOPASSWD: /usr/bin/privsep-helper *, /usr/bin/nova-rootwrap *" > /etc/sudoers.d/nova
+chmod 0440 /etc/sudoers.d/nova
+visudo -c -f /etc/sudoers.d/nova || die "refusing to continue with a broken nova sudoers"
+
+# ---------------------------------------------------------------- phase 2: neutron agent config
+
+log "== phase 2/5: neutron agent configuration"
+write_conf /etc/neutron/neutron.conf <<EOF
+[DEFAULT]
+transport_url = rabbit://openstack:$SERVICE_PASS@$CONTROLLER:5672/
+log_dir = /var/log/neutron
+[AGENT]
+# The default bare 'sudo' root helper fails: agents may only run the
+# filtered facility. This one line is the difference between working
+# DHCP and a silent spawn loop.
+root_helper = sudo neutron-rootwrap /etc/neutron/rootwrap.conf
+EOF
+
+write_conf /etc/neutron/plugins/ml2/openvswitch_agent.ini <<EOF
+[ovs]
+bridge_mappings = $PHYSNET:$BRIDGE
+[agent]
+tunnel_types =
+l2_population = false
+[securitygroup]
+firewall_driver = openvswitch
+EOF
+
+# neutron agents may only escalate through rootwrap and privsep.
+if grep -q privsep-helper /etc/sudoers.d/neutron 2>/dev/null; then
+	log "neutron sudoers already covers privsep-helper"
+else
+	printf '%s\n' "neutron ALL=(root) NOPASSWD: /usr/bin/neutron-rootwrap *, /usr/bin/neutron-rootwrap-daemon *, /usr/bin/privsep-helper *" > /etc/sudoers.d/neutron
+	chmod 0440 /etc/sudoers.d/neutron
+	visudo -c -f /etc/sudoers.d/neutron || die "refusing to continue with a broken neutron sudoers"
+fi
+
+# Launch the agents WITH their plugin configs. Without --config-file
+# the OVS agent reports empty bridge mappings and no port ever binds.
+# (Installed as drop-ins so they vanish harmlessly once the packaged
+# units carry the flags themselves.)
+dropin neutron-openvswitch-agent '--config-file' <<EOF
+ExecStart=
+ExecStart=/usr/bin/neutron-openvswitch-agent --config-file /etc/neutron/neutron.conf --config-file /etc/neutron/plugins/ml2/openvswitch_agent.ini
+EOF
+dropin neutron-dhcp-agent '--config-file' <<EOF
+ExecStart=
+ExecStart=/usr/bin/neutron-dhcp-agent --config-file /etc/neutron/neutron.conf
+EOF
+
+# ---------------------------------------------------------------- phase 3: libvirt daemon set
+
+log "== phase 3/5: libvirt daemons"
+# virtqemud ships ProtectControlGroups=yes, which mounts the cgroup
+# tree read-only inside the daemon: every guest start then fails.
+# Override it until the recipe is fixed (checked, so future-proof).
+dropin virtqemud 'ProtectControlGroups=no' <<EOF
+ProtectControlGroups=no
+EOF
+systemctl daemon-reload
+for s in virtlogd virtnodedevd virtsecretd virtqemud; do
+	systemctl enable --now "$s" 2>/dev/null || service "$s" start
+done
+for s in virtlogd virtnodedevd virtsecretd virtqemud; do
+	systemctl is-active --quiet "$s" || die "$s failed to start (guests cannot boot without the full set)"
+done
+log "libvirt daemon set active (qemud, logd, nodedev, secretd)"
+
+# ---------------------------------------------------------------- phase 4: provider bridge
+
+log "== phase 4/5: provider bridge $BRIDGE ($PHYSNET <- $TENANT_NIC)"
+ovs-vsctl --may-exist add-br "$BRIDGE"
+ovs-vsctl --may-exist add-port "$BRIDGE" "$TENANT_NIC"
+ip link set "$BRIDGE" up
+ip link set "$TENANT_NIC" up
+log "bridge ready. If this was your ssh NIC, your session is now riding the bridge."
+
+# ---------------------------------------------------------------- phase 5: start agents, verify
+
+log "== phase 5/5: starting agents and verifying"
+systemctl enable --now nova-compute neutron-openvswitch-agent neutron-dhcp-agent 2>/dev/null || \
+	die "failed to start compute services"
+sleep 30
+fail=0
+for s in nova-compute neutron-openvswitch-agent neutron-dhcp-agent; do
+	systemctl is-active --quiet "$s" && log "$s: active" || { log "$s: NOT ACTIVE"; fail=1; }
+done
+[ "$fail" -eq 0 ] || die "services failed — read the unit logs, fix, re-run (safe: config is kept)"
+
+log ""
+log "local services are up. Final proof must come from the CONTROLLER:"
+log "  1. on the controller, discover this host:"
+log "       nova-manage cell_v2 discover_hosts --verbose"
+log "  2. list hypervisors: the '$(hostname)' hypervisor must be up"
+log "  3. list neutron agents: the OVS + DHCP agents on '$(hostname)'"
+log "     must be alive AND the OVS agent must report"
+log "     bridge_mappings {$PHYSNET: $BRIDGE}"
+log "Then boot. It's so Simple it Hurts."

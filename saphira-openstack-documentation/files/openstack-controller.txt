@@ -1,0 +1,97 @@
+Saphira OpenStack — the controller node
+======================================
+(How to build it. Do this first, do it once.)
+
+The controller is the cloud's brain: identity (keystone), image
+(glance), placement, the compute and network APIs (nova, neutron),
+the dashboard (horizon), and the three things they all stand on
+(mariadb, rabbitmq, memcached). Nothing runs guests here. If you
+only have one machine, it still starts here — compute joins later.
+
+DO run saphira-openstack-setup-controller. It asks five questions
+and performs every phase below, verifying each one. This guide is
+what it does and why, so you can check its work, recover by hand,
+or adapt it.
+
+WHAT TO DO, IN ORDER (and why each step exists)
+------------------------------------------------
+1. Install the role package. It pulls the whole closure; it
+   configures nothing. Configuration is the setup script's job —
+   never the package's. (WHY: packages must be safe to install on
+   any machine. A package that configures on install cannot be
+   installed innocently.)
+
+2. Databases. One database per service (keystone, glance,
+   placement, placement_api, nova, nova_api, nova_cell0, neutron),
+   one user per service, granted on BOTH 'localhost' and
+   '127.0.0.1'. (WHY both: services connect over TCP to 127.0.0.1,
+   and MariaDB treats those two hostnames as different principals.
+   Grant one and the TCP connection dies with access denied.)
+
+3. RabbitMQ. Create the openstack user, full rights on /. On
+   RabbitMQ 4.x ALSO set
+     deprecated_features.permit.transient_nonexcl_queues = true
+   (WHY: oslo.messaging declares transient non-exclusive queues;
+   4.x deprecates them and refuses by default. Without the flag,
+   every agent fails at its first declare. WHEN NOT: RabbitMQ 3.x
+   has no such gate — do not set flags for problems your version
+   does not have.)
+
+4. Keystone. fernet_setup, db_sync, then bootstrap for the admin
+   user/project/role and the identity endpoints. (WHY fernet first:
+   tokens cannot be issued until the key repository exists. WHY
+   bootstrap: it creates the only credential that can create all
+   the others.)
+
+5. Identity contents. Create the service project; the glance,
+   placement, nova, neutron users; the admin/member/reader/manager
+   roles AND the service role; grant every service user admin AND
+   service on the service project; register all five services with
+   public/internal/admin endpoints. (WHY the service role: modern
+   services send their own service token alongside the user token,
+   and the receiving side enforces service_token_roles. Without the
+   grant, nova-to-neutron calls die with an EMPTY 401 — the single
+   most misleading error in this book. See pitfalls #1. WHEN: always.
+   There is no deployment where service users should lack it.)
+
+6. Service configs + db syncs. Minimal files: database connection,
+   transport_url, one keystone_authtoken stanza (identical shape
+   everywhere — drift here causes per-service auth mysteries), plus
+   each service's small specifics (glance file store, placement
+   dual databases, nova cells, neutron ml2 flat). Then db_sync each
+   (nova: api_db, map_cell0, create cell1, db; neutron: upgrade
+   head with BOTH config files). (WHY cell1: nova refuses to
+   schedule into a cell that was never created, with errors that
+   blame the hypervisor.)
+
+7. Horizon. File-based sessions, locmem cache, STATIC_ROOT plus
+   collectstatic (WITHOUT collectstatic the login page renders with
+   no styling and every click 404s — it looks like a code bug and
+   is a missing build step), AVAILABLE_REGIONS.
+
+8. Start everything INCLUDING neutron-rpc-server. (WHY: the API is
+   served by gunicorn, but nothing consumes agent RPC until the RPC
+   server runs. Without it both neutron agents time out forever and
+   no port ever binds. See pitfalls #3. WHEN: on every controller,
+   always — it is not optional.)
+
+9. Verify with the API, not with vibes: scoped admin token, then
+   empty-list each service (images, servers, networks). Then create,
+   in order: provider network + subnet (DHCP on), image (active),
+   flavor. Boot comes after the first compute joins.
+
+WHAT NOT TO DO
+---------------
+- Do NOT install compute or storage roles on the controller "to
+  keep it simple". A controller that also runs guests still needs
+  every agent a compute needs; you gain nothing and double the
+  failure surface. Add a compute node instead — that is what the
+  role is for.
+- Do NOT disable service_token_roles_required to dodge the 401.
+  You would be removing the mechanism that proves services to each
+  other. Grant the role; it is one call per user.
+- Do NOT point two services at each other's databases, do NOT share
+  one database user across services, and do NOT reuse the admin
+  password for service users. The day you rotate one credential is
+  the day you bless this rule.
+- Do NOT skip collectstatic. (Yes, twice. Everyone skips it once.)

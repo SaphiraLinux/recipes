@@ -1,0 +1,43 @@
+Saphira Horizon branding: provenance and regeneration.
+
+The two SVG files in this directory are TEXT (valid XML with base64
+data-URI raster inside), safe for the pure-text public mirror. They
+replace Horizon's default logo.svg (navbar, dark background) and
+logo-splash.svg (login page, light background) at package build time.
+No Horizon template is modified: the <img> references stay byte-
+identical; only the pixels change.
+
+Sources (NOT vendored — binary assets do not belong in files/):
+  logo.svg:
+    https://saphira.vm2.uk/images/saphira-linux-brand-icon-light-logo-320.webp
+    (light variant: the navbar behind it is dark; 320x107)
+  logo-splash.svg:
+    ~/saphira-openstack-logo.png
+    ("SaphiraLinux OpenStack" lockup, 1840x855 RGBA), scaled to
+    640x297 with Pillow (thumbnail, optimize) before embedding.
+
+Regeneration (run on a machine with Pillow):
+  python3 -c "
+  import base64
+  def svg(data, mime, w, h, out):
+      b64 = base64.b64encode(data).decode()
+      open(out, 'w').write(
+        '<svg xmlns=\"http://www.w3.org/2000/svg\" '
+        'xmlns:xlink=\"http://www.w3.org/1999/xlink\" '
+        'width=\"%d\" height=\"%d\" viewBox=\"0 0 %d %d\">'
+        '<image width=\"%d\" height=\"%d\" '
+        'xlink:href=\"data:%s;base64,%s\"/></svg>'
+        % (w, h, w, h, w, h, mime, b64))
+  svg(open('logo-navbar-320.webp','rb').read(), 'image/webp',
+      320, 107, 'logo.svg')
+  svg(open('logo-splash-640.png','rb').read(), 'image/png',
+      640, 297, 'logo-splash.svg')
+  "
+  then: python3 -c "import xml.dom.minidom
+  [xml.dom.minidom.parse(f) for f in ['logo.svg','logo-splash.svg']]"
+
+Why SVG wrappers and not raw PNG/WebP: Horizon's templates reference
+*.svg by name. An <img>-loaded SVG must be self-contained (external
+file references are blocked), hence data URIs; serving raster bytes
+under an .svg name would break on MIME mismatch. The wrapper keeps
+both constraints satisfied with zero template churn.

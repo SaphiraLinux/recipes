@@ -1,0 +1,31 @@
+Saphira OpenStack storage role (cinder LVM host)
+==================================================
+
+Install this package on the machine that will hold volumes, then run,
+as root:
+
+    saphira-openstack-setup-storage
+
+It asks which controller to serve, the credentials, and which DISK to
+devote to volumes — then creates the volume group, registers the
+cinder identity and endpoints, and writes cinder.conf.
+
+Read this before you run it: the iSCSI target daemon (tgt /
+open-iscsi) is NOT a Saphira package yet, so no host can export
+volumes today. The script prepares everything up to that gate and
+stops there honestly instead of pretending. When the target packages
+land, re-run the script and it picks up exactly where it stopped.
+
+Disk safety (enforced by the script, obey it anyway):
+  - Point it at an EMPTY disk. It refuses mounted filesystems and
+    existing partition tables unless you type YES.
+  - Snapshot or back up anything you value BEFORE pvcreate.
+    pvcreate on the wrong disk eats a partition table in one second.
+
+Verify later with:
+
+    saphira-openstack-setup-storage --check
+
+Full story (how-to, pitfalls, do and don't):
+saphira-openstack-documentation.
+Saphira Linux — "It's so Simple it Hurts."

@@ -14,7 +14,7 @@
 
 pkgname=openstack-horizon
 pkgver=27.0.0
-pkgrel=1
+pkgrel=2
 pkgarch=noarch
 pkgdesc='OpenStack Dashboard (Horizon): Django web UI'
 license='Apache-2.0'
@@ -129,6 +129,14 @@ recipe_install()
 	chmod 0644 "$PKGDEST/etc/horizon/local/__init__.py"
 	install -m 0644 "$SRC/openstack_dashboard/local/local_settings.py.example" \
 		"$PKGDEST/etc/horizon/local/local_settings.py.example"
+	# Saphira branding: replace the default navbar + splash artwork
+	# with the files/branding SVGs (self-contained data-URI raster,
+	# so no template changes are needed). Operators re-running
+	# collectstatic pick this up automatically.
+	install -m 0644 "$RECIPE_DIR/files/branding/logo.svg" \
+		"$PKGDEST/usr/lib/python3.14/site-packages/openstack_dashboard/static/dashboard/img/logo.svg"
+	install -m 0644 "$RECIPE_DIR/files/branding/logo-splash.svg" \
+		"$PKGDEST/usr/lib/python3.14/site-packages/openstack_dashboard/static/dashboard/img/logo-splash.svg"
 	# Policy samples for reference (the services ship their own
 	# enforced copies; these document Horizon's view of them).
 	install -d -m 0755 "$PKGDEST/usr/share/horizon"
@@ -174,12 +182,26 @@ recipe_install()
 		usr/share/saphira/accounts.d/openstack-horizon \
 		usr/share/saphira/fhs.d/openstack-horizon \
 		etc/logrotate.d/horizon \
+		usr/lib/python3.14/site-packages/openstack_dashboard/static/dashboard/img/logo.svg \
+		usr/lib/python3.14/site-packages/openstack_dashboard/static/dashboard/img/logo-splash.svg \
 	; do
 		[ -e "$PKGDEST/$p" ] || {
 			echo "ERROR: openstack-horizon payload is missing $p" >&2
 			return 1
 		}
 	done
+	# the shipped artwork must be Saphira's, not upstream's: both
+	# branded SVGs carry a data-URI raster, upstream's carry paths.
+	grep -q 'data:image/' \
+		"$PKGDEST/usr/lib/python3.14/site-packages/openstack_dashboard/static/dashboard/img/logo.svg" || {
+		echo "ERROR: openstack-horizon logo.svg is not the Saphira branding" >&2
+		return 1
+	}
+	grep -q 'data:image/' \
+		"$PKGDEST/usr/lib/python3.14/site-packages/openstack_dashboard/static/dashboard/img/logo-splash.svg" || {
+		echo "ERROR: openstack-horizon logo-splash.svg is not the Saphira branding" >&2
+		return 1
+	}
 	# This package must NOT pre-configure or auto-start anything: no
 	# active local settings, ever.
 	[ ! -e "$PKGDEST/etc/horizon/local/local_settings.py" ] || {

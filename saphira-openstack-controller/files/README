@@ -1,0 +1,27 @@
+Saphira OpenStack controller role
+===================================
+
+Install this package on the machine that will run the control plane:
+keystone, glance, placement, the nova API/conductor/scheduler,
+the neutron API + RPC server, horizon, and the supporting
+infrastructure (mariadb, rabbitmq, memcached).
+
+Then run, as root:
+
+    saphira-openstack-setup-controller
+
+Answer five questions. The script writes every configuration file,
+bootstraps the databases, registers all endpoints, starts every
+service, and proves each one answers. Re-running is safe.
+
+Verify later with:
+
+    saphira-openstack-setup-controller --check
+
+What the script deliberately does NOT do: it never touches compute
+or storage nodes (sibling packages), never enables anything at
+install time, and never stores your passwords.
+
+Full story (how-to, pitfalls, do and don't):
+saphira-openstack-documentation.
+Saphira Linux — "It's so Simple it Hurts."

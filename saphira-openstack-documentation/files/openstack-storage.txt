@@ -1,0 +1,79 @@
+Saphira OpenStack — the storage node (cinder LVM host)
+==========================================================
+(How to prepare it. Read ALL of this before touching a disk.)
+
+The storage node holds volumes: cinder-volume on LVM, exporting
+over iSCSI. It is the only role where a wrong answer destroys data,
+so this guide leads with the disk rules and the setup script
+enforces them.
+
+CURRENT STATUS, STATED PLAINLY: the iSCSI target daemon (tgt /
+open-iscsi) is not a Saphira package yet, so no host can export
+volumes today. saphira-openstack-setup-storage prepares EVERYTHING
+up to that gate — volume group, cinder identity, endpoint,
+configuration — verifies each piece, and then stops and says so.
+When the target packages land, re-running the script picks up
+exactly where it stopped. Do NOT fake the gate with an unreviewed
+static binary: an unreviewed storage path is how volumes (and the
+data on them) get lost silently.
+
+WHAT TO DO, IN ORDER
+---------------------
+1. Pick an EMPTY disk. List candidates with lsblk. The script
+   refuses mounted filesystems and existing partition tables
+   unless you type YES — and you should only type YES when you
+   have a snapshot or backup you have personally verified.
+   WHEN NOT to proceed: any doubt about what is on the disk. A
+   disk you are unsure about is a disk you do not touch. Full stop.
+
+2. pvcreate + vgcreate the chosen disk into the volume group
+   (default cinder-volumes). (WHY LVM: cinder's LVM driver wants a
+   VG to carve logical volumes from. Thin or thick is a later
+   tuning decision; a plain VG is the correct first shape.)
+
+3. Register cinder on the CONTROLLER (the script does this over
+   the API with your one-time admin password): cinder user, admin
+   + service grants, volumev3 service, endpoints pointing at THIS
+   host's 8776. Also create the cinder database + grants on the
+   controller's mariadb with the same DB password. (WHY remote:
+   the storage node holds no database. WHY the service grant too:
+   same 401 lesson as every other service — see pitfalls #1.)
+
+4. Write cinder.conf: transport to the controller, database to the
+   controller's mariadb, keystone_authtoken as cinder, [lvm] with
+   volume_group, target_protocol iscsi, target_helper tgtadm.
+   (WHY tgtadm named now: so that when the target lands, the only
+   remaining step is starting the daemon — no config rewrite.)
+
+5. Install the target package when it exists, re-run the script,
+   enable cinder-volume, create a test volume, attach it to a test
+   instance, write a filesystem, mount it, write a file, read it
+   back, delete it all. (WHY the full loop: a volume you have not
+   read back is a rumor.)
+
+WHAT NOT TO DO (the expensive list)
+------------------------------------
+- Do NOT point LVM at a disk with a job: OS disks, EFI partitions,
+  data disks, anything mounted, anything whose partition table you
+  did not create for this purpose. pvcreate does not ask twice.
+- Do NOT "temporarily" use a disk and migrate later. Temporary
+  disks become permanent at 3 a.m. during an outage.
+- Do NOT share one volume group between cinder and anything else.
+  Cinder assumes it owns the VG. Shared VGs produce the kind of
+  corruption that passes every check until restore day.
+- Do NOT enable cinder-volume before the target daemon exists. It
+  will start, look healthy, and fail every single operation with
+  errors that blame the network.
+- Do NOT put the cinder database on the storage node "for
+  locality". The controller's mariadb is the one backed up, the
+  one monitored, the one everyone knows about. One database
+  topology, no exceptions.
+
+WHEN TO ADD STORAGE (and when not to)
+--------------------------------------
+Add it when instances need persistent disks that outlive the
+instance, or when the controller's own disk is not where guest
+data belongs (it isn't). Do NOT add it to fix slow guests (that is
+compute/CPU), flaky networking (that is the provider bridge), or a
+full controller disk (that is housekeeping). Storage fixes
+storage-shaped problems.
