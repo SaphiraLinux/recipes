@@ -1,0 +1,54 @@
+openstack-glance — OpenStack Image service (Glance) 33.0.0 (2026.2 Hibiscus)
+=============================================================================
+
+This package installs the Glance image service. It installs software
+ONLY: nothing is enabled, started, migrated or credentialed at install
+time.
+
+What it ships
+-------------
+
+  /usr/bin/glance-*                 administrative CLIs (api, manage,
+                                    status, scrubber, cache tools, ...)
+  glance.wsgi.api:application       the supported WSGI application
+  glance/db/sqlalchemy/alembic_migrations/   database migration scripts
+  /etc/glance/glance-api-paste.ini  upstream paste pipeline (wiring)
+  /etc/glance/*.conf.sample         generated configuration samples
+  /etc/glance/schema-image.json     image schema (read-only data)
+  /etc/init.d/glance                OpenRC service (gunicorn)
+  /usr/lib/systemd/system/glance.service     systemd service (gunicorn)
+  /etc/conf.d/glance                WSGI container runtime settings
+
+Operator steps (NOT performed by this package)
+----------------------------------------------
+
+1. Write the configuration from the samples:
+
+     cp /etc/glance/glance-api.conf.sample /etc/glance/glance-api.conf
+     # edit /etc/glance/glance-api.conf (database, keystone auth,
+     # stores, ...). No database driver is installed by this package:
+     # add python-pymysql for MariaDB, or use sqlite for trials.
+
+2. Initialise the database:
+
+     glance-manage db_sync
+
+3. Register the service and endpoints in Keystone (operator-chosen):
+
+     openstack service create ... (see the deployment plan)
+
+4. Enable and start the service explicitly:
+
+     rc-update add glance default && rc-service glance start
+     # or
+     systemctl enable --now glance
+
+Glance is served by gunicorn; nginx/haproxy fronting it for TLS is an
+optional, operator-configured choice.
+
+Independence
+------------
+
+Glance depends on the native python closure, gunicorn and the keystone
+client libraries. It does not depend on Nova, Neutron, Cinder or QEMU,
+and it can be installed on its own.

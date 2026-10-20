@@ -1,0 +1,5 @@
+# Nova runtime directory: /var/run is a real, volatile directory and
+# /run is a separate one. Ordinary packaged-daemon PID/socket/state
+# live under /var/run/<service>.
+dir /var/run/nova 0750 nova nova
+rmdir-if-empty /run/nova

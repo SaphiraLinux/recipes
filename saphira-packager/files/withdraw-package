@@ -1,0 +1,567 @@
+#!/bin/bash
+
+# withdraw-package: explicit package-family withdrawal from generation repos.
+#
+# Removes indexed NVRs from each generation repository, preserves the
+# APK files in the existing archive, regenerates and signs the normal
+# indexes from the authoritative database, and records a durable audit
+# row per withdrawn NVR in the withdrawals table (SQLite - the same
+# repository.db, no sidecar files).
+#
+# Two selection modes. A bare family NAME withdraws every indexed NVR
+# (newest included) - the only path that may remove a newest NVR:
+# sign-apk-repo's retention (apply_retire) refuses newest rows by
+# design, so a retired-upstream family would otherwise pin its file
+# claims forever. A NAME=VERSION selector withdraws exactly one NVR:
+# the VERSION must identify a single indexed NVR (an exact NVR, or a
+# version prefix matching exactly one, e.g. 7.2.2 matches 7.2.2-r1
+# only when no sibling 7.2.2 revision is indexed); zero or multiple
+# matches refuse before anything mutates, naming the candidates.
+# Withdrawal is explicit (named selection + mandatory reason),
+# all-or-nothing per generation, and fail-closed: live dependents,
+# disk/database skew, hash drift, or a held lock all refuse without
+# mutating.
+#
+# usage: withdraw-package NAME[=VERSION] --reason TEXT [--archive-dir DIR]
+
+set -euo pipefail
+
+. "${SAPHIRA_CONFIG_FILE:-/etc/saphira/package_builder.sh}"
+
+lib_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+if [ -f "$lib_dir/repo-index.sh" ]; then
+	. "$lib_dir/repo-index.sh"
+elif [ -f /usr/lib/saphira-packager/repo-index.sh ]; then
+	. /usr/lib/saphira-packager/repo-index.sh
+else
+	printf 'withdraw-package: shared index helper repo-index.sh not found\n' >&2
+	exit 1
+fi
+
+repo_db_lib=$lib_dir/repo_db.py
+[ -f "$repo_db_lib" ] || repo_db_lib=/usr/lib/saphira-packager/repo_db.py
+[ -f "$repo_db_lib" ] || { printf 'withdraw-package: repo_db.py not found\n' >&2; exit 1; }
+
+die()
+{
+	printf 'withdraw-package: %s\n' "$*" >&2
+	exit 1
+}
+
+[ "$EUID" -eq 0 ] || die "must be run as root; use sudo explicitly"
+
+normalize_ownership()
+{
+	if [ -n "${SUDO_UID:-}" ]; then
+		chown "${SUDO_UID}:${SAPHIRA_REPO_GROUP:-saphira-build}" "$@" 2>/dev/null || true
+	fi
+}
+
+name=${1:-}
+[ -n "$name" ] || { printf 'usage: %s NAME[=VERSION] --reason TEXT [--archive-dir DIR]\n' "$0" >&2; exit 2; }
+case $name in
+	''|*[!A-Za-z0-9._+=-]*) die "invalid package selector: $name" ;;
+esac
+shift
+
+# Selection: bare NAME means the whole family (historical behaviour);
+# NAME=VERSION narrows to exactly one indexed NVR (resolved per
+# generation during preflight, before anything mutates).
+selector=$name
+fam=$name
+verspec=
+case $fam in
+	*=*)
+		verspec=${fam#*=}
+		fam=${fam%%=*}
+		[ -n "$fam" ] && [ -n "$verspec" ] || die "invalid package selector: $name (want NAME or NAME=VERSION)"
+		case $fam in ''|*[!A-Za-z0-9._+-]*) die "invalid package name: $fam" ;; esac
+		case $verspec in ''|*[!A-Za-z0-9._+-]*) die "invalid version selection: $verspec" ;; esac
+		;;
+	*)
+		case $fam in ''|*[!A-Za-z0-9._+-]*) die "invalid package name: $fam" ;; esac
+		;;
+esac
+# Recovery markers distinguish the two selection modes: a family
+# withdrawal in flight must not be mistaken for an NVR withdrawal
+# of the same family and vice versa.
+if [ -n "$verspec" ]; then
+	marker_expected="$fam=$verspec"
+else
+	marker_expected="$fam"
+fi
+
+reason=
+archive_dir=
+while [ "$#" -gt 0 ]; do
+	case $1 in
+		--reason) reason=${2:-}; shift 2 ;;
+		--archive-dir) archive_dir=${2:-}; shift 2 ;;
+		*) die "unknown argument: $1" ;;
+	esac
+done
+[ -n "$reason" ] || die "--reason TEXT is required (recorded in the audit trail)"
+
+archive_dir=${archive_dir:-$SAPHIRA_REPO_DIR/../archive}
+[ -d "$archive_dir" ] || die "archive directory does not exist: $archive_dir (never invent one)"
+
+incoming_dir=$SAPHIRA_INCOMING_DIR/$SAPHIRA_ARCH
+sign_key=$SAPHIRA_SIGN_KEY
+trust_key=$SAPHIRA_TRUST_KEY
+trust_dir=${trust_key%/*}
+[ -r "$sign_key" ] || die "cannot read signing key: $sign_key"
+[ -r "$trust_key" ] || die "cannot read repository trust key: $trust_key"
+
+IFS=' ' read -ra repo_names <<< "$SAPHIRA_REPO_NAMES"
+[ "${#repo_names[@]}" -gt 0 ] || die "SAPHIRA_REPO_NAMES is empty"
+
+actor=${SUDO_USER:-$(id -un)}
+[ -n "$actor" ] || die "cannot determine acting user"
+at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+# Serialize against the publisher: same lock sign-apk-repo takes, which
+# also blocks buildpkg staging for the duration.
+lock=$incoming_dir/sign-apk-repo.lock
+mkdir -p "$incoming_dir"
+mkdir "$lock" 2>/dev/null || die "publication lock already held: $lock"
+workspace=$(mktemp -d "$SAPHIRA_PACKAGE_TMP/withdraw-XXXXXXXX")
+packages_dir=$workspace/packages
+mkdir "$packages_dir"
+
+db_lock_held=
+cleanup()
+{
+	if [ -n "${db_lock_held:-}" ]; then
+		rmdir -- "$db_lock_held/repository.db.lock" 2>/dev/null || true
+	fi
+	rm -rf -- "$workspace"
+	rmdir "$lock" 2>/dev/null || true
+}
+trap cleanup EXIT HUP INT TERM
+
+# recovery_check db: inspect a leftover withdrawal_pending marker.
+# Prints NONE (fresh), RETRY (nothing happened, marker cleared, restart),
+# and exits non-zero for FOREIGN/STRANDED/GHOST (fail closed, no guessing).
+# The expected marker is the exact selector ("fam" or "fam=verspec"), so
+# an interrupted family withdrawal and an interrupted NVR withdrawal of
+# the same family never validate each other. Row checks are scoped to the
+# selection: bare names cover the family, versions cover the matched NVR.
+recovery_check()
+{
+	db_file=$1
+	"$SAPHIRA_PYTHON" - "$repo_db_lib" "$SAPHIRA_APK" "$db_file" "$fam" "$verspec" "$marker_expected" \
+		"$repo_dir" <<'PY' || return $?
+import sys
+(lib_path, apk, db_file, fam, verspec, expected, repo_dir) = sys.argv[1:8]
+sys.path.insert(0, __import__("os").path.dirname(lib_path))
+import os
+import repo_db as rdb
+conn = rdb.connect(db_file)
+try:
+    rdb.check_schema(conn)
+except rdb.RepoDbError as exc:
+    print(f"withdraw-package: {exc}", file=sys.stderr)
+    raise SystemExit(2)
+marker = rdb.get_meta(conn, "withdrawal_pending")
+if marker is None:
+    print("NONE")
+elif marker != expected:
+    print(f"FOREIGN:{marker}")
+    raise SystemExit(20)
+else:
+    rows = conn.execute(
+        "SELECT nvr FROM packages WHERE name=?", (fam,)).fetchall()
+    if verspec:
+        rows = [r for r in rows if rdb.match_nvr(fam, verspec, r["nvr"])]
+    present = [r["nvr"] for r in rows
+               if os.path.exists(os.path.join(repo_dir, r["nvr"] + ".apk"))]
+    if rows and len(present) == len(rows):
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.execute("DELETE FROM metadata WHERE key='withdrawal_pending'")
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        print("RETRY")
+    elif rows:
+        print("STRANDED")
+        raise SystemExit(21)
+    else:
+        print("GHOST")
+        raise SystemExit(22)
+PY
+}
+
+# preflight db index: readonly checks. Exit 0 prints the plan
+# (nvr|sha256|size|file_count lines) to the plan file; 10 ALREADY
+# (audit rows exist, nothing indexed); 11 ABSENT (unknown family);
+# 12 DEPENDENTS (list on stderr); 13 UNKNOWN-NVR (no indexed NVR
+# matches the version selection; available NVRs listed); 14
+# AMBIGUOUS (several indexed NVRs match; all listed, nothing
+# touched). All selection happens here, before any marker or
+# mutation, so ambiguous and unknown selections are reported
+# before any destructive transaction.
+preflight()
+{
+	db_file=$1 index_path=$2 plan_file=$3
+	"$SAPHIRA_PYTHON" - "$repo_db_lib" "$SAPHIRA_APK" "$db_file" "$fam" "$verspec" \
+		"$repo_dir" "$index_path" "$plan_file" <<'PY'
+import sys
+(lib_path, apk, db_file, fam, verspec, repo_dir, index_path, plan_file) = sys.argv[1:9]
+sys.path.insert(0, __import__("os").path.dirname(lib_path))
+import hashlib
+import os
+import repo_db as rdb
+conn = rdb.connect_readonly(db_file)
+try:
+    rdb.check_schema(conn)
+except rdb.RepoDbError as exc:
+    print(f"withdraw-package: {exc}", file=sys.stderr)
+    raise SystemExit(2)
+rows = conn.execute(
+    "SELECT nvr, apk_sha256 FROM packages WHERE name=? ORDER BY nvr",
+    (fam,)).fetchall()
+if verspec:
+    matched = [r for r in rows if rdb.match_nvr(fam, verspec, r["nvr"])]
+    if not matched:
+        # Re-withdrawing an already-withdrawn NVR is a verified
+        # no-op; anything else unmatched is unknown. Audit rows name
+        # exact NVRs, so match the verspec against them the same way.
+        gone = [r["nvr"] for r in conn.execute(
+            "SELECT nvr FROM withdrawals WHERE name=?", (fam,)).fetchall()
+            if rdb.match_nvr(fam, verspec, r["nvr"])]
+        if gone:
+            raise SystemExit(10)
+        have = ", ".join(r["nvr"] for r in rows) or "none indexed"
+        print(f"withdraw-package: unknown NVR selection: {fam}={verspec}"
+              f" (indexed: {have})", file=sys.stderr)
+        raise SystemExit(13)
+    if len(matched) > 1:
+        have = ", ".join(r["nvr"] for r in matched)
+        print(f"withdraw-package: ambiguous version selection: {fam}={verspec}"
+              f" matches several indexed NVRs: {have};"
+              " name one exactly (NAME=VERSION-rN)", file=sys.stderr)
+        raise SystemExit(14)
+    rows = matched
+if not rows:
+    audit = conn.execute(
+        "SELECT COUNT(*) c FROM withdrawals WHERE name=?", (fam,)).fetchone()["c"]
+    raise SystemExit(10 if audit else 11)
+dep_map = rdb.index_depends(apk, index_path)
+bad = []
+for (dname, dver), edges in sorted(dep_map.items()):
+    if dname == fam:
+        continue
+    for edge in edges:
+        if "/" in edge or ":" in edge:
+            continue
+        match = rdb.DEPEND_ATOM_RE.fullmatch(edge)
+        if match and match.group(1) == fam:
+            bad.append(f"{dname}-{dver} ({edge})")
+if bad:
+    print("withdraw-package: live dependents refuse withdrawal of"
+          f" {fam + '=' + verspec if verspec else fam}: " + ", ".join(bad),
+          file=sys.stderr)
+    raise SystemExit(12)
+lines = []
+for row in rows:
+    path = os.path.join(repo_dir, row["nvr"] + ".apk")
+    if not os.path.isfile(path):
+        print(f"withdraw-package: indexed file missing on disk:"
+              f" {path} (heal first)", file=sys.stderr)
+        raise SystemExit(3)
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        for chunk in iter(lambda: stream.read(1048576), b""):
+            digest.update(chunk)
+    if digest.hexdigest() != row["apk_sha256"]:
+        print(f"withdraw-package: hash drift on disk: {path} (heal first)",
+              file=sys.stderr)
+        raise SystemExit(3)
+    size = os.path.getsize(path)
+    count = conn.execute(
+        "SELECT COUNT(*) c FROM files WHERE package_id="
+        "(SELECT package_id FROM packages WHERE nvr=?)",
+        (row["nvr"],)).fetchone()["c"]
+    lines.append(f"{row['nvr']}|{row['apk_sha256']}|{size}|{count}")
+with open(plan_file, "w", encoding="utf-8") as stream:
+    stream.write("\n".join(lines) + "\n")
+PY
+}
+
+set_marker()
+{
+	db_file=$1
+	"$SAPHIRA_PYTHON" - "$repo_db_lib" "$db_file" "$marker_expected" <<'PY'
+import sys
+(lib_path, db_file, marker) = sys.argv[1:4]
+sys.path.insert(0, __import__("os").path.dirname(lib_path))
+import repo_db as rdb
+conn = rdb.connect(db_file)
+conn.execute("BEGIN IMMEDIATE")
+try:
+    rdb.set_meta(conn, "withdrawal_pending", marker)
+    conn.commit()
+except BaseException:
+    conn.rollback()
+    raise
+PY
+}
+
+# apply_withdraw_txn db plan: the single atomic database step - selected
+# rows go, audit rows land, marker clears, last_audit advances.
+# Family selections use the all-or-nothing apply_withdraw; NVR
+# selections use the subset-safe apply_withdraw_nvrs. The plan file
+# (written by preflight from the same selection) is the only scope.
+apply_withdraw_txn()
+{
+	db_file=$1 plan_file=$2
+	"$SAPHIRA_PYTHON" - "$repo_db_lib" "$db_file" "$fam" "$verspec" "$actor" \
+		"$reason" "$at" "$plan_file" <<'PY'
+import sys
+(lib_path, db_file, fam, verspec, actor, reason, at, plan_file) = sys.argv[1:9]
+sys.path.insert(0, __import__("os").path.dirname(lib_path))
+import repo_db as rdb
+items = []
+with open(plan_file, encoding="utf-8") as stream:
+    for line in stream:
+        line = line.strip()
+        if not line:
+            continue
+        nvr, sha256, size, count = line.split("|")
+        items.append({"nvr": nvr, "apk_sha256": sha256,
+                      "apk_size": int(size), "file_count": int(count)})
+conn = rdb.connect(db_file)
+conn.execute("BEGIN IMMEDIATE")
+notices = []
+try:
+    if verspec:
+        rdb.apply_withdraw_nvrs(conn, fam, items, actor, reason, at, notices)
+    else:
+        rdb.apply_withdraw(conn, fam, items, actor, reason, at, notices)
+    conn.execute("DELETE FROM metadata WHERE key='withdrawal_pending'")
+    rdb.set_meta(conn, "last_audit", at)
+    conn.commit()
+except rdb.RepoDbError as exc:
+    conn.rollback()
+    print(f"withdraw-package: withdrawal transaction failed: {exc}",
+          file=sys.stderr)
+    raise SystemExit(1)
+for notice in notices:
+    print(f"withdraw-package: notice: {notice}")
+print(f"withdraw-package: database transaction committed:"
+      f" {len(items)} package(s) withdrawn, audit recorded")
+PY
+}
+
+# verify_gen db: readonly post-conditions for one generation.
+# Scoped by selection exactly like preflight: bare names verify the
+# whole family is gone, versions verify only the selected NVRs
+# (siblings stay indexed and on disk, which is the point).
+verify_gen()
+{
+	db_file=$1
+	"$SAPHIRA_PYTHON" - "$repo_db_lib" "$SAPHIRA_APK" "$db_file" "$fam" "$verspec" \
+		"$repo_dir" <<'PY'
+import sys
+(lib_path, apk, db_file, fam, verspec, repo_dir) = sys.argv[1:7]
+sys.path.insert(0, __import__("os").path.dirname(lib_path))
+import os
+import repo_db as rdb
+conn = rdb.connect_readonly(db_file)
+def selected(nvr):
+    return not verspec or rdb.match_nvr(fam, verspec, nvr)
+left = [r["nvr"] for r in conn.execute(
+    "SELECT nvr FROM packages WHERE name=?", (fam,)).fetchall()
+    if selected(r["nvr"])]
+if left:
+    print(f"withdraw-package: verify failed: {len(left)} selected row(s)"
+          f" left for {fam}: " + ", ".join(sorted(left)), file=sys.stderr)
+    raise SystemExit(1)
+hit = [r["nvr"] for r in conn.execute(
+    "SELECT nvr FROM withdrawals WHERE name=?", (fam,)).fetchall()
+    if selected(r["nvr"])]
+if not hit:
+    print(f"withdraw-package: verify failed: no audit rows for"
+          f" {fam + '=' + verspec if verspec else fam}", file=sys.stderr)
+    raise SystemExit(1)
+if rdb.get_meta(conn, "withdrawal_pending") is not None:
+    print("withdraw-package: verify failed: recovery marker still set",
+          file=sys.stderr)
+    raise SystemExit(1)
+dep_map = rdb.index_depends(apk, os.path.join(repo_dir, "Packages.adb"))
+for (dname, dver) in dep_map:
+    nvr = f"{dname}-{dver}"
+    if dname == fam and (not verspec or selected(nvr)):
+        print(f"withdraw-package: verify failed: {nvr} still indexed",
+              file=sys.stderr)
+        raise SystemExit(1)
+for entry in os.listdir(repo_dir):
+    if not entry.endswith(".apk") or not entry.startswith(fam + "-"):
+        continue
+    if selected(entry[:-len(".apk")]):
+        print(f"withdraw-package: verify failed: file left behind: {entry}",
+              file=sys.stderr)
+        raise SystemExit(1)
+print(f"withdraw-package: verified: selection absent,"
+      f" {len(hit)} audit row(s) kept")
+PY
+}
+
+for repo_name in "${repo_names[@]}"; do
+	repo_dir=$SAPHIRA_REPO_DIR/$repo_name/$SAPHIRA_ARCH
+	db_file=$repo_dir/repository.db
+	[ -f "$db_file" ] || die "repository database missing: $db_file"
+	[ -f "$repo_dir/Packages.adb" ] || die "repository index missing: $repo_dir/Packages.adb (heal first)"
+
+	if ! mkdir "$repo_dir/repository.db.lock" 2>/dev/null; then
+		die "repository writer lock already held for $repo_name"
+	fi
+	db_lock_held=$repo_dir
+
+	plan_file=$workspace/$repo_name-plan.txt
+	rec_status=0
+	rec_out=$(recovery_check "$db_file") || rec_status=$?
+	case $rec_status in
+		0) : ;;
+		20) die "interrupted withdrawal of another family pending: $rec_out (resolve it first)" ;;
+		21) die "interrupted withdrawal of $fam left files moved but rows present: restore $archive_dir/$fam/*.apk and run sign-apk-repo --full-audit first" ;;
+		22) die "inconsistent state: no rows for $fam but a recovery marker is set (investigate before retrying)" ;;
+		*) die "recovery check failed for $repo_name (see above)" ;;
+	esac
+	[ "$rec_out" = NONE ] || [ "$rec_out" = RETRY ] || die "unexpected recovery state: $rec_out"
+	[ "$rec_out" = RETRY ] && printf 'withdraw-package: %s: previous run moved nothing; restarting\n' "$repo_name"
+
+	pf_status=0
+	preflight "$db_file" "$repo_dir/Packages.adb" "$plan_file" || pf_status=$?
+	case $pf_status in
+		0) : ;;
+		10)
+			printf 'withdraw-package: %s: %s already withdrawn (audit kept); verifying\n' "$repo_name" "$selector"
+			verify_gen "$db_file" || die "already-withdrawn verification failed for $repo_name"
+			rmdir -- "$repo_dir/repository.db.lock"
+			db_lock_held=
+			continue
+			;;
+		11) die "$repo_name: unknown package family: $fam (nothing indexed, no audit)" ;;
+		12) die "$repo_name: withdrawal refused (see above)" ;;
+		13) die "$repo_name: unknown NVR selection: $selector (see above; nothing mutated)" ;;
+		14) die "$repo_name: ambiguous version selection: $selector (see above; nothing mutated)" ;;
+		2) die "$repo_name: repository database unusable (see above)" ;;
+		*) die "$repo_name: pre-flight failed (see above)" ;;
+	esac
+
+	set_marker "$db_file"
+
+	archive_pkg_dir=$archive_dir/$fam
+	mkdir -p -- "$archive_pkg_dir"
+	while IFS='|' read -r nvr sha256 size count; do
+		[ -n "$nvr" ] || continue
+		mv -- "$repo_dir/$nvr.apk" "$archive_pkg_dir/$nvr.apk" \
+			|| die "$repo_name: archive move failed for $nvr (marker set; restore and heal)"
+		actual=$(sha256sum -- "$archive_pkg_dir/$nvr.apk" | awk '{ print $1 }')
+		[ "$actual" = "$sha256" ] || die "$repo_name: archived hash mismatch for $nvr (marker set; investigate)"
+		normalize_ownership "$archive_pkg_dir/$nvr.apk"
+		printf 'withdraw-package: %s: archived %s (%s bytes, sha256 %s)\n' "$repo_name" "$nvr" "$size" "$sha256"
+	done < "$plan_file"
+
+	# Index from the authoritative database: every indexed NVR except
+	# the withdrawn family must be present on disk with a matching
+	# hash, and no extra APK may ride along. The normal signed
+	# generation path runs on exactly that set.
+	dblist=$workspace/$repo_name-dblist.txt
+	"$SAPHIRA_PYTHON" - "$repo_db_lib" "$db_file" "$repo_dir" "$dblist" "$plan_file" <<'PY' \
+		|| die "$repo_name: database package set unreadable"
+import sys
+(lib_path, db_file, repo_dir, out_path, plan_path) = sys.argv[1:6]
+sys.path.insert(0, __import__("os").path.dirname(lib_path))
+import hashlib
+import os
+import repo_db as rdb
+conn = rdb.connect_readonly(db_file)
+gone = set()
+with open(plan_path, encoding="utf-8") as stream:
+    for line in stream:
+        line = line.strip()
+        if line:
+            gone.add(line.split("|")[0] + ".apk")
+expected = sorted(r["nvr"] + ".apk" for r in conn.execute("SELECT nvr FROM packages")
+                  if r["nvr"] + ".apk" not in gone)
+ondisk = sorted(e for e in os.listdir(repo_dir) if e.endswith(".apk"))
+if ondisk != expected:
+    only_disk = sorted(set(ondisk) - set(expected))
+    only_db = sorted(set(expected) - set(ondisk))
+    print(f"withdraw-package: disk/database skew: disk-only {only_disk},"
+          f" db-only {only_db} (heal first)", file=sys.stderr)
+    raise SystemExit(3)
+for entry in expected:
+    nvr = entry[:-4]
+    want = conn.execute(
+        "SELECT apk_sha256 FROM packages WHERE nvr=?", (nvr,)).fetchone()["apk_sha256"]
+    digest = hashlib.sha256()
+    with open(os.path.join(repo_dir, entry), "rb") as stream:
+        for chunk in iter(lambda: stream.read(1048576), b""):
+            digest.update(chunk)
+    if digest.hexdigest() != want:
+        print(f"withdraw-package: hash drift on disk: {entry} (heal first)",
+              file=sys.stderr)
+        raise SystemExit(3)
+with open(out_path, "w", encoding="utf-8") as stream:
+    for entry in expected:
+        stream.write(os.path.join(repo_dir, entry) + "\n")
+PY
+	mapfile -t index_inputs < "$dblist"
+	[ "${#index_inputs[@]}" -gt 0 ] || die "$repo_name: refusing to sign an empty index"
+	packages_adb=$workspace/$repo_name-Packages.adb
+	apkindex=$workspace/$repo_name-APKINDEX.tar.gz
+	repo_generate_index "$SAPHIRA_APK" "$packages_adb" "$apkindex" "$sign_key" "$trust_dir" \
+		"${index_inputs[@]}" || die "$repo_name: index generation failed"
+	"$SAPHIRA_PYTHON" - "$SAPHIRA_APK" "$packages_adb" "$apkindex" "$db_file" "$repo_db_lib" "$plan_file" <<'PY' \
+		|| die "$repo_name: generated index disagrees with database"
+import os
+import re
+import subprocess
+import sys
+apk, adb_path, tar_path, db_file, lib_path, plan_path = sys.argv[1:7]
+sys.path.insert(0, os.path.dirname(lib_path))
+import repo_db as rdb
+conn = rdb.connect_readonly(db_file)
+gone = set()
+with open(plan_path, encoding="utf-8") as stream:
+    for line in stream:
+        line = line.strip()
+        if line:
+            gone.add(line.split("|")[0])
+expected = {(r["name"], r["version"]) for r in
+            conn.execute("SELECT name, version, nvr FROM packages")
+            if r["nvr"] not in gone}
+for index in (adb_path, tar_path):
+    dump = subprocess.run([apk, "adbdump", index], check=True, text=True,
+                          capture_output=True).stdout
+    names = re.findall(r"^  - name: (\S+)$", dump, re.MULTILINE)
+    versions = re.findall(r"^    version: (\S+)$", dump, re.MULTILINE)
+    actual = set(zip(names, versions))
+    if len(names) != len(versions) or len(actual) != len(names) or actual != expected:
+        raise SystemExit(f"index identities do not match database: {index}")
+PY
+	repo_install_index "$repo_dir" "$packages_adb" "$apkindex" \
+		|| die "$repo_name: index install failed"
+	normalize_ownership "$repo_dir/Packages.adb" "$repo_dir/APKINDEX.tar.gz"
+
+	apply_withdraw_txn "$db_file" "$plan_file" \
+		|| die "$repo_name: database transaction failed"
+	normalize_ownership "$db_file"
+
+	verify_gen "$db_file" || die "$repo_name: post-withdrawal verification failed"
+
+	rmdir -- "$repo_dir/repository.db.lock"
+	db_lock_held=
+	printf 'withdraw-package: %s: %s withdrawn and verified\n' "$repo_name" "$name"
+done
+
+if [ -n "$verspec" ]; then
+	printf 'withdraw-package: NVR %s withdrawn from %s generation(s)\n' "$selector" "${#repo_names[@]}"
+else
+	printf 'withdraw-package: family %s withdrawn from %s generation(s)\n' "$fam" "${#repo_names[@]}"
+fi

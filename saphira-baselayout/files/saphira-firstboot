@@ -377,8 +377,15 @@ install_shell_defaults()
 	# setup after a run that had in fact finished everything else.
 	for template in .bashrc .profile; do
 		if test -f "$root_dir/etc/skel/$template"; then
-			install -m 0644 "$root_dir/etc/skel/$template" "$root_dir/root/$template"
-			install -m 0644 "$root_dir/etc/skel/$template" "$home/$template"
+			# Never overwrite an existing home dotfile: firstboot
+			# provisions new homes, it does not manage customisations.
+			# (Re-runs after a machine is established must not clobber.)
+			if ! test -f "$root_dir/root/$template"; then
+				install -m 0644 "$root_dir/etc/skel/$template" "$root_dir/root/$template"
+			fi
+			if ! test -f "$home/$template"; then
+				install -m 0644 "$root_dir/etc/skel/$template" "$home/$template"
+			fi
 		fi
 	done
 	chown 0:0 "$root_dir/root/.bashrc" "$root_dir/root/.profile" 2>/dev/null || true
@@ -795,7 +802,6 @@ commit_completion || {
 	printf '\nSaphira first-boot setup cannot record its own completion; refusing to continue.\n' >&2
 	exit 1
 }
-rm -f -- "$pending_user"
 printf '\nRoot password set: first-boot setup is complete and will not run again.\n'
 printf 'The remaining steps configure this machine; a failure below is reported and left for you to finish, never re-run as setup.\n\n'
 
@@ -849,6 +855,11 @@ if ! user_exists "$username"; then
 fi
 printf '\nSet a password for administrator %s.\n\n' "$username"
 run_step "Administrator password ($username)" set_password "$username" || true
+# The pending username has now been consumed: the account exists (or its
+# creation was recorded as unfinished) and the password was attempted.
+# Clearing it here - not at the commit point - keeps the resume check
+# above reachable for a previous partial run.
+rm -f -- "$pending_user"
 
 heading 'Network configuration'
 printf 'Configure the wired network interfaces of this system.\n\n'
@@ -868,8 +879,8 @@ chmod 0600 "$iface_index_tmp"
 # re-asks it, so a mistake is recoverable without rebooting and without
 # feeding the rest of the flow bogus values. Nothing is applied until
 # every interface has been walked.
-interfaces=($(list_interfaces))
-total=${#interfaces[$(@)]}
+	interfaces=($(list_interfaces))
+	total=${#interfaces[@]}
 declare -a walked_name walked_kind
 index=0
 while test "$index" -lt "$total"; do
@@ -910,7 +921,15 @@ while test "$index" -lt "$total"; do
 		walked_name[$index]=$INTERFACE
 		walked_kind[$index]=disabled
 	else
-		validate_network_state
+		# Post-commit this must not abort the wizard: a validation
+		# failure here would kill the whole run under set -e with
+		# the marker already spent. Record it and move on to the
+		# next interface instead.
+		if ! validate_network_state; then
+			record_unfinished "Network ($INTERFACE)" 'staged answers failed validation'
+			index=$((index + 1))
+			continue
+		fi
 		iface_state=$state_dir/.iface-$INTERFACE
 		cp -f "$network_state" "$iface_state"
 		chmod 0600 "$iface_state"
@@ -964,7 +983,16 @@ for INTERFACE in $configured_ifaces; do
 		sed -n '/^IPV4_MODE=/p;/^IPV4_CIDR=/p;/^IPV4_GATEWAY=/p;/^IPV4_METRIC=/p;/^IPV6_MODE=/p;/^IPV6_CIDR=/p;/^IPV6_GATEWAY=/p;/^IPV6_METRIC=/p' "$iface_state"
 		printf 'DNS_SERVERS=%s\nDNS_SEARCH=%s\n' "$DNS_SERVERS" "$DNS_SEARCH"
 	} > "$merged_tmp"
-	"$network_apply" validate "$merged_tmp"
+	# Post-commit this must not abort the wizard either. The merged
+	# file is the staged address plus the DNS choice; if the merge
+	# does not validate, keep the already-validated staged address
+	# (it applied cleanly above) and record DNS as unfinished, rather
+	# than losing the working address with it.
+	if ! "$network_apply" validate "$merged_tmp"; then
+		record_unfinished "Network ($INTERFACE)" 'DNS settings failed validation; keeping the interface address without DNS'
+		rm -f -- "$merged_tmp"
+		continue
+	fi
 	mv -f "$merged_tmp" "$iface_state"
 	chmod 0600 "$iface_state"
 done

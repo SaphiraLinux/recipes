@@ -218,11 +218,38 @@ import sys
 with open(sys.argv[1], encoding="utf-8") as stream:
     receipt = json.load(stream)
 accounts = receipt["artifacts"][0]["accounts"]
-assert accounts["users"] == [{"name": "iduser", "uid": "660", "primary": "idgroup", "home": "/var/lib/idsvc", "shell": "/sbin/nologin"}], accounts
+assert accounts["users"] == [{"name": "iduser", "uid": "660", "primary": "idgroup", "home": "/var/lib/idsvc", "shell": "/sbin/nologin", "supplementary": ""}], accounts
 assert accounts["groups"] == [{"name": "idgroup", "gid": "660"}], accounts
 assert accounts["dirs"] == [{"path": "/var/lib/idsvc", "mode": "0755", "owner": "iduser", "group": "idgroup"}], accounts
 PY
 printf '%s\n' 'account fragment round-trip: ok (scripts, helper depends, receipt)'
+
+# Supplementary groups (fragment `user` 6th field): parsed, recorded
+# in the receipt, and refused when malformed.
+mkdir -p "$stage/supsvc/pkg/usr/bin" "$stage/supsvc/pkg/usr/share/saphira/accounts.d"
+printf '%s\n' supsvc > "$stage/supsvc/pkg/usr/bin/supsvc"
+printf '%s\n' 'user supuser 661 supgroup /var/lib/supsvc /sbin/nologin devgrp,plugdev' 'group supgroup 661' 'group devgrp 662' 'group plugdev 663' > "$stage/supsvc/pkg/usr/share/saphira/accounts.d/supsvc"
+write_manifest supsvc '{"arch":"x86_64","build_time":8,"license":"MIT","name":"supsvc","origin":"supsvc","outputs":[{"dependencies":[],"description":"supsvc","name":"supsvc","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r0"}'
+run_makepkg supsvc
+python3 - "$stage/supsvc/artifact-manifest.json" <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as stream:
+    receipt = json.load(stream)
+accounts = receipt["artifacts"][0]["accounts"]
+assert accounts["users"] == [{"name": "supuser", "uid": "661", "primary": "supgroup", "home": "/var/lib/supsvc", "shell": "/sbin/nologin", "supplementary": "devgrp,plugdev"}], accounts
+PY
+printf '%s\n' 'supplementary groups round-trip: ok (receipt carries the list)'
+mkdir -p "$stage/supbad/pkg/usr/bin" "$stage/supbad/pkg/usr/share/saphira/accounts.d"
+printf '%s\n' supbad > "$stage/supbad/pkg/usr/bin/supbad"
+printf '%s\n' 'user supbad 664 supbadgroup /var/lib/supbad /sbin/nologin wheel' 'group supbadgroup 664' > "$stage/supbad/pkg/usr/share/saphira/accounts.d/supbad"
+write_manifest supbad '{"arch":"x86_64","build_time":8,"license":"MIT","name":"supbad","origin":"supbad","outputs":[{"dependencies":[],"description":"supbad","name":"supbad","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r0"}'
+if run_makepkg supbad > "$test_root/supbad.log" 2>&1; then
+	printf '%s\n' 'reserved supplementary group unexpectedly accepted' >&2
+	exit 1
+fi
+grep 'reserved foundation group' "$test_root/supbad.log" >/dev/null
+printf '%s\n' 'reserved supplementary group refused: ok'
 
 # sysusers stanza: a fragment with no census declares native account
 # management; install/upgrade callers run the reconciler then
@@ -375,7 +402,7 @@ if run_makepkg badfrag > "$test_root/badfrag.log" 2>&1; then
 	printf '%s\n' 'malformed account fragment unexpectedly packaged' >&2
 	exit 1
 fi
-grep 'UID must be 0..887' "$test_root/badfrag.log" >/dev/null
+grep 'UID must be 0..999' "$test_root/badfrag.log" >/dev/null
 mkdir -p "$stage/strayfrag/pkg/usr/bin" "$stage/strayfrag/pkg/usr/share/saphira/accounts.d"
 printf '%s\n' strayfrag > "$stage/strayfrag/pkg/usr/bin/strayfrag"
 printf '%s\n' 'group someoneelse 661' > "$stage/strayfrag/pkg/usr/share/saphira/accounts.d/someoneelse"
@@ -387,18 +414,28 @@ fi
 grep 'foreign account fragments' "$test_root/strayfrag.log" >/dev/null
 printf '%s\n' 'account fragment refusal: ok (malformed, foreign)'
 
-# Identities outside the packaged range (888..999 local, 1000+ human)
-# fail the build with the range named.
+# Identities anywhere in 0..999 package fine (one service range, no
+# tiers); 1000+ fails the build with the range named.
 mkdir -p "$stage/bigrange/pkg/usr/bin" "$stage/bigrange/pkg/usr/share/saphira/accounts.d"
 printf '%s\n' bigrange > "$stage/bigrange/pkg/usr/bin/bigrange"
 printf '%s\n' 'user biguser 900 biggroup /var/lib/big /sbin/nologin' 'group biggroup 900' > "$stage/bigrange/pkg/usr/share/saphira/accounts.d/bigrange"
 write_manifest bigrange '{"arch":"x86_64","build_time":11,"license":"MIT","name":"bigrange","origin":"bigrange","outputs":[{"dependencies":[],"description":"bigrange","name":"bigrange","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r0"}'
-if run_makepkg bigrange > "$test_root/bigrange.log" 2>&1; then
-	printf '%s\n' 'out-of-range account fragment unexpectedly packaged' >&2
+if ! run_makepkg bigrange > "$test_root/bigrange.log" 2>&1; then
+	printf '%s\n' 'in-range account fragment unexpectedly refused' >&2
 	exit 1
 fi
-grep 'must be 0..887' "$test_root/bigrange.log" >/dev/null
-printf '%s\n' 'account range refusal: ok (UID/GID 888+ rejected)'
+printf '%s\n' 'account range acceptance: ok (UID/GID 900 packages)'
+# Identities at 1000+ (human territory) fail the build.
+mkdir -p "$stage/humanrange/pkg/usr/bin" "$stage/humanrange/pkg/usr/share/saphira/accounts.d"
+printf '%s\n' humanrange > "$stage/humanrange/pkg/usr/bin/humanrange"
+printf '%s\n' 'user hugeuser 1000 hugegroup /var/lib/huge /sbin/nologin' 'group hugegroup 1000' > "$stage/humanrange/pkg/usr/share/saphira/accounts.d/humanrange"
+write_manifest humanrange '{"arch":"x86_64","build_time":17,"license":"MIT","name":"humanrange","origin":"humanrange","outputs":[{"dependencies":[],"description":"humanrange","name":"humanrange","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r0"}'
+if run_makepkg humanrange > "$test_root/humanrange.log" 2>&1; then
+	printf '%s\n' 'human-range account fragment unexpectedly packaged' >&2
+	exit 1
+fi
+grep 'must be 0..999' "$test_root/humanrange.log" >/dev/null
+printf '%s\n' 'account range refusal: ok (UID/GID 1000+ rejected)'
 
 # Reserved identities (root/wheel/ID 0, or a service anchored to
 # root/wheel) fail the build: root belongs to the base seed and
@@ -444,18 +481,21 @@ fi
 grep 'reserved foundation' "$test_root/gid1frag.log" >/dev/null
 printf '%s\n' 'account foundation-group refusal: ok (spokes/wheel/GID 0-2)'
 
-# Identities in the 200..887 expansion range build fine but earn a
-# loud notice (the fragment must document the exception).
+# Identities anywhere in 0..999 build with no notices attached (one
+# service range; tier notices were removed with the tiers).
 mkdir -p "$stage/midrange/pkg/usr/bin" "$stage/midrange/pkg/usr/share/saphira/accounts.d"
 printf '%s\n' midrange > "$stage/midrange/pkg/usr/bin/midrange"
-printf '%s\n' '# documented exception fixture' 'user miduser 250 midgroup /var/lib/mid /sbin/nologin' 'group midgroup 250' > "$stage/midrange/pkg/usr/share/saphira/accounts.d/midrange"
+printf '%s\n' 'user miduser 250 midgroup /var/lib/mid /sbin/nologin' 'group midgroup 250' > "$stage/midrange/pkg/usr/share/saphira/accounts.d/midrange"
 write_manifest midrange '{"arch":"x86_64","build_time":12,"license":"MIT","name":"midrange","origin":"midrange","outputs":[{"dependencies":[],"description":"midrange","name":"midrange","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r0"}'
 if ! run_makepkg midrange > "$test_root/midrange.log" 2>&1; then
-	printf '%s\n' 'expansion-range account fragment unexpectedly refused' >&2
+	printf '%s\n' 'in-range account fragment unexpectedly refused' >&2
 	exit 1
 fi
-grep 'expansion range' "$test_root/midrange.log" >/dev/null
-printf '%s\n' 'account expansion notice: ok (200..887 builds with notice)'
+if grep -q 'expansion range' "$test_root/midrange.log" 2>/dev/null; then
+	printf '%s\n' 'tier notice unexpectedly emitted' >&2
+	exit 1
+fi
+printf '%s\n' 'account acceptance: ok (250 builds silently)'
 
 # File stanzas bind install-time ownership to payload files: declared
 # owner plus the root built-in, validated, payload-bound, recorded in

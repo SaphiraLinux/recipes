@@ -1,6 +1,6 @@
 pkgname=saphira-unified-memory-mcp
 pkgver=3.13.5
-pkgrel=23
+pkgrel=24
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='SQLite-backed MCP memory suite: unified stdio servers, optional remote bearer endpoint, debate runtime, MariaDB profile'
 license='MIT'
@@ -9,6 +9,18 @@ origin=saphira-unified-memory-mcp
 repo=saphira
 url=https://github.com/akadata/akadata-unified-memory-mcp
 
+disabled=yes
+disabled_reason='retired in favour of the forthcoming native C saphira-memoryd; no further builds. Published r22/r23 APKs are retained as history. Standalone python recipes now provide the previously vendored wheels (cachetools, dnspython, jsonschema, jsonschema-specifications, pygments, pyjwt, pymysql, referencing, rpds_py); see the MCP ownership-migration record for the live-repository retirement.'
+
+# r24: extend the de-vendoring to the nine wheels the OpenStack work now
+# packages: cachetools 7.1.8, dnspython 2.8.0, jsonschema 4.26.0,
+# jsonschema_specifications 2025.9.1, pygments 2.21.0, pyjwt 2.13.0,
+# pymysql 1.2.0, referencing 0.37.0, rpds_py 2026.6.3. Each duplicated a
+# repo-owned site-packages tree and the file gate refuses the overlap.
+# cachetools is the only version skew: the bundle carried 7.1.8, so
+# python-cachetools is bumped to 7.1.8 to match (pymysql 1.2.0 vs repo
+# 1.2.3 is newer in the repo, so no skew). jsonschema_path 0.5.0 stays
+# vendored (no repo package claims its paths).
 # r23: extend the r21/r22 de-vendoring to attrs 26.1.0 (now a
 # proper repo package: python-attrs). Vendoring duplicated its
 # site-packages tree and the file gate refuses the overlap.
@@ -37,7 +49,7 @@ url=https://github.com/akadata/akadata-unified-memory-mcp
 akadata_unified_sha256=69cbd3a9ee3738c7a15bee4b0c89e3acbe5d9b6d76137ba7752415dda3131591
 wheels_sha256=8d3a76aff5e30571ba0eb62f580e716d9fb704059b2dd1a1160a8a59f8429754
 
-depends="python3 sqlite bash python-cryptography python-cffi anyio httpx click idna typing-extensions python-attrs"
+depends="python3 sqlite bash python-cryptography python-cffi anyio httpx click idna typing-extensions python-attrs python-cachetools python-dnspython python-jsonschema python-jsonschema-specifications python-pygments python-pyjwt python-pymysql python-referencing python-rpds-py"
 # Pure-python suite: no compilation. Only python3 is needed at build time
 # (zipfile extraction); no compiler, make, or kernel UAPI consumption.
 makedepends="python3"
@@ -65,6 +77,7 @@ recipe_install() {
 		# their trees or the file gate refuses the overlap.
 		case ${w##*/} in
 			cryptography-*|cffi-*|anyio-*|httpx-*|click-*|idna-*|typing_extensions-*|attrs-*) continue ;;
+			cachetools-*|dnspython-*|jsonschema-*|jsonschema_specifications-*|pygments-*|pyjwt-*|pymysql-*|referencing-*|rpds_py-*) continue ;;
 		esac
 		python3 -m zipfile -e "$w" "$SP/"
 	done

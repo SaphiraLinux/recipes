@@ -1,0 +1,22 @@
+#!/sbin/openrc-run
+#
+# OpenRC service for the OpenStack Cinder backup manager.
+#
+# Standalone daemon writing volume backups to the configured backup
+# driver (NFS/Ceph/S3/...). Reads /etc/cinder/cinder.conf
+# (operator-provided). Shipped unconditionally; never enabled or
+# started at install. Runs wherever backups are taken (usually the
+# controller or a dedicated backup node).
+
+name="cinder-backup"
+description="OpenStack Cinder backup manager"
+
+command="/usr/bin/cinder-backup"
+command_user="cinder:cinder"
+command_background="yes"
+pidfile="/var/run/cinder/cinder-backup.pid"
+
+depend() {
+	need net
+	after firewall
+}

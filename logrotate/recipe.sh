@@ -13,7 +13,7 @@ pkgver=3.22.0
 # convention (nginx, php-fpm, rsyncd, apk all moved out); this
 # package keeps the master config, scheduling, and the ownerless
 # generics (wtmp, lastlog) only.
-pkgrel=4
+pkgrel=5
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='Rotates, compresses, and mails system logs'
 license='GPL-2.0-or-later'

@@ -10,6 +10,10 @@
 # 2 SKIP-UPSTREAM, all 103 upstream commits accounted, byte-identical
 # upstream files under files/series/, adaptations only in files/fwd/).
 pkgname=linux-saphira-meta-cram
+
+disabled=yes
+disabled_reason='test that should not be deployed to production'
+
 kernel_version=${SAPHIRA_CRAM_KERNEL_VERSION:-7.2.9}
 # Saphira pre-release convention (underscore, never hyphen before -rN).
 # 7.2.9 is stable so no translation applies; kept as the same expansion

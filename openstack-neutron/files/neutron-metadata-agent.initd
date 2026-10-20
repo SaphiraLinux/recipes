@@ -1,0 +1,23 @@
+#!/sbin/openrc-run
+#
+# OpenRC service for the OpenStack Neutron metadata agent.
+#
+# Standalone daemon proxying instance metadata requests.
+# Privileged operations escalate per-command through
+# neutron-rootwrap; the agent itself runs as the neutron user. Reads
+# /etc/neutron/metadata_agent.ini (operator-provided). Shipped
+# unconditionally; never enabled or started at install. Runs on
+# network nodes.
+
+name="neutron-metadata-agent"
+description="OpenStack Neutron metadata agent"
+
+command="/usr/bin/neutron-metadata-agent"
+command_user="neutron:neutron"
+command_background="yes"
+pidfile="/var/run/neutron/neutron-metadata-agent.pid"
+
+depend() {
+	need net
+	after firewall
+}

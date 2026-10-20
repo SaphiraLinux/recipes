@@ -1,0 +1,34 @@
+#!/sbin/openrc-run
+# Saphira openrc service for systemd-udevd. The udev package ships
+# the standalone daemon but historically no init integration, so on
+# openrc no udevd ever ran and /dev/disk/* was never populated
+# (proven Egg 2026-10-19: rules, helpers and binary present and
+# owned, pidof empty, udevadm info bare). Trigger and settle run in
+# start_post so anything ordered after udev sees a settled tree;
+# there are no separate trigger/settle services by design.
+
+description="systemd-udevd device manager"
+
+command="/lib/systemd/systemd-udevd"
+supervisor="supervise-daemon"
+
+depend()
+{
+	# /dev is mounted by devfs (sysinit). Device nodes and
+	# /dev/disk/* must exist before filesystems are checked and
+	# mounted, and udevd must already run when modules load (their
+	# modalias uevents need it). fsck carries `use dev`; nothing
+	# else in the tree provides it, so this script does.
+	after devfs
+	before checkfs fsck localmount modules
+	provide dev
+}
+
+start_post()
+{
+	ebegin "Triggering udev events"
+	/bin/udevadm trigger --type=subsystems --action=add
+	/bin/udevadm trigger --type=devices --action=add
+	/bin/udevadm settle
+	eend $?
+}

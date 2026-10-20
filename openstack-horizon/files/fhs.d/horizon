@@ -1,0 +1,5 @@
+# Horizon runtime directory: /var/run is a real, volatile directory
+# and /run is a separate one. Ordinary packaged-daemon PID/socket/state
+# live under /var/run/<service>.
+dir /var/run/horizon 0750 horizon horizon
+rmdir-if-empty /run/horizon

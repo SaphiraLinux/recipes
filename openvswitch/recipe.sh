@@ -40,7 +40,7 @@ makedepends="
 	gawk
 	gcc
 	libevent-dev
-	saphira-kernel-headers
+	saphira-linux-uapi-headers
 	make
 	openssl-dev
 	pkgconf

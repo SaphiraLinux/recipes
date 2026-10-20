@@ -10,6 +10,10 @@ PartOf=libvirtd.service
 After=virtlogd.service virtlockd.service
 
 [Service]
+# Saphira is not usrmerged: daemons spawn helpers from /sbin and
+# /bin (tc, ip, ...), which this systemd build omits from the
+# default PATH. Set it explicitly (packaged paths, never aliases).
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # Mirrors files/virtqemud.initd.
 #
 # Type=notify: libvirt's modular daemons are sd_notify-native, so this is
@@ -32,10 +36,13 @@ Restart=on-failure
 # ProtectSystem=strict (virtqemud mounts images), or ProtectHome
 # (read-only, and the storage pool can be anywhere the operator chooses).
 #
-# This build configures -Dpolkit=disabled -Dselinux=disabled
-# -Dapparmor=disabled, so there is NO access control on virtqemud at all.
-# That is a separate concern from dual-init and is recorded in
-# daemon-inventory.map rather than silently hardened here.
+# This build configures -Dpolkit=disabled with -Dselinux=enabled
+# and -Dapparmor=enabled: both security drivers compile in, and each
+# self-disables where its kernel support is absent (SELinux is built
+# into Saphira kernels; AppArmor is not compiled in). No enforcement
+# is claimed without runtime policy and testing. That is a separate
+# concern from dual-init and is recorded in daemon-inventory.map rather
+# than silently hardened here.
 ProtectHome=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes

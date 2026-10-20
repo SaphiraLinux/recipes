@@ -234,6 +234,19 @@ CREATE TABLE IF NOT EXISTS fhs_paths(
     PRIMARY KEY(package_id, path)
 );
 CREATE INDEX IF NOT EXISTS idx_fhs_paths_path ON fhs_paths(path);
+CREATE TABLE IF NOT EXISTS withdrawals(
+    withdrawal_id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    nvr TEXT NOT NULL,
+    apk_sha256 TEXT NOT NULL,
+    apk_size INTEGER NOT NULL,
+    file_count INTEGER NOT NULL,
+    withdrawn_at TEXT NOT NULL,
+    withdrawn_by TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    UNIQUE(nvr)
+);
+CREATE INDEX IF NOT EXISTS idx_withdrawals_name ON withdrawals(name);
 """
 
 
@@ -415,6 +428,34 @@ def sha256_file(path: str | Path) -> str:
 # census: the deliberate expensive pass (migration, --full-audit, reconcile)
 # ---------------------------------------------------------------------------
 
+def _apk_dirs(repo_dir: str | Path) -> list[Path]:
+    """Arch-split layout: APKs live in <repo>/<arch>/ with <arch> the
+    build arch or noarch (apk fetches each package from its own arch
+    directory). Callers keep passing the build-arch directory; this
+    expands to the noarch sibling when present. Filenames are unique
+    across both directories (the publisher refuses dual claims)."""
+    base = Path(repo_dir)
+    dirs = [base]
+    sibling = base.parent / "noarch"
+    if sibling.is_dir() and sibling.resolve() != base.resolve():
+        dirs.append(sibling)
+    return dirs
+
+
+def _resolve_repo_file(repo_dir: str | Path, filename: str) -> Path:
+    """Resolve a repository filename to its arch directory. Exactly one
+    arch directory may claim a filename; zero or two is a loud refusal,
+    matching the publisher's present[] rule."""
+    hits = [d / filename for d in _apk_dirs(repo_dir)
+            if (d / filename).is_file() and not (d / filename).is_symlink()]
+    if len(hits) > 1:
+        raise RepoDbError(
+            f"filename claimed in two arch directories: {filename}")
+    if not hits:
+        raise RepoDbError(f"repository file not found: {filename}")
+    return hits[0]
+
+
 def census(apk_bin: str, repo_dir: str | Path) -> dict[str, dict]:
     """Dump every repository APK. Returns {filename: info} with info holding
     name, version, files, replaces, depends and apk_sha256. Dumps run in a
@@ -423,7 +464,9 @@ def census(apk_bin: str, repo_dir: str | Path) -> dict[str, dict]:
     still fails the whole census closed)."""
     import concurrent.futures
     paths = sorted(
-        path for path in Path(repo_dir).glob("*.apk")
+        path
+        for d in _apk_dirs(repo_dir)
+        for path in d.glob("*.apk")
         if not path.is_symlink() and path.is_file()
     )
 
@@ -465,22 +508,31 @@ def extract_declarations(apk_bin: str, repo_dir: str | Path, filenames: list[str
     repo_dir = Path(repo_dir)
     work_tmp = Path(work_tmp)
     _dump_cache: dict[str, dict] = {}
+    _file_dirs: dict[str, Path] = {}
+    for _d in _apk_dirs(repo_dir):
+        for _p in _d.glob("*.apk"):
+            if _p.is_file() and not _p.is_symlink():
+                if _p.name in _file_dirs:
+                    raise RepoDbError(
+                        f"filename claimed in two arch directories: {_p.name}")
+                _file_dirs[_p.name] = _d
 
     def cached_dump(filename: str) -> dict:
         if filename not in _dump_cache:
-            _dump_cache[filename] = dump_package(apk_bin, repo_dir / filename)
+            _dump_cache[filename] = dump_package(apk_bin, _file_dirs[filename] / filename)
         return _dump_cache[filename]
 
     def newest_provider(pkgname: str) -> str:
         matches = []
-        for path in repo_dir.glob(f"{pkgname}-*.apk"):
-            if not path.is_file() or path.is_symlink():
-                continue
-            info = cached_dump(path.name)
-            # Filename prefix is not identity: gdbm-*.apk also matches
-            # gdbm-dev-*.apk. Only the exact package name provides it.
-            if info["name"] == pkgname:
-                matches.append(path.name)
+        for _d in _apk_dirs(repo_dir):
+            for path in _d.glob(f"{pkgname}-*.apk"):
+                if not path.is_file() or path.is_symlink():
+                    continue
+                info = cached_dump(path.name)
+                # Filename prefix is not identity: gdbm-*.apk also matches
+                # gdbm-dev-*.apk. Only the exact package name provides it.
+                if info["name"] == pkgname:
+                    matches.append(path.name)
         if not matches:
             raise RepoDbError(
                 f"cannot resolve dependency {pkgname} for declaration extraction"
@@ -524,7 +576,7 @@ def extract_declarations(apk_bin: str, repo_dir: str | Path, filenames: list[str
     copies = work_tmp / "extract-apks"
     copies.mkdir(parents=True, exist_ok=True)
     for filename in sorted(set().union(*closures.values())):
-        shutil.copy2(repo_dir / filename, copies / filename)
+        shutil.copy2(_resolve_repo_file(repo_dir, filename), copies / filename)
 
     def install_closure(filename: str) -> Path:
         """Install one carrier closure into its own isolated root."""
@@ -857,9 +909,13 @@ def index_identities(apk_bin: str, index_path: str | Path) -> set[tuple[str, str
 
 def disk_set(repo_dir: str | Path) -> dict[str, str]:
     result: dict[str, str] = {}
-    for path in Path(repo_dir).glob("*.apk"):
-        if path.is_file() and not path.is_symlink():
-            result[path.name] = sha256_file(path)
+    for d in _apk_dirs(repo_dir):
+        for path in d.glob("*.apk"):
+            if path.is_file() and not path.is_symlink():
+                if path.name in result:
+                    raise RepoDbError(
+                        f"filename claimed in two arch directories: {path.name}")
+                result[path.name] = sha256_file(path)
     return result
 
 
@@ -980,6 +1036,22 @@ def evaluate_file_collisions(owners: dict[str, dict[str, str]],
 
 DEPEND_ATOM_RE = re.compile(
     r"^([A-Za-z0-9][A-Za-z0-9._+-]*?)((>=|<=|=|>|<|~)(.+))?$")
+
+
+def match_nvr(name: str, verspec: str, nvr: str) -> bool:
+    """Whether an indexed NVR matches a withdraw-package NAME=VERSION selection.
+
+    The NVR has the shape ``{name}-{version}-r{revision}``. A verspec
+    matches either the full ``version-rN`` tail (exact NVR selection)
+    or a version prefix that ends on the revision boundary (``7.2.2``
+    matches ``name-7.2.2-r1`` but never ``name-7.20.0-r1``). Anything
+    else does not match.
+    """
+    prefix = name + "-"
+    if not nvr.startswith(prefix):
+        return False
+    rest = nvr[len(prefix):]
+    return rest == verspec or (bool(verspec) and rest.startswith(verspec + "-r"))
 
 _compare_cache: dict[tuple[str, str, str], str] = {}
 
@@ -1282,11 +1354,158 @@ def apply_retire(conn, apk_bin: str, filenames, touched=frozenset(),
                         f" (dropped by {name}-{best}; IDs never recycle)")
 
 
+def apply_withdraw(conn, name: str, items: list[dict], actor: str,
+                   reason: str, at: str, notices=None) -> None:
+    """Withdraw a whole package family (every indexed NVR), newest included.
+
+    Explicit operator-confirmed lineage removal: the sanctioned
+    publication path (apply_retire) can never retire a newest NVR, so a
+    retired-upstream package family would otherwise pin its file and
+    identity claims forever and block unrelated packages from those
+    paths. Withdrawal deletes the family's package rows (files, users,
+    groups, state_dirs and fhs_paths go with their package, explicitly
+    like apply_retire) and tombstones ACTIVE reservations orphaned here
+    (IDs never recycle), and records one audit row per withdrawn NVR in
+    withdrawals. The audit table is outside the sync/heal package set,
+    so the evidence survives the lineage going absent; the archived APK
+    (pinned by apk_sha256) keeps the full file payload.
+
+    Refuses when the family has no indexed NVRs, when the item set does
+    not cover the family exactly (all-or-nothing per generation), or
+    when a recorded hash differs from the database. The caller holds
+    the transaction and has already moved the APK files to the archive
+    and verified them there by hash.
+    """
+    if notices is None:
+        notices = []
+    if not items:
+        raise RepoDbError(f"withdrawal refused: no items for {name}")
+    if not actor.strip() or not reason.strip():
+        raise RepoDbError("withdrawal refused: actor and reason are required")
+    indexed = conn.execute(
+        "SELECT package_id, nvr, apk_sha256 FROM packages WHERE name=?",
+        (name,)).fetchall()
+    if not indexed:
+        raise RepoDbError(f"withdrawal refused: no indexed NVRs for {name}")
+    by_nvr = {r["nvr"]: r for r in indexed}
+    if set(by_nvr) != {item["nvr"] for item in items}:
+        raise RepoDbError(
+            f"withdrawal refused: item set does not cover family {name} exactly")
+    for item in sorted(items, key=lambda i: i["nvr"]):
+        row = by_nvr[item["nvr"]]
+        if row["apk_sha256"] != item["apk_sha256"]:
+            raise RepoDbError(
+                f"withdrawal refused: hash drift for {item['nvr']}")
+        package_id = row["package_id"]
+        file_count = conn.execute(
+            "SELECT COUNT(*) c FROM files WHERE package_id=?",
+            (package_id,)).fetchone()["c"]
+        if file_count != item["file_count"]:
+            raise RepoDbError(
+                f"withdrawal refused: file count drift for {item['nvr']}")
+        conn.execute("DELETE FROM state_dirs WHERE package_id=?", (package_id,))
+        conn.execute("DELETE FROM fhs_paths WHERE package_id=?", (package_id,))
+        conn.execute("DELETE FROM users WHERE package_id=?", (package_id,))
+        conn.execute("DELETE FROM groups WHERE package_id=?", (package_id,))
+        conn.execute("DELETE FROM files WHERE package_id=?", (package_id,))
+        conn.execute("DELETE FROM packages WHERE package_id=?", (package_id,))
+        conn.execute(
+            "INSERT INTO withdrawals(name, nvr, apk_sha256, apk_size,"
+            " file_count, withdrawn_at, withdrawn_by, reason)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (name, item["nvr"], item["apk_sha256"], item["apk_size"],
+             file_count, at, actor, reason))
+        notices.append(f"withdrawal: {item['nvr']} retired ({file_count} files released)")
+    for res in conn.execute(
+            "SELECT kind, name FROM reservations"
+            " WHERE owning_package=? AND status='ACTIVE'", (name,)).fetchall():
+        conn.execute(
+            "UPDATE reservations SET status='TOMBSTONED' WHERE kind=? AND name=?",
+            (res["kind"], res["name"]))
+        notices.append(
+            f"reservation tombstoned: {res['kind']} {res['name']}"
+            f" ({name} withdrawn; IDs never recycle)")
+
+
+def apply_withdraw_nvrs(conn, name: str, items: list[dict], actor: str,
+                         reason: str, at: str, notices=None) -> None:
+    """Withdraw a caller-selected SUBSET of a family's indexed NVRs.
+
+    Same mechanics and audit shape as apply_withdraw, but the item set
+    is a strict subset: every item must name an indexed NVR of the
+    family with matching hash and file count, unknown NVRs refuse, and
+    one audit row lands per withdrawn NVR. Sibling NVRs, their files,
+    identities and reservations are untouched. Active reservations
+    owned by the family are tombstoned only when the withdrawing set
+    takes the family's last indexed NVR; while any sibling survives,
+    identity ownership stays live.
+    """
+    if notices is None:
+        notices = []
+    if not items:
+        raise RepoDbError(f"withdrawal refused: no items for {name}")
+    if not actor.strip() or not reason.strip():
+        raise RepoDbError("withdrawal refused: actor and reason are required")
+    indexed = conn.execute(
+        "SELECT package_id, nvr, apk_sha256 FROM packages WHERE name=?",
+        (name,)).fetchall()
+    by_nvr = {r["nvr"]: r for r in indexed}
+    item_nvrs = [item["nvr"] for item in items]
+    if len(set(item_nvrs)) != len(item_nvrs):
+        raise RepoDbError(
+            f"withdrawal refused: duplicate NVRs in withdrawal set for {name}")
+    unknown = [nvr for nvr in item_nvrs if nvr not in by_nvr]
+    if unknown:
+        raise RepoDbError(
+            f"withdrawal refused: unknown NVRs for {name}: "
+            + ", ".join(sorted(unknown)))
+    for item in sorted(items, key=lambda i: i["nvr"]):
+        row = by_nvr[item["nvr"]]
+        if row["apk_sha256"] != item["apk_sha256"]:
+            raise RepoDbError(
+                f"withdrawal refused: hash drift for {item['nvr']}")
+        package_id = row["package_id"]
+        file_count = conn.execute(
+            "SELECT COUNT(*) c FROM files WHERE package_id=?",
+            (package_id,)).fetchone()["c"]
+        if file_count != item["file_count"]:
+            raise RepoDbError(
+                f"withdrawal refused: file count drift for {item['nvr']}")
+        conn.execute("DELETE FROM state_dirs WHERE package_id=?", (package_id,))
+        conn.execute("DELETE FROM fhs_paths WHERE package_id=?", (package_id,))
+        conn.execute("DELETE FROM users WHERE package_id=?", (package_id,))
+        conn.execute("DELETE FROM groups WHERE package_id=?", (package_id,))
+        conn.execute("DELETE FROM files WHERE package_id=?", (package_id,))
+        conn.execute("DELETE FROM packages WHERE package_id=?", (package_id,))
+        conn.execute(
+            "INSERT INTO withdrawals(name, nvr, apk_sha256, apk_size,"
+            " file_count, withdrawn_at, withdrawn_by, reason)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (name, item["nvr"], item["apk_sha256"], item["apk_size"],
+             file_count, at, actor, reason))
+        notices.append(f"withdrawal: {item['nvr']} retired ({file_count} files released)")
+    survivors = conn.execute(
+        "SELECT COUNT(*) c FROM packages WHERE name=?", (name,)).fetchone()["c"]
+    if survivors:
+        notices.append(
+            f"withdrawal: {survivors} NVR(s) of {name} remain indexed")
+        return
+    for res in conn.execute(
+            "SELECT kind, name FROM reservations"
+            " WHERE owning_package=? AND status='ACTIVE'", (name,)).fetchall():
+        conn.execute(
+            "UPDATE reservations SET status='TOMBSTONED' WHERE kind=? AND name=?",
+            (res["kind"], res["name"]))
+        notices.append(
+            f"reservation tombstoned: {res['kind']} {res['name']}"
+            f" ({name} withdrawn; IDs never recycle)")
+
+
 def check_union(tsv_users: dict[str, int], tsv_groups: dict[str, int],
                 decls: list[tuple[str, dict]]) -> None:
     """Exactly one package owns each declared Unix identity. The TSV base
     seed is NOT the authority: identical redeclaration converges, differing
-    attributes collide. IDs outside 0..887 refuse. Mirrors the JSON-era
+    attributes collide. IDs outside 0..999 refuse. Mirrors the JSON-era
     account gate rule-for-rule."""
     mk = makepkg()
     max_id = mk.MAX_PACKAGED_ID
@@ -1996,21 +2215,10 @@ def gate_staged(conn: sqlite3.Connection, apk_bin: str, staged_accounts_path: st
         decls += [(label, decl) for label, _package, decl in staged_decl_list]
         check_union(tsv_users, tsv_groups, decls)
         check_reservations(conn, staged_decl_list)
-        mk = makepkg()
         for filename in sorted(info):
             item = staged_receipts.get(filename, {"accounts": {"users": [], "groups": [], "dirs": [], "files": []}})
             label = f"staged:{item.get('name', '?')}-{item.get('version', '?')}"
             check_file_references(label, item["accounts"])
-            for entry in item["accounts"].get("groups", []):
-                if int(entry["gid"]) > mk.PREFERRED_MAX_ID:
-                    notices.append(
-                        f"{label} group {entry['name']} GID {entry['gid']} is in the "
-                        f"200..887 expansion range (preferred 0..{mk.PREFERRED_MAX_ID})")
-            for entry in item["accounts"].get("users", []):
-                if int(entry["uid"]) > mk.PREFERRED_MAX_ID:
-                    notices.append(
-                        f"{label} user {entry['name']} UID {entry['uid']} is in the "
-                        f"200..887 expansion range (preferred 0..{mk.PREFERRED_MAX_ID})")
         check_legacy_union(info, decls)
     return info, notices
 
@@ -2031,8 +2239,9 @@ def apply_staged(conn: sqlite3.Connection, apk_bin: str, repo_dir: str | Path,
     for filename in sorted(staged):
         item = staged[filename]
         name, version = item["name"], item["version"]
-        installed = repo_dir / filename
-        if not installed.is_file():
+        try:
+            installed = _resolve_repo_file(repo_dir, filename)
+        except RepoDbError:
             raise RepoDbError(f"staged package not installed: {filename}")
         digest = sha256_file(installed)
         decl = item.get("accounts", {"users": [], "groups": [], "dirs": [], "files": []})

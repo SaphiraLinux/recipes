@@ -256,9 +256,68 @@ move_staged_tree()
 for subpackage in $subpackages; do
 	case $subpackage in
 		"$pkgname"-dev|"$pkgname"-doc|"$pkgname"-libs) ;;
-		*) die "unsupported subpackage: $subpackage (only -dev, -doc and -libs are supported)" ;;
+		*)
+			# Named subpackages: recipe-declared payload splits beyond
+			# the fixed -dev/-doc/-libs kinds. Rules live in the recipe
+			# tree: files/split-<name>.list (one payload-relative path
+			# per line, '#' comments, blanks skipped) plus optional
+			# files/split-<name>.depends (extra runtime deps, words).
+			# Rationale: some upstreams (libvirt drivers) need product
+			# splits that are none of -dev/-doc/-libs, and rebuilding
+			# per driver is forbidden. The manifest/outputs machinery
+			# below is already generic; only the move rules were fixed.
+			case $subpackage in
+				''|*[!A-Za-z0-9._+:-]*)
+					die "invalid subpackage name: $subpackage (allowed: ASCII alnum plus . _ + : -)" ;;
+			esac
+			case $subpackage in
+				[A-Za-z0-9]*) ;;
+				*) die "invalid subpackage name (must start alphanumeric): $subpackage" ;;
+			esac
+			[ "$subpackage" != "$pkgname" ] || die "subpackage duplicates base package name: $subpackage"
+			[ -f "$RECIPE_DIR/files/split-$subpackage.list" ] || die "named subpackage $subpackage lacks rules file: $RECIPE_DIR/files/split-$subpackage.list"
+			;;
 	esac
 done
+
+# Exact-duplicate payload claims across different splits are a recipe
+# bug (the second move would silently find nothing): fail closed.
+# (Nested dir/file overlaps across splits fail later at move time,
+# order-dependently; keep each list minimal and disjoint instead.)
+all_split_entries=$(for subpackage in $subpackages; do
+	case $subpackage in
+		"$pkgname"-dev|"$pkgname"-doc|"$pkgname"-libs) continue ;;
+	esac
+	grep -v '^[[:space:]]*#' "$RECIPE_DIR/files/split-$subpackage.list" | grep -v '^[[:space:]]*$'
+done)
+duplicate_entries=$(printf '%s\n' "$all_split_entries" | sort | uniq -d)
+[ -z "$duplicate_entries" ] || die "payload paths claimed by multiple subpackages: $(printf '%s' "$duplicate_entries" | tr '\n' ' ')"
+
+move_named_split()
+{
+	local subpackage=$1 list_file=$2 entry
+	while IFS= read -r entry || [ -n "$entry" ]; do
+		case $entry in
+			''|'#'*) continue ;;
+		esac
+		case $entry in
+			/*) die "named subpackage $subpackage: absolute path forbidden: $entry" ;;
+		esac
+		case $entry in
+			..|../|../*|*/../*|*/..) die "named subpackage $subpackage: parent reference forbidden: $entry" ;;
+		esac
+		# Explicit lists fail closed on missing paths (unlike the
+		# fixed rules above): a typo must break the build, never
+		# silently ship files in the wrong package.
+		if [ -d "$PKGDEST/$entry" ]; then
+			move_staged_tree "$entry" "$subpackage"
+		elif [ -e "$PKGDEST/$entry" ] || [ -L "$PKGDEST/$entry" ]; then
+			move_staged_file "$PKGDEST/$entry" "$subpackage"
+		else
+			die "named subpackage $subpackage: path not staged: $entry"
+		fi
+	done < "$list_file"
+}
 
 for subpackage in $subpackages; do
 	case $subpackage in
@@ -296,6 +355,9 @@ for subpackage in $subpackages; do
 				done < <(find "$root" \( -type f -o -type l \) -name '*.so.*' -print0)
 			done
 			;;
+		*)
+			move_named_split "$subpackage" "$RECIPE_DIR/files/split-$subpackage.list"
+			;;
 	esac
 done
 
@@ -327,6 +389,21 @@ for subpackage in $subpackages; do
 		# made gcc-libs drag the full compiler (binutils, gmp, isl, mpc,
 		# mpfr) into every runtime consumer chain.
 		"$pkgname"-libs) description="$pkgdesc runtime libraries"; dev_dependencies="" ;;
+		*)
+			# Named splits pin the base release (like -doc) plus the
+			# optional files/split-<name>.depends words, so the split
+			# installs with its producer and any direct runtime needs
+			# (e.g. the hypervisor a driver shells out to). Transitive
+			# closure beyond that resolves through the base pin.
+			description="$pkgdesc ($subpackage)"
+			split_deps_file=$RECIPE_DIR/files/split-$subpackage.depends
+			split_extra_deps=""
+			if [ -f "$split_deps_file" ]; then
+				split_extra_deps=$(sed -e 's/#.*//' "$split_deps_file" | tr '\n' ' ')
+			fi
+			dev_dependencies="$pkgname=$pkgver-r$pkgrel $split_extra_deps"
+			dev_dependencies=$(echo "$dev_dependencies" | tr -s ' ' | sed -e 's/^ //' -e 's/ $//')
+			;;
 	esac
 	printf '%s\t%s\t%s\t%s\n' \
 		"$subpackage" "subpkg/$subpackage" "$description" \

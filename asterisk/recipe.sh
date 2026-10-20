@@ -50,7 +50,7 @@ makedepends="
     gcc
     make
     pkgconf
-    saphira-kernel-headers
+    saphira-linux-uapi-headers
 
     curl-dev
     jansson-dev

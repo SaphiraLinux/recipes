@@ -43,10 +43,22 @@ case $out in
 *) bad "the default architecture is not x86_64: $out" ;;
 esac
 case $out in
-*'start=526336, size=267907072'*)
+*'start=133120, size=268300288'*)
 	ok 'the x86_64 UEFI partition plan is unchanged' ;;
 *)
 	bad "the x86_64 partition plan changed: $out" ;;
+esac
+
+# The ESP is 64 MiB (131072 sectors): enough for the ~1.5 MiB EFI
+# payload many times over, far above the FAT32 cluster-count floor
+# that rules out 32 MiB, and eight times smaller than the old default.
+# A silent ESP resize changes every UEFI image layout, so it is pinned
+# here, not just implied by the root line above.
+case $out in
+*'start=2048, size=131072'*)
+	ok 'the ESP is 64 MiB' ;;
+*)
+	bad "the ESP is not the pinned 64 MiB: $out" ;;
 esac
 
 printf '%s\n' '# an explicit architecture is honoured'

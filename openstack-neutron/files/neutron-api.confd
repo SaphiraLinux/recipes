@@ -1,0 +1,16 @@
+# Neutron API runtime settings (operator-editable).
+#
+# These are the WSGI container's own settings, not Neutron's
+# configuration (which lives in /etc/neutron/neutron.conf). Nothing
+# here is applied until the operator enables and starts the service.
+
+# Address and port gunicorn listens on. Point this at a TLS-terminating
+# proxy (nginx/haproxy) for production; leave the default for a local
+# listener behind such a proxy.
+#NEUTRON_API_BIND="127.0.0.1:9696"
+
+# Number of gunicorn worker processes.
+#NEUTRON_API_WORKERS="4"
+
+# Path to the Neutron configuration file.
+#NEUTRON_API_CONF="/etc/neutron/neutron.conf"

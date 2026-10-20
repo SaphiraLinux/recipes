@@ -1,0 +1,19 @@
+# services.tsv - OpenStack components known to the installer.
+# Fields: name|description|depends|allowed-roles|networks|storage|init|package
+# package is the provider APK name, or empty when no native package
+# exists. Readiness is DERIVED (engine os_service_probe: installed or
+# available in a configured apk repository), never hand-maintained:
+# the installer never claims a service is deployable unless its
+# package is actually obtainable here.
+keystone|Identity service (auth, catalog, tokens)|mariadb-server,rabbitmq,memcached|controller|management|none|openrc,systemd|openstack-keystone
+glance|Image service (VM images)|keystone|controller|management|local,zfs-dataset,nfs|openrc,systemd|openstack-glance
+nova|Compute service (VM lifecycle)|keystone,glance,neutron|controller,compute|management,tenant|local,zfs-pool|openrc,systemd|openstack-nova
+neutron-server|Network service (API, DHCP, metadata)|keystone|controller|management,tenant,provider|none|openrc,systemd|openstack-neutron
+placement|Placement service (resource tracking)|keystone|controller|management|none|openrc,systemd|openstack-placement
+cinder|Block storage service (volumes)|keystone|controller|management,storage|zfs-pool,nfs,lvm,ceph|openrc,systemd|openstack-cinder
+horizon|Dashboard (web UI)|keystone|controller|management|none|openrc,systemd|openstack-horizon
+# backing services (infra, not OpenStack proper)
+mariadb-server|Database server (API state)|none|controller|management|none|openrc,systemd|mariadb-server
+rabbitmq|Message queue (RPC transport)|none|controller|management|none|openrc,systemd|rabbitmq-server
+memcached|Token cache|none|controller|management|none|openrc,systemd|memcached
+valkey|Key/value cache (Redis-protocol)|none|controller|management|none|openrc,systemd|valkey

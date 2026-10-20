@@ -19,7 +19,7 @@ cronie_sha256=241ecc1dcd8d4b2a6744fe93509932254d20b7bb9d979d27429809493806357f
 # no -dev split) and needed at runtime.
 replaces="dcron dcron-doc"
 depends="linux-pam saphira-pambase"
-makedepends="autoconf automake gcc linux-pam make saphira-kernel-headers"
+makedepends="autoconf automake gcc linux-pam make saphira-linux-uapi-headers"
 recipe_build() {
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$RECIPE_DIR/files/cronie-1.7.2.tar.gz"
 	cd "$SRC"

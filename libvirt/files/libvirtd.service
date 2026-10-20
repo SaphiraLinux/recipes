@@ -17,10 +17,14 @@ Documentation=man:virtqemud(8) man:virtproxyd(8)
 After=network-online.target nftables.service
 Wants=network-online.target
 # Start ordering: every member is started before the umbrella goes active.
-After=virtlogd.service virtlockd.service virtqemud.service virtstoraged.service virtnetworkd.service virtnodedevd.service virtsecretd.service virtproxyd.service virtinterfaced.service virtnwfilterd.service
-Wants=virtlogd.service virtlockd.service virtqemud.service virtstoraged.service virtnetworkd.service virtnodedevd.service virtsecretd.service virtproxyd.service virtinterfaced.service virtnwfilterd.service
+After=virtlogd.service virtlockd.service virtqemud.service virtlxcd.service virtstoraged.service virtnetworkd.service virtnodedevd.service virtsecretd.service virtproxyd.service virtinterfaced.service virtnwfilterd.service
+Wants=virtlogd.service virtlockd.service virtqemud.service virtlxcd.service virtstoraged.service virtnetworkd.service virtnodedevd.service virtsecretd.service virtproxyd.service virtinterfaced.service virtnwfilterd.service
 
 [Service]
+# Saphira is not usrmerged: daemons spawn helpers from /sbin and
+# /bin (tc, ip, ...), which this systemd build omits from the
+# default PATH. Set it explicitly (packaged paths, never aliases).
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 Type=oneshot
 RemainAfterExit=yes
 # /bin/true: coreutils installs to /bin on Saphira (non-usrmerged), so

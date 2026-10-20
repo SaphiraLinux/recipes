@@ -14,7 +14,9 @@ set -uo pipefail
 here=$(cd -- "$(dirname -- "$0")" && pwd)
 root=$(cd -- "$here/.." && pwd)
 image=$root/files/saphira-image
-profiles=$root/files/profiles
+# Profiles live in the single shared tree (saphira-install-tools); the
+# guards run against the authority, not a copy.
+profiles=$root/../saphira-install-tools/files/profiles
 
 failures=0
 ok() { printf 'ok       %s\n' "$*"; }
@@ -119,6 +121,66 @@ if /usr/bin/grep -q 'INIT.*=.*systemd.*getty_opt=.*systemd.imds=no' "$image"; th
 	ok 'systemd kernel arguments are added for systemd targets only'
 else
 	bad 'the image tool must add systemd.imds=no for systemd targets'
+fi
+
+printf '%s\n' '# boot-time accounting is enabled, never baked'
+
+# Export must not capture boot state: utmp/wtmp hold the previous
+# boot's records (the writer appends per btime, so a baked file
+# would report a stale boot), and a stale systemd random-seed makes
+# coreutils fall back to image age instead of boot time (the 50-day
+# Egg uptime scare: no BOOT_TIME record is ever readable on musl,
+# so the seed mtime wins whenever the file exists).
+for baked in "var/run/utmp" "var/log/wtmp" "var/lib/systemd/random-seed"; do
+	if /usr/bin/grep -q "exclude='./$baked'" "$image"; then
+		ok "export excludes $baked"
+	else
+		bad "export does not exclude $baked"
+	fi
+done
+
+# The recorder must run in the boot runlevel (before gettys), on
+# both inits, guarded by presence like the other platform plumbing.
+if /usr/bin/grep -q 'runlevels/boot/saphira-utmp-boot' "$image"; then
+	ok 'utmp-boot is placed in the boot runlevel'
+else
+	bad 'utmp-boot is not placed in the boot runlevel'
+fi
+if /usr/bin/grep -q 'saphira-utmp-boot.service' "$image"; then
+	ok 'utmp-boot is enabled on systemd targets'
+else
+	bad 'utmp-boot is not enabled on systemd targets'
+fi
+
+# The unit keeps systemd default dependencies: it must run after
+# local filesystem availability, not before basic.target.
+unit=$root/../saphira-utmp/files/saphira-utmp-boot.service
+if test ! -r "$unit"; then
+	printf 'unit not readable, skipping: %s\n' "$unit" >&2
+else
+	if /usr/bin/grep -q '^DefaultDependencies=no' "$unit"; then
+		bad 'the utmp-boot unit disables default dependencies'
+	else
+		ok 'the utmp-boot unit keeps systemd default dependencies'
+	fi
+fi
+
+# The OpenRC service runs after the layout migration it writes
+# through, in the boot runlevel before ordinary services.
+initd=$root/../saphira-utmp/files/saphira-utmp-boot.initd
+if test ! -r "$initd"; then
+	printf 'initd not readable, skipping: %s\n' "$initd" >&2
+else
+	if /usr/bin/grep -q 'after saphira-fhs-converge' "$initd"; then
+		ok 'utmp-boot is ordered after the layout migration'
+	else
+		bad 'utmp-boot does not order after saphira-fhs-converge'
+	fi
+	if /usr/bin/grep -q 'before \*' "$initd"; then
+		ok 'utmp-boot runs before ordinary services'
+	else
+		bad 'utmp-boot has no before * ordering'
+	fi
 fi
 
 if test "$failures" -ne 0; then

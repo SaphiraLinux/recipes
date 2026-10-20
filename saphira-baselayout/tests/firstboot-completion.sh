@@ -207,6 +207,18 @@ for pair in "admin:$admin_line" "network:$net_line" "dns:$dns_line" "repository:
 	fi
 done
 
+# The pending admin username must survive long enough for the resume
+# check to read it. Deleting it at the commit point (before the
+# administrator section runs) made every resume impossible: the check
+# below would always see an empty file.
+resume_line=$(/usr/bin/grep -n 'test -s "$pending_user"' "$wizard" | /usr/bin/head -1 | /usr/bin/cut -d: -f1)
+clear_line=$(/usr/bin/grep -n 'rm -f -- "$pending_user"' "$wizard" | /usr/bin/head -1 | /usr/bin/cut -d: -f1)
+if test -n "$resume_line" && test -n "$clear_line" && test "$clear_line" -gt "$resume_line"; then
+	ok 'the pending username is cleared after the resume check, not at the commit point'
+else
+	bad "the pending username must be readable by the resume check before it is cleared (resume=$resume_line clear=$clear_line)"
+fi
+
 # Nothing may recreate the marker. The only writer is image assembly.
 if /usr/bin/grep -qE '(install|printf|: *>) *"?[^"]*\$marker"?$' "$wizard"; then
 	bad 'the wizard must never write the marker back; only image assembly may'

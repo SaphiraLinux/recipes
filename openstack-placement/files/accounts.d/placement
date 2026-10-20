@@ -1,0 +1,11 @@
+# Placement service identity (fixed, in the preferred 0..199 packaged
+# range): user placement UID 166, primary group placement GID 166.
+# OpenStack services own the 164-170 block (164 keystone, 165 glance,
+# 166 placement, 167-170 nova/neutron/cinder/horizon). Required
+# by the shipped service units (systemd User=placement, OpenRC
+# command_user placement:placement), placement-manage and the state/log
+# directories. UID 166 is not reused by any other packaged identity.
+user placement 166 placement /var/lib/placement /sbin/nologin
+group placement 166
+dir /var/lib/placement 0750 placement placement
+dir /var/log/placement 0750 placement placement

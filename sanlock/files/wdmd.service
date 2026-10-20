@@ -1,0 +1,13 @@
+[Unit]
+Description=Watchdog multiplexer for sanlock (wdmd)
+Documentation=man:wdmd(8)
+After=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/wdmd
+Restart=on-failure
+	RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

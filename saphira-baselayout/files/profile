@@ -1,8 +1,16 @@
-# Saphira Linux system-wide profile
+# Saphira Linux system-wide profile.
+#
+# Canonical PATH (Saphira PATH policy): /usr/local first (local
+# overrides), then /usr, then the real non-usrmerged /sbin and /bin.
+# Every boundary (sshd default-path, su/login.defs, sudo secure_path,
+# systemd ManagerEnvironment, OpenRC service environment) provides
+# this same set, so login sessions agree regardless of entry point.
+# Respected when already set: per-session overrides belong in
+# ~/.profile (after login) or /etc/profile.d/*.sh, not here.
 
 umask 022
 
-: "${PATH:=/usr/bin:/usr/sbin:/bin:/sbin}"
+: "${PATH:=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
 export PATH
 
 if [ -d /etc/profile.d ]; then

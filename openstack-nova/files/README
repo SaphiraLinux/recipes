@@ -1,0 +1,66 @@
+openstack-nova — OpenStack Compute service (Nova) 34.0.0 (2026.2 Hibiscus)
+=========================================================================
+
+This package installs the Nova compute service: API, conductor,
+scheduler, compute agent and the noVNC/serial/SPICE console proxies.
+It installs software ONLY: nothing is enabled, started, migrated or
+credentialed at install time.
+
+What it ships
+-------------
+
+  /usr/bin/nova-*                 administrative CLIs and daemons
+                                  (compute, conductor, manage, novncproxy,
+                                  scheduler, serialproxy,
+                                  spicehtml5proxy, status, ...)
+  nova.wsgi.osapi_compute:application   the supported WSGI application
+  nova/db/{api,main}/migrations/  database migration scripts
+  /etc/nova/api-paste.ini         upstream paste pipeline (wiring)
+  /etc/nova/rootwrap.conf + rootwrap.d/compute.filters
+  /etc/init.d/nova-*              OpenRC services (7 daemons)
+  /usr/lib/systemd/system/nova-*.service   systemd services (7 daemons)
+  /etc/conf.d/nova-*              WSGI container runtime settings (api)
+
+Operator steps (NOT performed by this package)
+----------------------------------------------
+
+1. Write /etc/nova/nova.conf (database, keystone auth, libvirt,
+   VNC/serial/SPICE consoles, Neutron networking, placement, ...).
+   Render the skeleton from the shipped generator inputs:
+
+     oslo-config-generator \
+       --config-file /usr/share/nova/nova-config-generator.conf \
+       --output-file /etc/nova/nova.conf
+   # edit /etc/nova/nova.conf. No database driver is installed by this
+   # package: add python-pymysql for MariaDB, or use sqlite for trials.
+
+2. Initialise the databases (api first, then cell0 and cell1):
+
+     nova-manage api_db sync
+     nova-manage cell_v2 map_cell0
+     nova-manage cell_v2 create_cell --name=cell1 ...
+     nova-manage db sync
+
+3. Register the service and endpoints in Keystone (operator-chosen).
+
+4. Enable per node role, explicitly. Controller example:
+
+     rc-update add nova-api default && rc-service nova-api start
+     rc-update add nova-conductor default && ...
+     rc-update add nova-scheduler default && ...
+   Compute node example:
+
+     rc-update add nova-compute default && rc-service nova-compute start
+   (systemd: systemctl enable --now nova-<daemon> instead.)
+
+Nova-compute drives KVM through libvirtd: the libvirt daemons must be
+installed and running, with QEMU/KVM available. The daemons talk to
+libvirtd, never to qemu binaries directly.
+
+Independence
+------------
+
+Nova depends on the native python closure, gunicorn, libvirt bindings
+and database client libraries. It does not depend on Neutron, Cinder,
+Glance placement beyond API calls, Horizon or QEMU directly, and it
+can be installed on its own.

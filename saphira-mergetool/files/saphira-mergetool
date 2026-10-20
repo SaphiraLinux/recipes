@@ -49,16 +49,30 @@ def load_config(path: str) -> configparser.ConfigParser:
 
 
 def scan_paths(config: configparser.ConfigParser, cli_paths: list[str]) -> list[Path]:
-    paths = list(cli_paths)
-    if not paths and config.has_option("mergetool", "scan_paths"):
+    if cli_paths:
+        # Explicit --scan-path: the operator named it, so a typo must
+        # fail loudly rather than silently scan nothing.
+        roots = []
+        for raw in cli_paths:
+            path = Path(raw)
+            if not path.is_dir():
+                raise MergeError(f"scan path is not a directory: {path}")
+            roots.append(path)
+        return roots
+    paths = list(DEFAULT_SCAN_PATHS)
+    if config.has_option("mergetool", "scan_paths"):
         paths = config.get("mergetool", "scan_paths").split()
-    if not paths:
-        paths = list(DEFAULT_SCAN_PATHS)
     roots = []
     for raw in paths:
         path = Path(raw)
         if not path.is_dir():
-            raise MergeError(f"scan path is not a directory: {path}")
+            # Configured roots cover optional components (e.g.
+            # /srv/gopher-source only exists with geomyidae installed):
+            # skip the absent ones with a warning instead of aborting
+            # the whole scan.
+            print(f"saphira-mergetool: skipping missing scan path: {path}",
+                  file=sys.stderr)
+            continue
         roots.append(path)
     return roots
 

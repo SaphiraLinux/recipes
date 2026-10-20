@@ -1,0 +1,27 @@
+[Unit]
+Description=OpenStack Identity (Keystone) API
+Documentation=man:gunicorn(1)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+User=keystone
+Group=keystone
+EnvironmentFile=-/etc/conf.d/keystone
+Environment=KEYSTONE_BIND=127.0.0.1:5000
+Environment=KEYSTONE_CONF=/etc/keystone/keystone.conf
+RuntimeDirectory=keystone
+RuntimeDirectoryMode=0750
+ExecStart=/usr/bin/gunicorn --name keystone \
+	--bind ${KEYSTONE_BIND} --workers ${KEYSTONE_WORKERS} \
+	--pid /var/run/keystone/keystone.pid \
+	--config ${KEYSTONE_CONF} \
+	keystone.wsgi.api:application
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+KillMode=mixed
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

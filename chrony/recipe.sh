@@ -23,7 +23,7 @@ makedepends="
 
     binutils
     gcc
-    saphira-kernel-headers
+    saphira-linux-uapi-headers
     make
 "
 

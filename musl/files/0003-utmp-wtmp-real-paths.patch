@@ -1,0 +1,14 @@
+--- musl-1.2.6-orig/include/paths.h	2026-03-20 15:40:00.000000000 +0000
++++ musl-1.2.6/include/paths.h	2026-10-19 00:50:28.319257920 +0000
+@@ -18,9 +18,9 @@
+ #define	_PATH_SHADOW	"/etc/shadow"
+ #define	_PATH_SHELLS	"/etc/shells"
+ #define	_PATH_TTY	"/dev/tty"
+-#define _PATH_UTMP	"/dev/null/utmp"
++#define _PATH_UTMP	"/var/run/utmp"
+ #define	_PATH_VI	"/usr/bin/vi"
+-#define _PATH_WTMP	"/dev/null/wtmp"
++#define _PATH_WTMP	"/var/log/wtmp"
+ 
+ #define	_PATH_DEV	"/dev/"
+ #define	_PATH_TMP	"/tmp/"

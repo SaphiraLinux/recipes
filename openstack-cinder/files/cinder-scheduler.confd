@@ -1,0 +1,4 @@
+# Cinder scheduler runtime settings (operator-editable).
+#
+# The scheduler reads /etc/cinder/cinder.conf directly. Nothing here
+# is applied until the operator enables and starts the service.

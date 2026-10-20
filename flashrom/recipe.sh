@@ -33,7 +33,7 @@ depends="libftdi1 libjaylink libusb pciutils"
 #  unit tests (need cmocka; bundled 1.1.8 fails under gcc 16 -Werror,
 #  and no system cmocka is packaged — safe dummy-programmer tests run
 #  separately against the installed binary).
-makedepends="binutils gcc libftdi1-dev libjaylink-dev libusb-dev make meson ninja pciutils-dev pkgconf saphira-kernel-headers"
+makedepends="binutils gcc libftdi1-dev libjaylink-dev libusb-dev make meson ninja pciutils-dev pkgconf saphira-linux-uapi-headers"
 
 recipe_build() {
 	FLASH_BALL="$RECIPE_DIR/files/flashrom-v${pkgver}.tar.xz"

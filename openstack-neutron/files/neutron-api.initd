@@ -1,0 +1,29 @@
+#!/sbin/openrc-run
+#
+# OpenRC service for the OpenStack Networking (Neutron) API.
+#
+# Served by gunicorn with the supported WSGI application
+# (neutron.wsgi.api:application). Configuration lives in
+# /etc/neutron/neutron.conf (operator-provided). Runtime settings are
+# read from /etc/conf.d/neutron-api.
+#
+# Shipped unconditionally; never enabled or started at install.
+# Runs on network/controller nodes.
+
+name="neutron-api"
+description="OpenStack Networking (Neutron) API"
+
+: "${NEUTRON_API_BIND:=127.0.0.1:9696}"
+: "${NEUTRON_API_WORKERS:=$(nproc 2>/dev/null || echo 4)}"
+: "${NEUTRON_API_CONF:=/etc/neutron/neutron.conf}"
+
+command="/usr/bin/gunicorn"
+command_args="--name neutron-api --bind ${NEUTRON_API_BIND} --workers ${NEUTRON_API_WORKERS} --pid /var/run/neutron/neutron-api.pid --config ${NEUTRON_API_CONF} neutron.wsgi.api:application"
+command_user="neutron:neutron"
+command_background="yes"
+pidfile="/var/run/neutron/neutron-api.pid"
+
+depend() {
+	need net
+	after firewall
+}

@@ -1,0 +1,17 @@
+[Unit]
+Description=OpenStack Cinder scheduler
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cinder
+Group=cinder
+EnvironmentFile=-/etc/conf.d/cinder-scheduler
+ExecStart=/usr/bin/cinder-scheduler
+Restart=on-failure
+KillMode=mixed
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

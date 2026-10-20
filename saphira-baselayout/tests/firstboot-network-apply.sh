@@ -191,6 +191,64 @@ else
 	ok 'the owning tool rejects SLAAC for IPv4'
 fi
 
+printf '%s\n' '# the post-commit guard: completed plus a live transaction applies'
+
+# The wizard commits (writes completed) BEFORE it applies the network,
+# so every post-commit apply runs with completed present. That must
+# succeed while the live transaction (active) exists: refusing it is
+# what left every committed machine without a network.
+printf 'completed\n' > "$state/completed"
+chmod 0600 "$state/completed"
+rm -rf "$root/etc/saphira-network.d"
+state_file=$(write_state 'postcommit' eth0 dhcp '' slaac '')
+out=$(apply_via_helper "$state_file")
+if test $? -ne 0; then
+	bad "the helper must apply with completed present and a live transaction: $out"
+elif test -f "$root/etc/saphira-network.d/eth0.conf"; then
+	ok 'post-commit apply with a live transaction writes the configuration'
+else
+	bad 'post-commit apply succeeded but wrote nothing'
+fi
+
+printf '%s\n' '# a stale completed state with no live transaction is still refused'
+
+# The other half of the guard: completed WITHOUT active is a previous
+# run's record, not this one, and must never let an apply through.
+rm -f "$state/active"
+rm -rf "$root/etc/saphira-network.d"
+state_file=$(write_state 'stale' eth0 dhcp '' slaac '')
+out=$(apply_via_helper "$state_file")
+if test $? -eq 0; then
+	bad 'the helper must refuse a completed state with no live transaction'
+else
+	ok 'a stale completed state with no live transaction is refused'
+fi
+# Restore the live transaction for the scenarios below.
+printf 'active\n' > "$state/active"
+chmod 0600 "$state/active"
+
+printf '%s\n' '# a failed activation rolls the written file back'
+
+# Activation runs the service for real here (still hermetic: the
+# service is /bin/false, so nothing touches any interface), and the
+# helper must fail AND remove what it wrote rather than leave a
+# half-applied configuration behind.
+rm -rf "$root/etc/saphira-network.d"
+state_file=$(write_state 'rollback' eth0 dhcp '' slaac '')
+out=$(env SAPHIRA_NETWORK_ROOT=$root \
+	SAPHIRA_FIRSTBOOT_STATE_DIR=$state \
+	SAPHIRA_NETWORK_APPLY=1 \
+	SAPHIRA_NETWORK_SERVICE=/bin/false \
+	SAPHIRA_NETWORK_SKIP_OWNERSHIP=1 \
+		"$helper" apply "$state_file" 2>&1)
+if test $? -eq 0; then
+	bad 'the helper must fail when activation fails'
+elif test -e "$root/etc/saphira-network.d/eth0.conf"; then
+	bad 'a failed activation must roll the written file back'
+else
+	ok 'a failed activation fails loudly and leaves no half-applied file'
+fi
+
 if test "$failures" -ne 0; then
 	printf 'firstboot-network-apply: %d failure(s)\n' "$failures" >&2
 	exit 1

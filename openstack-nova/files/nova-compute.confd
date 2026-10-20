@@ -1,0 +1,6 @@
+# Nova compute runtime settings (operator-editable).
+#
+# The compute agent reads /etc/nova/nova.conf directly (hypervisor,
+# libvirt, VNC and Neutron wiring live there). Nothing here is
+# applied until the operator enables and starts the service.
+# (No container settings: this daemon is not gunicorn-served.)

@@ -1,0 +1,15 @@
+[Unit]
+Description=iSCSI initiator daemon (iscsid)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Type=notify: iscsid is sd_notify-native (upstream unit agrees).
+Type=notify
+NotifyAccess=main
+ExecStart=/usr/sbin/iscsid -f
+Restart=on-failure
+	RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,8 @@
+# storage.tsv - storage backends and what they serve.
+# Fields: type|services|shared|status|description
+zfs-pool|nova,cinder,glance|no|ready|OpenZFS pool (saphira-zfs native)
+zfs-dataset|glance,cinder|no|ready|Dataset within a ZFS pool
+local|glance,nova|no|ready|Local directory on the service machine
+nfs|glance,cinder|yes|ready|NFS share (nfs-utils)
+lvm|cinder|no|pending|LVM volumes (needs targetcli)
+ceph|cinder,glance,nova|yes|pending|Ceph (not yet packaged)

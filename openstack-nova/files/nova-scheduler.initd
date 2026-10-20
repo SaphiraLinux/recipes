@@ -1,0 +1,20 @@
+#!/sbin/openrc-run
+#
+# OpenRC service for the OpenStack Nova scheduler.
+#
+# Standalone daemon reading /etc/nova/nova.conf (operator-provided).
+# Shipped unconditionally; never enabled or started at install.
+# Runs on controller nodes.
+
+name="nova-scheduler"
+description="OpenStack Nova scheduler"
+
+command="/usr/bin/nova-scheduler"
+command_user="nova:nova"
+command_background="yes"
+pidfile="/var/run/nova/nova-scheduler.pid"
+
+depend() {
+	need net
+	after firewall
+}

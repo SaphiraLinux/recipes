@@ -1,0 +1,9 @@
+# operations.tsv - operational choices.
+# Fields: key|values|description
+init|openrc,systemd|Active init system. Both ship in every package; the operator chooses.
+tls|none,selfsigned,provided|API TLS mode. Selfsigned generates at apply time; provided uses operator cert/key.
+credentials|interactive|Admin secrets are prompted at apply time and never stored.
+db_node|controller|Database lands on a controller node.
+mq_node|controller|Message queue lands on a controller node.
+ha|none|High-availability mode. The HA stack is pending.
+endpoints|public,internal,admin|API endpoint types to serve.

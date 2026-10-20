@@ -2,7 +2,7 @@
 
 pkgname=bindgen
 pkgver=0.72.1
-pkgrel=1
+pkgrel=2
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="Rust bindgen: automatically generates Rust FFI bindings to C libraries"
 license="Apache-2.0 OR MIT"
@@ -16,6 +16,7 @@ source=https://github.com/rust-lang/rust-bindgen/archive/refs/tags/v0.72.1.tar.g
 sha256=4ffb17061b2d71f19c5062d2e17e64107248f484f9775c0b7d30a16a8238dfd1
 
 depends="
+    gcc-libs
     libclang>=22.1.8-r1
 "
 
@@ -24,6 +25,7 @@ makedepends="
     curl
     gcc
     libclang>=22.1.8-r1
+    libunwind-dev
     llvm>=22.1.8-r1
     openssl-dev
     python3
@@ -80,7 +82,14 @@ replace-with = "saphira-vendored"
 directory = "$vendor"
 EOF
 	cd "$SRC"
+	# bindgen dlopens libclang at RUNTIME (clang-sys dynamic loading).
+	# A default rustc musl build is static-PIE, and static musl
+	# binaries cannot dlopen at all ("Dynamic loading not supported").
+	# -crt-static links the binary dynamically against the system
+	# libc, which is always present, so dlopen works. The binary
+	# stays PIE; only the libc linkage changes.
 	CARGO_HOME=$BUILDDIR/cargo-home \
+		RUSTFLAGS="-C target-feature=-crt-static" \
 		LIBCLANG_PATH=/usr/lib CLANG_PATH=/usr/bin/clang \
 		OPENSSL_DIR=/usr \
 		cargo build --frozen --offline --release --package bindgen-cli

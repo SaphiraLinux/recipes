@@ -110,6 +110,9 @@ test -z "$(find "$test_root" -mindepth 1 -name '.*' -print -quit)"
 # A MIXED transaction (publishable novel package + conflicting rebuild) is
 # NOT auto-retired: publication stops loudly and nothing is mutated, so the
 # novel outputs are not discarded alongside the rebuild.
+# Ownership gate: legacy mixed transactions without plan/closure hashes fail
+# closed as mixed authoritative (no newest-winner), preserving the same
+# safety property under the authoritative-producer model.
 mixed=$incoming/mixed-fixture-ready
 mkdir "$mixed"
 mkdir -p "$stage/m4/pkg/usr/bin"
@@ -129,8 +132,8 @@ if run_signer > "$test_root/mixed.out" 2> "$test_root/mixed.err"; then
 	printf '%s\n' 'mixed transaction unexpectedly published' >&2
 	exit 1
 fi
-grep 'automatic retirement is not safe' "$test_root/mixed.err" >/dev/null
 grep 'filename is immutable' "$test_root/mixed.err" >/dev/null
+grep -E 'refusing partial publish|mixes conflicting|uncertain provenance|stale consumer|unsatisfied closure' "$test_root/mixed.err" >/dev/null
 [ "$mixed_before" = "$(sha256sum "$repo/make-9-r0.apk" "$repo/Packages.adb" "$repo/APKINDEX.tar.gz")" ]
 test -d "$mixed"
 test ! -e "$mixed.superseded-conflict"
@@ -227,19 +230,21 @@ test -d "$incoming/mawk-fixture-published"
 # transactions fail closed too). Single-generation archive runs still take
 # historical r0 fixtures elsewhere in this suite. m4-1-r0 was built above
 # but never published, so it stages clean apart from its revision.
+# Authoritative-producer model: target must equal producer (m4), so the
+# r0 gate sees the authoritative file.
 r0ban=$incoming/r0ban-fixture-ready
 mkdir "$r0ban"
 cp "$artifacts/x86_64/m4-1-r0.apk" "$r0ban/"
-printf '%s\n' r0ban > "$r0ban/target"
+printf '%s\n' m4 > "$r0ban/target"
 cp "$incoming/make-fixture-published/package-seed.json" "$r0ban/"
-printf '%s\n' '{"schema":"saphira-build-artifacts/v1","target":"r0ban","constructors":[{"constructor":"makepkg","producer":"m4"}],"package_seed":{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}}' > "$r0ban/artifact-manifest.json"
+printf '%s\n' '{"schema":"saphira-build-artifacts/v1","target":"m4","constructors":[{"constructor":"makepkg","producer":"m4"}],"package_seed":{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}}' > "$r0ban/artifact-manifest.json"
 (CDPATH= cd -- "$r0ban" && sha256sum m4-1-r0.apk > manifest.sha256)
 r0ban_before=$(find "$test_root/repository" -type f -printf '%P %s\n' | sort | sha256sum)
 if SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
 	SAPHIRA_REPO_DIR=$test_root/repository SAPHIRA_INCOMING_DIR=$test_root/incoming \
 	SAPHIRA_PACKAGE_TMP=$test_root/package-tmp SAPHIRA_SIGN_KEY=$test_root/test-repository.rsa \
 	SAPHIRA_TRUST_KEY=$keys/test-repository.rsa.pub SAPHIRA_REPO_NAMES='hatchling hatched' \
-	unshare --map-root-user "$sign_repo" r0ban > "$test_root/r0ban.out" 2> "$test_root/r0ban.err"; then
+	unshare --map-root-user "$sign_repo" m4 > "$test_root/r0ban.out" 2> "$test_root/r0ban.err"; then
 	printf '%s\n' 'r0 publication to a live generation unexpectedly succeeded' >&2
 	exit 1
 fi
@@ -360,13 +365,24 @@ SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
 SAPHIRA_BUILD_ROOT=$stage SAPHIRA_INCOMING_DIR=$artifacts \
 SAPHIRA_PACKAGE_TMP=$test_root/makepkg-tmp SAPHIRA_FAKEROOT_BOOTSTRAP=1 \
 SAPHIRA_BOOTSTRAP_TARGET=fakeroot "$makepkg" mvfdev >/dev/null
+# Authoritative-producer model: one ready transaction per producer.
+# mvf and mvfdev are separate producers (separate recipes); each stages
+# only its own outputs. ONE ordinary sign-apk-repo run publishes both in
+# dependency order, proving cold-closure style multi-producer publish.
 movetxn=$incoming/move-ready
 mkdir "$movetxn"
-cp "$artifacts/x86_64/mvf-1-r2.apk" "$artifacts/x86_64/mvfdev-1-r2.apk" "$movetxn/"
+cp "$artifacts/x86_64/mvf-1-r2.apk" "$movetxn/"
 printf '%s\n' mvf > "$movetxn/target"
 printf '%s\n' '{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}' > "$movetxn/package-seed.json"
-printf '%s\n' '{"schema":"saphira-build-artifacts/v1","target":"mvf","constructors":[{"constructor":"makepkg","producer":"mvf"},{"constructor":"makepkg","producer":"mvfdev"}],"package_seed":{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}}' > "$movetxn/artifact-manifest.json"
-(CDPATH= cd -- "$movetxn" && sha256sum mvf-1-r2.apk mvfdev-1-r2.apk > manifest.sha256)
+printf '%s\n' '{"schema":"saphira-build-artifacts/v1","target":"mvf","constructors":[{"constructor":"makepkg","producer":"mvf"}],"package_seed":{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}}' > "$movetxn/artifact-manifest.json"
+(CDPATH= cd -- "$movetxn" && sha256sum mvf-1-r2.apk > manifest.sha256)
+movedevtxn=$incoming/movedev-ready
+mkdir "$movedevtxn"
+cp "$artifacts/x86_64/mvfdev-1-r2.apk" "$movedevtxn/"
+printf '%s\n' mvfdev > "$movedevtxn/target"
+printf '%s\n' '{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}' > "$movedevtxn/package-seed.json"
+printf '%s\n' '{"schema":"saphira-build-artifacts/v1","target":"mvfdev","constructors":[{"constructor":"makepkg","producer":"mvfdev"}],"package_seed":{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}}' > "$movedevtxn/artifact-manifest.json"
+(CDPATH= cd -- "$movedevtxn" && sha256sum mvfdev-1-r2.apk > manifest.sha256)
 run_signer > "$test_root/move.out" 2> "$test_root/move.err"
 test -f "$repo/mvf-1-r2.apk"
 test -f "$repo/mvfdev-1-r2.apk"
@@ -1013,11 +1029,12 @@ fi
 grep 'conflicts with base seed' "$test_root/clashpub.err" >/dev/null
 test ! -f "$repo/acctclash-1-r0.apk"
 mv "$clashpub" "$clashpub.superseded-conflict"
-# An identity outside the packaged range (888..999 local, 1000+ human)
-# refuses at the publish backstop even with a crafted receipt. (The APK
-# ships a valid fragment so the receipt/fragment presence checks pass
-# and the range rule itself is what fires - makepkg would never build
-# an out-of-range fragment, so the receipt is the gate's input here.)
+# An identity anywhere in 0..999 publishes (one service range; the
+# backstop refuses only human-range IDs). (The crafted receipt lets
+# the gate's input be controlled directly.)
+mkdir -p "$stage/acctrange/pkg/usr/bin" "$stage/acctrange/pkg/usr/share/saphira/accounts.d"
+printf '%s\n' acctrange > "$stage/acctrange/pkg/usr/bin/acctrange"
+printf '%s\n' 'user rangeuser 900 rangegroup /var/lib/range /sbin/nologin' 'group rangegroup 900' > "$stage/acctrange/pkg/usr/share/saphira/accounts.d/acctrange"
 mkdir -p "$stage/acctrange/pkg/usr/bin" "$stage/acctrange/pkg/usr/share/saphira/accounts.d"
 printf '%s\n' acctrange > "$stage/acctrange/pkg/usr/bin/acctrange"
 printf '%s\n' 'user rangeuser 671 rangegroup /var/lib/range /sbin/nologin' 'group rangegroup 671' > "$stage/acctrange/pkg/usr/share/saphira/accounts.d/acctrange"
@@ -1032,17 +1049,15 @@ cp "$artifacts/x86_64/acctrange-1-r0.apk" "$rangepub/"
 printf '%s\n' acctrange > "$rangepub/target"
 printf '%s\n' '{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}' > "$rangepub/package-seed.json"
 rangesha=$(sha256sum "$rangepub/acctrange-1-r0.apk" | awk '{ print $1 }')
-printf '%s\n' '{"schema":"saphira-build-artifacts/v1","target":"acctrange","constructors":[{"constructor":"makepkg","producer":"acctrange","artifacts":[{"name":"acctrange","artifact":"acctrange-1-r0.apk","sha256":"'"$rangesha"'","backend":"userns-maproot","accounts":{"users":[{"name":"rangeuser","uid":"900","primary":"rangegroup","home":"/var/lib/range","shell":"/sbin/nologin"}],"groups":[{"name":"rangegroup","gid":"900"}],"dirs":[]}}]}],"package_seed":{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}}' > "$rangepub/artifact-manifest.json"
-(CDPATH= cd -- "$rangepub" && sha256sum acctrange-1-r0.apk > manifest.sha256)
-if SAPHIRA_ACCOUNTS_TSV=$test_root/accounts.tsv run_signer > "$test_root/rangepub.out" 2> "$test_root/rangepub.err"; then
-	printf '%s\n' 'out-of-range identity unexpectedly published' >&2
-	exit 1
-fi
-grep 'outside the packaged range 0..887' "$test_root/rangepub.err" >/dev/null
-test ! -f "$repo/acctrange-1-r0.apk"
-mv "$rangepub" "$rangepub.superseded-conflict"
-# An identity in the 200..887 expansion range publishes with a loud
-# notice (the fragment must document the exception).
+	printf '%s\n' '{"schema":"saphira-build-artifacts/v1","target":"acctrange","constructors":[{"constructor":"makepkg","producer":"acctrange","artifacts":[{"name":"acctrange","artifact":"acctrange-1-r0.apk","sha256":"'"$rangesha"'","backend":"userns-maproot","accounts":{"users":[{"name":"rangeuser","uid":"900","primary":"rangegroup","home":"/var/lib/range","shell":"/sbin/nologin"}],"groups":[{"name":"rangegroup","gid":"900"}],"dirs":[]}}]}],"package_seed":{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}}' > "$rangepub/artifact-manifest.json"
+	(CDPATH= cd -- "$rangepub" && sha256sum acctrange-1-r0.apk > manifest.sha256)
+	if ! SAPHIRA_ACCOUNTS_TSV=$test_root/accounts.tsv run_signer > "$test_root/rangepub.out" 2> "$test_root/rangepub.err"; then
+		printf '%s\n' 'in-range identity unexpectedly refused at publish' >&2
+		exit 1
+	fi
+	test -f "$repo/acctrange-1-r0.apk"
+# An identity anywhere in 0..999 publishes with no notices attached
+# (one service range; tier notices were removed with the tiers).
 mkdir -p "$stage/acctmid/pkg/usr/bin" "$stage/acctmid/pkg/usr/share/saphira/accounts.d"
 printf '%s\n' acctmid > "$stage/acctmid/pkg/usr/bin/acctmid"
 printf '%s\n' '# documented exception fixture' 'user miduser 250 midgroup /var/lib/acctmid /sbin/nologin' 'group midgroup 250' > "$stage/acctmid/pkg/usr/share/saphira/accounts.d/acctmid"
@@ -1059,9 +1074,39 @@ printf '%s\n' '{"schema":"saphira-package-seed/v1","generation":"test","seed":["
 midsha=$(sha256sum "$midpub/acctmid-1-r0.apk" | awk '{ print $1 }')
 printf '%s\n' '{"schema":"saphira-build-artifacts/v1","target":"acctmid","constructors":[{"constructor":"makepkg","producer":"acctmid","artifacts":[{"name":"acctmid","artifact":"acctmid-1-r0.apk","sha256":"'"$midsha"'","backend":"userns-maproot","accounts":{"users":[{"name":"miduser","uid":"250","primary":"midgroup","home":"/var/lib/acctmid","shell":"/sbin/nologin"}],"groups":[{"name":"midgroup","gid":"250"}],"dirs":[]}}]}],"package_seed":{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}}' > "$midpub/artifact-manifest.json"
 (CDPATH= cd -- "$midpub" && sha256sum acctmid-1-r0.apk > manifest.sha256)
-SAPHIRA_ACCOUNTS_TSV=$test_root/accounts.tsv run_signer > "$test_root/midpub.out" 2> "$test_root/midpub.err"
-test -f "$repo/acctmid-1-r0.apk"
-grep 'expansion range' "$test_root/midpub.out" >/dev/null
+	SAPHIRA_ACCOUNTS_TSV=$test_root/accounts.tsv run_signer > "$test_root/midpub.out" 2> "$test_root/midpub.err"
+	test -f "$repo/acctmid-1-r0.apk"
+	if grep -q 'expansion range' "$test_root/midpub.out" 2>/dev/null; then
+		printf '%s\n' 'tier notice unexpectedly emitted at publish' >&2
+		exit 1
+	fi
+	# An identity at 1000+ (human territory) refuses at the publish
+	# backstop even with a crafted receipt. The staged fragment stays
+	# makepkg-valid (uid 900) so the receipt is the gate's input, same
+	# shape as the reserved-identity case below.
+	mkdir -p "$stage/accthuman/pkg/usr/bin" "$stage/accthuman/pkg/usr/share/saphira/accounts.d"
+	printf '%s\n' accthuman > "$stage/accthuman/pkg/usr/bin/accthuman"
+	printf '%s\n' 'user hugeuser 900 hugegroup /var/lib/huge /sbin/nologin' 'group hugegroup 900' > "$stage/accthuman/pkg/usr/share/saphira/accounts.d/accthuman"
+	printf '%s\n' '{"arch":"x86_64","build_time":18,"license":"MIT","name":"accthuman","origin":"accthuman","outputs":[{"dependencies":[],"description":"accthuman","name":"accthuman","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r0"}' > "$stage/accthuman/manifest.json"
+	SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
+	SAPHIRA_BUILD_ROOT=$stage SAPHIRA_INCOMING_DIR=$artifacts \
+	SAPHIRA_PACKAGE_TMP=$test_root/makepkg-tmp SAPHIRA_FAKEROOT_BOOTSTRAP=1 \
+	SAPHIRA_BOOTSTRAP_TARGET=fakeroot "$makepkg" accthuman >/dev/null
+	humanpub=$incoming/humanpub-ready
+	mkdir "$humanpub"
+	cp "$artifacts/x86_64/accthuman-1-r0.apk" "$humanpub/"
+	printf '%s\n' accthuman > "$humanpub/target"
+	printf '%s\n' '{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}' > "$humanpub/package-seed.json"
+	humansha=$(sha256sum "$humanpub/accthuman-1-r0.apk" | awk '{ print $1 }')
+	printf '%s\n' '{"schema":"saphira-build-artifacts/v1","target":"accthuman","constructors":[{"constructor":"makepkg","producer":"accthuman","artifacts":[{"name":"accthuman","artifact":"accthuman-1-r0.apk","sha256":"'"$humansha"'","backend":"userns-maproot","accounts":{"users":[{"name":"hugeuser","uid":"1000","primary":"hugegroup","home":"/var/lib/huge","shell":"/sbin/nologin"}],"groups":[{"name":"hugegroup","gid":"1000"}],"dirs":[]}}]}],"package_seed":{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}}' > "$humanpub/artifact-manifest.json"
+	(CDPATH= cd -- "$humanpub" && sha256sum accthuman-1-r0.apk > manifest.sha256)
+	if SAPHIRA_ACCOUNTS_TSV=$test_root/accounts.tsv run_signer > "$test_root/humanpub.out" 2> "$test_root/humanpub.err"; then
+		printf '%s\n' 'human-range identity unexpectedly published' >&2
+		exit 1
+	fi
+	grep 'outside the packaged range 0..999' "$test_root/humanpub.err" >/dev/null
+	test ! -f "$repo/accthuman-1-r0.apk"
+	mv "$humanpub" "$humanpub.superseded-conflict"
 # A crafted receipt declaring a reserved identity (root) refuses at
 # the publish backstop even though the APK itself is well-formed:
 # makepkg would never build such a fragment, so the receipt is the
@@ -1212,7 +1257,7 @@ printf '%s\n' '{"schema":"saphira-build-artifacts/v1","target":"legacypair","con
 (CDPATH= cd -- "$legacypairdir" && sha256sum legacypair-1-r0.apk > manifest.sha256)
 SAPHIRA_ACCOUNTS_TSV=$test_root/accounts.tsv run_signer > "$test_root/legacypair.out" 2> "$test_root/legacypair.err"
 test -f "$repo/legacypair-1-r0.apk"
-printf '%s\n' 'account identity gate, ledger carry-forward, UID-collision, base-seed convergence/conflict, range refusal, reserved-identity refusal, file-reference accept/refusal, legacy-history refusal, paired-legacy acceptance, and expansion-notice tests: OK'
+printf '%s\n' 'account identity gate, ledger carry-forward, UID-collision, base-seed convergence/conflict, range accept/refusal, reserved-identity refusal, file-reference accept/refusal, legacy-history refusal, paired-legacy acceptance tests: OK'
 
 youngsterpub=$incoming/youngsterpub-ready
 mkdir "$youngsterpub"
@@ -1362,13 +1407,22 @@ SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
 SAPHIRA_BUILD_ROOT=$stage SAPHIRA_INCOMING_DIR=$artifacts \
 SAPHIRA_PACKAGE_TMP=$test_root/makepkg-tmp SAPHIRA_FAKEROOT_BOOTSTRAP=1 \
 SAPHIRA_BOOTSTRAP_TARGET=fakeroot "$makepkg" retsplitdev >/dev/null
+# Authoritative-producer model: one transaction per producer. Both r2
+# outputs stage separately; ONE ordinary run publishes both, and retention
+# retires the old pair atomically.
 mkdir "$incoming/retsplit2-ready"
-cp "$artifacts/x86_64/retsplit-1-r2.apk" "$artifacts/x86_64/retsplitdev-1-r2.apk" "$incoming/retsplit2-ready/"
+cp "$artifacts/x86_64/retsplit-1-r2.apk" "$incoming/retsplit2-ready/"
 printf '%s\n' retsplit > "$incoming/retsplit2-ready/target"
 printf '%s\n' '{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}' > "$incoming/retsplit2-ready/package-seed.json"
-printf '%s\n' '{"schema":"saphira-build-artifacts/v1","target":"retsplit","constructors":[{"constructor":"makepkg","producer":"retsplit"},{"constructor":"makepkg","producer":"retsplitdev"}],"package_seed":{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}}' > "$incoming/retsplit2-ready/artifact-manifest.json"
-(CDPATH= cd -- "$incoming/retsplit2-ready" && sha256sum retsplit-1-r2.apk retsplitdev-1-r2.apk > manifest.sha256)
-run_signer_dual retsplit > "$test_root/retsplit2.out" 2> "$test_root/retsplit2.err"
+printf '%s\n' '{"schema":"saphira-build-artifacts/v1","target":"retsplit","constructors":[{"constructor":"makepkg","producer":"retsplit"}],"package_seed":{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}}' > "$incoming/retsplit2-ready/artifact-manifest.json"
+(CDPATH= cd -- "$incoming/retsplit2-ready" && sha256sum retsplit-1-r2.apk > manifest.sha256)
+mkdir "$incoming/retsplitdev2-ready"
+cp "$artifacts/x86_64/retsplitdev-1-r2.apk" "$incoming/retsplitdev2-ready/"
+printf '%s\n' retsplitdev > "$incoming/retsplitdev2-ready/target"
+printf '%s\n' '{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}' > "$incoming/retsplitdev2-ready/package-seed.json"
+printf '%s\n' '{"schema":"saphira-build-artifacts/v1","target":"retsplitdev","constructors":[{"constructor":"makepkg","producer":"retsplitdev"}],"package_seed":{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}}' > "$incoming/retsplitdev2-ready/artifact-manifest.json"
+(CDPATH= cd -- "$incoming/retsplitdev2-ready" && sha256sum retsplitdev-1-r2.apk > manifest.sha256)
+run_signer_dual retsplit retsplitdev > "$test_root/retsplit2.out" 2> "$test_root/retsplit2.err"
 fixture_pkg retsplit retsplit 1-r3 usr/bin/retsplit three ""
 rm -rf "$stage/retsplitdev"
 mkdir -p "$stage/retsplitdev/pkg/usr/lib/pkgconfig"
@@ -1379,12 +1433,18 @@ SAPHIRA_BUILD_ROOT=$stage SAPHIRA_INCOMING_DIR=$artifacts \
 SAPHIRA_PACKAGE_TMP=$test_root/makepkg-tmp SAPHIRA_FAKEROOT_BOOTSTRAP=1 \
 SAPHIRA_BOOTSTRAP_TARGET=fakeroot "$makepkg" retsplitdev >/dev/null
 mkdir "$incoming/retsplit3-ready"
-cp "$artifacts/x86_64/retsplit-1-r3.apk" "$artifacts/x86_64/retsplitdev-1-r3.apk" "$incoming/retsplit3-ready/"
+cp "$artifacts/x86_64/retsplit-1-r3.apk" "$incoming/retsplit3-ready/"
 printf '%s\n' retsplit > "$incoming/retsplit3-ready/target"
 printf '%s\n' '{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}' > "$incoming/retsplit3-ready/package-seed.json"
-printf '%s\n' '{"schema":"saphira-build-artifacts/v1","target":"retsplit","constructors":[{"constructor":"makepkg","producer":"retsplit"},{"constructor":"makepkg","producer":"retsplitdev"}],"package_seed":{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}}' > "$incoming/retsplit3-ready/artifact-manifest.json"
-(CDPATH= cd -- "$incoming/retsplit3-ready" && sha256sum retsplit-1-r3.apk retsplitdev-1-r3.apk > manifest.sha256)
-run_signer_dual retsplit > "$test_root/retsplit3.out" 2> "$test_root/retsplit3.err"
+printf '%s\n' '{"schema":"saphira-build-artifacts/v1","target":"retsplit","constructors":[{"constructor":"makepkg","producer":"retsplit"}],"package_seed":{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}}' > "$incoming/retsplit3-ready/artifact-manifest.json"
+(CDPATH= cd -- "$incoming/retsplit3-ready" && sha256sum retsplit-1-r3.apk > manifest.sha256)
+mkdir "$incoming/retsplitdev3-ready"
+cp "$artifacts/x86_64/retsplitdev-1-r3.apk" "$incoming/retsplitdev3-ready/"
+printf '%s\n' retsplitdev > "$incoming/retsplitdev3-ready/target"
+printf '%s\n' '{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}' > "$incoming/retsplitdev3-ready/package-seed.json"
+printf '%s\n' '{"schema":"saphira-build-artifacts/v1","target":"retsplitdev","constructors":[{"constructor":"makepkg","producer":"retsplitdev"}],"package_seed":{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}}' > "$incoming/retsplitdev3-ready/artifact-manifest.json"
+(CDPATH= cd -- "$incoming/retsplitdev3-ready" && sha256sum retsplitdev-1-r3.apk > manifest.sha256)
+run_signer_dual retsplit retsplitdev > "$test_root/retsplit3.out" 2> "$test_root/retsplit3.err"
 grep 'retention: retired 2 package' "$test_root/retsplit3.out" >/dev/null
 live_has retsplit-1-r3.apk retsplit-1-r2.apk retsplitdev-1-r3.apk retsplitdev-1-r2.apk \
 	nofile:retsplit-1-r1.apk nofile:retsplitdev-1-r1.apk
@@ -1921,3 +1981,115 @@ grep 'receipt declares file capabilities but ships no caps.d fragment' "$test_ro
 test ! -e "$repo/capplain-1-r0.apk"
 rm -rf "$incoming/capplain-fixture-ready"
 printf '%s\n' 'caps gate refusal: ok (declares capabilities, ships no fragment)'
+
+printf '%s\n' '# disabled-producer transactions never publish'
+
+# A recipe disabled after staging (the python-pyparsing incident: a
+# retired duplicate's staged transaction collided at the ownership
+# gate on every publish run) must not reach any gate. The publisher
+# skips such transactions loudly so unrelated packages still
+# publish; retirement itself stays a deliberate operator act via
+# the rename-and-note convention.
+mkdir -p "$test_root/recipes/oldpkg"
+printf '%s\n' 'pkgname=oldpkg' 'disabled=yes' "disabled_reason='retired test duplicate'" > "$test_root/recipes/oldpkg/recipe.sh"
+disabled_tx=$incoming/oldpkg-fixture-ready
+mkdir "$disabled_tx"
+printf '%s\n' oldpkg > "$disabled_tx/target"
+printf '%s\n' '{"schema":"saphira-build-plan/v1","target":"oldpkg","target_producer":"oldpkg"}' > "$disabled_tx/plan.json"
+printf '%s\n' '{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}' > "$disabled_tx/package-seed.json"
+printf '%s\n' '{"schema":"saphira-build-artifacts/v1","target":"oldpkg","constructors":[],"package_seed":{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}}' > "$disabled_tx/artifact-manifest.json"
+: > "$disabled_tx/manifest.sha256"
+# stage a second one with no plan.json: the target-file fallback
+# must resolve the producer the same way.
+disabled2_tx=$incoming/oldpkg2-fixture-ready
+mkdir "$disabled2_tx"
+# no target_producer here: exercises the target-file fallback
+printf '%s\n' oldpkg > "$disabled2_tx/target"
+printf '%s\n' '{"schema":"saphira-build-plan/v1","target":"oldpkg"}' > "$disabled2_tx/plan.json"
+printf '%s\n' '{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}' > "$disabled2_tx/package-seed.json"
+printf '%s\n' '{"schema":"saphira-build-artifacts/v1","target":"oldpkg","constructors":[],"package_seed":{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}}' > "$disabled2_tx/artifact-manifest.json"
+: > "$disabled2_tx/manifest.sha256"
+# nothing else staged: every transaction is skipped, so the run
+# refuses with the retirement pointer instead of the generic
+# empty-stage message. (Other cases clean up after themselves; hold
+# aside any stray -ready dirs and restore them afterwards.)
+hold=$test_root/hold-ready
+mkdir -p "$hold"
+for d in "$incoming"/*-ready; do
+	[ -d "$d" ] || continue
+	case $d in
+		*oldpkg*-ready) ;;
+		*) mv "$d" "$hold/" ;;
+	esac
+done
+if SAPHIRA_RECIPE_ROOT=$test_root/recipes run_signer > "$test_root/disabled.out" 2> "$test_root/disabled.err"; then
+	printf '%s\n' 'disabled-producer transactions unexpectedly published' >&2
+	exit 1
+fi
+grep 'retire them, then re-run' "$test_root/disabled.out" "$test_root/disabled.err" >/dev/null
+test -d "$disabled_tx"
+test -d "$disabled2_tx"
+printf '%s\n' 'disabled producers: all-skipped run refuses with a retirement pointer'
+# mixed stage: a live package still publishes while the disabled
+# ones are skipped loudly and left untouched. A fresh package name
+# (not the already-published make) so the publish path is exercised,
+# not the identical-skip path.
+mkdir -p "$stage/goodpkg/pkg/usr/bin"
+printf '%s\n' goodpkg > "$stage/goodpkg/pkg/usr/bin/goodpkg"
+printf '%s\n' '{"arch":"x86_64","build_time":42,"license":"MIT","name":"goodpkg","origin":"goodpkg","outputs":[{"dependencies":[],"description":"good test package","name":"goodpkg","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r0"}' > "$stage/goodpkg/manifest.json"
+SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
+SAPHIRA_BUILD_ROOT=$stage SAPHIRA_INCOMING_DIR=$artifacts \
+SAPHIRA_PACKAGE_TMP=$test_root/makepkg-tmp SAPHIRA_FAKEROOT_BOOTSTRAP=1 \
+SAPHIRA_BOOTSTRAP_TARGET=fakeroot "$makepkg" goodpkg >/dev/null
+make_ready goodpkg 1-r0 goodpkg real
+SAPHIRA_RECIPE_ROOT=$test_root/recipes run_signer > "$test_root/disabled-mixed.out" 2> "$test_root/disabled-mixed.err"
+grep 'skipping oldpkg-fixture-ready' "$test_root/disabled-mixed.out" "$test_root/disabled-mixed.err" >/dev/null
+grep 'skipping oldpkg2-fixture-ready' "$test_root/disabled-mixed.out" "$test_root/disabled-mixed.err" >/dev/null
+test -f "$repo/goodpkg-1-r0.apk"
+test -d "$disabled_tx"
+test -d "$disabled2_tx"
+rm -rf "$incoming/oldpkg-fixture-ready" "$incoming/oldpkg2-fixture-ready" "$incoming/goodpkg-fixture-ready"
+printf '%s\n' 'disabled producers: skipped loudly, live packages publish, staging untouched'
+# a transaction naming a recipe that no longer exists is unknown
+# provenance and fails closed instead of being skipped.
+missing_tx=$incoming/nosuchpkg-fixture-ready
+mkdir "$missing_tx"
+printf '%s\n' nosuchpkg > "$missing_tx/target"
+printf '%s\n' '{"schema":"saphira-build-plan/v1","target":"nosuchpkg","target_producer":"nosuchpkg"}' > "$missing_tx/plan.json"
+if SAPHIRA_RECIPE_ROOT=$test_root/recipes run_signer > "$test_root/missing.out" 2> "$test_root/missing.err"; then
+	printf '%s\n' 'missing-recipe transaction unexpectedly published' >&2
+	exit 1
+fi
+grep 'missing recipe nosuchpkg' "$test_root/missing.out" "$test_root/missing.err" >/dev/null
+rm -rf "$missing_tx"
+printf '%s\n' 'missing recipe: unknown provenance fails closed'
+# restore any staged transactions held aside above
+for d in "$hold"/*-ready; do
+	[ -d "$d" ] || continue
+	mv "$d" "$incoming/"
+done
+# Arch-split layout: a noarch package must publish into
+# <repo>/noarch/ because apk fetches every package from its own arch
+# directory, while the combined index stays in the build-arch
+# directory. Regression test for the production noarch fetch failure
+# (225 packages unfetchable: apk requested <repo>/noarch/<file> but
+# the publisher had placed everything flat under <repo>/x86_64/).
+mkdir -p "$stage/noarchpkg/pkg/usr/share/doc"
+printf '%s\n' noarch-fixture > "$stage/noarchpkg/pkg/usr/share/doc/noarch-fixture.txt"
+printf '%s\n' '{"arch":"noarch","build_time":50,"license":"MIT","name":"noarchpkg","origin":"noarchpkg","outputs":[{"dependencies":[],"description":"noarch fixture","name":"noarchpkg","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r1"}' > "$stage/noarchpkg/manifest.json"
+SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
+SAPHIRA_BUILD_ROOT=$stage SAPHIRA_INCOMING_DIR=$artifacts \
+SAPHIRA_PACKAGE_TMP=$test_root/makepkg-tmp SAPHIRA_FAKEROOT_BOOTSTRAP=1 \
+SAPHIRA_BOOTSTRAP_TARGET=fakeroot "$makepkg" noarchpkg >/dev/null
+make_ready noarchpkg 1-r1 noarchpkg real
+run_signer noarchpkg >/dev/null
+repo_base=$(dirname "$repo")
+test -f "$repo_base/noarch/noarchpkg-1-r1.apk"
+test ! -e "$repo/noarchpkg-1-r1.apk"
+apk adbdump "$repo/Packages.adb" | grep -q '^  - name: noarchpkg$' >/dev/null
+# The original defect, end to end: fetch resolves the noarch file.
+rm -rf "$test_root/fetch" && mkdir "$test_root/fetch"
+apk --repository "$test_root/repository/hatchling" --allow-untrusted fetch -o "$test_root/fetch" noarchpkg >/dev/null
+test -f "$test_root/fetch/noarchpkg-1-r1.apk"
+rm -rf "$incoming/noarchpkg-fixture-ready"
+printf '%s\n' 'noarch arch-split: ok (placed, indexed, fetchable)'

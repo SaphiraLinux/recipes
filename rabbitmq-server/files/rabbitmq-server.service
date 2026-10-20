@@ -1,0 +1,21 @@
+[Unit]
+Description=RabbitMQ message broker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+NotifyAccess=all
+User=rabbitmq
+Group=rabbitmq
+EnvironmentFile=-/etc/conf.d/rabbitmq-server
+Environment=RABBITMQ_NODENAME=rabbit@localhost
+Environment=RABBITMQ_MNESIA_DIR=/var/lib/rabbitmq/mnesia
+Environment=RABBITMQ_LOG_BASE=/var/log/rabbitmq
+ExecStart=/usr/lib/rabbitmq/bin/rabbitmq-server
+Restart=on-failure
+KillMode=mixed
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

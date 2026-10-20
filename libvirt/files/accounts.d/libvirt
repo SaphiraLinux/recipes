@@ -1,0 +1,29 @@
+# QEMU unprivileged identity (fixed, provisioned ahead of use): user
+# and group qemu, UID/GID 173. First free ID in the 101..999 service
+# range above the claimed cluster (172 rabbitmq), clear of the systemd
+# sysusers pins (127-131, 144-145) and the 157-163 device block. Home
+# is /var/empty: the platform's established no-home idiom (ensure_home
+# returns early for it). The account never logs in, and home creation
+# is firstboot's job; /var/lib/libvirt stays a plain state dir owned
+# by root until the privilege migration explicitly reconciles it.
+# (A real home path here fails clean-root install tests: the
+# reconciler chowns it.)
+# The account is currently UNUSED:
+# -Dqemu_user stays root until the coordinated privilege migration
+# (guest image DAC + nova wiring, OpenStack lane). kvm supplementary
+# membership is deferred with it (needs the supplementary-groups
+# grammar not yet published on install targets).
+user qemu 173 qemu /var/empty /sbin/nologin
+group qemu 173
+# libvirt socket-access group (fixed GID 174: first free ID in the
+# 101..999 service range above the 164-173 cluster, clear of the
+# 157-163 device reservation). Sockets are root-only without it (see
+# libvirtd.conf); service accounts join it supplementarily (nova),
+# operators likewise. Supersedes hand-provisioned libvirt:981 found on
+# early hosts: delete the hand-made group before installing (sockets
+# are runtime state and are recreated with the new group; no file
+# migration needed).
+group libvirt 174
+# kvm is base-seeded (accounts.tsv); redeclaring it identically
+# converges silently and qualifies the legacy entry below.
+group kvm 160

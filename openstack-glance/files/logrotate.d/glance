@@ -1,0 +1,12 @@
+# Glance file-based logs. copytruncate because gunicorn workers keep the
+# log file open across a rotate. missingok so the fragment is inert until
+# the service writes.
+/var/log/glance/*.log {
+	weekly
+	rotate 4
+	missingok
+	notifempty
+	compress
+	delaycompress
+	copytruncate
+}

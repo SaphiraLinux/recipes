@@ -19,11 +19,11 @@ sha256=cd980020c811627fe816eee933de15723681c9bcf370f7a680c41f0663c207da
 # superiotool, bucts). cbfstool vendors its lzma/lz4 sources in-tree.
 depends="pciutils zlib"
 # vim supplies xxd, which cbfstool needs to generate its trampoline.
-# pciutils-dev/zlib-dev feed the -lpci/-lz probes. saphira-kernel-headers
+# pciutils-dev/zlib-dev feed the -lpci/-lz probes. saphira-linux-uapi-headers
 # for cbmem and friends. WERROR stays at upstream default.
 # patches/cbmem-endian-include.patch: cbmem.c uses le32toh/le16toh
 # without including <endian.h> (glibc tolerated it, musl errors).
-makedepends="binutils gcc make pciutils-dev pkgconf saphira-kernel-headers vim zlib-dev"
+makedepends="binutils gcc make pciutils-dev pkgconf saphira-linux-uapi-headers vim zlib-dev"
 
 # Tools built on every architecture (pure parsers/generators, no HW I/O).
 PORTABLE_TOOLS="cbfstool ifdtool smmstoretool"

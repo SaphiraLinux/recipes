@@ -1,0 +1,13 @@
+# Cinder service identity (fixed, in the preferred 0..199 packaged
+# range): user cinder UID 169, primary group cinder GID 169.
+# OpenStack services own the 164-170 block (164 keystone, 165 glance,
+# 166 placement, 167 nova, 168 neutron, 169 cinder, 170 horizon).
+# Required by the shipped service units (systemd User=cinder, OpenRC
+# command_user cinder:cinder), cinder-manage and the state/log
+# directories. Backend operations escalate per-command through
+# cinder-rootwrap; daemons never run as root. UID 169 is not reused
+# by any other packaged identity.
+user cinder 169 cinder /var/lib/cinder /sbin/nologin
+group cinder 169
+dir /var/lib/cinder 0750 cinder cinder
+dir /var/log/cinder 0750 cinder cinder

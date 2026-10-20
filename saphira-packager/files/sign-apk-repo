@@ -99,12 +99,14 @@ fi
 # unblock themselves without touching unrelated pending transactions.
 # Without arguments, all ready transactions publish. Filters never
 # select the gate algorithm; see --full-audit above.
+filter_requested=0
 if [ "$#" -gt 0 ]; then
 	for pkg in "$@"; do
 		case $pkg in
 			''|*[!A-Za-z0-9._+-]*) die "invalid package name: $pkg" ;;
 		esac
 	done
+	filter_requested=1
 	selected=()
 	for transaction in "${ready_transactions[@]}"; do
 		[ -f "$transaction/target" ] || continue
@@ -121,12 +123,57 @@ if [ "$#" -gt 0 ]; then
 	ready_transactions=("${selected[@]}")
 fi
 
-# Heal mode: --full-audit with an empty stage reconciles repository
-# indexes and repository.db with disk truth (e.g. after sanctioned
-# out-of-band removal of superseded artifacts) and publishes nothing.
-# Without --full-audit an empty stage is still a refusal.
+# Disabled-producer guard: a transaction staged before its recipe was
+# disabled (or whose recipe is gone) must never publish. A disabled
+# duplicate staged before its recipe was retired rode the *-ready glob
+# into the ownership gate and failed *every* run, blocking unrelated
+# packages (python-pyparsing precedent); four same-name
+# saphira-bpftool transactions did the same against the published
+# bpftool. Disabled producers are skipped loudly so the run can
+# proceed; missing recipes are unknown provenance and fail closed.
+# Retire stale transactions with the rename-and-note convention
+# instead of publishing them. The guard keys on plan.json, which
+# every builder-produced transaction carries; older or hand-staged
+# transactions without one keep the pre-existing validation path
+# untouched.
+skipped_disabled=0
+skipped_transactions=()
+if [ "${#ready_transactions[@]}" -gt 0 ]; then
+	kept=()
+	for transaction in "${ready_transactions[@]}"; do
+		if [ ! -f "$transaction/plan.json" ]; then
+			kept+=("$transaction")
+			continue
+		fi
+		producer=$("$SAPHIRA_PYTHON" -c 'import json,sys; print(json.load(open(sys.argv[1])).get("target_producer","") or "")' "$transaction/plan.json" 2>/dev/null || true)
+		if [ -z "$producer" ] && [ -f "$transaction/target" ]; then
+			producer=$(cat "$transaction/target")
+		fi
+		case $producer in
+			''|*[!A-Za-z0-9._+-]*)
+				die "cannot determine producing recipe for staged transaction ${transaction##*/} (no usable plan.json target_producer or target file)"
+				;;
+		esac
+		recipe_file=${SAPHIRA_RECIPE_ROOT:-/recipes}/$producer/recipe.sh
+		if [ ! -f "$recipe_file" ]; then
+			die "staged transaction ${transaction##*/} names missing recipe $producer (retire the transaction, never publish it)"
+		fi
+		if grep -q '^disabled=yes$' "$recipe_file"; then
+			reason=$(grep '^disabled_reason=' "$recipe_file" | head -1)
+		printf 'sign-apk-repo: skipping %s: producer recipe %s is disabled (%s); retire the transaction instead of publishing it\n' "${transaction##*/}" "$producer" "${reason#disabled_reason=}" >&2
+		skipped_disabled=$((skipped_disabled + 1))
+		skipped_transactions+=("$transaction")
+		continue
+		fi
+		kept+=("$transaction")
+	done
+	ready_transactions=("${kept[@]}")
+fi
 if [ "${#ready_transactions[@]}" -eq 0 ]; then
 	if [ "$force_full" -eq 0 ]; then
+		if [ "$skipped_disabled" -gt 0 ]; then
+			die "all $skipped_disabled staged transaction(s) are from disabled recipes (see warnings above); retire them, then re-run"
+		fi
 		die "no complete ready transactions in $incoming_dir"
 	fi
 	heal_mode=1
@@ -227,64 +274,338 @@ with out_path.open("w", encoding="utf-8") as stream:
     stream.write("\n")
 PY
 
-# Automatic retirement of pure-rebuild transactions: when EVERY package in
-# a transaction content-conflicts with the same-NVR published copy in some
-# generation repository, nothing in it can ever publish (published NVRs
-# are immutable; the published copy wins) and retiring it is safe. A
-# transaction mixing conflicting rebuilds with publishable packages must
-# stop loudly instead - the novel outputs must not be discarded alongside
-# the rebuilds.
+# Publisher snapshot: record staged transactions before any decision.
+# buildpkg refuses to stage while sign-apk-repo.lock exists; revalidation
+# below fails closed if the stage changed anyway (concurrent builder or
+# manual move), before any repository or incoming mutation. Skipped
+# disabled-producer transactions are pinned in the snapshot exactly like
+# selected ones (they stay on disk untouched); only truly new,
+# disappeared, or altered entries invalidate the run.
+snapshot_file=$workspace/incoming-snapshot.txt
+: > "$snapshot_file"
+for transaction in "${ready_transactions[@]}" ${skipped_transactions[@]+"${skipped_transactions[@]}"}; do
+	[ -f "$transaction/manifest.sha256" ] || die "ready transaction is incomplete: $transaction"
+	manifest_hash=$(sha256sum "$transaction/manifest.sha256" | awk '{ print $1 }')
+	printf '%s %s\n' "${transaction##*/}" "$manifest_hash" >> "$snapshot_file"
+done
+sort -o "$snapshot_file" "$snapshot_file"
+
+revalidate_snapshot()
+{
+	revalidation_tmp=$workspace/incoming-snapshot-check.txt
+	: > "$revalidation_tmp"
+	for transaction in "$incoming_dir"/*-ready; do
+		[ -e "$transaction" ] || continue
+		[ -d "$transaction" ] || continue
+		manifest_hash=""
+		if [ -f "$transaction/manifest.sha256" ]; then
+			manifest_hash=$(sha256sum "$transaction/manifest.sha256" | awk '{ print $1 }')
+		fi
+		printf '%s %s\n' "${transaction##*/}" "$manifest_hash" >> "$revalidation_tmp"
+	done
+	sort -o "$revalidation_tmp" "$revalidation_tmp"
+	# Filtered runs (explicit package targets): only the selected set is
+	# pinned; unrelated pending transactions are ignored. Unfiltered runs
+	# pin the whole stage: any new ready appearing mid-run invalidates it.
+	if [ "$filter_requested" -eq 1 ]; then
+		while IFS= read -r line || [ -n "$line" ]; do
+			[ -n "$line" ] || continue
+			grep -qF -- "$line" "$revalidation_tmp" ||
+				die "publisher snapshot invalidated during run: selected transaction changed or disappeared: ${line%% *} (concurrent builder rename? re-run sign-apk-repo)"
+		done < "$snapshot_file"
+	else
+		if ! cmp -s -- "$snapshot_file" "$revalidation_tmp"; then
+			die "publisher snapshot invalidated during run: incoming stage changed under lock (concurrent builder or manual move); no repository mutation performed - re-run sign-apk-repo"
+		fi
+	fi
+	rm -f -- "$revalidation_tmp"
+}
+
+# Ownership gate (minimal): authoritative outputs are APKs produced by the
+# transaction's own target recipe (producer == target); bundled dependency
+# copies are build inputs and never publishable from this transaction.
+# - Same NVR authoritatively claimed with different bytes -> FAIL CLOSED.
+# - Published NVR immutable; pure authoritative rebuilds auto-retire.
+# - Bundled present without closure-hashes -> uncertainty, FAIL CLOSED.
+# - Bundled stale vs authoritative/published -> FAIL CLOSED with rebuild.
+# - Missing dependency with no published/staged provider -> FAIL CLOSED.
+ownership_json=$workspace/ownership.json
+publishable_list=$workspace/publishable-transactions.txt
+autorelire_list=$workspace/autoretire-transactions.txt
+"$SAPHIRA_PYTHON" - "$ownership_json" "$publishable_list" "$autorelire_list" \
+	"$SAPHIRA_APK" "$sign_key" "$SAPHIRA_REPO_DIR" "$SAPHIRA_ARCH" \
+	"${repo_names[@]}" -- "${ready_transactions[@]}" <<'PY'
+import hashlib
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+args = sys.argv[1:]
+ownership_path = Path(args[0])
+publishable_path = Path(args[1])
+autorelire_path = Path(args[2])
+apk_bin = args[3]
+sign_key = args[4]
+repo_root = Path(args[5])
+arch = args[6]
+sep = args.index("--")
+repo_names = args[7:sep]
+transactions = [Path(p) for p in args[sep+1:]]
+
+def die(msg):
+    print(f"sign-apk-repo: {msg}", file=sys.stderr)
+    raise SystemExit(1)
+
+def file_sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+def signed_equal(staged, published):
+    import tempfile, shutil
+    with tempfile.NamedTemporaryFile(suffix=".apk", delete=False) as tmp:
+        tmp_path = tmp.name
+    try:
+        shutil.copy2(staged, tmp_path)
+        subprocess.run([apk_bin, "adbsign", "--allow-untrusted",
+                        "--sign-key", sign_key, tmp_path],
+                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        with open(tmp_path, "rb") as a, open(published, "rb") as b:
+            return a.read() == b.read()
+    finally:
+        try:
+            Path(tmp_path).unlink()
+        except OSError:
+            pass
+
+def dump_depends(path):
+    out = subprocess.run([apk_bin, "adbdump", str(path)],
+                         check=True, text=True, capture_output=True).stdout
+    depends = []
+    section = None
+    in_list = None
+    for line in out.splitlines():
+        if line and not line.startswith(" ") and line.endswith(":"):
+            section = line[:-1]
+            in_list = None
+            continue
+        if section == "info":
+            if line.strip() == "depends:":
+                in_list = "depends"
+                continue
+            if in_list == "depends":
+                s = line.strip()
+                if s.startswith("- "):
+                    depends.append(s[2:].strip())
+                    continue
+                if line.startswith("  ") and not line.startswith("    "):
+                    in_list = None
+    return depends
+
+txns = {}
+auth_claims = {}
+for txn in transactions:
+    target = (txn / "target").read_text(encoding="utf-8").strip()
+    manifest = json.loads((txn / "artifact-manifest.json").read_text(encoding="utf-8"))
+    plan = json.loads((txn / "plan.json").read_text(encoding="utf-8")) if (txn / "plan.json").is_file() else None
+    closure = json.loads((txn / "closure-hashes.json").read_text(encoding="utf-8")) if (txn / "closure-hashes.json").is_file() else None
+    producers = [r.get("producer") for r in manifest.get("constructors", []) if r.get("producer")]
+    has_artifacts = any(isinstance(r.get("artifacts"), list) and r.get("artifacts") for r in manifest.get("constructors", []))
+    file_producer = {}
+    if has_artifacts:
+        for r in manifest.get("constructors", []):
+            for art in r.get("artifacts", []) or []:
+                file_producer[Path(art["artifact"]).name] = r.get("producer")
+    else:
+        for f in txn.glob("*.apk"):
+            best = None
+            for prod in producers:
+                if f.name.startswith(prod + "-") and (best is None or len(prod) > len(best)):
+                    best = prod
+            file_producer[f.name] = best if best is not None else target
+    staged_files = {}
+    for line in (txn / "manifest.sha256").read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        digest, _, fname = line.partition("  ")
+        if not digest or not fname:
+            die(f"invalid package checksum manifest: {txn}")
+        staged_files[fname] = digest
+    authoritative = []
+    bundled = []
+    for fname, sha in staged_files.items():
+        producer = file_producer.get(fname)
+        if producer is None:
+            die(f"staged file has no producer receipt: {txn}/{fname}")
+        if file_sha256(txn / fname) != sha:
+            die(f"package checksum mismatch: {txn}/{fname}")
+        entry = {"filename": fname, "sha256": sha, "producer": producer}
+        (authoritative if producer == target else bundled).append(entry)
+    txns[str(txn)] = {"basename": txn.name, "path": str(txn), "target": target,
+                      "authoritative": authoritative, "bundled": bundled,
+                      "has_closure": closure is not None, "closure": closure}
+    for e in authoritative:
+        auth_claims.setdefault(e["filename"], []).append(
+            {"transaction": str(txn), "basename": txn.name, "producer": e["producer"], "sha256": e["sha256"]})
+
+for fname, claimants in sorted(auth_claims.items()):
+    if len({c["sha256"] for c in claimants}) > 1:
+        detail = ", ".join(f"{c['basename']} (producer {c['producer']} sha256 {c['sha256'][:12]})" for c in claimants)
+        die(f"conflicting authoritative producers for {fname}: {detail} - refusing (no newest/timestamp winner; bump pkgrel or retire stale transactions manually)")
+
+present = {}
+for fname in auth_claims:
+    hits = []
+    for r in repo_names:
+        in_repo = [repo_root / r / d / fname for d in (arch, "noarch")
+                   if (repo_root / r / d / fname).is_file()]
+        if len(in_repo) > 1:
+            die(f"filename claimed in two arch directories of {r}: {fname} - repository inconsistent, run --full-audit")
+        hits.extend(in_repo)
+    present[fname] = hits
+
+txn_conflicts, txn_novel, txn_identical = {}, {}, {}
+for txn_path, info in txns.items():
+    conflicts, novel, identical = [], [], []
+    for e in info["authoritative"]:
+        staged = Path(txn_path) / e["filename"]
+        pubs = present.get(e["filename"], [])
+        if not pubs:
+            novel.append(e)
+        elif any(not signed_equal(str(staged), str(p)) for p in pubs):
+            conflicts.append(e)
+        elif len(pubs) < len(repo_names):
+            novel.append(e)
+        else:
+            identical.append(e)
+    txn_conflicts[txn_path], txn_novel[txn_path], txn_identical[txn_path] = conflicts, novel, identical
+
+auto_retire = [p for p, c in txn_conflicts.items() if c and not txn_novel[p] and not txns[p]["bundled"]]
+for p, c in txn_conflicts.items():
+    if c and txn_novel[p]:
+        die(f"published filename is immutable and has different content: {', '.join(e['filename'] for e in c)} (in transaction {Path(p).name}; same producer version mixes conflicting rebuilds with novel splits - refusing partial publish; bump pkgrel or retire stale transaction)")
+
+remaining = {p: i for p, i in txns.items() if p not in auto_retire}
+for txn_path, info in remaining.items():
+    if info["bundled"] and not info["has_closure"]:
+        bnames = ", ".join(f"{e['filename']} (producer {e['producer']})" for e in info["bundled"])
+        die(f"uncertain provenance: transaction {Path(txn_path).name} bundles dependency outputs without build-time closure hashes ({bnames}); cannot prove consumer freshness - refusing unsafe publication (rebuild with current builder to emit per-producer transactions with plan.json + closure-hashes.json, then re-run: buildpkg {info['target']})")
+    if info["has_closure"]:
+        for e in info["bundled"]:
+            fname = e["filename"]
+            current = [c for c in auth_claims.get(fname, []) if c["transaction"] in remaining]
+            if current and e["sha256"] not in {c["sha256"] for c in current}:
+                die(f"stale consumer: {Path(txn_path).name} bundles {fname} sha256 {e['sha256'][:12]} but authoritative {current[0]['basename']} carries different bytes; dependency was rebuilt - rebuild consumer (buildpkg {info['target']}) and re-run sign-apk-repo")
+            elif not current:
+                pubs = present.get(fname, [])
+                if pubs and any(not signed_equal(str(Path(txn_path) / fname), str(p)) for p in pubs):
+                    die(f"stale consumer: {Path(txn_path).name} bundles {fname} differing from published immutable NVR; published copy wins - rebuild consumer against current repository (buildpkg {info['target']})")
+                elif not pubs:
+                    die(f"unsatisfied closure: {Path(txn_path).name} requires bundled {fname} (producer {e['producer']}) with no authoritative transaction in stage and not published; rebuild with current builder to emit per-producer transactions (buildpkg {e['producer']} and buildpkg {info['target']})")
+
+novel_idents, novel_depends, novel_archs = {}, {}, {}
+for txn_path in remaining:
+    for e in txn_novel[txn_path]:
+        out = subprocess.run([apk_bin, "adbdump", str(Path(txn_path) / e["filename"])],
+                             check=True, text=True, capture_output=True).stdout
+        name = version = parch = None
+        for line in out.splitlines():
+            if line.startswith("  name: "):
+                name = line.split(": ", 1)[1].strip()
+            elif line.startswith("  version: "):
+                version = line.split(": ", 1)[1].strip()
+            elif line.startswith("  arch: "):
+                parch = line.split(": ", 1)[1].strip()
+        if name and version:
+            novel_idents[e["filename"]] = (name, version)
+            novel_depends[e["filename"]] = dump_depends(str(Path(txn_path) / e["filename"]))
+            # Arch-split repository layout: apk fetches each package
+            # from <repo>/<package-arch>/. Only the build arch and
+            # noarch exist on Saphira; anything else fails closed here
+            # rather than landing where no client will request it.
+            if parch not in (arch, "noarch"):
+                die(f"unsupported package arch: {e['filename']} reports arch '{parch}' (expected '{arch}' or 'noarch')")
+            novel_archs[e["filename"]] = parch
+
+pub_versions = {}
+for repo in repo_names:
+    for archdir in (arch, "noarch"):
+        d = repo_root / repo / archdir
+        if not d.is_dir():
+            continue
+        for p in d.glob("*.apk"):
+            if p.name.endswith(".apk") and "-" in p.name:
+                base = p.name[:-4]
+                # name-version split: version starts at last '-' before digit? Use producer-agnostic: split on '-' with version pattern.
+                import re
+                m = re.match(r"^(.*)-([0-9][^-]*-r[0-9]+)$", base)
+                if m:
+                    pub_versions.setdefault(m.group(1), set()).add(m.group(2))
+staged_versions = {}
+for fname, (n, v) in novel_idents.items():
+    staged_versions.setdefault(n, set()).add(v)
+for fname, deps in novel_depends.items():
+    import re
+    for atom in deps:
+        if "/" in atom or ":" in atom:
+            continue
+        m = re.match(r"^([A-Za-z0-9][A-Za-z0-9._+-]*)", atom)
+        if not m:
+            continue
+        pkg = m.group(1)
+        if pkg not in pub_versions and pkg not in staged_versions:
+            die(f"unsatisfied closure: {novel_idents[fname][0]}-{novel_idents[fname][1]} ({fname}) depends on '{atom}' with no published or staged provider; build it first: buildpkg {pkg}")
+
+ordered = sorted(remaining)
+sources = {}
+for p in ordered:
+    for e in txn_novel[p]:
+        sources.setdefault(e["filename"], p)
+ownership = {"transactions": {Path(p).name: {"target": info["target"], "authoritative": info["authoritative"],
+              "bundled": info["bundled"], "has_closure": info["has_closure"],
+              "novel": txn_novel[p], "identical": txn_identical[p], "conflicts": txn_conflicts[p]} for p, info in remaining.items()},
+              "auto_retire": [Path(p).name for p in auto_retire], "order": [Path(p).name for p in ordered], "sources": sources,
+              "archs": novel_archs}
+Path(ownership_path).write_text(json.dumps(ownership, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+Path(publishable_path).write_text("".join(p + "\n" for p in ordered if any(e["filename"] in sources and sources[e["filename"]] == p for e in txn_novel[p]) or (not txn_novel[p] and txn_identical[p])), encoding="utf-8")
+Path(autorelire_path).write_text("".join(p + "\n" for p in auto_retire), encoding="utf-8")
+print(f"sign-apk-repo: ownership gate: {len(remaining)} transaction(s), {len(sources)} authoritative novel file(s), {len(auto_retire)} auto-retired pure-rebuild(s)")
+PY
+ownership_status=$?
+[ "$ownership_status" -eq 0 ] || die "ownership gate failed (see above; no repository mutation performed)"
+
+# Snapshot revalidation BEFORE any incoming or repository mutation.
+revalidate_snapshot
+
+# Automatic retirement of pure authoritative rebuilds (no bundled inputs,
+# so nothing novel is discarded). Retained as evidence.
 auto_retired=0
 publishable_transactions=()
-for transaction in "${ready_transactions[@]}"; do
-	conflicts=0
-	publishable=0
-	conflicting_name=""
-	for package in "$transaction"/*.apk; do
-		name=${package##*/}
-		published_apk=""
-		for candidate_repo in "${repo_names[@]}"; do
-			candidate=$SAPHIRA_REPO_DIR/$candidate_repo/$SAPHIRA_ARCH/$name
-			if [ -e "$candidate" ]; then
-				published_apk=$candidate
-				break
-			fi
-		done
-		if [ -z "$published_apk" ]; then
-			publishable=$((publishable + 1))
-			continue
-		fi
-		probe=$workspace/probe-${name}
-		cp -- "$package" "$probe"
-		"$SAPHIRA_APK" adbsign --allow-untrusted --sign-key "$sign_key" "$probe" >/dev/null 2>&1 ||
-			{ rm -f -- "$probe"; die "incoming package cannot be re-signed for comparison: $package"; }
-		if cmp -s -- "$probe" "$published_apk"; then
-			publishable=$((publishable + 1))
-		else
-			conflicts=$((conflicts + 1))
-			conflicting_name=$name
-		fi
-		rm -f -- "$probe"
-	done
-	if [ "$conflicts" -gt 0 ] && [ "$publishable" -eq 0 ]; then
-		retired=${transaction}.superseded-conflict
+if [ -s "$autorelire_list" ]; then
+	while IFS= read -r retired_txn || [ -n "$retired_txn" ]; do
+		[ -n "$retired_txn" ] || continue
+		[ -d "$retired_txn" ] || die "auto-retire target missing: $retired_txn"
+		retired=${retired_txn}.superseded-conflict
 		[ ! -e "$retired" ] || die "automatic retirement target already exists: $retired"
-		mv -- "$transaction" "$retired"
+		mv -- "$retired_txn" "$retired"
 		{
-			printf 'Automatically retired by sign-apk-repo: every package in this transaction\n'
+			printf 'Automatically retired by sign-apk-repo: every authoritative output in this transaction\n'
 			printf 'is a rebuild of an NVR already published in a generation repository with\n'
-			printf 'different bytes (first conflict: %s). Published NVRs are immutable and\n' "$conflicting_name"
-			printf 'the published copy wins; nothing here could publish. Retained as evidence\n'
+			printf 'different bytes. Published NVRs are immutable and the published copy wins;\n'
+			printf 'nothing here could publish. Retained as evidence\n'
 			printf 'under the visible lifecycle rules; restore with a rename if disputed.\n'
 		} > "$retired/RETIRED-NOTE.txt"
-		printf 'sign-apk-repo: auto-retired pure-rebuild transaction %s (every package conflicts with an already-published NVR; the published copy wins)\n' "${transaction##*/}"
+		printf 'sign-apk-repo: auto-retired pure-rebuild transaction %s (every authoritative output conflicts with an already-published NVR; the published copy wins)\n' "${retired_txn##*/}"
 		auto_retired=$((auto_retired + 1))
-	elif [ "$conflicts" -gt 0 ]; then
-		die "published filename is immutable and has different content: $conflicting_name (in transaction ${transaction##*/}; the transaction mixes publishable packages with conflicting rebuilds, so automatic retirement is not safe - retire the rebuild manually and re-run: mv '$transaction' '${transaction}.superseded-conflict')"
-	else
-		publishable_transactions+=("$transaction")
-	fi
-done
+	done < "$autorelire_list"
+fi
+while IFS= read -r txn || [ -n "$txn" ]; do
+	[ -n "$txn" ] || continue
+	publishable_transactions+=("$txn")
+done < "$publishable_list"
 if [ "${#publishable_transactions[@]}" -gt 0 ]; then
 	ready_transactions=("${publishable_transactions[@]}")
 elif [ "$heal_mode" -eq 0 ]; then
@@ -294,43 +615,44 @@ elif [ "$heal_mode" -eq 0 ]; then
 	exit 0
 fi
 
-# Validation pass over every repo (no copies yet): per-repo published
-# conflicts die here, cross-transaction conflicts are detected globally,
-# and staged_sources accumulates the union of filenames needing
-# publication anywhere. Copies and signatures happen exactly once below,
-# outside the per-repo loop.
+# Authoritative staged set only; bundled inputs never publish. Duplicate
+# authoritative bytes already refused above; identical-everywhere files are
+# skipped (no copy). Per-repo installs below publish missing repos only.
 declare -A staged_sources=()
-for repo_name in "${repo_names[@]}"; do
-	repo_dir=$SAPHIRA_REPO_DIR/$repo_name/$SAPHIRA_ARCH
-	for transaction in "${ready_transactions[@]}"; do
-	for package in "$transaction"/*.apk; do
-		name=${package##*/}
-		if [ -e "$repo_dir/$name" ]; then
-			if ! cmp -s "$package" "$repo_dir/$name"; then
-				# Incoming staging APKs are UNSIGNED while the
-				# published copy is signed, so raw-byte comparison
-				# is wrong for a deterministic same-version rebuild.
-				# Sign a scratch copy with the same key and compare
-				# again; only a real content difference conflicts.
-				probe=$(mktemp "$workspace/probe-XXXXXXXX.apk")
-				cp -- "$package" "$probe"
-				"$SAPHIRA_APK" adbsign --allow-untrusted --sign-key "$sign_key" "$probe"
-				if ! cmp -s "$probe" "$repo_dir/$name"; then
-					die "published filename is immutable and has different content: $name (in transaction ${transaction##*/}; the published copy wins - retire this transaction: mv '$transaction' '${transaction}.superseded-conflict' and re-run sign-apk-repo)"
-				fi
-				rm -f -- "$probe"
-			fi
-			continue
-		fi
-		if [ -n "${staged_sources[$name]-}" ]; then
-			if ! cmp -s "$package" "${staged_sources[$name]}"; then
-				die "ready transactions conflict for filename: $name (${transaction##*/} differs from an earlier staged transaction; keep the newer build and retire the other: mv '<stale transaction>' '<stale transaction>.superseded-conflict')"
-			fi
-			continue
-		fi
-		staged_sources[$name]=$package
-	done
-done
+declare -A staged_source_txn=()
+ownership_list_tmp=$workspace/ownership-sources-list.txt
+ownership_arch_tmp=$workspace/ownership-archs-list.txt
+python3 - "$ownership_json" "$ownership_list_tmp" "$ownership_arch_tmp" <<'PY'
+import json, sys
+ownership = json.load(open(sys.argv[1]))
+with open(sys.argv[2], "w", encoding="utf-8") as out:
+    for fname, txn in sorted(ownership.get("sources", {}).items()):
+        out.write(f"{fname}\t{txn}\n")
+with open(sys.argv[3], "w", encoding="utf-8") as out:
+    for fname, parch in sorted(ownership.get("archs", {}).items()):
+        out.write(f"{fname}\t{parch}\n")
+PY
+while IFS=$'\t' read -r fname txn_path || [ -n "$fname" ]; do
+	[ -n "$fname" ] || continue
+	[ -n "$txn_path" ] || continue
+	[ -f "$txn_path/$fname" ] || die "authoritative source missing: $txn_path/$fname"
+	[ -z "${staged_sources[$fname]-}" ] || continue
+	staged_sources[$fname]="$txn_path/$fname"
+	staged_source_txn[$fname]="$txn_path"
+done < "$ownership_list_tmp"
+rm -f -- "$ownership_list_tmp"
+# Per-file package arch (validated in the ownership gate): placement,
+# presence and retirement below all resolve through this map, so a
+# noarch package can never land in (or be looked up from) the build-
+# arch directory. Missing entry fails closed, never defaults.
+declare -A staged_archs=()
+while IFS=$'\t' read -r fname parch || [ -n "$fname" ]; do
+	[ -n "$fname" ] || continue
+	staged_archs[$fname]=$parch
+done < "$ownership_arch_tmp"
+rm -f -- "$ownership_arch_tmp"
+for fname in "${!staged_sources[@]}"; do
+	[ -n "${staged_archs[$fname]-}" ] || die "authoritative source has no recorded arch: $fname"
 done
 
 # Stage, sign and verify the union exactly once. Per-repo iterations
@@ -546,10 +868,37 @@ PY
 
 
 for repo_name in "${repo_names[@]}"; do
-	repo_dir=$SAPHIRA_REPO_DIR/$repo_name/$SAPHIRA_ARCH
+	repo_base=$SAPHIRA_REPO_DIR/$repo_name
+	repo_dir=$repo_base/$SAPHIRA_ARCH
+	# Arch-split layout resolver: apk fetches each package from
+	# <repo>/<package-arch>/, so every file lookup and placement
+	# must resolve the file's own arch directory. The strict form
+	# (exactly one claimant) mirrors the ownership gate's present[]
+	# rule; the probe form is for novelty checks where absence is
+	# the normal novel-file case.
+	repo_file_dir()
+	{
+		_base=$1 _fname=$2
+		_hits=""
+		for _d in "$SAPHIRA_ARCH" noarch; do
+			if [ -e "$_base/$_d/$_fname" ]; then
+				[ -z "$_hits" ] || die "filename claimed in two arch directories of $_base: $_fname (repository inconsistent - run --full-audit)"
+				_hits=$_d
+			fi
+		done
+		[ -n "$_hits" ] || die "file has no arch directory in $_base: $_fname (repository inconsistent - run --full-audit)"
+		printf '%s\n' "$_hits"
+	}
 	install_set=()
 	for name in "${!staged_sources[@]}"; do
-		[ -e "$repo_dir/$name" ] || install_set+=("$packages_dir/$name")
+		_present=""
+		for _d in "$SAPHIRA_ARCH" noarch; do
+			if [ -e "$repo_base/$_d/$name" ]; then
+				[ -z "$_present" ] || die "filename claimed in two arch directories of $repo_base: $name (repository inconsistent - run --full-audit)"
+				_present=$_d
+			fi
+		done
+		[ -n "$_present" ] || install_set+=("$packages_dir/$name")
 	done
 identities=$workspace/package-identities.json
 	staged_list=$workspace/staged-packages.txt
@@ -590,8 +939,12 @@ identities=$workspace/package-identities.json
 		fi
 	fi
 	if [ "$gate_mode" = full ]; then
-		for package in "$repo_dir"/*.apk; do
-			"$SAPHIRA_APK" verify --keys-dir "$trust_dir" "$package" >/dev/null
+		for _vdir in "$repo_dir" "$repo_base/noarch"; do
+			[ -d "$_vdir" ] || continue
+			for package in "$_vdir"/*.apk; do
+				[ -f "$package" ] || continue
+				"$SAPHIRA_APK" verify --keys-dir "$trust_dir" "$package" >/dev/null
+			done
 		done
 		db_gate full "$db_file" "$staged_info" "$repo_dir/Packages.adb" "${staged_paths[@]}" \
 			|| die "full audit failed for $repo_name (see above)"
@@ -672,11 +1025,18 @@ else:
 PY
 	while IFS= read -r filename || [ -n "$filename" ]; do
 		[ -n "$filename" ] || continue
-		[ -e "$repo_dir/$filename" ] || die "retire set references missing file: $filename (repository inconsistent - run --full-audit)"
-		rm -f -- "$repo_dir/$filename"
+		_fdir=$(repo_file_dir "$repo_base" "$filename")
+		rm -f -- "$repo_base/$_fdir/$filename"
 	done < "$retire_file"
 fi
-all_packages=("$repo_dir"/*.apk)
+all_packages=()
+for _pdir in "$repo_dir" "$repo_base/noarch"; do
+	[ -d "$_pdir" ] || continue
+	for _apk in "$_pdir"/*.apk; do
+		[ -f "$_apk" ] || continue
+		all_packages+=("$_apk")
+	done
+done
 [ "${#install_set[@]}" -eq 0 ] || all_packages+=("${install_set[@]}")
 [ "${#all_packages[@]}" -gt 0 ] || die "publication set contains no APK files"
 
@@ -705,11 +1065,19 @@ PY
 
 for package in ${install_set[@]+"${install_set[@]}"}; do
 	name=${package##*/}
-	temporary=$repo_dir/$name.publishing-$publication_id
-	[ ! -e "$repo_dir/$name" ] || die "package appeared concurrently: $name"
+	_parch=${staged_archs[$name]-}
+	[ -n "$_parch" ] || die "install set file has no recorded arch: $name"
+	case $_parch in
+		"$SAPHIRA_ARCH"|noarch) ;;
+		*) die "refusing to place $name with unvalidated arch: $_parch" ;;
+	esac
+	_destdir=$repo_base/$_parch
+	mkdir -p -- "$_destdir"
+	temporary=$_destdir/$name.publishing-$publication_id
+	[ ! -e "$_destdir/$name" ] || die "package appeared concurrently: $_destdir/$name"
 	install -m 644 -- "$package" "$temporary"
-	mv -- "$temporary" "$repo_dir/$name"
-	normalize_ownership "$repo_dir/$name"
+	mv -- "$temporary" "$_destdir/$name"
+	normalize_ownership "$_destdir/$name"
 done
 
 for index_name in Packages.adb APKINDEX.tar.gz; do
@@ -733,17 +1101,39 @@ normalize_ownership "$repo_dir/repository.db"
 rmdir -- "$repo_dir/repository.db.lock" 2>/dev/null || true
 db_lock_held=""
 chmod g+rws -- "$repo_dir" 2>/dev/null || true
+[ -d "$repo_base/noarch" ] && chmod g+rws -- "$repo_base/noarch" 2>/dev/null || true
 
-printf 'sign-apk-repo: published and indexed %s verified APK files in %s\n' \
-	"${#all_packages[@]}" "$repo_dir"
+printf 'sign-apk-repo: published and indexed %s verified APK files in %s (+ noarch split where present)\n' \
+	"${#all_packages[@]}" "$repo_base"
 done
 
 for transaction in "${ready_transactions[@]}"; do
 	published=${transaction%-ready}-published
 	[ ! -e "$published" ] || die "published transaction marker already exists: $published"
 	mv -- "$transaction" "$published"
+	python3 - "$ownership_json" "$published" <<'PY'
+import json, sys
+from pathlib import Path
+ownership, published_dir = json.load(open(sys.argv[1])), Path(sys.argv[2])
+basename = published_dir.name[:-len("-published")] + "-ready"
+record = ownership.get("transactions", {}).get(basename)
+lines = ["Published by sign-apk-repo (authoritative-producer gate).",
+         "Original manifests preserved in this directory."]
+if record:
+    for e in record.get("novel", []):
+        lines.append(f"published authoritative: {e['filename']} sha256 {e['sha256']} producer {e['producer']}")
+    for e in record.get("identical", []):
+        lines.append(f"skipped already-published-identical: {e['filename']} sha256 {e['sha256']} producer {e['producer']}")
+    for e in record.get("bundled", []):
+        lines.append(f"skipped bundled build-input: {e['filename']} sha256 {e['sha256']} producer {e['producer']} (publish via its authoritative producer transaction)")
+with open(published_dir / "PUBLICATION-REPORT.txt", "w", encoding="utf-8") as f:
+    f.write("\n".join(lines) + "\n")
+PY
 done
 
 trap - EXIT HUP INT TERM
 cleanup
 printf 'sign-apk-repo: publication complete across %s generation repositories\n' "${#repo_names[@]}"
+if [ "${skipped_disabled:-0}" -gt 0 ]; then
+	printf 'sign-apk-repo: %s staged transaction(s) from disabled recipes were skipped (see warnings above); retire them with the rename-and-note convention\n' "$skipped_disabled" >&2
+fi

@@ -1,0 +1,20 @@
+#!/sbin/openrc-run
+#
+# OpenRC service for the OpenStack Neutron RPC server.
+#
+# Standalone daemon reading /etc/neutron/neutron.conf
+# (operator-provided). Shipped unconditionally; never enabled or
+# started at install. Runs on network/controller nodes.
+
+name="neutron-rpc-server"
+description="OpenStack Neutron RPC server"
+
+command="/usr/bin/neutron-rpc-server"
+command_user="neutron:neutron"
+command_background="yes"
+pidfile="/var/run/neutron/neutron-rpc-server.pid"
+
+depend() {
+	need net
+	after firewall
+}

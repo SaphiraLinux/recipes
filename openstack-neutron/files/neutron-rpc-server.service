@@ -1,0 +1,17 @@
+[Unit]
+Description=OpenStack Neutron RPC server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=neutron
+Group=neutron
+EnvironmentFile=-/etc/conf.d/neutron-rpc-server
+ExecStart=/usr/bin/neutron-rpc-server
+Restart=on-failure
+KillMode=mixed
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

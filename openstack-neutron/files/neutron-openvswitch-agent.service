@@ -1,0 +1,17 @@
+[Unit]
+Description=OpenStack Neutron Open vSwitch agent
+After=network-online.target openvswitch.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=neutron
+Group=neutron
+EnvironmentFile=-/etc/conf.d/neutron-openvswitch-agent
+ExecStart=/usr/bin/neutron-openvswitch-agent
+Restart=on-failure
+KillMode=mixed
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

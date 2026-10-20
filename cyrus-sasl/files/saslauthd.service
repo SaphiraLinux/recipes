@@ -1,0 +1,14 @@
+[Unit]
+Description=SASL authentication daemon (saslauthd)
+Documentation=man:saslauthd(8)
+After=local-fs.target
+
+[Service]
+Type=simple
+ExecStartPre=+/bin/install -d -o root -g root -m 0755 /var/run/saslauthd
+ExecStart=/usr/sbin/saslauthd -d -m /var/run/saslauthd
+Restart=on-failure
+	RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

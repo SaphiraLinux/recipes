@@ -1,0 +1,27 @@
+[Unit]
+Description=OpenStack Block Storage (Cinder) API
+Documentation=man:gunicorn(1)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+User=cinder
+Group=cinder
+EnvironmentFile=-/etc/conf.d/cinder-api
+Environment=CINDER_API_BIND=127.0.0.1:8776
+Environment=CINDER_API_CONF=/etc/cinder/cinder.conf
+RuntimeDirectory=cinder
+RuntimeDirectoryMode=0750
+ExecStart=/usr/bin/gunicorn --name cinder-api \
+	--bind ${CINDER_API_BIND} --workers ${CINDER_API_WORKERS} \
+	--pid /var/run/cinder/cinder-api.pid \
+	--config ${CINDER_API_CONF} \
+	cinder.wsgi.api:application
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+KillMode=mixed
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

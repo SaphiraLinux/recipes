@@ -1,0 +1,17 @@
+[Unit]
+Description=OpenStack Nova scheduler
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nova
+Group=nova
+EnvironmentFile=-/etc/conf.d/nova-scheduler
+ExecStart=/usr/bin/nova-scheduler
+Restart=on-failure
+KillMode=mixed
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

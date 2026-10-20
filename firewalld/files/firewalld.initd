@@ -1,0 +1,16 @@
+#!/sbin/openrc-run
+
+description="firewalld dynamic firewall daemon"
+
+# firewalld runs as root (--nofork keeps it in the foreground under
+# supervise-daemon, so no pidfile).
+command="/usr/sbin/firewalld"
+command_args="--nofork --nopid"
+supervisor="supervise-daemon"
+
+depend()
+{
+	need localmount dbus
+	use net
+	after firewall
+}

@@ -38,6 +38,7 @@ usage()
 	cat >&2 <<USAGE
 usage:
   $PROG build --target TARGET --output IMAGE [options]
+  $PROG install-to-disk --target TARGET --device DEV [options]
   $PROG export --image IMAGE --output ROOTFS.tar.xz
   $PROG list-targets
   $PROG plan --target TARGET [--size SIZE]
@@ -74,6 +75,32 @@ build options:
                       shipped default deliberately does not assume, such
                       as console=ttyS0,115200 for a serial console
   --keep-work         retain the scratch workspace for diagnosis
+
+install-to-disk options:
+  --target NAME       one of the eight matrix targets
+  --device DEV        whole-disk block device to install onto
+                      (for example /dev/vdb on Hatchling; loop and nbd
+                      devices are accepted for disposable test disks).
+                      The disk is partitioned, formatted and written.
+  --preview           print the complete installation plan and stop
+                      without touching the device
+  --hostname NAME     hostname written into the system (default saphira)
+  --root-password PW  set the root password in the system
+  --netconf LIST      comma-separated IFACE:MODE (dhcp|off), as in build
+  --role NAME         add a role layer; repeatable
+  --role-file PATH    add intentions from a file; repeatable
+  --arch ARCH         target architecture: x86_64 (default) or aarch64
+  --repository PATH   repository index/Packages.adb to install from
+  --kernel-arg ARG    append ARG to GRUB_CMDLINE_LINUX; repeatable
+  --no-enable         do not enable the target's services
+  --keep-work         retain the scratch workspace on failure
+
+  install-to-disk NEVER guesses a device: there is no default, no
+  discovery and no --yes. The plan is always printed first and the
+  operator must type the device path back to confirm destruction of
+  everything on it. A device is refused outright when it does not
+  exist, is not a block device, has any mounted partition or active
+  swap, or hosts the running system. Preview mode touches nothing.
 
 plan options:
   --size SIZE         minimum image size used to size the partitions
@@ -114,24 +141,37 @@ require_canonical_path()
        Install saphira-install-tools."
 }
 
-# The target matrix and the profiles are installed as DATA under
+# The target matrix and the service mapping are installed as DATA under
 # /usr/share/saphira/image, NOT next to the executable. The first draft
 # derived both from dirname $0, which is /usr/bin once installed, so it
-# looked for /usr/bin/targets and /usr/bin/profiles and the installed tool
-# died immediately on its very first check -- while every in-tree test
-# still passed, because in the recipe directory files/targets really is a
-# sibling of files/saphira-image. Source-tree layout is therefore detected
+# looked for /usr/bin/targets and the installed tool died immediately on
+# its very first check -- while every in-tree test still passed, because
+# in the recipe directory files/targets really is a sibling of
+# files/saphira-image. Source-tree layout is therefore detected
 # explicitly and the installed datadir is the fallback. Environment
 # overrides still win over both.
+#
+# Profiles are NOT image-creator data: the single authoritative profile
+# tree lives in saphira-install-tools (/usr/share/saphira/profiles) and
+# is owned by saphira-profiles(5). This tool only reads it - resolved
+# below, with the same source-tree/installed/override precedence - and
+# stages what it needs into scratch for the installer. A second profile
+# namespace here is what previously let two kernels and two meanings of
+# saphira-openrc coexist unnoticed.
 datadir=${SAPHIRA_IMAGE_DATADIR:-/usr/share/saphira/image}
+shared_profiles=${SAPHIRA_IMAGE_SHARED_PROFILES:-/usr/share/saphira/profiles}
 if [ -f "$bindir/targets" ]; then
 	targets_dir=${SAPHIRA_IMAGE_TARGETS:-$bindir/targets}
-	profiles_dir=${SAPHIRA_IMAGE_PROFILES:-$bindir/profiles}
 	services_dir=${SAPHIRA_IMAGE_SERVICES:-$bindir/services.d}
+# $bindir is <recipe>/files both in a checkout and (via $0) for the
+# tool itself, so the shared tree is two levels up and across:
+# <root>/saphira-install-tools/files/profiles. No `..` guessing is
+# hidden anywhere else: dirname nesting is lexical and exact.
+	profiles_dir=${SAPHIRA_IMAGE_PROFILES:-$bindir/../../saphira-install-tools/files/profiles}
 else
 	targets_dir=${SAPHIRA_IMAGE_TARGETS:-$datadir/targets}
-	profiles_dir=${SAPHIRA_IMAGE_PROFILES:-$datadir/profiles}
 	services_dir=${SAPHIRA_IMAGE_SERVICES:-$datadir/services.d}
+	profiles_dir=${SAPHIRA_IMAGE_PROFILES:-$shared_profiles}
 fi
 # services.d is OPTIONAL data. Absence is the normal case and means every
 # service is named after its package, which is true of almost all of them.
@@ -140,10 +180,12 @@ fi
 [ -d "$services_dir" ] || services_dir=""
 [ -f "$targets_dir" ] || die "target matrix is missing: $targets_dir
        Expected it at $datadir/targets. The saphira-image-creator package
-       installs the matrix and the profiles as data; if you are running
+       installs the matrix as data; if you are running
        from a source tree, point SAPHIRA_IMAGE_TARGETS at files/targets."
 [ -d "$profiles_dir" ] || die "profile directory is missing: $profiles_dir
-       Expected it at $datadir/profiles."
+       Expected the shared profile tree at $shared_profiles
+       (saphira-install-tools). If you are running from a source tree,
+       point SAPHIRA_IMAGE_PROFILES at saphira-install-tools/files/profiles."
 
 # --- target matrix ----------------------------------------------------
 
@@ -206,8 +248,17 @@ resolve_target()
 #         partition is meaningless to UEFI firmware and a missing ESP
 #         means the firmware finds no bootloader at all.
 #
-# Sizes: ESP is 512 MiB, which is generous for a GRUB EFI payload and
-# leaves room for a future kernel-on-ESP layout. Root takes the rest,
+# Sizes: ESP is 64 MiB. That is generous for what actually lives on
+# it: the reference UEFI machine carries 1.5 MiB of EFI binaries
+# (GRUB only - the kernel and initramfs stay in /boot on the root
+# filesystem, where GRUB loads them from), so 64 MiB holds forty times
+# the deployed payload with room for filesystem metadata, updates and
+# a second bootloader entry. It is deliberately not 32 MiB: FAT32
+# needs at least 65,525 data clusters by definition, and 32 MiB holds
+# at most ~64,496 after the reserved area and the allocation tables,
+# so a 32 MiB FAT32 is below the architectural minimum - mkfs refuses
+# it or firmware may. 64 MiB sits at roughly twice the minimum, eight
+# times smaller than the previous 256 MiB default. Root takes the rest,
 # minus a 1 MiB alignment slack so the first partition starts on a 1 MiB
 # boundary as both BIOS and UEFI firmware prefer.
 
@@ -366,10 +417,10 @@ start=$((first_sector + bios_boot)), size=$root_sectors, type=0FC63DAF-8483-4772
 PLAN
 		;;
 	uefi)
-		esp=524288   # 512 MiB in 512-byte sectors
+		esp=131072   # 64 MiB in 512-byte sectors
 		root_sectors=$(( available - esp ))
 		[ "$root_sectors" -ge 65536 ] ||
-			die "size $SIZE is too small: a 512M ESP leaves no usable root"
+			die "size $SIZE is too small: a 64M ESP leaves no usable root"
 			cat <<PLAN
 label: gpt
 # UEFI: a FAT EFI System Partition the firmware can actually read. BIOS
@@ -468,6 +519,125 @@ boot_device_for()
 	esac
 }
 
+# --- physical disk naming, safety, preview --------------------------------
+#
+# Physical disks do not share the loop partition naming: /dev/sda takes
+# sda1/sda2 while /dev/nvme0n1 takes nvme0n1p1/nvme0n1p2. The kernel
+# rule is a trailing digit on the disk name takes a 'p' separator.
+
+part_device_for()
+{
+	# $1 disk device path, $2 partition number.
+	case $1 in
+	*[0-9]) printf '%s\n' "$1p$2" ;;
+	*) printf '%s\n' "$1$2" ;;
+	esac
+}
+
+whole_disk_for()
+{
+	# $1 block device path. Prints the whole-disk kernel name the
+	# device belongs to (sda1 -> sda, nvme0n1p2 -> nvme0n1, sda ->
+	# sda). sysfs is authoritative: a `partition` file means
+	# partition, its absence on a present device means whole disk.
+	# Without sysfs there is no safe answer (sda1 and nvme0n1 end
+	# the same way), so refuse rather than guess.
+	name=$(basename -- "$1")
+	[ -e "/sys/class/block/$name" ] ||
+		return 1
+	if [ -e "/sys/class/block/$name/partition" ]; then
+		link=$(readlink "/sys/class/block/$name") || return 1
+		basename -- "${link%/*}" || return 1
+		return 0
+	fi
+	printf '%s\n' "$name"
+}
+
+device_is_busy()
+{
+	# $1 whole-disk kernel name. True (0) when the disk or anything
+	# stacked on it (partitions, device-mapper, swap) is in use by the
+	# running system. Reads mount and swap tables only; touches nothing.
+	disk=$1
+	while read -r src _rest; do
+		case $src in /dev/*) ;;
+			*) continue ;;
+		esac
+		[ -b "$src" ] || continue
+		if [ "$(whole_disk_for "$src")" = "$disk" ]; then
+			return 0
+		fi
+		# Device-mapper and md stack whole disks underneath: a mount
+		# on dm-0 or md0 counts against every disk it stands on.
+		slaves_dir=/sys/class/block/$(basename -- "$src")/slaves
+		if [ -d "$slaves_dir" ]; then
+			for slave in "$slaves_dir"/*; do
+				[ -e "$slave" ] || continue
+				if [ "$(whole_disk_for "/dev/$(basename -- "$slave")")" = "$disk" ]; then
+					return 0
+				fi
+			done
+		fi
+	done < /proc/mounts
+	while read -r src _rest; do
+		case $src in /dev/*) ;;
+			*) continue ;;
+		esac
+		[ -b "$src" ] || continue
+		if [ "$(whole_disk_for "$src")" = "$disk" ]; then
+			return 0
+		fi
+	done < /proc/swaps 2>/dev/null || true
+	return 1
+}
+
+boot_disk_for_root()
+{
+	# Prints the whole-disk kernel name hosting / (the running system).
+	root_src=$(awk '$2 == "/" { print $1; exit }' /proc/mounts)
+	[ -n "$root_src" ] || return 1
+	case $root_src in /dev/*) ;;
+		*) return 1 ;;
+	esac
+	[ -b "$root_src" ] || return 1
+	whole_disk_for "$root_src"
+}
+
+validate_device()
+{
+	# $1 device path. Refuses everything that is not an installable
+	# whole disk, before anything is previewed, let alone written.
+	# Read-only: blockdev size probes and table reads only.
+	device=$1
+	[ -n "$device" ] || die "no device given (use --device /dev/...)"
+	[ -e "$device" ] || die "device does not exist: $device"
+	[ -b "$device" ] || die "not a block device: $device (images stay in build --output; --device takes a disk)"
+	# The busy check reads live mount state: unreadable tables mean
+	# the check cannot run, and installing blind is not an option.
+	[ -r /proc/mounts ] || die "cannot read /proc/mounts; refusing to judge $device busy or idle"
+	[ -r /proc/swaps ] || die "cannot read /proc/swaps; refusing to judge $device busy or idle"
+	disk=$(basename -- "$device")
+	# A partition is never an install target: the tool owns the whole
+	# partition table it writes.
+	if [ -e "/sys/class/block/$disk/partition" ]; then
+		die "not a whole disk: $device is a partition (pass its disk)"
+	fi
+	if ! dev_bytes=$(blockdev --getsize64 -- "$device" 2>/dev/null); then
+		die "cannot read the size of $device"
+	fi
+	case $dev_bytes in ''|*[!0-9]*|0) die "device $device reports no usable size" ;; esac
+	if device_is_busy "$(whole_disk_for "$device")"; then
+		die "device $device (or something stacked on it) is mounted or swapped on - refusing a live disk"
+	fi
+	boot_disk=$(boot_disk_for_root 2>/dev/null || true)
+	if [ -n "$boot_disk" ] && [ "$(whole_disk_for "$device" || true)" = "$boot_disk" ]; then
+		die "device $device hosts the running system - refusing to install onto the boot disk"
+	fi
+	DEV_BYTES=$dev_bytes
+	DEV_DISK=$(whole_disk_for "$device") ||
+		die "cannot determine the whole disk for $device"
+}
+
 # --- host tool presence ------------------------------------------------
 #
 # Checked up front and named individually, because a missing tool
@@ -493,6 +663,32 @@ require_host_tools()
 		;;
 	esac
 	if command -v qemu-img >/dev/null 2>&1; then have_qemu_img=1; else have_qemu_img=0; fi
+}
+
+require_disk_tools()
+{
+	# Same contract as require_host_tools, for the disk path: every
+	# destructive prerequisite is named before anything is previewed,
+	# let alone written. No loop tools here (a disk is already a
+	# device); blockdev sizes it and partprobe is not needed because
+	# sfdisk re-reads the table itself.
+	missing=
+	for tool in sfdisk mkfs.ext4 grub-install blockdev blkid; do
+		command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"
+	done
+	[ -z "$missing" ] || die "host tool(s) missing:$missing
+       saphira-image needs the partitioning and formatting tools on the
+       host that installs the disk. On Saphira they come from util-linux
+       (sfdisk, blockdev, blkid), e2fsprogs (mkfs.ext4), dosfstools
+       (mkfs.vfat) and grub (grub-install)."
+	case $BOOT in
+	uefi)
+		command -v mkfs.vfat >/dev/null 2>&1 ||
+			die "host tool missing: mkfs.vfat
+       A uefi target cannot be installed without dosfstools: the firmware
+       requires a FAT EFI System Partition."
+		;;
+	esac
 }
 
 # --- init preparation --------------------------------------------------
@@ -577,6 +773,18 @@ INITTAB
 			ln -sfn /etc/init.d/saphira-fhs-converge \
 				"$mnt/etc/runlevels/boot/saphira-fhs-converge"
 		fi
+		# Boot-time utmp/wtmp accounting: records one BOOT_TIME
+		# record per kernel boot (the service is a restart-safe
+		# no-op afterwards). Placed in the boot runlevel alongside
+		# the other platform plumbing, ordered after the FHS
+		# convergence it writes through, so coreutils uptime/who -b
+		# agree with /proc/uptime from the first boot instead of
+		# falling back to image-file mtimes.
+		if [ -f "$mnt/etc/init.d/saphira-utmp-boot" ]; then
+			mkdir -p "$mnt/etc/runlevels/boot"
+			ln -sfn /etc/init.d/saphira-utmp-boot \
+				"$mnt/etc/runlevels/boot/saphira-utmp-boot"
+		fi
 		# Firstboot account/identity setup: runs only while its
 		# assembly-written marker exists, otherwise a no-op. Placed in
 		# the BOOT runlevel, ordered after the boot-level services
@@ -604,6 +812,16 @@ INITTAB
 			mkdir -p "$mnt/etc/runlevels/boot"
 			ln -sfn /etc/init.d/saphira-firstboot \
 				"$mnt/etc/runlevels/boot/saphira-firstboot"
+		fi
+		# Device manager in sysinit (not default): /dev/disk/* must
+		# exist before the boot runlevel's fsck, localmount and
+		# modules start. Same reason as firstboot above: no profile
+		# enumerates base-owned plumbing, so the image enables it
+		# itself, guarded by presence.
+		if [ -f "$mnt/etc/init.d/udev" ]; then
+			mkdir -p "$mnt/etc/runlevels/sysinit"
+			ln -sfn /etc/init.d/udev \
+				"$mnt/etc/runlevels/sysinit/udev"
 		fi
 		# Serial console instance (not enabled): Saphira ships no
 		# serial getty at all (no serial hardware generally; VGA
@@ -648,10 +866,19 @@ INITTAB
 			units=
 			[ -f "$mnt/usr/lib/systemd/system/saphira-fhs-converge.service" ] &&
 				units="$units saphira-fhs-converge.service"
+			[ -f "$mnt/usr/lib/systemd/system/saphira-utmp-boot.service" ] &&
+				units="$units saphira-utmp-boot.service"
 			[ -f "$mnt/usr/lib/systemd/system/saphira-firstboot.service" ] &&
 				units="$units saphira-firstboot.service"
 			[ -f "$mnt/usr/lib/systemd/system/sshd.service" ] &&
 				units="$units sshd.service"
+			# Device manager: the daemon binary ships in the udev
+			# package while the units ship in systemd (its
+			# strict-complement rule keeps them). Enablement
+			# resolves the [Install] Also=/WantedBy cascade, so
+			# the control/kernel sockets come along automatically.
+			[ -f "$mnt/usr/lib/systemd/system/systemd-udevd.service" ] &&
+				units="$units systemd-udevd.service"
 			[ -f "$mnt/usr/lib/systemd/system/systemd-networkd.service" ] &&
 				units="$units systemd-networkd.service"
 			[ -f "$mnt/usr/lib/systemd/system/systemd-networkd-wait-online.service" ] &&
@@ -1212,8 +1439,8 @@ cmd_build()
 	done
 	# The profile is named by BASENAME only, and saphira-install resolves it
 	# under ITS OWN profile root (SAPHIRA_PROFILE_ROOT, default
-	# /usr/share/saphira/profiles) -- a different namespace from this
-	# package's /usr/share/saphira/image/profiles. The composed profile
+	# /usr/share/saphira/profiles) - the same single tree this tool read
+	# the product profile and role layers from above. The composed profile
 	# (minimal intentions plus any role layers) is therefore staged into a
 	# WRITABLE scratch profile root, and that root is handed to the
 	# installer.
@@ -1225,9 +1452,24 @@ cmd_build()
 	# not work at all, and writing there would make a per-image
 	# intention part of a package's own payload -- mutating
 	# package-owned data, which is never the right way to express it.
+	#
+	# @-includes inside the composed profile (or inside any shared
+	# profile) resolve against the scratch root, so the whole shared
+	# tree is staged first and the composed file laid over it. The
+	# bootstrap refuses an unresolvable include rather than guessing.
 	profile_name=$(basename "$composed")
 	profile_root=$work/profiles
 	mkdir -p "$profile_root" || die 'cannot create the scratch profile root'
+	for shared_profile in "$profiles_dir"/*; do
+		[ -f "$shared_profile" ] || continue
+		# .services sidecars are deliberately NOT staged: image builds
+		# enable services through prepare_init/enable_services (both
+		# inits), never through the assembler's systemd-only sidecars.
+		# Disk installation will stage them explicitly when it lands.
+		case $shared_profile in *.services) continue ;; esac
+		cp "$shared_profile" "$profile_root/${shared_profile##*/}" ||
+			die 'cannot stage the shared profile tree'
+	done
 	cp "$composed" "$profile_root/$profile_name" ||
 		die 'cannot stage the composed profile'
 
@@ -1434,6 +1676,266 @@ PY
 	cleanup 0
 }
 
+# --- physical disk installation ----------------------------------------
+#
+# install-to-disk is build's sibling, not its flag: a file image and a
+# physical disk share the engine (partition plan, install, init
+# preparation, bootloader, measurement) but differ in backing, safety
+# and cleanup, and mixing the two behind one --output would risk the
+# working qcow2 path. Everything destructive below runs only after an
+# explicit preview plus a typed confirmation, and preview mode never
+# writes anything at all.
+
+print_install_plan()
+{
+	# $1 device path. Prints the complete installation plan: what will
+	# be destroyed, what will be written, and where the bootloader
+	# goes. Read-only (size probe and table reads).
+	[ -n "${DEV_BYTES:-}" ] && [ -n "${DEV_DISK:-}" ] ||
+		die "internal: print_install_plan without a validated device"
+	human=$(awk -v b="$DEV_BYTES" 'BEGIN {
+		if (b >= 1073741824) printf "%.1f GiB", b/1073741824;
+		else if (b >= 1048576) printf "%.1f MiB", b/1048576;
+		else printf "%d bytes", b }')
+	printf 'device:            %s (%s, %s bytes)\n' \
+		"$1" "$human" "$DEV_BYTES"
+	printf 'target:            %s (boot=%s init=%s)\n' \
+		"$TARGET" "$BOOT" "$INIT"
+	printf 'profile:           %s\n' "$PROFILE"
+	for r in $roles $role_files; do
+		printf 'role layer:        %s\n' "$r"
+	done
+	printf 'hostname:          %s\n' "${hostname:-saphira}"
+	printf 'partition table:   GPT (whole disk is rewritten)\n'
+	printf 'partition plan:\n'
+	SIZE=$DEV_BYTES partition_plan | sed 's/^/  /'
+	if [ "$BOOT" = uefi ]; then
+		printf 'firmware:          UEFI, 64 MiB FAT ESP, GRUB %s-efi --removable\n' "$ARCH"
+	else
+		printf 'firmware:          BIOS, 1 MiB bios-boot, GRUB i386-pc\n'
+	fi
+	printf 'filesystem:        ext4 root (label saphira-root)\n'
+	printf 'bootloader:        grub-install to %s (the disk, never a partition)\n' "$1"
+	printf 'fstab:             generated from the installed mounts\n'
+}
+
+confirm_device_destroy()
+{
+	# $1 device path. The operator types the path back: printing it is
+	# not consent. EOF or any other answer aborts with nothing touched.
+	printf 'Type the device path to confirm destroying ALL data on %s: ' "$1" >&2
+	answer=
+	read -r answer </dev/tty 2>/dev/null ||
+		die "no confirmation read; nothing was touched"
+	if [ "$answer" != "$1" ]; then
+		die "confirmation did not match; nothing was touched"
+	fi
+}
+
+cmd_install_to_disk()
+{
+	TARGET= device= repository= hostname= root_password= kernel_args= arch=
+	roles= role_files= enable=1 keep_work=0 preview=0 netconf=
+	while test $# -gt 0; do
+		case $1 in
+			--target) TARGET=${2:?missing TARGET}; shift 2 ;;
+			--target=*) TARGET=${1#*=}; shift ;;
+			--device) device=${2:?missing DEVICE}; shift 2 ;;
+			--device=*) device=${1#*=}; shift ;;
+			--preview) preview=1; shift ;;
+			--kernel-arg) kernel_args="$kernel_args ${2:?missing ARG}"; shift 2 ;;
+			--kernel-arg=*) kernel_args="$kernel_args ${1#*=}"; shift ;;
+			--arch) arch=${2:?missing ARCH}; shift 2 ;;
+			--arch=*) arch=${1#*=}; shift ;;
+			--repository) repository=${2:?missing REPOSITORY}; shift 2 ;;
+			--repository=*) repository=${1#*=}; shift ;;
+			--hostname) hostname=${2:?missing HOSTNAME}; shift 2 ;;
+			--hostname=*) hostname=${1#*=}; shift ;;
+			--root-password) root_password=${2:?missing PASSWORD}; shift 2 ;;
+			--root-password=*) root_password=${1#*=}; shift ;;
+			--netconf) netconf=${2:?missing NETCONF}; shift 2 ;;
+			--netconf=*) netconf=${1#*=}; shift ;;
+			--role) roles="$roles ${2:?missing ROLE}"; shift 2 ;;
+			--role=*) roles="$roles ${1#*=}" ; shift ;;
+			--role-file) role_files="$role_files ${2:?missing FILE}"; shift 2 ;;
+			--role-file=*) role_files="$role_files ${1#*=}" ; shift ;;
+			--no-enable) enable=0; shift ;;
+			--keep-work) keep_work=1; shift ;;
+			--) shift; break ;;
+			*) usage ;;
+		esac
+	done
+	[ -n "$TARGET" ] || usage
+	[ -n "$device" ] || usage
+	case $TARGET in *[!A-Za-z0-9._+-]* | '') die "invalid target name: $TARGET" ;; esac
+
+	resolve_target "$TARGET"
+	validate_arch
+	ENABLE=$enable
+	NETCONF=${netconf:-}
+
+	# Safety first, before privileges and before anything destructive:
+	# validate (read-only) and print the complete plan. Preview mode
+	# needs no installer, no host tools and no privileges beyond
+	# reading the device size, so it stops here.
+	validate_device "$device"
+	print_install_plan "$device"
+	if [ "$preview" -eq 1 ]; then
+		printf '%s: preview only; the device was not touched\n' "$PROG"
+		return 0
+	fi
+	require_canonical_path
+	require_disk_tools
+	confirm_device_destroy "$device"
+
+	test "$($(command -v id) -u)" -eq 0 || die 'root privileges are required (partitioning, filesystems, mounts)'
+
+	tmpbase=$(saphira_tmpdir)
+	mkdir -p "$tmpbase" || die "cannot create scratch under $tmpbase"
+	work=$(mktemp -d "$tmpbase/saphira-image.XXXXXX") ||
+		die 'cannot create image workspace'
+	mnt=$work/mnt
+	mkdir -p "$mnt" || die 'cannot create mountpoint'
+	mounted=
+	esp_mounted=
+
+	cleanup_disk()
+	{
+		status=${1:-$?}
+		set +e
+		# Unmount deepest-first. The disk itself is left exactly as
+		# the run left it: on failure the partitions, filesystems
+		# and any installed content stay for diagnosis, but nothing
+		# stays mounted.
+		[ -n "$esp_mounted" ] && umount -R -- "$mnt/boot/efi" >/dev/null 2>&1
+		[ -n "$mounted" ] && umount -R -- "$mnt" >/dev/null 2>&1 || umount -l -- "$mnt" >/dev/null 2>&1
+		mounted= esp_mounted=
+		if [ "$keep_work" -eq 1 ] || [ "$status" -ne 0 ]; then
+			printf '%s: workspace retained for diagnosis: %s\n' "$PROG" "$work" >&2
+			printf '%s: disk %s left as-is (unmounted); inspect before retrying\n' "$PROG" "$device" >&2
+		else
+			rm -rf -- "$work"
+		fi
+		exit "$status"
+	}
+	trap 'cleanup_disk $?' EXIT
+	trap 'cleanup_disk 129' HUP
+	trap 'cleanup_disk 130' INT
+	trap 'cleanup_disk 143' TERM
+
+	printf '%s: target=%s (boot=%s init=%s) profile=%s device=%s\n' \
+		"$PROG" "$TARGET" "$BOOT" "$INIT" "$PROFILE" "$device"
+
+	# Partition. The plan generator is shared with image builds; only
+	# the capacity differs (whole device instead of --size).
+	SIZE=$DEV_BYTES
+	plan=$work/plan.sfdisk
+	partition_plan > "$plan" || die 'cannot generate the partition plan'
+	sfdisk --label gpt -- "$device" < "$plan" || die 'partitioning failed'
+	# The kernel may need a moment to publish the partition nodes.
+	for _ in 1 2 3 4 5 6 7 8 9 10; do
+		rootdev=$(part_device_for "$device" 2)
+		[ -b "$rootdev" ] && break
+		sleep 0.2
+	done
+	rootdev=$(part_device_for "$device" 2)
+	bootdev=$(part_device_for "$device" 1)
+	[ -b "$rootdev" ] || die "root partition device did not appear: $rootdev"
+	[ -b "$bootdev" ] || die "boot partition device did not appear: $bootdev"
+
+	mkfs.ext4 -q -L saphira-root "$rootdev" || die 'cannot format root partition'
+	mount -o noatime "$rootdev" "$mnt" || die 'cannot mount root'
+	mounted=1
+
+	# NOTE: the ESP is formatted here but mounted only AFTER the
+	# install below: saphira-install refuses a non-empty target,
+	# and a mounted ESP (even an empty fresh FAT) trips that guard.
+	# grub-install - which genuinely needs the ESP mounted - runs
+	# after the install step.
+	if [ "$BOOT" = uefi ]; then
+		mkfs.vfat -F 32 -n SaphiraESP "$bootdev" ||
+			die 'cannot format the EFI System Partition'
+	fi
+
+	# The canonical path, identical to image builds: saphira-install
+	# -> saphira-assemble-rootfs. The composed profile carries the
+	# minimal intentions plus any roles.
+	composed=$work/profile
+	cat "$profiles_dir/$PROFILE" > "$composed"
+	for r in $roles; do
+		[ -f "$profiles_dir/$r" ] || die "no such role layer: $r"
+		printf '\n# role: %s\n' "$r" >> "$composed"
+		cat "$profiles_dir/$r" >> "$composed"
+	done
+	for f in $role_files; do
+		[ -f "$f" ] || die "no such role file: $f"
+		cat "$f" >> "$composed"
+	done
+	profile_name=$(basename "$composed")
+	profile_root=$work/profiles
+	mkdir -p "$profile_root" || die 'cannot create the scratch profile root'
+	for shared_profile in "$profiles_dir"/*; do
+		[ -f "$shared_profile" ] || continue
+		case $shared_profile in *.services) continue ;; esac
+		cp "$shared_profile" "$profile_root/${shared_profile##*/}" ||
+			die 'cannot stage the shared profile tree'
+	done
+	cp "$composed" "$profile_root/$profile_name" ||
+		die 'cannot stage the composed profile'
+
+	# Assemble. saphira-install owns this entirely: it invokes
+	# saphira-assemble-rootfs, which owns rootfs assembly and the
+	# accounts.d / sysusers.d identity replay. Nothing here unpacks an
+	# APK or writes a package list of its own. saphira-genfstab runs
+	# inside, against the real mounts, so the installed fstab names
+	# the real partitions.
+	SAPHIRA_ARCH="$ARCH" \
+		SAPHIRA_REPOSITORY="$repository" \
+		SAPHIRA_PROFILE_ROOT="$profile_root" \
+		SAPHIRA_HOSTNAME="${hostname:-saphira}" \
+		SAPHIRA_ROOT_PASSWORD="$root_password" \
+		"$install_command" --target "$mnt" --profile "$profile_name" ||
+		die 'installation onto disk failed'
+
+	prepare_init "$mnt"
+	enable_services "$mnt" "$profile_root/$profile_name"
+	KERNEL_ARGS=$kernel_args
+	fix_kernel_cmdline "$mnt" "$rootdev"
+
+	if [ "$BOOT" = uefi ]; then
+		mkdir -p "$mnt/boot/efi"
+		mount "$bootdev" "$mnt/boot/efi" || die 'cannot mount the ESP'
+		esp_mounted=1
+	fi
+	# The bootloader platform follows BOTH the boot method and the
+	# architecture. grub-install targets the WHOLE DISK here, never a
+	# partition: the boot sectors and the EFI fallback live outside
+	# any filesystem.
+	# UEFI uses --removable (fallback BOOTX64.EFI): no NVRAM entry is
+	# written, so installation works identically on machines whose
+	# firmware variables are unreachable, and efibootmgr stays a
+	# deliberate follow-up rather than a silent requirement.
+	grub_args=
+	[ "$BOOT" = bios ] && grub_args="--target=i386-pc --recheck"
+	[ "$BOOT" = uefi ] && grub_args="--target=$ARCH-efi --efi-directory=/boot/efi --removable --recheck"
+	# shellcheck disable=SC2086
+	"$chroot_command" "$mnt" /usr/sbin/grub-install $grub_args "$device" ||
+		die "grub-install failed ($BOOT)"
+	"$chroot_command" "$mnt" /usr/sbin/grub-mkconfig -o /boot/grub/grub.cfg ||
+		die 'grub-mkconfig failed'
+	test -s "$mnt/boot/grub/grub.cfg" || die 'grub.cfg is empty'
+	grep -q 'vmlinuz' "$mnt/boot/grub/grub.cfg" ||
+		die 'grub.cfg has no kernel entry: the disk would not boot'
+	finalize_bootloader "$mnt" "$rootdev"
+
+	report_closure "$mnt"
+
+	umount -R -- "$mnt" || die 'cannot unmount the disk'
+	mounted= esp_mounted=
+	printf '%s: %s installed (target=%s)\n' "$PROG" "$device" "$TARGET"
+	cleanup_disk 0
+}
+
 # --- rootfs export ----------------------------------------------------
 
 find_free_nbd()
@@ -1459,6 +1961,12 @@ find_free_nbd()
 # state is excluded by an explicit list; anything excluded here must
 # be recreatable at first boot (firstboot mints machine-id, openssh
 # first-start mints host keys, the daemons own their runtime dirs).
+# Boot-time accounting state is excluded the same way: utmp/wtmp are
+# recreated with the current boot's record by saphira-utmp-boot, and
+# a stale systemd random-seed must never ship (coreutils falls back
+# to its mtime when utmp has no BOOT_TIME record - the 50-day Egg
+# uptime scare; the seed is unmanaged on OpenRC and recreated on
+# demand where systemd uses it).
 cmd_export()
 {
 	image= output=
@@ -1522,8 +2030,11 @@ cmd_export()
 		--exclude='./var/lib/saphira-firstboot/.iface-index.*' \
 		--exclude='./etc/machine-id' --exclude='./var/lib/dbus/machine-id' \
 		--exclude='./etc/ssh/ssh_host_*' \
+		--exclude='./etc/ssh_host_*' \
 		--exclude='./root/.ash_history' --exclude='./home/*/.ash_history' \
 		--exclude='./etc/*.lock' --exclude='./var/lib/seedrng' \
+		--exclude='./var/run/utmp' --exclude='./var/log/wtmp' \
+		--exclude='./var/lib/systemd/random-seed' \
 		-C "$mnt" . || die "rootfs archive failed: $output"
 	sha256sum "$output" | sed "s| .*|  $(basename "$output")|" > "$output.sha256" ||
 		die "cannot write $output.sha256"
@@ -1539,6 +2050,7 @@ action=$1
 shift
 case $action in
 build) cmd_build "$@" ;;
+install-to-disk) cmd_install_to_disk "$@" ;;
 export) cmd_export "$@" ;;
 plan) cmd_plan "$@" ;;
 report) cmd_report "$@" ;;

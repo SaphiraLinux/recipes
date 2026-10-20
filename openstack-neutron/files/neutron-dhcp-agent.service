@@ -1,0 +1,17 @@
+[Unit]
+Description=OpenStack Neutron DHCP agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=neutron
+Group=neutron
+EnvironmentFile=-/etc/conf.d/neutron-dhcp-agent
+ExecStart=/usr/bin/neutron-dhcp-agent
+Restart=on-failure
+KillMode=mixed
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

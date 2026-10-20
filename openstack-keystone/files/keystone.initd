@@ -1,0 +1,28 @@
+#!/sbin/openrc-run
+#
+# OpenRC service for the OpenStack Identity (Keystone) API.
+#
+# Served by gunicorn with the supported WSGI application
+# (keystone.wsgi.api:application). Configuration lives in
+# /etc/keystone/keystone.conf (operator-provided). Runtime settings are
+# read from /etc/conf.d/keystone.
+#
+# Shipped unconditionally; never enabled or started at install.
+
+name="keystone"
+description="OpenStack Identity (Keystone) API"
+
+: "${KEYSTONE_BIND:=127.0.0.1:5000}"
+: "${KEYSTONE_WORKERS:=$(nproc 2>/dev/null || echo 4)}"
+: "${KEYSTONE_CONF:=/etc/keystone/keystone.conf}"
+
+command="/usr/bin/gunicorn"
+command_args="--name keystone --bind ${KEYSTONE_BIND} --workers ${KEYSTONE_WORKERS} --pid /var/run/keystone/keystone.pid --config ${KEYSTONE_CONF} keystone.wsgi.api:application"
+command_user="keystone:keystone"
+command_background="yes"
+pidfile="/var/run/keystone/keystone.pid"
+
+depend() {
+	need net
+	after firewall
+}

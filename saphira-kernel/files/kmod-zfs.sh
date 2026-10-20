@@ -5,8 +5,8 @@
 # sandbox never executes it).
 #
 # The kernel version coupling is the STAGED TREE ($SRC/linux-<short>
-# from /input via stage-kmod-input.sh), not the saphira-kernel-headers
-# pin (host UAPI only). KVER_FULL (module install path) derives from
+# from /input via stage-kmod-input.sh), not the UAPI package
+# (saphira-linux-uapi-headers, host UAPI only). KVER_FULL (module install path) derives from
 # the tree's own Makefile, so release candidates map correctly
 # (7.3-rc1 tree -> /lib/modules/7.3.0-rc1/extra).
 

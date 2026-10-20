@@ -1,0 +1,7 @@
+# RabbitMQ service identity (fixed, in the preferred 0..199
+# packaged range): user rabbitmq UID 172, group rabbitmq GID 172.
+# (171 is memcached; the OpenStack block is 164-170.) Not reused
+user rabbitmq 172 rabbitmq /var/lib/rabbitmq /sbin/nologin
+group rabbitmq 172
+dir /var/lib/rabbitmq 0750 rabbitmq rabbitmq
+dir /var/log/rabbitmq 0750 rabbitmq rabbitmq

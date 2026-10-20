@@ -1,7 +1,7 @@
 #!/bin/sh
 pkgname=zlib
 pkgver=1.3.1
-pkgrel=3
+pkgrel=4
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='Compression library implementing the deflate algorithm'
 license='Zlib'
@@ -22,7 +22,11 @@ recipe_build() {
 }
 recipe_install() {
 	make -C "$SRC" DESTDIR="$PKGDEST" install
-	rm -f "$PKGDEST/usr/lib/libz.a"
+	# libz.a is SHIPPED (not deleted): qemu-user-static links it for
+	# fully static user-mode emulators (proven missing by its link
+	# failure: "cannot find -lz"). buildpkg-single moves *.a to the
+	# -dev subpackage automatically, so the shared-only main payload
+	# - and dynamic linking everywhere else - is unchanged.
 	# FHS non-usrmerged: /sbin consumers (fsck.cramfs, mkfs.cramfs)
 	# need the runtime SONAME chain in /lib; the dev linker name
 	# stays in /usr/lib pointing back (acl precedent).

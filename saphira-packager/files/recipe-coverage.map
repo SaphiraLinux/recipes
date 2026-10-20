@@ -23,7 +23,6 @@ qemu-tools consolidate qemu # same upstream tree, tools ship from the monolith b
 python-certifi rename certifi # de-prefixed (replaces="python-certifi")
 python-idna rename idna # de-prefixed (replaces="python-idna")
 python-packaging rename packaging # de-prefixed (replaces="python-packaging")
-python-pyparsing rename pyparsing # de-prefixed (replaces="python-pyparsing")
 node22lts rename nodejs22 # side-by-side versioned runtime (binaries suffixed node22, headers in /usr/include/node22)
 #
 # Reviewed exemptions:

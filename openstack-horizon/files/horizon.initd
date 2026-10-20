@@ -1,0 +1,29 @@
+#!/sbin/openrc-run
+#
+# OpenRC service for the OpenStack Dashboard (Horizon).
+#
+# Served by gunicorn with the Django WSGI application
+# (openstack_dashboard.wsgi:application). Operator settings live in
+# /etc/horizon/local/local_settings.py (on PYTHONPATH, so upgrades
+# never clobber them); runtime settings are read from
+# /etc/conf.d/horizon.
+#
+# Shipped unconditionally; never enabled or started at install.
+# Runs where the dashboard is served (usually a controller).
+
+name="horizon"
+description="OpenStack Dashboard (Horizon)"
+
+: "${HORIZON_BIND:=127.0.0.1:8000}"
+: "${HORIZON_WORKERS:=$(nproc 2>/dev/null || echo 4)}"
+
+command="/usr/bin/gunicorn"
+command_args="--name horizon --bind ${HORIZON_BIND} --workers ${HORIZON_WORKERS} --pid /var/run/horizon/horizon.pid --pythonpath /etc/horizon --env DJANGO_SETTINGS_MODULE=openstack_dashboard.settings openstack_dashboard.wsgi:application"
+command_user="horizon:horizon"
+command_background="yes"
+pidfile="/var/run/horizon/horizon.pid"
+
+depend() {
+	need net
+	after firewall
+}

@@ -1,0 +1,12 @@
+# Keystone service identity (fixed, in the preferred 0..199 packaged
+# range): user keystone UID 164, primary group keystone GID 164.
+# OpenStack services own the 164-170 block (164 keystone, 165 glance,
+# 166 placement, 167-170 nova/neutron/cinder/horizon). Required
+# by the shipped service units (systemd User=keystone, OpenRC
+# command_user keystone:keystone), keystone-manage and the state/log
+# directories. UID 164 is not reused by any other packaged identity:
+# the base seed owns 108 (unbound), 109 (dnsmasq), 110 (kea).
+user keystone 164 keystone /var/lib/keystone /sbin/nologin
+group keystone 164
+dir /var/lib/keystone 0750 keystone keystone
+dir /var/log/keystone 0750 keystone keystone

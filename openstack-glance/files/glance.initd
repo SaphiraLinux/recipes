@@ -1,0 +1,28 @@
+#!/sbin/openrc-run
+#
+# OpenRC service for the OpenStack Image (Glance) API.
+#
+# Served by gunicorn with the supported WSGI application
+# (glance.wsgi.api:application). Configuration lives in
+# /etc/glance/glance-api.conf (operator-provided). Runtime settings are
+# read from /etc/conf.d/glance.
+#
+# Shipped unconditionally; never enabled or started at install.
+
+name="glance"
+description="OpenStack Image (Glance) API"
+
+: "${GLANCE_BIND:=127.0.0.1:9292}"
+: "${GLANCE_WORKERS:=$(nproc 2>/dev/null || echo 4)}"
+: "${GLANCE_CONF:=/etc/glance/glance-api.conf}"
+
+command="/usr/bin/gunicorn"
+command_args="--name glance --bind ${GLANCE_BIND} --workers ${GLANCE_WORKERS} --pid /var/run/glance/glance.pid --config ${GLANCE_CONF} glance.wsgi.api:application"
+command_user="glance:glance"
+command_background="yes"
+pidfile="/var/run/glance/glance.pid"
+
+depend() {
+	need net
+	after firewall
+}

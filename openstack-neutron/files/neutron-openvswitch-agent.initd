@@ -1,0 +1,26 @@
+#!/sbin/openrc-run
+#
+# OpenRC service for the OpenStack Neutron Open vSwitch agent.
+#
+# Standalone daemon driving OVS through ovs-vsctl/ovsdb (the
+# openvswitch daemons must be running). Privileged operations go
+# through neutron-rootwrap with the shipped filter policy; the agent
+# itself runs as the neutron user. Reads
+# /etc/neutron/plugins/ml2/openvswitch_agent.ini (operator-provided;
+# sample inputs under /etc/neutron). Shipped unconditionally; never
+# enabled or started at install. Runs on every node carrying tenant
+# traffic (compute and network nodes).
+
+name="neutron-openvswitch-agent"
+description="OpenStack Neutron Open vSwitch agent"
+
+command="/usr/bin/neutron-openvswitch-agent"
+command_user="neutron:neutron"
+command_background="yes"
+pidfile="/var/run/neutron/neutron-openvswitch-agent.pid"
+
+depend() {
+	need net
+	use openvswitch
+	after firewall openvswitch
+}

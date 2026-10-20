@@ -1,0 +1,16 @@
+# Nova API runtime settings (operator-editable).
+#
+# These are the WSGI container's own settings, not Nova's configuration
+# (which lives in /etc/nova/nova.conf). Nothing here is applied
+# until the operator enables and starts the service.
+
+# Address and port gunicorn listens on. Point this at a TLS-terminating
+# proxy (nginx/haproxy) for production; leave the default for a local
+# listener behind such a proxy.
+#NOVA_API_BIND="127.0.0.1:8774"
+
+# Number of gunicorn worker processes.
+#NOVA_API_WORKERS="4"
+
+# Path to the Nova configuration file.
+#NOVA_API_CONF="/etc/nova/nova.conf"

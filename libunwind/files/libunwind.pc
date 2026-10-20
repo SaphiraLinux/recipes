@@ -1,0 +1,10 @@
+prefix=/usr
+libdir=/usr/lib
+includedir=/usr/include
+
+Name: libunwind
+Description: LLVM unwinding runtime
+Version: 0.0.0
+
+Libs: -L${libdir} -lunwind
+Cflags: -I${includedir}

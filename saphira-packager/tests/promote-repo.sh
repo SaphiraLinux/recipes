@@ -353,3 +353,29 @@ cmp -s "$test_root/hatched-before.sql" "$test_root/hatched-after.sql"
 test -z "$(find "$hatched" \( -name '*.publishing-*' -o -name '*.promoting-*' \) -print -quit)"
 
 printf '%s\n' 'promote-repo: verified exact-byte promotion, idempotence, immutability refusal, and verification refusal tests: OK'
+# Arch-split promotion: a noarch package keeps its arch directory
+# across generations (hatchling/noarch -> hatched/noarch) and stays
+# fetchable; the combined index lives in the build-arch directory.
+mkdir -p "$stage/noarchpromote-1-r1/pkg/usr/share/doc"
+printf '%s\n' noarch-promote-fixture > "$stage/noarchpromote-1-r1/pkg/usr/share/doc/noarch-promote-fixture.txt"
+printf '%s' '{"arch":"noarch","build_time":9,"license":"MIT","name":"noarchpromote-1-r1","origin":"noarchpromote","outputs":[{"dependencies":[],"description":"noarchpromote","name":"noarchpromote","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r1"}' \
+	> "$stage/noarchpromote-1-r1/manifest.json"
+SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
+SAPHIRA_BUILD_ROOT=$stage SAPHIRA_INCOMING_DIR=$test_root/noarchartifacts \
+SAPHIRA_PACKAGE_TMP=$test_root/makepkg-tmp SAPHIRA_FAKEROOT_BOOTSTRAP=1 \
+SAPHIRA_BOOTSTRAP_TARGET=fakeroot "$makepkg" noarchpromote-1-r1 >/dev/null
+nready=$incoming/noarchpromote-1-r1-ready
+mkdir "$nready"
+cp "$test_root/noarchartifacts/x86_64/noarchpromote-1-r1.apk" "$nready/"
+printf '%s\n' noarchpromote-1-r1 > "$nready/target"
+printf '%s\n' '{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}' > "$nready/package-seed.json"
+printf '%s\n' "{\"schema\":\"saphira-build-artifacts/v1\",\"target\":\"noarchpromote-1-r1\",\"constructors\":[{\"constructor\":\"makepkg\",\"producer\":\"noarchpromote-1-r1\"}],\"package_seed\":{\"schema\":\"saphira-package-seed/v1\",\"generation\":\"test\",\"seed\":[\"test\"],\"resolved\":[]}}" > "$nready/artifact-manifest.json"
+(CDPATH= cd -- "$nready" && sha256sum noarchpromote-1-r1.apk > manifest.sha256)
+run_signer >/dev/null
+test -f "$test_root/repository/hatchling/noarch/noarchpromote-1-r1.apk"
+test ! -e "$test_root/repository/hatchling/x86_64/noarchpromote-1-r1.apk"
+run_promoter hatchling hatched noarchpromote-1-r1 > "$test_root/promote-noarch.out"
+test -f "$hatched/../noarch/noarchpromote-1-r1.apk"
+test ! -e "$hatched/noarchpromote-1-r1.apk"
+apk adbdump "$hatched/Packages.adb" | grep -q '^  - name: noarchpromote$' >/dev/null
+printf '%s\n' 'promote-repo: noarch arch-split promotion: OK'

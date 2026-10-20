@@ -1,0 +1,15 @@
+#!/sbin/openrc-run
+
+description="iSNS discovery service (isnsd)"
+
+# isnsd runs as root (privileged discovery port) with --foreground
+# under supervise-daemon, so no pidfile.
+command="/usr/sbin/isnsd"
+command_args="--foreground"
+supervisor="supervise-daemon"
+
+depend()
+{
+	need localmount
+	use net
+}

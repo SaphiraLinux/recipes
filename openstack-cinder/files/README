@@ -1,0 +1,69 @@
+openstack-cinder — OpenStack Block Storage (Cinder) 29.0.0 (2026.2 Hibiscus)
+============================================================================
+
+This package installs the Cinder block storage service: API, scheduler,
+volume and backup managers. It installs software ONLY: nothing is
+enabled, started, migrated or credentialed at install time.
+
+What it ships
+-------------
+
+  /usr/bin/cinder-*                administrative CLIs and daemons
+                                   (api, backup, manage, scheduler,
+                                   status, volume, rtstool, ...)
+  cinder.wsgi.api:application      the supported WSGI application
+  cinder/db/migrations/versions/   database migration scripts
+  /etc/cinder/api-paste.ini        upstream paste pipeline (wiring)
+  /etc/cinder/rootwrap.conf + rootwrap.d/volume.filters
+  /etc/cinder/resource_filters.json scheduler hints (read-only data)
+  /etc/init.d/cinder-*             OpenRC services (4 daemons)
+  /usr/lib/systemd/system/cinder-*.service   systemd services (4 daemons)
+  /etc/conf.d/cinder-api           WSGI container runtime settings (api)
+
+Operator steps (NOT performed by this package)
+----------------------------------------------
+
+1. Write /etc/cinder/cinder.conf from the samples and the generator
+   inputs in /usr/share/cinder/:
+
+     oslo-config-generator \
+       --config-file /usr/share/cinder/cinder-config-generator.conf \
+       --output-file /etc/cinder/cinder.conf
+     # edit /etc/cinder/cinder.conf: database, keystone auth,
+     # enabled_backends + one section per backend (LVM, Ceph, NFS,
+     # ZFS, ...) and a backup section. No database driver is installed
+     # by this package: add python-pymysql for MariaDB, or use sqlite
+     # for trials.
+
+2. Provision the backing store OUTSIDE the installer. ZFS example
+   (saphira-zfs-userspace is a package dependency, the pool is the
+   operator's explicit decision):
+
+     zpool create cinder-pool mirror /dev/sdX /dev/sdY
+     # then reference cinder-pool in the [zfs] backend section.
+
+   iSCSI export uses the kernel LIO target through rtslib-fb over
+   configfs (targetcli is the optional interactive frontend).
+
+3. Initialise the database:
+
+     cinder-manage db sync
+
+4. Register the service and endpoints in Keystone (operator-chosen).
+
+5. Enable per node role, explicitly. Controller example:
+
+     rc-update add cinder-api default && rc-service cinder-api start
+     rc-update add cinder-scheduler default && ...
+   Storage node example:
+
+     rc-update add cinder-volume default && rc-service cinder-volume start
+     rc-update add cinder-backup default && ...
+   (systemd: systemctl enable --now cinder-<daemon> instead.)
+
+Independence
+------------
+
+Cinder depends on the native python closure, gunicorn, ZFS userspace
+and database client libraries. It does not depend on Nova, Neutron,
+Glance or Horizon, and it can be installed on its own.

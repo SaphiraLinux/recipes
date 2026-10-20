@@ -42,7 +42,7 @@ wireguard_tools_sha256=587db136e52a53999bd58df8626137b2600db90909a4020b0f7c8b356
 # fwmark table and must run as root (CAP_NET_ADMIN), so there is no
 # accounts.d fragment for this package.
 depends="bash coreutils iproute2 nftables procps-ng"
-makedepends="saphira-kernel-headers gcc make"
+makedepends="saphira-linux-uapi-headers gcc make"
 recipe_build() {
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$RECIPE_DIR/files/wireguard-tools-v1.0.20260223.tar.xz"
 	cd "$SRC"

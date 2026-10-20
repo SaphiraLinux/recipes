@@ -1,0 +1,27 @@
+[Unit]
+Description=OpenStack Placement API
+Documentation=man:gunicorn(1)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+User=placement
+Group=placement
+EnvironmentFile=-/etc/conf.d/placement
+Environment=PLACEMENT_BIND=127.0.0.1:8780
+Environment=PLACEMENT_CONF=/etc/placement/placement.conf
+RuntimeDirectory=placement
+RuntimeDirectoryMode=0750
+ExecStart=/usr/bin/gunicorn --name placement \
+	--bind ${PLACEMENT_BIND} --workers ${PLACEMENT_WORKERS} \
+	--pid /var/run/placement/placement.pid \
+	--config ${PLACEMENT_CONF} \
+	placement.wsgi.api:application
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+KillMode=mixed
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,17 @@
+[Unit]
+Description=OpenStack Nova noVNC console proxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nova
+Group=nova
+EnvironmentFile=-/etc/conf.d/nova-novncproxy
+ExecStart=/usr/bin/nova-novncproxy
+Restart=on-failure
+KillMode=mixed
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

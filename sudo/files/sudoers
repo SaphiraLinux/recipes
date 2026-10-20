@@ -1,0 +1,10 @@
+# Saphira sudoers: grants plus the canonical secure_path.
+#
+# secure_path (Saphira PATH policy) makes sudo sessions agree with
+# login shells regardless of the caller's environment: without it sudo
+# inherits whatever PATH the caller had, which silently varies between
+# console, ssh, cron and service contexts on a non-usrmerged system.
+Defaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+root ALL=(ALL:ALL) ALL
+%wheel ALL=(ALL:ALL) NOPASSWD:ALL

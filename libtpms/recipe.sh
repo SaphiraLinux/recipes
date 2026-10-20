@@ -21,7 +21,7 @@ makedepends="
 	gawk
 	gcc
 	libtool
-	saphira-kernel-headers
+	saphira-linux-uapi-headers
 	make
 	openssl-dev
 	pkgconf

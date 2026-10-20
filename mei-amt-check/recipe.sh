@@ -20,7 +20,7 @@ sha256=d84e72316a9a3374dac8a7f40da878dd0ac8cf29ee92837c2719e0f54b710f9e
 # CONFIG_INTEL_MEI_ME (TXE/GSC variants where hardware provides them).
 depends=""
 # x86-only: talks Intel ME/AMT over MEI.
-makedepends="binutils gcc make saphira-kernel-headers"
+makedepends="binutils gcc make saphira-linux-uapi-headers"
 
 recipe_build() {
 	case "${SAPHIRA_ARCH:-x86_64}" in

@@ -29,7 +29,39 @@ pkgver=1.0
 # identity-less fragments) plus the legacy-gate namespace fix: a
 # legacy user's primary GID is a reference, not a group-namespace
 # history claim, so paired user+group sidecars publish.
-pkgrel=77
+pkgrel=84
+# r84: builder passes the mounted repo in directory form (the r83
+# file-form index path resolved noarch payloads flat beside the index
+# and still failed: strace proves file-form apk ignores package arch,
+# while directory-form resolves index at <arch>/ and payloads at
+# <package-arch>/). Namespaces mount the generation root either way.
+# r83: builder resolves per-arch payload paths (the nova r3 build
+# proved the gap: namespaces mounted only the arch dir, so every
+# noarch fetch died ENOENT). Namespaces now bind the generation root
+# with the index at <arch>/Packages.adb; resolvepkg records per-arch
+# artifact paths; seed/collision/drift scans cover both directories
+# with dual-claim refusal. Resolver suite green.
+# r82: arch-split repository layout for noarch packages (apk fetches
+# every package from <repo>/<package-arch>/, but the publisher placed
+# everything flat: 225 noarch packages unfetchable). sign-apk-repo
+# reads each staged APK's own arch, refuses anything outside
+# {build-arch, noarch}, and places/looks-up/retires/verifies per arch
+# directory with a combined index in the build-arch directory;
+# repo_db census/disk/extract/apply scan both directories with
+# dual-claim refusal; promote-repo preserves arch across generations.
+# Regression tests: publication (place+index+fetch) and promotion
+# (cross-generation carry) noarch fixtures, suites green.
+# r81: restore the original UID/GID rule (0..100 system, 101..999
+# services, 1000+ human, 65534 nobody) across makepkg, repo_db, the
+# accounts-bootstrap census and the suites: tier ceilings, preferred
+# notices and expansion notices removed; collision detection,
+# validation and reconciliation untouched. Prior unauthorised tier
+# commits are preserved in history, not rewritten.
+# r80: ship the staged builder features the installed r79 predates:
+# named subpackage splits beyond -dev/-doc/-libs (explicit
+# files/split-<name>.list + .depends, fail-closed, base-pinned) and
+# genuinely standalone -libs runtime packages. The libvirt LXC split
+# waits on this toolchain (lists are inert under r79).
 # r76: sanctioned identity renumbers (identity-transitions data
 # file): the history census stays fail-closed except for an
 # explicitly declared package/kind/name/old/new/introducing-NVR
@@ -65,9 +97,14 @@ pkgrel=77
 # refusal + --no-scripts seed assembly with fhs.d convergence, fhs
 # dual-claim ledger fix + per-carrier extraction isolation, saphira-build
 # pidfile path, additive-schema self-heal + sysusers-native counting).
-# Seed policy: saphira-kernel-headers pins the UAPI line fuzzily
-# (~7.1.5: newest rN on the line, other lines rejected by apk
-# itself); buildpkg resolves bare names for globs, enforces
+# r78: authoritative-producer publication (buildpkg stages one ready
+# transaction per built producer with plan.json + closure-hashes.json and
+# refuses while the publisher lock is held; sign-apk-repo publishes only
+# authoritative outputs, fails closed on duplicates/stale/uncertainty with
+# snapshot revalidation and PUBLICATION-REPORT audit).
+# Seed policy: saphira-linux-uapi-headers names the UAPI baseline exactly
+# (single active line; moving it is a deliberate recipe edit, never a float);
+# buildpkg resolves bare names for globs, enforces
 # constraints per candidate, compares drift by version line, and
 # the UAPI gate accepts = and ~ pins (a bare name still floats and
 # is refused as unpinned).
@@ -145,6 +182,7 @@ recipe_install()
 	install -m 755 "$RECIPE_DIR/files/cleanpkg" "$DESTDIR/usr/bin/cleanpkg"
 	install -m 755 "$RECIPE_DIR/files/resolvepkg" "$DESTDIR/usr/bin/resolvepkg"
 	install -m 755 "$RECIPE_DIR/files/sign-apk-repo" "$DESTDIR/usr/bin/sign-apk-repo"
+	install -m 755 "$RECIPE_DIR/files/withdraw-package" "$DESTDIR/usr/bin/withdraw-package"
 	install -m 755 "$RECIPE_DIR/files/promote-repo" "$DESTDIR/usr/bin/promote-repo"
 	install -d "$DESTDIR/usr/lib/saphira-packager"
 	install -m 644 "$RECIPE_DIR/files/repo-index.sh" "$DESTDIR/usr/lib/saphira-packager/repo-index.sh"

@@ -1,0 +1,6 @@
+# networks.tsv - network purposes and what each supports.
+# Fields: purpose|families|dhcp|vlan|bridge|ovs|description
+management|ipv4,ipv6,dual|static,dhcp|yes|yes|yes|Control plane, API and management traffic. Required.
+provider|ipv4,ipv6|no|yes|yes|yes|External/provider connectivity for floating IPs and NAT.
+tenant|ipv4,ipv6|no|yes|yes|yes|Instance/overlay traffic (VXLAN/GENEVE tunnels).
+storage|ipv4,ipv6|no|no|yes|yes|Storage replication and data traffic.

@@ -120,7 +120,7 @@ def installed_makepkg() -> object:
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    for attr in ("parse_accounts_fragment", "MAX_PACKAGED_ID", "PREFERRED_MAX_ID",
+    for attr in ("parse_accounts_fragment", "MAX_PACKAGED_ID",
                  "RESERVED_USER_NAMES", "RESERVED_GROUP_NAMES", "RESERVED_GIDS"):
         if not hasattr(module, attr):
             raise BootstrapError(
@@ -204,7 +204,7 @@ def package_files(apk: str, path: Path) -> tuple[str, str, list[str]]:
 def check_union(tsv_users: dict[str, int], tsv_groups: dict[str, int],
                 decls: list[tuple[str, dict]]) -> None:
     """r48's own union + reservation rules, ported verbatim from the
-    deployed signer: packaged IDs 0..887; TSV convergence vs conflict;
+    deployed signer: packaged IDs 0..999; TSV convergence vs conflict;
     fragment duplicates collide; root/wheel/spokes + UID 0 + GIDs 0/1/2
     refused; primaries must be base-seeded or same-fragment."""
     max_id = MK.MAX_PACKAGED_ID
@@ -219,7 +219,7 @@ def check_union(tsv_users: dict[str, int], tsv_groups: dict[str, int],
             if name in reserved_groups or gid in reserved_gids:
                 errors.append(f"group {name}: {owner} declares reserved foundation identity (groups root/wheel/spokes and GIDs 0/1/2 are never package-owned)")
             elif gid > max_id:
-                errors.append(f"group {name}: {owner} GID {gid} is outside the packaged range 0..{max_id} (888..999 are local-user-service territory, 1000+ human)")
+                errors.append(f"group {name}: {owner} GID {gid} is outside the packaged range 0..{max_id} (1000+ is human territory)")
             elif name in tsv_groups:
                 if tsv_groups[name] != gid:
                     errors.append(f"group {name}: {owner} GID {gid} conflicts with base seed GID {tsv_groups[name]}")
@@ -243,7 +243,7 @@ def check_union(tsv_users: dict[str, int], tsv_groups: dict[str, int],
             elif primary in reserved_groups:
                 errors.append(f"user {name}: {owner} primary group {primary} is a reserved foundation group; service users must not be anchored to it")
             elif uid > max_id:
-                errors.append(f"user {name}: {owner} UID {uid} is outside the packaged range 0..{max_id} (888..999 are local-user-service territory, 1000+ human)")
+                errors.append(f"user {name}: {owner} UID {uid} is outside the packaged range 0..{max_id} (1000+ is human territory)")
             elif name in tsv_users:
                 if tsv_users[name] != uid:
                     errors.append(f"user {name}: {owner} UID {uid} conflicts with base seed UID {tsv_users[name]}")
@@ -464,15 +464,6 @@ def bootstrap_repo(config: dict, repo: str, write: bool) -> str:
             newest[name] = (version, declarations[filename])
     decls = [(f"{name}-{version}", decl) for name, (version, decl) in sorted(newest.items())]
     check_union(tsv_users, tsv_groups, decls)
-    for name, (version, decl) in sorted(newest.items()):
-        for entry in decl.get("groups", []):
-            if int(entry["gid"]) > MK.PREFERRED_MAX_ID:
-                print(f"saphira-accounts-bootstrap: notice: {name}-{version} group"
-                      f" {entry['name']} GID {entry['gid']} is in the 200..887 expansion range")
-        for entry in decl.get("users", []):
-            if int(entry["uid"]) > MK.PREFERRED_MAX_ID:
-                print(f"saphira-accounts-bootstrap: notice: {name}-{version} user"
-                      f" {entry['name']} UID {entry['uid']} is in the 200..887 expansion range")
 
     entries = [(census_data[f]["name"], census_data[f]["version"], declarations[f])
                for f in carriers]

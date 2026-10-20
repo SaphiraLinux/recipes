@@ -14,7 +14,33 @@
 # only package intentions, per saphira-profiles(5)) and is optional.
 pkgname=saphira-image-creator
 pkgver=0.1
-pkgrel=22
+pkgrel=25
+# r25: ESP 512M(doc)/256M(actual) -> 64 MiB. The old comment claimed
+# 512 MiB while the constant staged 524288 sectors (256 MiB); both are
+# gone. 64 MiB holds the ~1.5 MiB EFI payload (GRUB only; kernel and
+# initramfs stay in /boot, proven by the Minimer reference layout) forty
+# times over, sits at twice the FAT32 cluster-count floor that rules
+# out 32 MiB, and brings UEFI images inside the 500 MB installer
+# budget. FAT32 formatting and firmware boot of the smaller ESP are
+# Hatchling-verified, not assumed.
+# r24: install-to-disk. The same engine (partition plan, saphira-install,
+# init preparation, PARTUUID bootloader, measurement) installs onto a
+# physical disk instead of an image file: same functions, whole-device
+# backing, grub-install to the disk, no loop detach, no qcow2 convert.
+# Safety is structural, not advisory: no default device, no discovery,
+# mounted/swapped/boot disks refused outright, the complete plan always
+# printed first, --preview stops before anything is touched, and a real
+# run requires typing the device path back. On failure the disk is
+# unmounted and left as-is, never wiped by the error path. UEFI uses
+# the --removable fallback path (no NVRAM writes); efibootmgr stays a
+# deliberate follow-up.
+# r23: profiles move to the single authoritative tree in
+# saphira-install-tools (/usr/share/saphira/profiles). This package
+# ships the target matrix and the service mapping only; profile
+# intentions are validated where they live (install-tools recipe_build)
+# and the tool reads the shared tree (source tree, installed package,
+# or SAPHIRA_IMAGE_PROFILES override). No payload change beyond the
+# moved data: the same profiles resolve for every matrix target.
 # r22: systemd-only kernel arguments are added per target, not shipped in
 # the init-neutral packaged default. systemd.imds=no (with
 # systemd.getty_auto=0) now goes on the SaphiraD kernel line only; an
@@ -147,38 +173,27 @@ makedepends=""
 
 recipe_build()
 {
-	# The target matrix and the profiles are DATA, and a data file that
-	# names a package which does not exist produces an image that simply
-	# fails to install. Every intention in every shipped profile must be a
-	# real recipe, checked here rather than at image-build time.
-	local f pkg
-	for f in "$RECIPE_DIR"/files/profiles/*; do
-		awk '
-			{ line = $0; sub(/#.*$/, "", line) }
-			line ~ /^[[:space:]]*$/ { next }
-			{ gsub(/^[ \t]+|[ \t]+$/, "", line); print line }
-		' "$f" | while read -r pkg; do
-			[ -n "$pkg" ] || continue
-			case $pkg in
-			*[![:alnum:]._+-]*) continue ;;
-			esac
-			[ -f "$SAPHIRA_RECIPE_ROOT/$pkg/recipe.sh" ] || {
-				echo "ERROR: ${f##*/} names $pkg, which has no recipe" >&2
-				exit 1
-			}
-		done
-	done
 	# Every target must name a profile that exists and a supported
-	# boot/init pair. A matrix row naming a profile that was renamed would
-	# otherwise fail only at image-build time.
+	# boot/init pair. A matrix row naming a profile that was renamed
+	# would otherwise fail only at image-build time. Profile INTENTIONS
+	# (every bare name is a real recipe, every @-include resolves) are
+	# validated where the profiles live, in
+	# saphira-install-tools/recipe.sh.
 	local name boot init profile
 	while read -r name boot init profile; do
 		case $name in ''|'#'*) continue ;; esac
-		case $boot in bios|uefi) ;; *) echo "ERROR: target $name has boot=$boot" >&2; exit 1 ;; esac
-		case $init in openrc|systemd) ;; *) echo "ERROR: target $name has init=$init" >&2; exit 1 ;; esac
-		[ -f "$RECIPE_DIR/files/profiles/$profile" ] || {
-			echo "ERROR: target $name names a missing profile: $profile" >&2
-			exit 1
+		case $boot in bios|uefi) ;; *) echo "ERROR: target $name has boot=$boot" >&2; return 1 ;; esac
+		case $init in openrc|systemd) ;; *) echo "ERROR: target $name has init=$init" >&2; return 1 ;; esac
+		[ -n "$profile" ] || {
+			echo "ERROR: target $name names no profile" >&2
+			return 1
+		}
+		# Profiles live in the single shared tree (install-tools);
+		# a matrix row naming a profile that is not there fails here,
+		# not at image-build time.
+		[ -f "$SAPHIRA_RECIPE_ROOT/saphira-install-tools/files/profiles/$profile" ] || {
+			echo "ERROR: target $name names a missing shared profile: $profile" >&2
+			return 1
 		}
 	done < "$RECIPE_DIR/files/targets"
 	# Shell and man page must be syntactically valid before they ship.
@@ -194,11 +209,6 @@ recipe_install()
 		"$PKGDEST/usr/bin/saphira-image"
 	install -D -m 0644 "$RECIPE_DIR/files/targets" \
 		"$PKGDEST/usr/share/saphira/image/targets"
-	install -d -m 0755 "$PKGDEST/usr/share/saphira/image/profiles"
-	for profile in "$RECIPE_DIR"/files/profiles/*; do
-		install -m 0644 "$profile" \
-			"$PKGDEST/usr/share/saphira/image/profiles/${profile##*/}"
-	done
 	# Package -> init services mapping. OPTIONAL data: absent means every
 	# service is named after its package, which is the normal case. It
 	# exists because that assumption is not universal - saphira-packager
@@ -226,19 +236,15 @@ recipe_install()
 	install -D -m 0644 "$RECIPE_DIR/files/licenses/LICENSE" \
 		"$PKGDEST/usr/share/licenses/saphira-image-creator/LICENSE"
 	# The tool resolves its data beside itself, so the payload must carry
-	# both. Asserted rather than assumed: a missing data file makes every
-	# subcommand fail at runtime, which is exactly the class of defect
-	# this package exists to remove from the image path.
+	# the matrix. Profiles come from the shared tree (saphira-install-tools
+	# dependency), asserted rather than assumed: a missing matrix makes
+	# every subcommand fail at runtime.
 	for p in usr/share/saphira/image/targets usr/bin/saphira-image; do
 		[ -e "$PKGDEST/$p" ] || {
 			echo "ERROR: saphira-image-creator payload is missing $p" >&2
 			return 1
 		}
 	done
-	[ -d "$PKGDEST/usr/share/saphira/image/profiles" ] || {
-		echo "ERROR: saphira-image-creator shipped no profiles" >&2
-		return 1
-	}
 	# Every declared mapping must be non-empty, or it would silently enable
 	# nothing and reintroduce the defect it exists to fix.
 	for svc in "$PKGDEST"/usr/share/saphira/image/services.d/*; do

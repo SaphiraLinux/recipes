@@ -1,0 +1,12 @@
+# Cinder file-based logs. copytruncate because gunicorn workers and
+# eventlet daemons keep the log file open across a rotate. missingok
+# so the fragment is inert until the service writes.
+/var/log/cinder/*.log {
+	weekly
+	rotate 4
+	missingok
+	notifempty
+	compress
+	delaycompress
+	copytruncate
+}

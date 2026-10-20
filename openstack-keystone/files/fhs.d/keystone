@@ -1,0 +1,5 @@
+# Keystone runtime directory: /var/run is a real, volatile directory and
+# /run is a separate one. Ordinary packaged-daemon PID/socket/state live
+# under /var/run/<service>.
+dir /var/run/keystone 0750 keystone keystone
+rmdir-if-empty /run/keystone

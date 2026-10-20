@@ -1,0 +1,20 @@
+#!/sbin/openrc-run
+#
+# OpenRC service for the OpenStack Cinder scheduler.
+#
+# Standalone daemon reading /etc/cinder/cinder.conf
+# (operator-provided). Shipped unconditionally; never enabled or
+# started at install. Runs on controller nodes.
+
+name="cinder-scheduler"
+description="OpenStack Cinder scheduler"
+
+command="/usr/bin/cinder-scheduler"
+command_user="cinder:cinder"
+command_background="yes"
+pidfile="/var/run/cinder/cinder-scheduler.pid"
+
+depend() {
+	need net
+	after firewall
+}

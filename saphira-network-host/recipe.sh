@@ -2,10 +2,10 @@
 
 pkgname=saphira-network-host
 pkgver=0.1
-pkgrel=2
+pkgrel=3
 # x86_64, not noarch: see saphira-base recipe.sh (repo has no
 # noarch/ payload subdir yet; same fix applies here).
-pkgarch=${SAPHIRA_ARCH:-x86_64}
+pkgarch=noarch
 pkgdesc='Saphira network-host group (static config framework, OVS tooling, DHCP client)'
 license='BUSL-1.1'
 origin=saphira-network-host

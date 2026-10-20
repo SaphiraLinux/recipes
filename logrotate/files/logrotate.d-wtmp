@@ -1,8 +1,10 @@
-# no packages own wtmp -- rotated here (upstream convention)
+# wtmp/lastlog rotate on schedule. Ownership is root:root (Saphira
+# ships no utmp group and nothing non-root writes these files; the
+# historical 0664 root:utmp mode named a group that does not exist).
 /var/log/wtmp {
     missingok
     monthly
-    create 0664 root utmp
+    create 0644 root root
     minsize 1M
     rotate 1
 }

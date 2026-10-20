@@ -3,8 +3,11 @@
 # Top-level intentions ONLY: the package manager owns dependency
 # closure. Never enumerate resolved dependencies here; prove the
 # closure with the repository index instead (see saphira-profiles(5)).
+#
+# Kernel pinned by LINE (per-kver co-installable identity); the bare
+# saphira-kernel identity is disabled and must never be named here.
 saphira-base
-saphira-kernel
+saphira-kernel-7.2.3
 systemd
 saphira-virtualisation
 saphira-network-host

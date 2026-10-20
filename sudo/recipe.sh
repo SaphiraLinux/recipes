@@ -1,7 +1,11 @@
 #!/bin/sh
 pkgname=sudo
 pkgver=1.9.17_p2
-pkgrel=7
+pkgrel=8
+# r8: owned /etc/sudoers (existing grants verbatim + canonical
+# secure_path): without it sudo inherits whatever PATH the caller
+# had, which varies silently across console/ssh/cron/service
+# contexts. Operator modifications park as .apk-new as usual.
 # r7: merge line (explicit --sysconfdir=/etc + --localstatedir=/var
 # adopted from the hotfix configure-hygiene sweep; hatched publishes
 # r6 built without them and localstatedir-derived compiled paths may
@@ -41,6 +45,13 @@ recipe_build() {
 }
 recipe_install() {
 	make -C "$SRC" DESTDIR="$PKGDEST" install
+	# Owned sudoers (Saphira PATH policy): upstream installs a minimal
+	# file with just the grants; the canonical secure_path belongs to
+	# the same owned content so sudo sessions agree with login shells
+	# regardless of the caller's environment. Existing grants preserved
+	# verbatim; upgrades park operator modifications as .apk-new.
+	install -m 0440 "$RECIPE_DIR/files/sudoers" \
+		"$PKGDEST/etc/sudoers"
 	# Least-privilege payload: sudoers.d holds privilege config,
 	# so it ships 0750 even though upstream installs 0755.
 	install -d -m 0750 "$PKGDEST/etc/sudoers.d"

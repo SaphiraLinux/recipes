@@ -1,0 +1,22 @@
+#!/sbin/openrc-run
+#
+# OpenRC service for the OpenStack Nova compute agent.
+#
+# Standalone daemon reading /etc/nova/nova.conf (operator-provided).
+# Drives KVM guests through libvirtd: libvirt must be installed and
+# its daemons running (see the package README). Shipped
+# unconditionally; never enabled or started at install. Runs on
+# compute nodes.
+
+name="nova-compute"
+description="OpenStack Nova compute agent"
+
+command="/usr/bin/nova-compute"
+command_user="nova:nova"
+command_background="yes"
+pidfile="/var/run/nova/nova-compute.pid"
+
+depend() {
+	need net
+	after firewall
+}

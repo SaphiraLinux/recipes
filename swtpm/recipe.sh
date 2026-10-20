@@ -28,7 +28,7 @@ makedepends="
 	gmp-dev
 	libtool
 	libtpms-dev
-	saphira-kernel-headers
+	saphira-linux-uapi-headers
 	make
 	openssl-dev
 	pkgconf

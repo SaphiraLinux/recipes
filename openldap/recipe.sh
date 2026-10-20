@@ -184,7 +184,7 @@ recipe_install()
 		{ printf 'openldap: libperl missing from slapd DT_NEEDED\n' >&2; \
 		readelf -d "$PKGDEST/usr/libexec/slapd" >&2 || true; exit 1; }
 	# Runtime identity declaration: ldap:146 (next free ID in the
-	# 0..199 packaged range; verified against accounts.tsv, all
+	# 101..999 service range; verified against accounts.tsv, all
 	# accounts.d fragments, and the service-identity migration
 	# matrix - 124/125/126 taken, 127..131 and 144/145 sysusers
 	# reservations, 132..143 claimed).

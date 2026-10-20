@@ -206,10 +206,14 @@ files under).
 Success, or nothing pending. Dry runs always exit 0.
 .TP
 .B 1
-A merge was aborted, a scan path is not a directory, the
-configuration is unreadable, or a file is not an
+A merge was aborted, an explicit
+.B --scan-path
+is not a directory, the configuration is unreadable, or a file is not
+an
 .B .apk-new
-artifact. Aborts write nothing.
+artifact. Aborts write nothing. Configured scan paths that do not
+exist (optional components not installed) are skipped with a warning,
+not an error.
 .SH SEE ALSO
 .BR apk (8),
 .BR vipw (8)

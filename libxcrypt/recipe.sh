@@ -12,7 +12,7 @@ pkgver=4.4.38
 # generic crypt.3/crypt_r.3; libxcrypt-doc keeps the extended API
 # pages (gensalt/ra/rn, checksalt, preferred_method, crypt.5) only.
 # Supersedes unpublished r2 (payload delta: minus two doc files).
-pkgrel=6
+pkgrel=7
 # r6: the generic crypt namespace belongs to musl, and stays musl's.
 # musl-dev owns an EMPTY libcrypt.a for build-system compatibility and
 # crypt()/crypt_r() live in musl's libc, so an ordinary -lcrypt resolves
@@ -25,6 +25,12 @@ pkgrel=6
 # r4 re-exposed libxcrypt's implementation as the generic libcrypt.so, and
 # r5 invented a linker-script shim that was redundant with the empty archive
 # musl already provides. Neither was needed.
+# r7: FHS non-usrmerged — /bin/login, passwd, su, getsubids +
+# /sbin/sulogin link libcrypt, so the runtime SONAME chain ships in
+# /lib (verified 2026-10-19 via ldd). Dev/opt-in names stay in
+# /usr/lib as absolute /lib targets (development artefacts, not
+# usrmerge; no relative ../ links). Egg carries an unowned stage1
+# fossil in /lib; the package must stage it in /lib.
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="Extended crypt library for password hashing (libcrypt)"
 license="LGPL-2.1-or-later"
@@ -64,6 +70,14 @@ recipe_build()
 recipe_install()
 {
 	make DESTDIR="$PKGDEST" install
+	# FHS non-usrmerged: /bin/login, passwd, su, getsubids +
+	# /sbin/sulogin link libcrypt, so the runtime SONAME chain ships
+	# in /lib; dev/opt-in names stay in /usr/lib as absolute /lib
+	# targets (no relative ../ links).
+	mkdir -p "$PKGDEST/lib"
+	for lib in "$PKGDEST/usr/lib/libcrypt.so.2"*; do
+		[ -e "$lib" ] && mv "$lib" "$PKGDEST/lib/"
+	done
 	# Private development namespace: the header and the -lcrypt dev
 	# link move out of the global paths so generic <crypt.h>/-lcrypt
 	# resolve to musl. Runtime libcrypt.so.2 stays global.
@@ -90,8 +104,8 @@ recipe_install()
 	# object under a name nothing else can collide with. There is no
 	# libxcrypt.a because the build is --disable-static; the empty generic
 	# libcrypt.a is musl's and is unaffected either way.
-	ln -s libcrypt.so.2 "$PKGDEST/usr/lib/libxcrypt.so"
-	ln -s ../libcrypt.so.2 "$PKGDEST/usr/lib/libxcrypt/libcrypt.so"
+	ln -s /lib/libcrypt.so.2 "$PKGDEST/usr/lib/libxcrypt.so"
+	ln -s /lib/libcrypt.so.2 "$PKGDEST/usr/lib/libxcrypt/libcrypt.so"
 	# The explicit interface is pkg-config libxcrypt; the global
 	# libcrypt.pc masquerades as the default provider (nothing in
 	# /recipes consumes it - verified 2026-09-16) and goes.
@@ -124,11 +138,28 @@ recipe_install()
 		return 1
 	}
 	# The opt-in name must exist, or nobody can select the extended hashes.
-	[ -e "$PKGDEST/usr/lib/libxcrypt.so" ] || {
+	# -L, not -e: the link target is absolute (/lib/...), and -e would
+	# resolve it against the build root instead of the staging tree.
+	[ -L "$PKGDEST/usr/lib/libxcrypt.so" ] || {
 		echo "ERROR: libxcrypt.so missing; a consumer cannot opt into the" >&2
 		echo "       extended hashes deliberately." >&2
 		return 1
 	}
+	# FHS placement: the runtime SONAME chain serves /bin + /sbin
+	# consumers, so it lives in /lib; /usr/lib keeps only the
+	# opt-in/dev names pointing back.
+	test -f "$PKGDEST/lib/libcrypt.so.2.0.0" || {
+		echo "ERROR: runtime libcrypt.so.2.0.0 missing from /lib" >&2; return 1; }
+	test -L "$PKGDEST/lib/libcrypt.so.2" || {
+		echo "ERROR: SONAME link libcrypt.so.2 missing from /lib" >&2; return 1; }
+	test ! -e "$PKGDEST/usr/lib/libcrypt.so.2.0.0" || {
+		echo "ERROR: runtime libcrypt.so.2.0.0 staged in /usr/lib (belongs in /lib)" >&2; return 1; }
+	# Stage1-leak guard (2026-10-19 file fossil incident): a clean
+	# native build must never embed /saphirabuild stage paths.
+	if grep -rqF '/saphirabuild/' "$PKGDEST"; then
+		echo "ERROR: staged payload leaks /saphirabuild stage path" >&2
+		return 1
+	fi
 	test ! -e "$PKGDEST/usr/share/man/man3/crypt.3" || {
 		echo "ERROR: generic crypt.3 still staged (man-pages owns it)" >&2; return 1; }
 	test ! -e "$PKGDEST/usr/share/man/man3/crypt_r.3" || {

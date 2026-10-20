@@ -1,0 +1,5 @@
+# Nova conductor runtime settings (operator-editable).
+#
+# The conductor reads /etc/nova/nova.conf directly. Nothing here is
+# applied until the operator enables and starts the service.
+# (No container settings: this daemon is not gunicorn-served.)

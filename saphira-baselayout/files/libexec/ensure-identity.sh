@@ -36,7 +36,8 @@
 #
 # Fragment syntax (strict; anything else fails closed):
 #   group <name> <gid>
-#   user <name> <uid> <primary-group> <home> <shell>
+#   user <name> <uid> <primary-group> <home> <shell> [supplementary-groups]
+#   (comma-separated supplementary names, no spaces; additive only)
 #   dir <path> <mode> <owner> <group>
 #   file <path> <mode> <owner> <group>
 # Blank lines and '#' comments are ignored.
@@ -75,12 +76,9 @@
 #   is not forbidden by this rule.) Root provisioning belongs
 #   exclusively to the base seed and firstboot; this tool can
 #   neither create, converge with, nor disable those identities.
-# - packaged IDs are created only in 0..887 (preferred 0..199;
-#   200..887 is reserved expansion - accepted here, allocation
-#   preference is enforced at build and publish time, not on the
-#   live box). 888..999 belong to local user services and 1000+ to
-#   humans: creation there refuses, while convergence with an
-#   existing entry is always allowed.
+# - packaged IDs are created only in 0..999 (1000+ are human
+#   territory, never minted here). Converging with an already-present
+#   entry above is fine and is handled by the early return.
 # - a primary group that is neither declared in this fragment nor already
 #   present may still be satisfied from the accounts.tsv base-seed map
 #   (shipped by this same package set at usr/share/saphira/accounts.tsv).
@@ -549,19 +547,17 @@ ensure_group()
 		log "group $name ($gid) already present"
 		return 0
 	fi
-	# Packaged range only on creation: 888..999 belong to local user
-	# services and 1000+ to humans, so this tool never mints IDs there
-	# (converging with an already-present entry above is fine and is
-	# handled by the early return). A hand-provisioned local account
-	# (e.g. qmail's fixed IDs) with matching attributes converges
-	# silently instead of blocking the install.
-	if [ "$gid" -ge 0 ] && [ "$gid" -le 887 ]; then
+	# Packaged range only on creation: 1000+ are human territory, so
+	# this tool never mints IDs there (converging with an
+	# already-present entry above is fine and is handled by the early
+	# return).
+	if [ "$gid" -ge 0 ] && [ "$gid" -le 999 ]; then
 		:
 	elif [ "$CHECK" -eq 1 ]; then
-		drift "group $name ($gid) is outside the packaged range 0..887"
+		drift "group $name ($gid) is outside the packaged range 0..999"
 		return 0
 	else
-		die "GID outside packaged range 0..887: $gid"
+		die "GID outside packaged range 0..999: $gid"
 	fi
 	owner=$(gid_taken "$gid")
 	if [ -n "$owner" ]; then
@@ -591,6 +587,7 @@ ensure_user()
 	primary=$3
 	home=$4
 	shell=$5
+	supp=${6-}
 	valid_name "$name" || die "invalid user name: $name"
 	valid_name "$primary" || die "invalid primary group name: $primary"
 	case $uid in
@@ -635,18 +632,19 @@ ensure_user()
 		log "user $name ($uid) already present"
 		ensure_shadow "$name"
 		ensure_home "$home" "$uid" "$primary"
+		ensure_memberships "$name" "$supp"
 		return 0
 	fi
-	# Packaged range only on creation (see ensure_group): a locally
-	# hand-provisioned account with matching attributes converges
-	# above via the early return and never reaches this refusal.
-	if [ "$uid" -ge 0 ] && [ "$uid" -le 887 ]; then
+	# Packaged range only on creation (see ensure_group): converging
+	# with an already-present entry above is fine and never reaches
+	# this refusal.
+	if [ "$uid" -ge 0 ] && [ "$uid" -le 999 ]; then
 		:
 	elif [ "$CHECK" -eq 1 ]; then
-		drift "user $name ($uid) is outside the packaged range 0..887"
+		drift "user $name ($uid) is outside the packaged range 0..999"
 		return 0
 	else
-		die "UID outside packaged range 0..887: $uid"
+		die "UID outside packaged range 0..999: $uid"
 	fi
 	owner=$(uid_taken "$uid")
 	if [ -n "$owner" ]; then
@@ -689,6 +687,84 @@ ensure_user()
 	log "user $name ($uid:$gid) created"
 	ensure_shadow "$name"
 	ensure_home "$home" "$uid" "$primary"
+	ensure_memberships "$name" "$supp"
+}
+
+# Supplementary group membership (fragment `user` 6th field,
+# comma-separated names, no spaces). Additive only: memberships are
+# created/converged here and never removed, matching the conservative
+# removal direction (disable mode never touches them, same as users,
+# groups and state). Group resolution mirrors primary groups:
+# fragment-declared (groups pre-pass runs first), live, or
+# base-seeded; anything else fails closed.
+ensure_memberships()
+{
+	name=$1
+	supp=${2-}
+	[ -n "$supp" ] || return 0
+	old_ifs=$IFS
+	IFS=,
+	# shellcheck disable=SC2086
+	set -f
+	for group in $supp; do
+		valid_name "$group" || die "invalid supplementary group name: $group (user $name)"
+		case $group in
+			root|wheel|spokes) die "refusing user $name: supplementary group $group is a reserved foundation group" ;;
+		esac
+		if [ -z "$(group_entry "$group")" ]; then
+			tsv_gid=$(tsv_group_gid "$group") || tsv_gid=
+			if [ -n "$tsv_gid" ]; then
+				ensure_group "$group" "$tsv_gid"
+			elif [ "$CHECK" -eq 1 ]; then
+				case $CHECK_DONE in
+				*" g:$group "*) ;;
+				*) die "supplementary group is not declared, present, or base-seeded: $group (user $name)" ;;
+				esac
+			else
+				die "supplementary group is not declared, present, or base-seeded: $group (user $name)"
+			fi
+		fi
+		entry=$(group_entry "$group")
+		[ -n "$entry" ] || die "supplementary group vanished: $group"
+		members=$(field 4 "$entry")
+		case ",$members," in
+			*",$name,"*) log "user $name already member of $group" ;;
+			*)
+				if [ "$CHECK" -eq 1 ]; then
+					drift "user $name would join group $group"
+				else
+					member_add "$name" "$group" "$entry"
+				fi
+				;;
+		esac
+	done
+	IFS=$old_ifs
+	set +f
+}
+
+member_add()
+{
+	name=$1
+	group=$2
+	entry=$3
+	gid=$(field 3 "$entry")
+	members=$(field 4 "$entry")
+	if [ -n "$members" ]; then
+		newline="$group:x:$gid:$members,$name"
+	else
+		newline="$group:x:$gid:$name"
+	fi
+	tmp=$(mktemp "$ROOT/etc/.saphira-member.XXXXXX") ||
+		die "cannot create membership workspace"
+	while IFS= read -r line || [ -n "$line" ]; do
+		case $line in
+			"$group":*) printf '%s\n' "$newline" >> "$tmp" ;;
+			*) printf '%s\n' "$line" >> "$tmp" ;;
+		esac
+	done < "$GROUPF"
+	cat -- "$tmp" > "$GROUPF" || die "cannot update group database"
+	rm -f -- "$tmp"
+	log "user $name joined group $group"
 }
 
 group_gid()
@@ -856,7 +932,7 @@ check_index_fragment() {
 		esac
 		case $1 in
 		user)
-			[ $# -eq 6 ] || continue
+			[ $# -eq 6 -o $# -eq 7 ] || continue
 			valid_name "$2" || continue
 			case $3 in
 			''|*[!0-9]*) continue ;;
@@ -1356,7 +1432,7 @@ disable_validate()
 				frag_groups="$frag_groups$2:$(($3 + 0)) "
 				;;
 			user)
-				[ $# -eq 6 ] || die "fragment line $lineno: user needs 5 fields"
+				[ $# -eq 6 -o $# -eq 7 ] || die "fragment line $lineno: user needs 5 fields plus optional supplementary list"
 				valid_name "$2" || die "invalid user name: $2"
 				valid_name "$4" || die "invalid primary group name: $4"
 				case $3 in
@@ -1522,7 +1598,7 @@ reject_reserved()
 				reserved_identity group "$2" "$(($3 + 0))"
 				;;
 			user)
-				[ $# -eq 6 ] || continue
+				[ $# -eq 6 -o $# -eq 7 ] || continue
 				valid_name "$2" || continue
 				case $3 in
 					''|*[!0-9]*) continue ;;
@@ -1570,8 +1646,8 @@ while IFS= read -r line || [ -n "$line" ]; do
 			ensure_group "$2" "$3"
 			;;
 		user)
-			[ $# -eq 6 ] || die "fragment line $lineno: user needs 5 fields"
-			ensure_user "$2" "$3" "$4" "$5" "$6"
+			[ $# -eq 6 -o $# -eq 7 ] || die "fragment line $lineno: user needs 5 fields plus optional supplementary list"
+			ensure_user "$2" "$3" "$4" "$5" "$6" "${7-}"
 			;;
 		dir)
 			[ $# -eq 5 ] || die "fragment line $lineno: dir needs 4 fields"

@@ -1,0 +1,16 @@
+# Cinder API runtime settings (operator-editable).
+#
+# These are the WSGI container's own settings, not Cinder's
+# configuration (which lives in /etc/cinder/cinder.conf). Nothing
+# here is applied until the operator enables and starts the service.
+
+# Address and port gunicorn listens on. Point this at a TLS-terminating
+# proxy (nginx/haproxy) for production; leave the default for a local
+# listener behind such a proxy.
+#CINDER_API_BIND="127.0.0.1:8776"
+
+# Number of gunicorn worker processes.
+#CINDER_API_WORKERS="4"
+
+# Path to the Cinder configuration file.
+#CINDER_API_CONF="/etc/cinder/cinder.conf"

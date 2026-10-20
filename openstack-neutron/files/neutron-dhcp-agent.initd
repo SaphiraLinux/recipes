@@ -1,0 +1,25 @@
+#!/sbin/openrc-run
+#
+# OpenRC service for the OpenStack Neutron DHCP agent.
+#
+# Standalone daemon spawning dnsmasq instances per network (it calls
+# the dnsmasq binary directly; the system dnsmasq service is a
+# different thing and must NOT be enabled on these ports).
+# Privileged operations escalate per-command through neutron-rootwrap;
+# the agent itself runs as the neutron user. Reads
+# /etc/neutron/dhcp_agent.ini (operator-provided). Shipped
+# unconditionally; never enabled or started at install. Runs on
+# network nodes.
+
+name="neutron-dhcp-agent"
+description="OpenStack Neutron DHCP agent"
+
+command="/usr/bin/neutron-dhcp-agent"
+command_user="neutron:neutron"
+command_background="yes"
+pidfile="/var/run/neutron/neutron-dhcp-agent.pid"
+
+depend() {
+	need net
+	after firewall
+}

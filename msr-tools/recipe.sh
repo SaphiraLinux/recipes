@@ -18,7 +18,7 @@ depends=""
 # x86 MSRs do not exist elsewhere: fail closed off x86_64 (established
 # SAPHIRA_ARCH case pattern) rather than shipping dead binaries.
 # Upstream install target ignores DESTDIR, so install manually.
-makedepends="binutils gcc make saphira-kernel-headers"
+makedepends="binutils gcc make saphira-linux-uapi-headers"
 
 recipe_build() {
 	case "${SAPHIRA_ARCH:-x86_64}" in

@@ -2,7 +2,41 @@
 
 pkgname=saphira-baselayout
 pkgver=0.1
-pkgrel=49
+pkgrel=54
+# r54: systemd PATH drop-in sets DefaultEnvironment as well as
+# ManagerEnvironment (proven on Minimer: ManagerEnvironment alone
+# never reaches services, leaving daemons without /sbin:/bin;
+# mariadb/rabbitmq failed boot on missing chown/uname/readlink).
+# r53: restore the original UID/GID rule in ensure-identity.sh
+# (0..999 creatable, 1000+ refused; tier ceilings and notices
+# removed; collision/conflict and safe-reconciliation paths
+# untouched) + document the user-line supplementary field. The r52
+# shell/PATH payload is unchanged.
+# r52: shell foundations (Saphira PATH policy + interactive defaults):
+# canonical PATH order in profile/root.profile, new /etc/bashrc
+# (root-aware prompt, history, completion hook, aliases) with skel
+# thinned to wire it in, systemd ManagerEnvironment PATH drop-in
+# (this systemd build omits /sbin:/bin from its compiled default),
+# firstboot provisions home dotfiles only when absent.
+# r51: supplementary-groups grammar in ensure-identity.sh ONLY
+# (fragment `user` 7th field, additive memberships, conservative
+# removal). Verified: the entire installed-vs-tree delta is this
+# grammar (firstboot, accounts.tsv, ensure-fhs identical). Unblocks
+# the libvirt qemu:kvm membership; no behavior change for existing
+# fragments (6-field lines parse identically).
+# r50: the completion rule contradicted itself. commit_completion runs
+# BEFORE the network apply, but apply-network.sh refused any state
+# where completed exists - so every post-commit network apply failed,
+# the written config was rolled back, and committed machines came up
+# with loopback only. The guard now admits completed plus a live
+# transaction (active) and still refuses a stale completed state with
+# none, so a stale marker can never bypass it. Also: the interface
+# count typo (${#interfaces[$(@)]}), the pending username deleted
+# before the resume check could read it, and two bare post-commit
+# validations that aborted the wizard under set -e - all recorded
+# instead of fatal now. Proven by tests/firstboot-completion.sh and
+# tests/firstboot-network-apply.sh (real helper, post-commit and
+# failure paths).
 # r49: an identity must not die reconciling its own home directory.
 # The reconciler pasted its root onto every path, so a root of "/" made
 # them "//etc/passwd" and "//var/lib/dhcpcd". A double-slashed path is
@@ -380,6 +414,15 @@ recipe_install()
 	# installing it here too would dual-own /etc/inittab and trip
 	# the repository ownership gate.
 	install -m 0644 "$RECIPE_DIR/files/profile" "$PKGDEST/etc/profile"
+	# System-wide interactive Bash defaults (sourced by /etc/skel/.bashrc;
+	# existing home dotfiles are never rewritten to pick it up).
+	install -m 0644 "$RECIPE_DIR/files/bashrc" "$PKGDEST/etc/bashrc"
+	# systemd manager environment: this systemd build omits /sbin and
+	# /bin from its compiled DefaultEnvironment (proven by daemons
+	# failing bare-name helper lookups), so set the canonical PATH
+	# centrally rather than per-unit workarounds in every package.
+	install -D -m 0644 "$RECIPE_DIR/files/systemd/system.conf.d/10-saphira-path.conf" \
+		"$PKGDEST/etc/systemd/system.conf.d/10-saphira-path.conf"
 	install -m 0644 "$RECIPE_DIR/files/network.conf" \
 		"$PKGDEST/etc/network.conf"
 	install -m 0644 "$RECIPE_DIR/files/default-grub" \

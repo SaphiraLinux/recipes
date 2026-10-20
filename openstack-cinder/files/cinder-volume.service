@@ -1,0 +1,17 @@
+[Unit]
+Description=OpenStack Cinder volume manager
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cinder
+Group=cinder
+EnvironmentFile=-/etc/conf.d/cinder-volume
+ExecStart=/usr/bin/cinder-volume
+Restart=on-failure
+KillMode=mixed
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

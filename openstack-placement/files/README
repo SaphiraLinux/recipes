@@ -1,0 +1,53 @@
+openstack-placement — OpenStack Placement 16.0.0 (2026.2 Hibiscus)
+====================================================================
+
+This package installs the Placement resource-tracking service. It
+installs software ONLY: nothing is enabled, started, migrated or
+credentialed at install time.
+
+What it ships
+-------------
+
+  /usr/bin/placement-manage        administrative CLI (db sync, ...)
+  /usr/bin/placement-status        status CLI
+  placement.wsgi.api:application   the supported WSGI application
+  placement/db/sqlalchemy/alembic/ database migration scripts
+  /usr/share/placement/config-generator.conf   config generator input
+  /etc/init.d/placement            OpenRC service (gunicorn)
+  /usr/lib/systemd/system/placement.service   systemd service (gunicorn)
+  /etc/conf.d/placement            WSGI container runtime settings
+
+Operator steps (NOT performed by this package)
+----------------------------------------------
+
+1. Render and edit the configuration (no sample placement.conf ships
+   upstream; generate from the shipped generator input):
+
+     oslo-config-generator \
+       --config-file /usr/share/placement/config-generator.conf \
+       --output-file /etc/placement/placement.conf
+     # edit /etc/placement/placement.conf (database, keystone auth, ...).
+     # No database driver is installed by this package: add
+     # python-pymysql for MariaDB, or use sqlite for trials.
+
+2. Initialise the database:
+
+     placement-manage db_sync
+
+3. Register the service and endpoints in Keystone (operator-chosen).
+
+4. Enable and start the service explicitly:
+
+     rc-update add placement default && rc-service placement start
+     # or
+     systemctl enable --now placement
+
+Placement is served by gunicorn; nginx/haproxy fronting it for TLS is
+an optional, operator-configured choice.
+
+Independence
+------------
+
+Placement depends on the native python closure, gunicorn and the
+keystone middleware libraries. It does not depend on Nova, Neutron,
+Cinder, Glance or QEMU, and it can be installed on its own.

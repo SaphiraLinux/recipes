@@ -12,9 +12,17 @@
 # The profile is named base-system, not saphira-base, because saphira-base is
 # an APK. @base-system (this file) and saphira-base (a package) would
 # otherwise be two things one keystroke apart, in documentation, in logs and
-# in an installer UI. Compose it with @saphira-openrc or @saphira-systemd.
+# in an installer UI. Compose it with @init-openrc or @init-systemd for a
+# bare base, or name a product profile (@minimal-openrc, @saphira-openrc)
+# for a complete machine.
+#
+# The kernel is pinned by LINE, not by version: saphira-kernel-7.2.3 is a
+# per-kver co-installable identity, so naming it is a bare-package intention
+# (recipe-rules.sh compliant) that still selects the known-good 7.2.3 line.
+# The bare saphira-kernel identity is disabled (superseded by the per-kver
+# split) and must never be named here.
 saphira-base
-saphira-kernel
+saphira-kernel-7.2.3
 # Boot infrastructure is an explicit intention: an installed machine
 # carries its own bootloader, both to boot now and to survive a later
 # kernel upgrade.
@@ -33,3 +41,9 @@ vim
 iproute2
 ca-certificates
 tzdata
+# Device management: both inits need the udev daemon (the systemd
+# package explicitly does not ship systemd-udevd; see its
+# strict-complement rule), and /dev/disk/* never exists without it
+# (proven Egg 2026-10-19). Init-neutral like everything else here:
+# openrc runs /etc/init.d/udev, systemd runs systemd-udevd.service.
+udev

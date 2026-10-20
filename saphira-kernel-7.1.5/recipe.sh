@@ -18,7 +18,14 @@ pkgname=saphira-kernel-7.1.5
 # automatic replacement.
 kernel_version=7.1.5
 pkgver=1
-pkgrel=3
+pkgrel=5
+# r5: origin="$pkgname" (version-specific identity end to end; no
+# generic saphira-kernel origin for independently versioned kernel
+# packages). Metadata change, revision bump.
+# r4: hypervisor programme (task 55f2235d): KVM_AMD=m, KVM_XEN=y,
+# full Xen Dom0/DomU set (core/console/root-path frontends =y,
+# backends + rest =m; TARGET_CORE/TCG_TPM=m prerequisites).
+# Verified per line with olddefconfig. Payload change.
 # r3: build in DRM_BOCHS + DRM_QXL (QEMU std VGA and SPICE consoles
 # need builtin drivers; no initramfs to load them). Payload change.
 # r2: build in DRM_I915 + DRM_SIMPLEDRM (no early boot logs: i915 as a
@@ -27,7 +34,7 @@ pkgrel=3
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="Saphira kernel 7.1.5 (x86-64-v3, signed modules, Saphira regdb trust)"
 license=GPL-2.0-only
-origin=saphira-kernel
+origin="$pkgname"
 repo=saphira
 url=https://saphira.vm2.uk/
 
@@ -181,6 +188,11 @@ recipe_install()
 	install -m 644 "$SRC/linux-${kernel_version}/arch/x86/boot/bzImage" "$PKGDEST/boot/vmlinuz-${kernel_version}-akadata"
 	install -m 644 "$SRC/linux-${kernel_version}/System.map" "$PKGDEST/boot/System.map-${kernel_version}-akadata"
 	install -m 644 "$SRC/linux-${kernel_version}/.config" "$PKGDEST/boot/config-${kernel_version}-akadata"
+	# /boot image naming policy: vmlinuz-<kver>-akadata exactly, no
+	# suffixes (revisions live in the APK NVR, never the filename).
+	# Fails the stage on any stray name; report-only, never deletes.
+	. "$RECIPE_DIR/files/check-boot-image-names.sh"
+	check_boot_image_names "$PKGDEST" "$kernel_version"
 	# saphira-kernel-7.1.5 is a RUNTIME package. Upstream modules_install bakes the
 	# absolute build-tree path into lib/modules/<release>/{build,source};
 	# constructor state under /build must never leak into an installed

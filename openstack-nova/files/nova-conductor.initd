@@ -1,0 +1,20 @@
+#!/sbin/openrc-run
+#
+# OpenRC service for the OpenStack Nova conductor.
+#
+# Standalone daemon reading /etc/nova/nova.conf (operator-provided).
+# Shipped unconditionally; never enabled or started at install.
+# Runs on controller nodes.
+
+name="nova-conductor"
+description="OpenStack Nova conductor"
+
+command="/usr/bin/nova-conductor"
+command_user="nova:nova"
+command_background="yes"
+pidfile="/var/run/nova/nova-conductor.pid"
+
+depend() {
+	need net
+	after firewall
+}

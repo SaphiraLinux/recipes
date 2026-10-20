@@ -14,6 +14,7 @@ depend()
 start_pre()
 {
 	checkpath -d -m 0755 /run/saphira-network
+	checkpath -d -m 0755 /var/run/dhcpcd
 	ebegin "Validating saphira network configuration"
 	"$command" validate
 }

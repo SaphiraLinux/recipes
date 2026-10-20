@@ -1,0 +1,39 @@
+#!/sbin/openrc-run
+
+description="libvirt virtualization LXC driver (virtlxcd)"
+
+# libvirt's modular daemons do not daemonize, so supervise-daemon owns the
+# real process and there is no pidfile to track. Mirrors
+# files/virtqemud.initd; the SIGHUP reload stanza mirrors upstream's
+# virtlxcd.init.in (virtlxcd re-execs configuration on SIGHUP).
+command="/usr/sbin/virtlxcd"
+supervisor="supervise-daemon"
+
+# Saphira is not usrmerged and /var/run is a real directory, never a
+# /run alias: the daemon is built with -Drunstatedir=/var/run, so the
+# socket directory must exist here before the daemon starts.
+start_pre()
+{
+	checkpath -d -o root:root -m 0755 /var/run/libvirt
+}
+
+depend()
+{
+	need localmount
+	use net
+	after firewall
+}
+
+extra_started_commands="reload"
+description_reload="re-exec the daemon to enforce configuration reload"
+
+reload()
+{
+	if ! service_started ; then
+		eerror "$name is not running"
+		return 1
+	fi
+	ebegin "re-exec() virtlxcd"
+	supervise-daemon "$name" --signal HUP
+	eend $?
+}

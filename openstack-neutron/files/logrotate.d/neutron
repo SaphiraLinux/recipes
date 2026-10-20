@@ -1,0 +1,12 @@
+# Neutron file-based logs. copytruncate because gunicorn workers and
+# eventlet agents keep the log file open across a rotate. missingok
+# so the fragment is inert until the service writes.
+/var/log/neutron/*.log {
+	weekly
+	rotate 4
+	missingok
+	notifempty
+	compress
+	delaycompress
+	copytruncate
+}

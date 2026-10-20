@@ -352,7 +352,14 @@ class Planner:
     def _record_repository_package(self, packages: dict[str, list[RepositoryPackage]], current: dict[str, str], repo_dir: Path) -> None:
         if not all(current.get(key) for key in ("name", "version", "arch")):
             die("trusted repository index contains incomplete package metadata")
-        artifact = repo_dir / f"{current['name']}-{current['version']}.apk"
+        # Arch-split layout: the artifact lives under the package's own
+        # arch directory (repo_dir itself is the build-arch level).
+        if current["arch"] == self.config["SAPHIRA_ARCH"]:
+            artifact = repo_dir / f"{current['name']}-{current['version']}.apk"
+        elif current["arch"] == "noarch":
+            artifact = repo_dir.parent / "noarch" / f"{current['name']}-{current['version']}.apk"
+        else:
+            die(f"trusted repository index contains unsupported package arch: {current['name']}-{current['version']} arch {current['arch']!r}")
         if artifact.is_file():
             packages.setdefault(current["name"], []).append(
                 RepositoryPackage(current["name"], current["version"], current["arch"], str(artifact))

@@ -1,0 +1,11 @@
+# RabbitMQ log rotation. missingok keeps the fragment inert until
+# the broker writes.
+/var/log/rabbitmq/*.log {
+	weekly
+	rotate 4
+	missingok
+	notifempty
+	compress
+	delaycompress
+	copytruncate
+}

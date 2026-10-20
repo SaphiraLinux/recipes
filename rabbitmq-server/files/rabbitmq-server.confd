@@ -1,0 +1,6 @@
+# RabbitMQ runtime settings (operator-editable).
+#
+# The broker reads /etc/rabbitmq/rabbitmq.conf (operator-provided;
+# see the RabbitMQ configuration guide). Nothing here is applied until
+# the operator enables and starts the service.
+#RABBITMQ_NODENAME="rabbit@$(hostname)"

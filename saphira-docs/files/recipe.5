@@ -137,12 +137,21 @@ A service package owns its Unix identities by shipping
 one stanza per line:
 .PP
 .RS
-user <name> <uid> <primary-group> <home> <shell>
+user <name> <uid> <primary-group> <home> <shell> [<supp-groups>]
 .br
 group <name> <gid>
 .br
 dir <path> <mode> <owner> <group>
 .RE
+.PP
+The optional sixth user field is a comma-separated supplementary
+group list (no spaces), for device access such as a hypervisor user
+in the
+.I kvm
+group. Names resolve like the primary (same-fragment, live, or
+base-seeded) and foundation groups are refused there too.
+Membership is additive only: creation and convergence add it, removal
+never recycles it.
 .PP
 Packaged IDs fall in 0..887 (0..199 preferred; 200..887 are documented
 expansion exceptions; 888..999 are local services, 1000+ humans).

@@ -1,0 +1,19 @@
+#!/sbin/openrc-run
+
+description="SASL authentication daemon (saslauthd)"
+
+# saslauthd runs as root (it reads the system user database) and
+# stays in the foreground under supervise-daemon, so no pidfile.
+command="/usr/sbin/saslauthd"
+command_args="-d -m /var/run/saslauthd"
+supervisor="supervise-daemon"
+
+start_pre()
+{
+	checkpath -d -m 0755 /var/run/saslauthd
+}
+
+depend()
+{
+	need localmount
+}

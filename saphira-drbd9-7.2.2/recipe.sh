@@ -32,7 +32,7 @@ depends="kmod saphira-kernel-7.2.2"
 # The worker refuses before spending anything when the builder did
 # not expose a readable /keys/module-signing.pem.
 saphira_sign_key_required=yes
-# saphira-kernel-headers stays kver-only (bare name, host UAPI only;
+# saphira-linux-uapi-headers supplies host UAPI (single active line;
 # the build tree comes from staged /input). -rN never enters kmod deps.
 # elfutils is a build-root input: the staged tree's prebuilt host tools
 # (objtool) link libelf.so.1, and the tree arrives built, not built here.
@@ -46,7 +46,7 @@ makedepends="
     patch
     perl
     elfutils
-    saphira-kernel-headers
+    saphira-linux-uapi-headers
 "
 
 KVER_SHORT=7.2.2

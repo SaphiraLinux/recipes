@@ -1,0 +1,5 @@
+# Placement runtime directory: /var/run is a real, volatile directory
+# and /run is a separate one. Ordinary packaged-daemon PID/socket/state
+# live under /var/run/<service>.
+dir /var/run/placement 0750 placement placement
+rmdir-if-empty /run/placement

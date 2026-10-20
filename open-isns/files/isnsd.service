@@ -1,0 +1,13 @@
+[Unit]
+Description=iSNS discovery service (isnsd)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/isnsd --foreground
+Restart=on-failure
+	RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

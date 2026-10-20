@@ -1,0 +1,21 @@
+#!/sbin/openrc-run
+#
+# OpenRC service for the OpenStack Nova serial console proxy.
+#
+# Standalone eventlet daemon. Bind address and port come from
+# /etc/nova/nova.conf ([serial_console] serialproxy_host/_port,
+# default port 6083). Shipped unconditionally; never enabled or
+# started at install.
+
+name="nova-serialproxy"
+description="OpenStack Nova serial console proxy"
+
+command="/usr/bin/nova-serialproxy"
+command_user="nova:nova"
+command_background="yes"
+pidfile="/var/run/nova/nova-serialproxy.pid"
+
+depend() {
+	need net
+	after firewall
+}

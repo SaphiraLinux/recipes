@@ -1,0 +1,14 @@
+# libvirt-lxc named split (builder named-splits mechanism): the LXC
+# driver set, partitioned out of the single canonical build. Every
+# path below is certain: the daemon binary, driver module and default
+# config come from -Ddriver_lxc=enabled (meson-verified), and the two
+# units are installed by recipe_install itself. Explicit lists fail
+# closed on missing paths. Forward-compatible: inert under the
+# pre-splits builder (virtlxcd ships in main), activates with the
+# splits toolchain. No .depends: the driver links nothing beyond the
+# main package closure.
+usr/sbin/virtlxcd
+usr/lib/libvirt/connection-driver/libvirt_driver_lxc.so
+etc/libvirt/lxc.conf
+etc/init.d/virtlxcd
+usr/lib/systemd/system/virtlxcd.service

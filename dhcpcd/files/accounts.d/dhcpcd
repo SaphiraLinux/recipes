@@ -19,8 +19,13 @@
 # package configures a service account the package never declared, only
 # quieter.
 #
-# ID IT NOT 157:  it is 104:104  check base seeds! do not assume an id is free
-# the next free slot above the declared 100-199 package tier
-# (sshd 101 ... polkitd 156), clear of the foundation identities.
+# ID 104:104, declared identically in saphira-baselayout's base seed
+# (accounts.tsv) so fresh installs converge instead of refusing on
+# drift. Do not renumber without updating the seed in the same change;
+# the publish gate refuses a fragment that disagrees with the seed.
 user dhcpcd 104 dhcpcd /var/lib/dhcpcd /sbin/nologin
 group dhcpcd 104
+# The lease/state database the dropped-privilege client must write.
+# The payload ships the directory root-owned; this converges it to the
+# service identity at install time, or DHCP can never store leases.
+dir /var/lib/dhcpcd 0755 dhcpcd dhcpcd

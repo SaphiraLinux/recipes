@@ -1,7 +1,7 @@
 #!/bin/sh
 
 pkgname=rustc
-pkgver=1.98.1
+pkgver=1.99.1
 pkgrel=1
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="Rust language compiler, cargo, clippy and rustfmt"
@@ -11,8 +11,8 @@ repo=main
 url=https://www.rust-lang.org/
 # Official dist source tarball carries the full vendored crate set
 # (vendor=true, locked-deps=true below); GitHub tag archives do not.
-source=https://static.rust-lang.org/dist/rustc-1.98.1-src.tar.xz
-sha256=be1816e7f6c40abb90245ad6e024bed2a7e88d7dda4561e4d5470207df616b9f
+source=https://static.rust-lang.org/dist/rustc-1.99.1-src.tar.xz
+sha256=6451598a99e77f07571960f6b21d577399d3a30f33e80cbd2e3a4aae6535d265
 
 depends="
     llvm>=22.1.8-r2
@@ -103,11 +103,11 @@ PKG_CONFIG_ALLOW_CROSS = "1"
 EOF
 	bootstrap=$BUILDDIR/bootstrap
 	install_bootstrap_component \
-		rustc-1.97.1-x86_64-unknown-linux-musl.tar.xz "$bootstrap"
+		rustc-1.98.0-x86_64-unknown-linux-musl.tar.xz "$bootstrap"
 	install_bootstrap_component \
-		rust-std-1.97.1-x86_64-unknown-linux-musl.tar.xz "$bootstrap"
+		rust-std-1.98.0-x86_64-unknown-linux-musl.tar.xz "$bootstrap"
 	install_bootstrap_component \
-		cargo-1.97.1-x86_64-unknown-linux-musl.tar.xz "$bootstrap"
+		cargo-1.98.0-x86_64-unknown-linux-musl.tar.xz "$bootstrap"
 	cat > "$SRC/bootstrap.toml" <<EOF
 change-id = "ignore"
 

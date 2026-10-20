@@ -1,0 +1,19 @@
+Saphira musl port: provide PTHREAD_MUTEX_RECURSIVE_NP.
+
+musl supplies only the POSIX PTHREAD_MUTEX_RECURSIVE; the _NP spelling
+is a glibc extension (identical value on Linux). Upstream maps it only
+for Solaris; extend the fallback to any libc lacking the extension.
+Saphira builds musl-only, so the glibc-enum interaction is moot here.
+
+--- a/src/lib/u/lock.c
++++ b/src/lib/u/lock.c
+@@ -52,6 +52,9 @@
+ #if defined (__SVR4) && defined (__sun)
+ #define PTHREAD_MUTEX_RECURSIVE_NP PTHREAD_MUTEX_RECURSIVE
+ #endif
++#ifndef PTHREAD_MUTEX_RECURSIVE_NP
++#define PTHREAD_MUTEX_RECURSIVE_NP PTHREAD_MUTEX_RECURSIVE
++#endif
+ 
+ void u_init_lock(void *data)
+ {

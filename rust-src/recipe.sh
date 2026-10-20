@@ -1,10 +1,10 @@
 #!/bin/sh
 
 pkgname=rust-src
-pkgver=1.97.1
-# r2: generation sync with the branded rustc r2 (same sources, same
-# shared install path; the tuple needs no target-specific dir).
-pkgrel=2
+pkgver=1.99.1
+# r1: new upstream release; same official dist source tarball as rustc 1.99.1-r1
+# (same sources, same shared install path; the tuple needs no target-specific dir).
+pkgrel=1
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="Rust standard library source (rust-analyzer type info, -Zbuild-std)"
 license="MIT OR Apache-2.0"
@@ -12,8 +12,8 @@ origin=rust-src
 repo=main
 url=https://www.rust-lang.org/
 # Same official dist source tarball as rustc; only the std sources are shipped.
-source=https://static.rust-lang.org/dist/rustc-1.97.1-src.tar.xz
-sha256=0ed06fdaffd4722a7702e0b4eebfafc897ab8f513e8e1b247cdd7e5c6df6ded2
+source=https://static.rust-lang.org/dist/rustc-1.99.1-src.tar.xz
+sha256=6451598a99e77f07571960f6b21d577399d3a30f33e80cbd2e3a4aae6535d265
 
 recipe_build()
 {

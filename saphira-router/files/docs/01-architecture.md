@@ -346,7 +346,8 @@ upstream design. None of that is a reason for the *controller* to be root.
   that self-drops must verify its own config is still readable and refuse to
   start, naming the group change it needs.
 - **Service identity.** `files/accounts.d/<pkgname>`. The UID/GID namespace is
-  operator-locked: `0..199` preferred, `888..999` forbidden, `1000+` human.
+  operator-locked: `0..100` system, `101..999` services, `1000+` human,
+  `65534` nobody.
   `122` (postgres), `123` (gredist), `124` (hostapd), `125` (frr) and `126`
   (breathgslb) are taken; `127+` are free and are where saphira-router should
   allocate.

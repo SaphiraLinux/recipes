@@ -1,7 +1,12 @@
 #!/bin/sh
 pkgname=util-linux
 pkgver=2.41.1
-pkgrel=7
+# r8: rebuild against musl r5 headers so direct-file utmp readers
+# (notably last) resolve the real database paths instead of
+# musl upstream's /dev/null placeholders. No source change;
+# the embedded _PATH_WTMP moves from /dev/null/wtmp to
+# /var/log/wtmp, which the Stage4 writer maintains.
+pkgrel=8
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='Miscellaneous Linux utilities (mount, lsblk, blkid, fdisk, dmesg)'
 license='GPL-2.0-or-later LGPL-2.1-or-later BSD-3-Clause'
@@ -10,7 +15,7 @@ repo=saphira
 url=https://github.com/util-linux/util-linux
 util_linux_sha256=be9ad9a276f4305ab7dd2f5225c8be1ff54352f565ff4dede9628c1aaa7dec57
 depends="ncurses readline zlib"
-makedepends="bison flex gcc gettext libxcrypt-dev readline-dev saphira-kernel-headers meson ninja pkgconf zlib-dev ncurses-dev"
+makedepends="bison flex gcc gettext libxcrypt-dev readline-dev saphira-linux-uapi-headers meson ninja pkgconf python3 zlib-dev ncurses-dev"
 subpackages="$pkgname-dev $pkgname-doc"
 recipe_build()
 {

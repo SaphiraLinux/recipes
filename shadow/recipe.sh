@@ -1,7 +1,11 @@
 #!/bin/sh
 pkgname=shadow
 pkgver=4.17.3
-pkgrel=10
+pkgrel=11
+# r11: ENV_SUPATH + ENV_PATH set to the canonical PATH (Saphira PATH
+# policy): upstream defaults omit /usr/local and interleave the
+# non-usrmerged pairs, so su/login sessions disagreed with the rest
+# of the system. Asserted after install; fails closed.
 # r10: merge line (explicit --localstatedir=/var adopted from the
 # hotfix configure-hygiene sweep; hatched publishes r9 built without
 # it and localstatedir-derived compiled paths may shift payload
@@ -117,6 +121,21 @@ recipe_install() {
 	login_defs=$PKGDEST/etc/login.defs
 	[ -f "$login_defs" ] ||
 		{ echo "ERROR: shadow did not install /etc/login.defs" >&2; return 1; }
+	# Canonical PATH (Saphira PATH policy) for su/login sessions:
+	# upstream defaults (/sbin:/bin:/usr/sbin:/usr/bin for root,
+	# /bin:/usr/bin for users) omit /usr/local and interleave the
+	# non-usrmerged pairs. Both classes get the full set; login shells
+	# agree regardless of entry point.
+	sed -E -i -e 's|^[[:space:]]*#?[[:space:]]*ENV_SUPATH[[:space:]]+.*|ENV_SUPATH\tPATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin|' \
+		-e 's|^[[:space:]]*#?[[:space:]]*ENV_PATH[[:space:]]+.*|ENV_PATH\tPATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin|' \
+		"$login_defs"
+	for knob in ENV_SUPATH ENV_PATH; do
+		grep -qE "^[[:space:]]*$knob[[:space:]]+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin[[:space:]]*$" "$login_defs" ||
+			{
+				echo "ERROR: $knob not set to the canonical PATH in login.defs" >&2
+				return 1
+			}
+	done
 	for knob in SUB_UID_MIN SUB_UID_MAX SUB_UID_COUNT \
 		SUB_GID_MIN SUB_GID_MAX SUB_GID_COUNT; do
 		grep -qE "^[[:space:]]*$knob[[:space:]]+[0-9]+" "$login_defs" ||

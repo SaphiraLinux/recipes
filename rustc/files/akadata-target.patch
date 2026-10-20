@@ -56,7 +56,7 @@
 +}
 --- a/compiler/rustc_target/src/spec/mod.rs
 +++ b/compiler/rustc_target/src/spec/mod.rs
-@@ -1491,6 +1491,7 @@ supported_targets! {
+@@ -1492,6 +1492,7 @@ supported_targets! {
      ("aarch64-unknown-linux-pauthtest", aarch64_unknown_linux_pauthtest),
      ("aarch64_be-unknown-linux-musl", aarch64_be_unknown_linux_musl),
      ("x86_64-unknown-linux-musl", x86_64_unknown_linux_musl),
@@ -66,15 +66,14 @@
      ("mips-unknown-linux-musl", mips_unknown_linux_musl),
 --- a/src/bootstrap/src/core/sanity.rs
 +++ b/src/bootstrap/src/core/sanity.rs
-@@ -36,6 +36,9 @@
+@@ -35,7 +35,10 @@
  /// when the newly-bumped stage 0 compiler now knows about the formerly-missing targets.
  const STAGE0_MISSING_TARGETS: &[&str] = &[
      // just a dummy comment so the list doesn't get onelined
 +    // Saphira: our first-class target is newer than any stage0 compiler;
 +    // remove if a future stage0 ever ships it (i.e. never, unless upstreamed).
 +    "x86_64-akadata-linux-musl",
-     "powerpc64-unknown-linux-gnuelfv2",
-     "aarch64-unknown-linux-pauthtest", // Stage 0 compiler is not guaranteed to see the target yet.
-     "aarch64-unknown-qnx",
+     "aarch64-unknown-l4re-uclibc",
+ ];
  
  /// Minimum version threshold for libstdc++ required when using prebuilt LLVM

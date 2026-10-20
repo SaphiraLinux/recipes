@@ -1,0 +1,7 @@
+# Neutron Open vSwitch agent runtime settings (operator-editable).
+#
+# The agent reads its ML2/OVS configuration directly. Privileged
+# datapath operations escalate per-command through neutron-rootwrap
+# with the shipped filter policy; the agent itself runs as neutron.
+# Nothing here is applied until the operator enables and starts the
+# service.

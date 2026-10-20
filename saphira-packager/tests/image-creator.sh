@@ -25,7 +25,10 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 pkgdir=${1:-$root/saphira-image-creator}
 tool=$pkgdir/files/saphira-image
 targets=$pkgdir/files/targets
-profiles=$pkgdir/files/profiles
+# Profiles live in the single shared tree (saphira-install-tools), not
+# beside the tool: assert against the authority. Overridable for
+# out-of-tree layouts.
+profiles=${SAPHIRA_IMAGE_CREATOR_PROFILES:-$root/saphira-install-tools/files/profiles}
 
 fail()
 {
@@ -65,18 +68,18 @@ refused()
 # --- 1. the target matrix ----------------------------------------------
 
 printf '%s\n' "image-creator: target matrix"
-for t in bios-openrc bios-systemd uefi-openrc uefi-systemd; do
+for t in bios-openrc bios-systemd bios-saphira bios-saphirad uefi-openrc uefi-systemd uefi-saphira uefi-saphirad; do
 	out=$(sh "$tool" list-targets)
 	printf '%s\n' "$out" | grep -q "^$t " ||
 		fail "list-targets does not offer $t"
 done
-ok "all four targets are offered (bios/uefi x openrc/systemd)"
+ok "all eight targets are offered (bios/uefi x openrc/systemd x minimal/product)"
 
-# The matrix must contain exactly those four, and nothing else.
+# The matrix must contain exactly those eight, and nothing else.
 matrix_count=$(awk '{ l = $0; sub(/#.*$/, "", l); gsub(/^[ \t]+|[ \t]+$/, "", l) } l != "" { n++ } END { print n + 0 }' "$targets")
-[ "$matrix_count" -eq 4 ] ||
-	fail "target matrix has $matrix_count rows, expected exactly 4"
-ok "the matrix is exactly four rows: adding a target is a line, not a tool"
+[ "$matrix_count" -eq 8 ] ||
+	fail "target matrix has $matrix_count rows, expected exactly 8"
+ok "the matrix is exactly eight rows: adding a target is a line, not a tool"
 
 # Every row must be a supported pair and name a profile that exists.
 while read -r name boot init profile; do
@@ -295,7 +298,7 @@ refused "an unknown action" sh "$tool" frobnicate
 refused "an unknown role layer" sh "$tool" report --target bios-openrc --role role-nonesuch
 
 # A size too small to be bootable must be refused, not silently accepted:
-# a 512M ESP plus an alignment gap leaves no usable root below a point.
+# a 64M ESP plus an alignment gap leaves no usable root below a point.
 for tiny in 8M 16M; do
 	refused "a ${tiny} image (no usable root)" sh "$tool" plan --target uefi-systemd --size "$tiny"
 done
@@ -309,6 +312,45 @@ refused "an existing output path" env SAPHIRA_IMAGE_TARGETS="$targets" \
 [ -s "$work/existing.raw" ] || [ -f "$work/existing.raw" ] ||
 	fail "the refusal removed a pre-existing output file; only outputs this run created may be removed"
 ok "a pre-existing output is refused and left untouched"
+
+printf '%s\n' "image-creator: physical-disk refusals (nothing touched)"
+
+# Every refusal below fires before privileges, partitioning, mounts or
+# any write: validation is read-only (blockdev size probes and table
+# reads), so these run rootless. Anything reaching past validation
+# would still stop at the typed confirmation, which is never satisfied
+# here. Preview mode never writes by construction.
+refused "install-to-disk without a device" \
+	sh "$tool" install-to-disk --target bios-openrc
+refused "install-to-disk without a target" \
+	sh "$tool" install-to-disk --device /dev/does-not-exist-xyz
+refused "install-to-disk on a missing path" \
+	sh "$tool" install-to-disk --target bios-openrc --device /dev/does-not-exist-xyz
+: > "$work/not-a-disk"
+refused "install-to-disk on a non-block file" \
+	sh "$tool" install-to-disk --target bios-openrc --device "$work/not-a-disk"
+# The disk backing the work directory is mounted by definition (and
+# usually the boot disk too): whichever guard fires first, it must be
+# refused without touching anything. No block-backed root in this
+# environment (container overlay) means nothing to refuse here.
+root_src=$(df -- "$work" 2>/dev/null | awk 'NR==2 { print $1 }')
+case $root_src in
+/dev/*)
+	if [ -b "$root_src" ]; then
+		refused "install-to-disk on a live disk" \
+			sh "$tool" install-to-disk --target bios-openrc --device "$root_src" --preview
+		ok "a live disk is refused without touching anything"
+	else
+		ok "no block device backs the work directory; live-disk refusal untestable here"
+	fi ;;
+*)
+	ok "no block device backs the work directory; live-disk refusal untestable here" ;;
+esac
+refused "install-to-disk with an unknown target" \
+	sh "$tool" install-to-disk --target bios-plan9 --device /dev/does-not-exist-xyz
+refused "install-to-disk preview without a device" \
+	sh "$tool" install-to-disk --target bios-openrc --preview
+ok "physical-disk refusals all fire before anything destructive"
 
 # --- 5. missing tool detection ----------------------------------------
 
@@ -339,6 +381,9 @@ ok "host tools are checked before the image is allocated"
 printf '%s\n' "image-creator: profiles"
 missing=0
 for f in "$profiles"/*; do
+	# .services sidecars name services, not packages (resolved through
+	# unit [Install] sections); they are not install intentions.
+	case $f in *.services) continue ;; esac
 	awk '
 		{ line = $0; sub(/#.*$/, "", line) }
 		line ~ /^[[:space:]]*$/ { next }
@@ -348,7 +393,13 @@ for f in "$profiles"/*; do
 		case $pkg in
 		*[![:alnum:]._+-]*) continue ;;
 		esac
-		[ -f "$root/$pkg/recipe.sh" ] || {
+		# -dev/-doc names resolve to the base recipe (repo convention).
+		base=$pkg
+		case $base in
+		*-dev) base=${base%-dev} ;;
+		*-doc) base=${base%-doc} ;;
+		esac
+		[ -f "$root/$base/recipe.sh" ] || {
 			printf 'image-creator: %s names %s, which has no recipe\n' "${f##*/}" "$pkg" >&2
 			exit 1
 		}
@@ -395,6 +446,36 @@ for role in "$profiles"/role-*; do
 		fail "role $name is also a recipe; roles are profile data, not meta-packages"
 done
 ok "roles are profile data; no role-* meta-package was invented"
+
+# Every @-include must resolve to a profile in the shared tree (with the
+# historical @saphira-stage4-/@akadata-stage4- alias spelling). A dangling
+# include fails only at image-build time, inside the installer, far from
+# the typo - the bootstrap refuses it there, but the recipe build should
+# never ship it.
+unresolved=0
+for f in "$profiles"/*; do
+	[ -f "$f" ] || continue
+	case $f in *.services) continue ;; esac
+	awk '
+		{ line = $0; sub(/#.*$/, "", line) }
+		line ~ /^[[:space:]]*$/ { next }
+		{ gsub(/^[ \t]+|[ \t]+$/, "", line); print line }
+	' "$f" | while read -r entry; do
+		[ -n "$entry" ] || continue
+		case $entry in
+		@*)	inc=${entry#@}
+			case $inc in
+			saphira-stage4-*|akadata-stage4-*)
+				inc=${inc#saphira-stage4-}
+				inc=${inc#akadata-stage4-} ;;
+			esac
+			[ -f "$profiles/$inc" ] ||
+				{ printf 'image-creator: %s includes missing profile @%s\n' "${f##*/}" "$entry" >&2; exit 1; } ;;
+		esac
+	done || unresolved=$((unresolved + 1))
+done
+[ "$unresolved" -eq 0 ] || fail "a profile includes a profile that does not exist"
+ok "every profile include resolves inside the shared tree"
 
 # --- 7. no-X and non-usrmerged ----------------------------------------
 
@@ -504,20 +585,31 @@ ok "man page is complete and ASCII"
 printf '%s\n' "image-creator: installed layout"
 
 # Simulate a real install: tool in a bin directory with NO sibling data,
-# matrix and profiles under a data directory, exactly as
-# /usr/bin/saphira-image + /usr/share/saphira/image/{targets,profiles}.
+# matrix under the image datadir, profiles under the SHARED tree,
+# exactly as /usr/bin/saphira-image + /usr/share/saphira/image/targets +
+# /usr/share/saphira/profiles (saphira-install-tools).
 instbin=$work/install/bin
 instdata=$work/install/share/saphira/image
-mkdir -p "$instbin" "$instdata/profiles"
+instshared=$work/install/share/saphira/profiles
+mkdir -p "$instbin" "$instdata" "$instshared"
 cp "$tool" "$instbin/saphira-image"
 cp "$targets" "$instdata/targets"
-cp "$profiles"/* "$instdata/profiles/"
+cp "$profiles"/* "$instshared/"
 
 out=$(SAPHIRA_IMAGE_DATADIR="$instdata" sh "$instbin/saphira-image" list-targets) ||
 	fail "the tool cannot find its data when installed (no sibling targets); it must fall back to the image datadir"
 printf '%s\n' "$out" | grep -q '^bios-openrc ' ||
 	fail "installed-layout list-targets did not offer bios-openrc"
 ok "the installed tool resolves targets/ from the image datadir, not from dirname \$0"
+
+# Profiles resolve from the shared tree, not the image datadir: plan
+# must work with only the matrix beside the tool.
+out=$(SAPHIRA_IMAGE_DATADIR="$instdata" SAPHIRA_IMAGE_SHARED_PROFILES="$instshared" \
+	sh "$instbin/saphira-image" plan --target bios-openrc --size 2G) ||
+	fail "installed-layout plan cannot resolve its profile from the shared tree"
+printf '%s\n' "$out" | grep -q '^# saphira-image plan: target=bios-openrc' ||
+	fail "installed-layout plan printed no plan header"
+ok "the installed tool resolves profiles from the shared tree"
 
 # And it must REFUSE rather than silently searching its own bin directory
 # when there is no data anywhere, instead of dying later with a confusing
@@ -565,6 +657,13 @@ MOUNTER_LOG=$work/mounter.log; export MOUNTER_LOG
 # chroot_command is a VARIABLE holding a path in the tool (it defaults to
 # $bindir/saphira-chroot), so the harness must supply a path, not a shell
 # function.
+# bindir is a tool GLOBAL (dirname $0) that enable_services reads for the
+# services-off.d lookup. The extracted function runs outside the tool, so
+# the harness supplies a bindir with no services-off.d in it: the lookup
+# falls through to datadir (also unset here) and is skipped, exactly as
+# on a target with no exclusions. This is fixture completeness, not a
+# behaviour change: the tool always sets bindir at startup.
+mkdir -p "$work/empty-bindir"
 cat >"$work/harness.sh" <<HARNESS
 set -eu
 work='$work'
@@ -573,6 +672,8 @@ die() { printf 'HARNESS-DIE: %s\n' "\$*" >&2; exit 1; }
 . "\$work/enable.fn"
 ENABLE=1
 INIT=\$1
+bindir="\$work/empty-bindir"
+datadir=""
 services_dir=""
 chroot_command="\$work/mounter"
 enable_services "\$work/img" "\$work/composed-profile"
@@ -634,6 +735,8 @@ die() { printf 'HARNESS-DIE: %s\n' "\$*" >&2; exit 1; }
 . "\$work/enable.fn"
 ENABLE=1
 INIT=\$1
+bindir="\$work/empty-bindir"
+datadir=""
 services_dir="\$work/svc.d"
 chroot_command="\$work/mounter"
 enable_services "\$work/img2" "\$work/composed-profile2"

@@ -14,7 +14,7 @@ depends="libnl"
 makedepends="
 	binutils
 	gcc
-	saphira-kernel-headers
+	saphira-linux-uapi-headers
 	libnl-dev
 	make
 	pkgconf

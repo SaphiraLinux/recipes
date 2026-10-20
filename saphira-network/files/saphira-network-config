@@ -342,6 +342,11 @@ dhcpcd_up()
 	flags=$1
 	interface=$2
 	attempt=1
+	# The daemon writes its own pidfile, but it does not create the
+	# parent directory: without this, a fresh /var/run has no
+	# dhcpcd directory, no pidfile ever appears, and the bounded wait
+	# below reports a dead client after five silent seconds.
+	mkdir -p "$DHCPCD_PID_DIR"
 	while :; do
 		for suffix in '' '-4' '-6'; do
 			pidfile=$DHCPCD_PID_DIR/$interface$suffix.pid

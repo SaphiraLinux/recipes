@@ -1,0 +1,67 @@
+# Saphira system-wide interactive Bash defaults (/etc/bashrc).
+#
+# Sourced by /etc/skel/.bashrc (and therefore by every new account);
+# existing home dotfiles keep working standalone and are never
+# rewritten to pick this up. Bash-only by construction, POSIX-safe by
+# structure: the whole body sits inside a BASH_VERSION + interactive
+# test, so sourcing from sh (or a non-interactive shell) is a silent
+# no-op rather than an error -- `return` outside a function is illegal
+# in POSIX sh, and `exit` would kill the calling shell, so neither is
+# used here. POSIX shell startup must never depend on anything in this
+# file (see /etc/profile). No output, no slow commands: builtins and
+# guarded file tests only, safe for scp/rsync/cron-adjacent sessions.
+if [ -n "${BASH_VERSION-}" ]; then
+case $- in
+*i*)
+
+# History: shared, appended, sized for real administration.
+HISTFILE=$HOME/.bash_history
+HISTSIZE=2000
+HISTFILESIZE=4000
+HISTCONTROL=ignoreboth
+shopt -s histappend
+shopt -s checkwinsize
+# noemptycmd is recent (absent in bash 5.3): guard it so older
+# shells stay silent instead of printing session pollution.
+shopt -s noemptycmd 2>/dev/null || true
+
+# Prompt: user@host:dir, coloured on capable terminals, red # for
+# root and green $ otherwise. Colours only when stdout is a terminal;
+# dumb terminals and pipes get the plain form.
+if [ -t 1 ]; then
+	if [ "${EUID:-$(id -u)}" = 0 ]; then
+		PS1='\[\e[1;31m\]\u@\h\[\e[0m\]:\[\e[1;34m\]\w\[\e[0m\]# '
+	else
+		PS1='\[\e[1;32m\]\u@\h\[\e[0m\]:\[\e[1;34m\]\w\[\e[0m\]\$ '
+	fi
+else
+	if [ "${EUID:-$(id -u)}" = 0 ]; then
+		PS1='\u@\h:\w# '
+	else
+		PS1='\u@\h:\w\$ '
+	fi
+fi
+
+# Colour and pager defaults that behave in a pipe. GNU coreutils is
+# the shipped userland, so these are safe.
+alias ll='ls -alF'
+alias la='ls -A'
+alias l='ls -CF'
+alias ls='ls --color=auto'
+alias grep='grep --color=auto'
+alias fgrep='fgrep --color=auto'
+
+export PAGER=less
+export LESS='-R'
+export EDITOR=vi
+
+# Optional completion (bash-completion package): sourced when present,
+# silently skipped when absent. Never errors on minimal systems.
+if [ -r /usr/share/bash-completion/bash_completion ]; then
+	. /usr/share/bash-completion/bash_completion
+fi
+
+umask 022
+;;
+esac
+fi

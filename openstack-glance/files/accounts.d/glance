@@ -1,0 +1,11 @@
+# Glance service identity (fixed, in the preferred 0..199 packaged
+# range): user glance UID 165, primary group glance GID 165.
+# OpenStack services own the 164-170 block (164 keystone, 165 glance,
+# 166 placement, 167-170 nova/neutron/cinder/horizon). Required
+# by the shipped service units (systemd User=glance, OpenRC
+# command_user glance:glance), glance-manage and the state/log
+# directories. UID 165 is not reused by any other packaged identity.
+user glance 165 glance /var/lib/glance /sbin/nologin
+group glance 165
+dir /var/lib/glance 0750 glance glance
+dir /var/log/glance 0750 glance glance

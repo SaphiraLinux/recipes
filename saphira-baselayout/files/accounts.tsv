@@ -28,7 +28,7 @@ nginx	user	102	nginx	/var/lib/nginx	/sbin/nologin	-
 nginx	group	102	-	-	-	-
 php-fpm	user	103	php-fpm	/var/lib/php-fpm	/sbin/nologin	-
 php-fpm	group	103	-	-	-	-
-dhcpcd	user	104	dhcpcd	/var/empty	/sbin/nologin	-
+dhcpcd	user	104	dhcpcd	/var/lib/dhcpcd	/sbin/nologin	-
 dhcpcd	group	104	-	-	-	-
 haproxy	user	105	haproxy	/var/lib/haproxy	/sbin/nologin	-
 haproxy	group	105	-	-	-	-

@@ -26,7 +26,7 @@ makedepends="
     gcc
     make
     openssl-dev
-    saphira-kernel-headers
+    saphira-linux-uapi-headers
     util-linux-dev
 "
 

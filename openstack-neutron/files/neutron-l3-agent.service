@@ -1,0 +1,17 @@
+[Unit]
+Description=OpenStack Neutron L3 agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=neutron
+Group=neutron
+EnvironmentFile=-/etc/conf.d/neutron-l3-agent
+ExecStart=/usr/bin/neutron-l3-agent
+Restart=on-failure
+KillMode=mixed
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

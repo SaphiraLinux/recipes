@@ -1,0 +1,17 @@
+#!/sbin/openrc-run
+
+description="Shared-storage lease manager (sanlock)"
+
+# sanlock runs as root (raw shared-block access) with -D keeping it
+# in the foreground under supervise-daemon, so no pidfile.
+# WARNING: sanlock arms fencing (including watchdog reset) once
+# lockspaces are joined -- never enable without configured shared
+# storage and reviewed sanlock.conf.
+command="/usr/sbin/sanlock"
+command_args="daemon -D"
+supervisor="supervise-daemon"
+
+depend()
+{
+	need localmount
+}

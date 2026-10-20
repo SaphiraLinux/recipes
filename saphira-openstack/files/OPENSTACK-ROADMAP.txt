@@ -1,0 +1,111 @@
+saphira-openstack: native OpenStack dependency roadmap
+=====================================================
+
+This records the VERIFIED native APK dependency graph toward Keystone and
+the wider OpenStack service set, and what remains. It is engineering
+status, not a promise: entries move from MISSING to packaged only when a
+real recipe exists in /recipes.
+
+The installer never claims a service is deployable while its recipes are
+missing; the component catalog marks every unported service PENDING.
+
+What is packaged today (verified)
+---------------------------------
+
+  Base
+    python3                3.14.6   system interpreter, no venv
+    python3-pip            25.2
+    setuptools, wheel, typing-extensions, python-markupsafe
+
+  HTTP/crypto foundations (already present)
+    idna                   3.19     (de-prefixed native name)
+    certifi                2026.7.22
+    python-charset-normalizer, python-urllib3, python-requests
+    python-pycparser, python-cffi, python-cryptography, python-josepy
+    python-aiohttp + its async stack
+
+  Foundations added for OpenStack (this work)
+    python-six, python-pbr, python-stevedore, python-debtcollector,
+    python-wrapt, python-netaddr, python-iso8601, python-dateutil,
+    python-webob, python-routes, python-paste, python-pymysql,
+    python-memcached, python-sqlalchemy, python-alembic, python-mako
+
+  Keystone closure (built; services install independently)
+    full oslo.* layer, keystonemiddleware, keystoneauth1/client,
+    Flask stack, jsonschema tree, pysaml2, gunicorn, and the service
+    package openstack-keystone 30.0.0 (2026.2 Hibiscus)
+
+  Glance + placement wave (2026.2 pins, upper-constraints)
+    37 native recipes (taskflow, WSME, glance-store, castellan,
+    cursive, oslo-limit, oslo-reports, microversion-parse,
+    os-resource-classes, os-traits, openstacksdk, cliff/cmd2 tree,
+    ...), and the service packages openstack-glance 33.0.0 and
+    openstack-placement 16.0.0
+
+Still MISSING (ordered backlog)
+--------------------------------
+
+  Nova 34.0.0 layer
+    python-os-brick, python-os-vif, python-oslo-privsep (recipe
+    exists, build red), python-oslo-rootwrap, python-oslo-versionedobjects,
+    python-paramiko, python-lxml, python-cinderclient,
+    python-glanceclient, python-neutronclient, python-tooz, python-websockify
+
+  Neutron 29.0.0 layer
+    python-neutron-lib, python-os-ken, python-ovs (bindings),
+    python-ovsdbapp, python-pecan, python-designateclient,
+    (openvswitch + dnsmasq already packaged; uses the nova list too)
+
+  Cinder 29.0.0 layer
+    python-oslo-vmware, python-barbicanclient (done in wave-1),
+    python-novaclient, python-rtslib-fb, python-tzdata (recipe
+    exists, build red)
+
+  Horizon 27.0.0 layer
+    python-django, 25 XStatic-* assets, python-django-compressor,
+    python-django-debreach, python-pillow, python-libsass,
+    python-swiftclient, python-qrcode, python-semantic-version
+
+  Backing infrastructure
+    rabbitmq (+ erlang), memcached            (mariadb-server is packaged;
+    valkey already covers the redis-protocol side)
+
+  Web tier: gunicorn (packaged; what every service recipe uses)
+
+Porting order (repository-first, dependency-before-consumer)
+------------------------------------------------------------
+
+  1. oslo.* foundation, leaf-first: DONE (keystone closure).
+  2. keystonemiddleware: DONE.
+  3. keystone 30.0.0 (gunicorn WSGI, mariadb-client-side): recipe
+     exists, building.
+  4. glance 33.0.0 + placement 16.0.0 + their 37-recipe leaf wave:
+     recipes exist, building.
+  5. backing infrastructure: rabbitmq (+ erlang), memcached.
+  6. nova 34.0.0 -> neutron 29.0.0 -> cinder 29.0.0 -> horizon 27.0.0,
+     each with the layer above. All versions pinned to stable/2026.2
+     upper-constraints before porting (see wave-1 method).
+
+Conventions every recipe follows
+--------------------------------
+
+  * pkgname=python-<pypi-name> (or the de-prefixed native name already
+    established, e.g. idna, certifi);
+  * source=<pinned sdist URL> + sha256=<64-hex>, with the archive
+    vendored at files/<basename> and a files/<basename>.sha256 sidecar;
+  * recipe_build is a no-op; recipe_install runs
+    `python3 -m pip install --no-deps --no-build-isolation --no-compile
+     --root "$PKGDEST" --prefix /usr "$SRC"` into system site-packages;
+  * no unpinned network installation at build time: the vendored archive
+    is the only input;
+  * pkgrel>=1; repo=saphira; license is the upstream SPDX identifier.
+
+Deferred upstream dependencies recorded per recipe
+--------------------------------------------------
+
+  python-webob    -> python-legacy-cgi
+  python-routes   -> python-repoze-lru
+  python-alembic  -> python-tomli
+
+These are noted in each recipe as comments; they are not depends= entries
+until their own recipes exist, so every recipe here resolves today.

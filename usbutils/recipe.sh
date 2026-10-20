@@ -17,7 +17,7 @@ makedepends="
 	binutils
 	gcc
 	libusb-dev
-	saphira-kernel-headers
+	saphira-linux-uapi-headers
 	meson
 	ninja
 	pkgconf

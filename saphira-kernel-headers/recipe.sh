@@ -1,6 +1,16 @@
 pkgname=saphira-kernel-headers
 pkgver=${SAPHIRA_KERNEL_VERSION:-7.1.5}
 pkgrel=2
+# RETIRED IDENTITY, DISABLED: env-selected single-name headers floated
+# across kernel lines (SAPHIRA_KERNEL_VERSION picked the version at
+# build time), so apk upgrade silently replaced Egg's pinned 7.1.5 UAPI
+# with 7.2.3. Superseded by the per-line saphira-kernel-headers-7.1.5 /
+# -7.2.2 / -7.2.3 / -7.3-rc1 recipes (fixed version per directory,
+# origin="$pkgname"). This recipe must never build again; its published
+# NVRs retire through normal retention once nothing references the
+# generic name.
+disabled=yes
+disabled_reason='superseded by per-line saphira-kernel-headers-7.1.5/-7.2.2/-7.2.3/-7.3-rc1 (fixed version, origin="$pkgname"; env-selected version silently replaced the pinned UAPI baseline)'
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='Saphira kernel UAPI headers (version selected by SAPHIRA_KERNEL_VERSION)'
 license=GPL-2.0-only

@@ -1,0 +1,5 @@
+# Cinder backup runtime settings (operator-editable).
+#
+# The backup manager reads /etc/cinder/cinder.conf directly
+# (backup_driver and its section). Nothing here is applied until the
+# operator enables and starts the service.

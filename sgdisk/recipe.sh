@@ -11,7 +11,7 @@ source=https://downloads.sourceforge.net/project/gptfdisk/gptfdisk/${pkgver}/gpt
 sha256=2abed61bc6d2b9ec498973c0440b8b804b7a72d7144069b5a9209b2ad693a282
 
 depends="popt util-linux"
-makedepends="gcc make popt-dev saphira-kernel-headers util-linux-dev"
+makedepends="gcc make popt-dev saphira-linux-uapi-headers util-linux-dev"
 
 recipe_build() {
 	# sgdisk only: it links libuuid and libpopt. The sibling gdisk and

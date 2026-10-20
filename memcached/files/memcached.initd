@@ -1,0 +1,24 @@
+#!/sbin/openrc-run
+#
+# OpenRC service for memcached.
+#
+# The daemon drops privileges itself (-u memcached, see confd) after
+# binding; it starts as root for the port bind. Shipped unconditionally;
+# never enabled or started at install.
+
+name="memcached"
+description="Distributed memory object caching system"
+
+: "${MEMCACHED_PORT:=11211}"
+: "${MEMCACHED_MEMORY:=64}"
+: "${MEMCACHED_CONNS:=1024}"
+
+command="/usr/bin/memcached"
+command_args="-d -P /var/run/memcached/memcached.pid -u memcached -p ${MEMCACHED_PORT} -m ${MEMCACHED_MEMORY} -c ${MEMCACHED_CONNS}"
+command_background="no"
+pidfile="/var/run/memcached/memcached.pid"
+
+depend() {
+	need net
+	after firewall
+}

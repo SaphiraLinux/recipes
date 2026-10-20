@@ -1,0 +1,14 @@
+#!/sbin/openrc-run
+
+description="Linux audit daemon (auditd)"
+
+# auditd runs as root (it owns the kernel audit netlink socket) and
+# stays in the foreground under supervise-daemon, so no pidfile.
+command="/usr/sbin/auditd"
+command_args="-f"
+supervisor="supervise-daemon"
+
+depend()
+{
+	need localmount
+}

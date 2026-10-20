@@ -168,17 +168,38 @@ else
 	bad 'the dhcpcd recipe must install its accounts.d fragment'
 fi
 
-# No other package may already own the chosen id.
+# No other package may already own the chosen id - and the base seed
+# counts: it is the other half of the convergence contract, and the
+# accounts.d-only grep used to miss it entirely.
 id=$(sed -n 's/^user dhcpcd \([0-9]*\).*/\1/p' "$fragment" 2>/dev/null)
 if test -n "$id"; then
 	clash=$(grep -rlE "^user [a-z_][a-z0-9_-]* $id " \
-		--include='*' "$recipe_root"/*/files/accounts.d 2>/dev/null |
+		-r --include='*' "$recipe_root"/*/files/accounts.d 2>/dev/null |
 		grep -v '/dhcpcd/' || true)
+	seed_clash=$(awk -v want="$id" '$2 == "user" && $3 == want && $1 != "dhcpcd" { print FILENAME ":" $1 }' \
+		"$recipe_root"/saphira-baselayout/files/accounts.tsv 2>/dev/null || true)
+	clash=${clash}${seed_clash:+${clash:+ }${seed_clash}}
 	if test -z "$clash"; then
-		ok "uid $id is not claimed by any other package identity"
+		ok "uid $id is not claimed by any other package identity (fragments and base seed)"
 	else
 		bad "uid $id is also declared by: $clash"
 	fi
+fi
+
+printf '%s\n' '# the fragment converges the state directory the client must write'
+
+if test -f "$fragment" && grep -Eq '^dir /var/lib/dhcpcd 0755 dhcpcd dhcpcd$' "$fragment"; then
+	ok 'the fragment converges /var/lib/dhcpcd to the service identity'
+else
+	bad 'the fragment must converge /var/lib/dhcpcd (the payload ships it root-owned and the dropped-privilege client cannot store leases)'
+fi
+
+printf '%s\n' '# the daemon writes its pidfile into a directory that must exist'
+
+if grep -q 'mkdir -p "$DHCPCD_PID_DIR"' "$config"; then
+	ok 'dhcpcd_up creates the pidfile directory before waiting on it'
+else
+	bad 'dhcpcd_up must create $DHCPCD_PID_DIR (dhcpcd will not create the parent itself)'
 fi
 
 if test "$failures" -ne 0; then

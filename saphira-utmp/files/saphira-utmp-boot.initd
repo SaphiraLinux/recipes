@@ -1,0 +1,29 @@
+#!/sbin/openrc-run
+# saphira-utmp-boot: write one BOOT_TIME record per kernel boot.
+#
+# Neither init path records boots on Saphira (OpenRC has no utmp
+# writer; systemd is built with -Dutmp=false, musl-mandated), so
+# coreutils uptime/who -b fell back to image-file mtimes. This
+# service runs the recorder at early boot, before any login can
+# happen: the boot runlevel completes before the default runlevel
+# (gettys, sshd) starts, so the record always precedes user
+# sessions. Restart-safe by construction: re-running changes
+# nothing (the tool no-ops when this boot is already recorded).
+# A non-zero exit marks the service failed, loud in rc-status:
+# boot time must never be silently faked.
+
+description="Saphira boot-time utmp/wtmp accounting (once per boot)"
+
+command="/usr/sbin/saphira-utmp-boot"
+
+depend() {
+	need localmount
+	after saphira-fhs-converge
+	before *
+}
+
+start() {
+	ebegin "Recording boot time"
+	"$command"
+	eend $?
+}

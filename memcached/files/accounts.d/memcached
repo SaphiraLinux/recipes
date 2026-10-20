@@ -1,0 +1,7 @@
+# memcached service identity (fixed, in the preferred 0..199
+# packaged range): user memcached UID 171, group memcached GID 171.
+# The daemon drops privileges itself after binding. UID 171 is not
+# reused by any other packaged identity.
+user memcached 171 memcached /var/lib/memcached /sbin/nologin
+group memcached 171
+dir /var/lib/memcached 0750 memcached memcached

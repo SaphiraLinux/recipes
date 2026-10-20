@@ -134,31 +134,64 @@ repo_after=$(find "$live_repo" -maxdepth 1 -type f -printf '%f %s %T@\n' | sort 
 [ "$host_before" = "$host_after" ]
 [ "$repo_before" = "$repo_after" ]
 
-# Success removes the workspace; the single ready transaction carries
-# every producer output (each producer promotes into the same staging).
+# Success removes the workspace; every locally-built producer receives its
+# own authoritative transaction (target == producer), each carrying only
+# its own outputs plus the full resolver plan and exact build-time closure
+# hashes. The consumer never bundles dependencies as publishable outputs.
 test ! -e "$build_root/dep-c.buildpkg"
-set -- "$incoming/x86_64"/dep-c-*-ready
-[ "$#" -eq 1 ] && [ -d "$1" ]
-ready=$1
-test -f "$ready/dep-a-1-r1.apk"
-test -f "$ready/dep-b-1-r1.apk"
-test -f "$ready/dep-c-1-r1.apk"
-python3 - "$ready/artifact-manifest.json" <<'PY'
+for producer in dep-a dep-b dep-c; do
+	set -- "$incoming/x86_64"/$producer-*-ready
+	[ "$#" -eq 1 ] && [ -d "$1" ] || {
+		printf '%s\n' "closure-deps: expected exactly one ready transaction for $producer" >&2
+		exit 1
+	}
+done
+ready_a=$(echo "$incoming"/x86_64/dep-a-*-ready)
+ready_b=$(echo "$incoming"/x86_64/dep-b-*-ready)
+ready_c=$(echo "$incoming"/x86_64/dep-c-*-ready)
+test -f "$ready_a/dep-a-1-r1.apk"
+test ! -e "$ready_a/dep-b-1-r1.apk"
+test ! -e "$ready_a/dep-c-1-r1.apk"
+test -f "$ready_b/dep-b-1-r1.apk"
+test ! -e "$ready_b/dep-a-1-r1.apk"
+test ! -e "$ready_b/dep-c-1-r1.apk"
+test -f "$ready_c/dep-c-1-r1.apk"
+test ! -e "$ready_c/dep-a-1-r1.apk"
+test ! -e "$ready_c/dep-b-1-r1.apk"
+python3 - "$ready_a/artifact-manifest.json" "$ready_b/artifact-manifest.json" "$ready_c/artifact-manifest.json" \
+	"$ready_a/plan.json" "$ready_c/closure-hashes.json" <<'PY'
 import json
 import sys
+for path in sys.argv[1:4]:
+    with open(path, encoding="utf-8") as stream:
+        manifest = json.load(stream)
+    assert manifest["schema"] == "saphira-build-artifacts/v1"
+    assert len(manifest["constructors"]) == 1
+    assert manifest["constructors"][0]["constructor"] == "makepkg"
 with open(sys.argv[1], encoding="utf-8") as stream:
-    manifest = json.load(stream)
-assert manifest["schema"] == "saphira-build-artifacts/v1"
-assert manifest["target"] == "dep-c"
-assert [item["producer"] for item in manifest["constructors"]] == ["dep-a", "dep-b", "dep-c"]
-assert all(item["constructor"] == "makepkg" for item in manifest["constructors"])
+    assert json.load(stream)["target"] == "dep-a"
+with open(sys.argv[2], encoding="utf-8") as stream:
+    assert json.load(stream)["target"] == "dep-b"
+with open(sys.argv[3], encoding="utf-8") as stream:
+    assert json.load(stream)["target"] == "dep-c"
+with open(sys.argv[4], encoding="utf-8") as stream:
+    plan = json.load(stream)
+assert plan["schema"] == "saphira-build-plan/v1"
+assert plan["target"] == "dep-c"
+assert [b["producer"] for b in plan["builds"]] == ["dep-a", "dep-b", "dep-c"]
+with open(sys.argv[5], encoding="utf-8") as stream:
+    closure = json.load(stream)
+assert closure["schema"] == "saphira-build-closure/v1"
+assert closure["target"] == "dep-c"
 PY
-(CDPATH= cd -- "$ready" && sha256sum -c manifest.sha256 >/dev/null)
+(CDPATH= cd -- "$ready_a" && sha256sum -c manifest.sha256 >/dev/null)
+(CDPATH= cd -- "$ready_b" && sha256sum -c manifest.sha256 >/dev/null)
+(CDPATH= cd -- "$ready_c" && sha256sum -c manifest.sha256 >/dev/null)
 
 # The staged artifacts are valid APKs (allow-untrusted verifies) but
 # remain UNSIGNED: plain verification must refuse every one of them,
 # so the operator's final sign-apk-repo is still the publication gate.
-for artifact in "$ready"/dep-a-1-r1.apk "$ready"/dep-b-1-r1.apk "$ready"/dep-c-1-r1.apk; do
+for artifact in "$ready_a"/dep-a-1-r1.apk "$ready_b"/dep-b-1-r1.apk "$ready_c"/dep-c-1-r1.apk; do
 	apk verify --allow-untrusted "$artifact" >/dev/null
 	if apk verify "$artifact" >/dev/null 2>&1; then
 		printf '%s\n' "closure-deps: staged artifact unexpectedly verifies signed: $artifact" >&2

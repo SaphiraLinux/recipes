@@ -1,0 +1,21 @@
+#!/sbin/openrc-run
+#
+# OpenRC service for the OpenStack Nova SPICE console proxy.
+#
+# Standalone eventlet daemon. Bind address and port come from
+# /etc/nova/nova.conf ([spice] html5proxy_host/_port, default port
+# 6082). Shipped unconditionally; never enabled or started at
+# install.
+
+name="nova-spicehtml5proxy"
+description="OpenStack Nova SPICE console proxy"
+
+command="/usr/bin/nova-spicehtml5proxy"
+command_user="nova:nova"
+command_background="yes"
+pidfile="/var/run/nova/nova-spicehtml5proxy.pid"
+
+depend() {
+	need net
+	after firewall
+}

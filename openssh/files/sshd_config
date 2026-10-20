@@ -4,11 +4,13 @@ AddressFamily any
 ListenAddress 0.0.0.0
 ListenAddress ::
 
+# Host keys, newest first: mldsa44 (latest), ed25519 (standard),
+# ecdsa (minimum). No RSA host key offered: clients negotiate the
+# best of the above. This does not prevent RSA otherwise — client
+# keys, signatures and key-exchange algorithms are untouched.
 HostKey /etc/ssh/ssh_host_mldsa44_ed25519_key
 HostKey /etc/ssh/ssh_host_ed25519_key
 HostKey /etc/ssh/ssh_host_ecdsa_key
-# RSA last: legacy fallback for clients without newer host-key support.
-HostKey /etc/ssh/ssh_host_rsa_key
 
 SyslogFacility AUTHPRIV
 LogLevel INFO

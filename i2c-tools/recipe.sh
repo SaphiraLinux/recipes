@@ -16,7 +16,7 @@ depends="perl"
 # EXTRA=eeprog builds upstream's 24Cxx EEPROM tool alongside the probing
 # family (fits the firmware toolkit; py-smbus stays out of scope).
 # BUILD_STATIC_LIB=0: shared libi2c only, per Saphira policy.
-makedepends="binutils gcc make saphira-kernel-headers"
+makedepends="binutils gcc make saphira-linux-uapi-headers"
 subpackages="$pkgname-dev"
 
 recipe_build() {

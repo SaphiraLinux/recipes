@@ -1,0 +1,20 @@
+[Unit]
+Description=firewalld dynamic firewall daemon
+Documentation=man:firewalld(1)
+Before=network-pre.target
+Wants=network-pre.target
+# Restart with the bus: firewalld's D-Bus connection does not survive
+# dbus restarts (upstream rationale, kept).
+PartOf=dbus.service
+# No Conflicts=iptables/ebtables/ipset stanzas: those sysv services do
+# not exist on Saphira (nftables backend only).
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/firewalld --nofork --nopid
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+	RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

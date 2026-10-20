@@ -1,0 +1,75 @@
+openstack-neutron — OpenStack Networking (Neutron) 29.0.0 (2026.2 Hibiscus)
+==============================================================================
+
+This package installs the Neutron network service: API, RPC server and
+the OVS-path agents (openvswitch, dhcp, l3, metadata). It installs
+software ONLY: nothing is enabled, started, migrated or credentialed
+at install time.
+
+What it ships
+-------------
+
+  /usr/bin/neutron-*              API/agent CLIs and daemons
+  neutron.wsgi.api:application    the supported WSGI application
+  neutron/db/migration/alembic_migrations/   migration scripts
+  /etc/neutron/api-paste.ini      upstream paste pipeline (wiring)
+  /etc/neutron/rootwrap.conf + rootwrap.d/   agent privilege policy
+  /etc/neutron/plugins/ml2/ml2_conf.ini      ML2 sample wiring
+  /etc/init.d/neutron-*           OpenRC services (6 daemons)
+  /usr/lib/systemd/system/neutron-*.service  systemd services (6 daemons)
+  /etc/conf.d/neutron-api         WSGI container runtime settings (api)
+
+Operator steps (NOT performed by this package)
+----------------------------------------------
+
+1. Write /etc/neutron/neutron.conf plus the ML2 and agent configs
+   (ml2_conf.ini, openvswitch/dhcp/l3/metadata agent inis) from the
+   samples and the generator inputs in /usr/share/neutron/:
+
+     oslo-config-generator \
+       --config-file /usr/share/neutron/oslo-config-generator/*.conf \
+       ...
+   # edit: database, keystone auth, ML2 mechanism_drivers=openvswitch,
+   # tenant_network_types, OVS integration bridge, ... No database
+   # driver is installed by this package: add python-pymysql for
+   # MariaDB, or use sqlite for trials.
+
+2. Initialise the database:
+
+     neutron-db-manage upgrade heads
+
+3. Register the service and endpoints in Keystone (operator-chosen),
+   create provider/external networks and the OVS integration bridge.
+
+4. Enable per node role, explicitly. Network/controller example:
+
+     rc-update add neutron-api default && rc-service neutron-api start
+     rc-update add neutron-rpc-server default && ...
+     rc-update add neutron-dhcp-agent default && ...
+     rc-update add neutron-l3-agent default && ...
+   Hypervisor-adjacent (compute + network) nodes also run:
+
+     rc-update add neutron-openvswitch-agent default && ...
+   (systemd: systemctl enable --now neutron-<daemon> instead.)
+
+Scope notes
+-----------
+
+  * ML2/OVS only. The openvswitch daemons (ovsdb-server,
+    ovs-vswitchd) must be installed and running; agents reach them
+    through ovs-vsctl/OVSDB. OVN is not packaged and not claimed.
+  * Agents run as the neutron user and escalate per-command through
+    neutron-rootwrap with the shipped filter policy; they never run
+    as root.
+  * Legacy VRRP HA needs keepalived (not packaged): plain routing
+    and DVR are unaffected.
+  * neutron-dhcp-agent spawns dnsmasq instances itself; the system
+    dnsmasq service must stay off those ports.
+
+Independence
+------------
+
+Neutron depends on the native python closure, gunicorn, OVS/dnsmasq/
+iproute2/iptables/ipset/conntrack userlands and database client
+libraries. It does not depend on Nova, Cinder, Glance or Horizon, and
+it can be installed on its own.

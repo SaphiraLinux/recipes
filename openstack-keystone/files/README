@@ -1,0 +1,55 @@
+openstack-keystone — OpenStack Identity (Keystone) 30.0.0 (2026.2 Hibiscus)
+==========================================================================
+
+This package installs the Keystone identity service. It installs software
+ONLY: nothing is enabled, started, migrated or credentialed at install
+time.
+
+What it ships
+-------------
+
+  /usr/bin/keystone-manage          administrative CLI (db_sync, bootstrap, ...)
+  /usr/bin/keystone-status          status CLI
+  keystone.wsgi.api:application     the supported WSGI application
+  keystone/common/sql/migrations/   database migration scripts
+  /etc/keystone/logging.conf.sample
+  /etc/keystone/sso_callback_template.html
+  /usr/share/keystone/keystone.conf config-generator input
+  /etc/init.d/keystone              OpenRC service (gunicorn)
+  /usr/lib/systemd/system/keystone.service   systemd service (gunicorn)
+  /etc/conf.d/keystone              WSGI container runtime settings
+
+Operator steps (NOT performed by this package)
+----------------------------------------------
+
+1. Generate and edit the configuration:
+
+     oslo-config-generator \
+       --config-file /usr/share/keystone/keystone.conf \
+       --output-file /etc/keystone/keystone.conf
+     # edit /etc/keystone/keystone.conf (database, tokens, federation, ...)
+
+2. Initialise the database (against a MariaDB/PostgreSQL the operator
+   provides; no database server is installed by this package):
+
+     keystone-manage db_sync
+
+3. Bootstrap the admin identity and endpoints (operator-chosen secrets):
+
+     keystone-manage bootstrap ...
+
+4. Enable and start the service explicitly:
+
+     rc-update add keystone default && rc-service keystone start
+     # or
+     systemctl enable --now keystone
+
+Keystone is served by gunicorn; nginx/haproxy fronting it for TLS is an
+optional, operator-configured choice.
+
+Independence
+------------
+
+Keystone depends only on the native python closure, gunicorn and a
+database client. It does not depend on QEMU, Nova, Neutron or any other
+OpenStack service, and it can be installed on its own.

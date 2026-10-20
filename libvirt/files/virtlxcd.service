@@ -1,0 +1,52 @@
+[Unit]
+Description=libvirt virtualization LXC driver (virtlxcd)
+Documentation=man:virtlxcd(8)
+After=network-online.target nftables.service
+Wants=network-online.target
+# systemd-machined tracks containers: ships in Saphira's systemd, so
+# upstream's ordering stands.
+Wants=systemd-machined.service
+After=systemd-machined.service
+After=remote-fs.target
+# Umbrella membership: stop/restart of libvirtd.service propagates here.
+PartOf=libvirtd.service
+# virtlogd and virtlockd hold state consumers depend on: when the stack
+# starts together they must be available first.
+After=virtlogd.service virtlockd.service
+
+[Service]
+# Saphira is not usrmerged: daemons spawn helpers from /sbin and
+# /bin (tc, ip, ...), which this systemd build omits from the
+# default PATH. Set it explicitly (packaged paths, never aliases).
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# Mirrors files/virtlxcd.initd.
+#
+# Type=notify: libvirt's modular daemons are sd_notify-native.
+Type=notify
+NotifyAccess=main
+ExecStartPre=+/bin/install -d -o root -g root -m 0755 /var/run/libvirt
+ExecStart=/usr/sbin/virtlxcd
+# /var/run/libvirt holds one socket per driver (virtlxcd-sock here);
+# /var/run is a real directory, never a /run alias.
+# KillMode=process is upstream's lxc-specific choice: stopping the
+# daemon must not kill running containers (they are independent
+# machines that reconnect on start).
+KillMode=process
+Restart=on-failure
+	RestartSec=5
+
+# Deliberately NOT set, diverging from virtqemud.service where noted:
+# - ProtectHome (virtqemud sets yes): container files legitimately
+#   live under /home or /root (user images, per-user paths).
+# - ProtectSystem=strict (virtqemud mounts images; lxc mounts whole
+#   container filesystems the operator places anywhere).
+# - ProtectControlGroups (virtqemud sets yes): the LXC driver manages
+#   container cgroups itself.
+# - ProtectKernelModules, NoNewPrivileges: same reasoning as virtqemud
+#   (documented there). What stays matches virtqemud because the
+#   daemon's own needs (sockets, state, netlink) are identical.
+ReadWritePaths=/var/run/libvirt /var/lib/libvirt
+RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

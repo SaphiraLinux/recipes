@@ -8,7 +8,9 @@ pkgver=1.2.6
 # override" contract) so libc.a links into static-PIE binaries.
 # Shared libc, loader, CRT, headers and ABI are intentionally
 # unchanged: libc.so keeps consuming the same LOBJS as before.
-pkgrel=4
+# r4->r5 carries only the utmp/wtmp paths.h statements (no code,
+# no ABI): direct-file readers resolve the real database.
+pkgrel=5
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='musl libc 1.2.6 with the Saphira 1MiB pthread stack patch - the installable base libc'
 license='MIT'
@@ -26,6 +28,15 @@ musl_patch_sha256=e74dcb8dd4aaf6bf9ad1410a3394343bbfbfb34e55007c83fe2b63dccc5767
 # linux/in6.h was included first (mirrors glibc __USE_KERNEL_IPV6_DEFS).
 # Fixes packages mixing <netinet/in.h> with kernel netfilter headers.
 in6_patch_sha256=28ea1e653d0b4e242065714c2018aed67d68ce06dc5cd8526ef735a1a5a06d01
+# Stage4 utmp integration: libc paths.h points _PATH_UTMP/_PATH_WTMP
+# at the real database locations (/var/run/utmp, /var/log/wtmp)
+# instead of musl upstream's /dev/null placeholders. Saphira writes
+# real accounting there (saphira-utmp-boot); direct-file readers
+# such as util-linux last then work. This changes no ABI and no
+# libc behavior: musl's getutxent remains upstream-stubbed, so
+# coreutils who/uptime keep using their fallbacks, which is exactly
+# what makes uptime correct once no stale seed shadows the lookup.
+utmp_patch_sha256=49345f5ae4acf6e1cbedddb9a4f4a7c8077c1260c6a97bc487c7cb512aeae8e8
 
 depends=""
 makedepends="
@@ -47,6 +58,9 @@ recipe_build()
 	P6="$RECIPE_DIR/files/0002-netinet-in6-kernel-uapi-coordination.patch"
 	echo "$in6_patch_sha256  $P6" | sha256sum -c -
 	patch -d "$SRC" -Np1 -i "$P6"
+	P7="$RECIPE_DIR/files/0003-utmp-wtmp-real-paths.patch"
+	echo "$utmp_patch_sha256  $P7" | sha256sum -c -
+	patch -d "$SRC" -Np1 -i "$P7"
 	cd "$SRC"
 	# Built against the repository musl-dev headers installed in the
 	# clean root from the package seed: same-ABI rebuild, no cross

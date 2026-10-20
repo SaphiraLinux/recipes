@@ -1,0 +1,23 @@
+#!/sbin/openrc-run
+#
+# OpenRC service for the RabbitMQ message broker (Erlang/OTP).
+#
+# The broker runs as the rabbitmq user (RABBITMQ_NODENAME default
+# rabbit@hostname; data in /var/lib/rabbitmq). Shipped unconditionally;
+# never enabled or started at install. Requires Erlang/OTP and the
+# rabbitmq plugins set at first start by the operator.
+
+name="rabbitmq-server"
+description="RabbitMQ message broker"
+
+: "${RABBITMQ_NODENAME:=rabbit@$(hostname)}"
+
+command="/usr/lib/rabbitmq/bin/rabbitmq-server"
+command_user="rabbitmq:rabbitmq"
+command_background="yes"
+pidfile="/var/run/rabbitmq/rabbitmq.pid"
+
+depend() {
+	need net
+	after firewall
+}

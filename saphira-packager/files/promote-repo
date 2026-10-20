@@ -75,6 +75,24 @@ to_dir=$repo_root/$to/$arch
 [ -f "$from_dir/Packages.adb" ] || die "source repository index is missing: $from_dir/Packages.adb"
 [ -d "$to_dir" ] || die "destination generation repository is not seeded: $to_dir (run seed-repo first)"
 
+# Arch-split layout resolver (same rule as sign-apk-repo): apk fetches
+# each package from <repo>/<package-arch>/. Promotion preserves the
+# source location's arch directory; a filename claimed in both is a
+# loud refusal, never a guess.
+resolve_source_dir()
+{
+	_r=$1 _fname=$2
+	_hits=""
+	for _d in "$arch" noarch; do
+		if [ -e "$repo_root/$_r/$_d/$_fname" ]; then
+			[ -z "$_hits" ] || die "filename claimed in two arch directories of $_r: $_fname (repository inconsistent)"
+			_hits=$_d
+		fi
+	done
+	[ -n "$_hits" ] || return 1
+	printf '%s\n' "$_hits"
+}
+
 # Ownership policy: published /out state belongs to the invoking user
 # with the repository group, even when invoked through sudo.
 normalize_ownership()
@@ -112,9 +130,10 @@ fi
 mkdir -p -- "${SAPHIRA_TMPDIR:-/build/tmp}"
 workspace=""
 # shellcheck disable=SC2086
-trap 'if [ -n "$db_lock_held" ]; then rmdir -- "$db_lock_held/repository.db.lock" 2>/dev/null || true; fi; if [ -n "$workspace" ]; then if [ -f "$workspace/staged-files" ]; then while IFS= read -r f || [ -n "$f" ]; do [ -n "$f" ] && rm -f -- "$to_dir/$f"; done < "$workspace/staged-files"; fi; rm -rf -- "$workspace"; fi' EXIT HUP INT TERM
+trap 'if [ -n "$db_lock_held" ]; then rmdir -- "$db_lock_held/repository.db.lock" 2>/dev/null || true; fi; if [ -n "$workspace" ]; then if [ -f "$workspace/staged-files" ]; then while IFS= read -r f || [ -n "$f" ]; do [ -n "$f" ] && rm -f -- "$repo_root/$to/$f"; done < "$workspace/staged-files"; fi; rm -rf -- "$workspace"; fi' EXIT HUP INT TERM
 workspace=$(mktemp -d "${SAPHIRA_TMPDIR:-/build/tmp}/promote-repo.XXXXXX")
 : > "$workspace/staged-files" || die "cannot create staging ledger"
+: > "$workspace/promoted-archs.txt" || die "cannot create arch ledger"
 
 # Phase 1 — validate and place. Copies land under their final names so
 # the gate below reads exactly what would be committed (same bytes the
@@ -126,8 +145,13 @@ workspace=$(mktemp -d "${SAPHIRA_TMPDIR:-/build/tmp}/promote-repo.XXXXXX")
 # and the trap above rolls them back on signal/exit paths.)
 for nvr in "$@"; do
 	printf '%s' "$nvr" | grep -Eq "$NVR_RE" || die "invalid NVR (expected name-version-rN): $nvr"
-	source_apk=$from_dir/$nvr.apk
-	dest_apk=$to_dir/$nvr.apk
+	src_subdir=$(resolve_source_dir "$from" "$nvr.apk") \
+		|| die "source package not found: $from/$nvr.apk (neither $arch nor noarch claims it)"
+	source_apk=$repo_root/$from/$src_subdir/$nvr.apk
+	dest_subdir=$src_subdir
+	dest_apk=$repo_root/$to/$dest_subdir/$nvr.apk
+	mkdir -p -- "$repo_root/$to/$dest_subdir" \
+		|| die "cannot create destination arch directory: $repo_root/$to/$dest_subdir"
 	[ -f "$source_apk" ] || die "source package not found: $source_apk"
 	"$SAPHIRA_APK" verify --keys-dir "$trust_dir" "$source_apk" \
 		|| die "source package fails repository-key verification: $source_apk"
@@ -144,8 +168,10 @@ for nvr in "$@"; do
 	"$SAPHIRA_APK" verify --keys-dir "$trust_dir" "$dest_apk" \
 		|| { rm -f -- "$dest_apk"; die "placed copy fails verification: $nvr (removed; live index/db unchanged)"; }
 	normalize_ownership "$dest_apk"
-	printf '%s\n' "$nvr.apk" >> "$workspace/staged-files" \
+	printf '%s\n' "$dest_subdir/$nvr.apk" >> "$workspace/staged-files" \
 		|| { rm -f -- "$dest_apk"; die "cannot record staged file"; }
+	printf '%s\t%s\n' "$nvr" "$dest_subdir" >> "$workspace/promoted-archs.txt" \
+		|| { rm -f -- "$dest_apk"; die "cannot record staged arch"; }
 	promoted=$((promoted + 1))
 	promoted_nvrs+=("$nvr")
 	printf 'promote-repo: staged %s for promotion (%s -> %s)\n' "$nvr" "$from" "$to"
@@ -164,7 +190,7 @@ if [ "$promoted" -gt 0 ]; then
 	rollback_staged()
 	{
 		while IFS= read -r f || [ -n "$f" ]; do
-			[ -n "$f" ] && rm -f -- "$to_dir/$f"
+			[ -n "$f" ] && rm -f -- "$repo_root/$to/$f"
 		done < "$workspace/staged-files"
 		: > "$workspace/staged-files"
 	}
@@ -178,7 +204,7 @@ if [ "$promoted" -gt 0 ]; then
 		# The lock was taken before the first copy, above; assert it is
 		# still ours rather than acquiring it a second time.
 		[ -n "$db_lock_held" ] || die "internal: writer lock was not held before mutation"
-	"$SAPHIRA_PYTHON" - "$repo_db_lib" "$SAPHIRA_APK" "$to_dir" \
+	"$SAPHIRA_PYTHON" - "$repo_db_lib" "$SAPHIRA_APK" "$to_dir" "$workspace/promoted-archs.txt" \
 		"${promoted_nvrs[@]}" <<'PY' || { rollback_staged; die "promotion refused or failed (staged files removed; live index/db unchanged; see above)"; }
 import json
 import os
@@ -188,9 +214,32 @@ import tempfile
 _promote_tmp_base = os.environ.get("SAPHIRA_TMPDIR", "/build/tmp")
 os.makedirs(_promote_tmp_base, exist_ok=True)
 
-(lib_path, apk, to_dir, *nvrs) = sys.argv[1:]
+(lib_path, apk, to_dir, archmap_path, *nvrs) = sys.argv[1:]
 sys.path.insert(0, os.path.dirname(lib_path))
 import repo_db as rdb
+
+archmap = {}
+with open(archmap_path, encoding="utf-8") as stream:
+    for line in stream:
+        line = line.rstrip("\n")
+        if not line:
+            continue
+        nvr_name, subdir = line.split("\t")
+        if subdir not in ("noarch",) and not subdir.replace("_", "").replace("-", "").isalnum():
+            print(f"promote-repo: invalid arch directory in ledger: {subdir}", file=sys.stderr)
+            raise SystemExit(1)
+        archmap[nvr_name] = subdir
+
+def promoted_path(nvr):
+    # to_dir already ends in the build-arch level; the file's own
+    # arch directory hangs off the generation base instead.
+    to_base = os.path.dirname(to_dir)
+    try:
+        subdir = archmap[nvr]
+    except KeyError:
+        print(f"promote-repo: promoted NVR has no recorded arch directory: {nvr}", file=sys.stderr)
+        raise SystemExit(1)
+    return os.path.join(to_base, subdir, nvr + ".apk")
 
 db_file = os.path.join(to_dir, "repository.db")
 try:
@@ -217,7 +266,7 @@ except rdb.RepoDbError as exc:
 staged = {}
 carriers = []
 for nvr in nvrs:
-    dumped = rdb.dump_package(apk, os.path.join(to_dir, nvr + ".apk"))
+    dumped = rdb.dump_package(apk, promoted_path(nvr))
     filename = nvr + ".apk"
     if any(f.startswith((rdb.FRAGMENT_PREFIX, rdb.FHS_FRAGMENT_PREFIX, rdb.CAPS_FRAGMENT_PREFIX)) for f in dumped["files"]):
         carriers.append(filename)
@@ -226,7 +275,7 @@ with tempfile.TemporaryDirectory(prefix="promote-repo-extract-", dir=_promote_tm
 receipts = {}
 for nvr in nvrs:
     filename = nvr + ".apk"
-    dumped = rdb.dump_package(apk, os.path.join(to_dir, filename))
+    dumped = rdb.dump_package(apk, promoted_path(nvr))
     # Manifest-schema receipts: the gate compares payload presence
     # against these declarations in both directions (fragment without
     # declaration, and declaration without fragment, both refuse).
@@ -255,7 +304,7 @@ with open(receipts_path, "w", encoding="utf-8") as stream:
     json.dump(receipts, stream, sort_keys=True, separators=(",", ":"))
     stream.write("\n")
 tsv_path = os.environ.get("SAPHIRA_ACCOUNTS_TSV", "/usr/share/saphira/accounts.tsv")
-package_paths = [os.path.join(to_dir, nvr + ".apk") for nvr in nvrs]
+package_paths = [promoted_path(nvr) for nvr in nvrs]
 try:
     staged, notices = rdb.gate_staged(conn, apk, receipts_path,
                                       set(receipts), package_paths, tsv_path)
@@ -286,7 +335,7 @@ PY
 	: > "$workspace/staged-files"
 	# shellcheck disable=SC2046
 	repo_generate_index "$SAPHIRA_APK" "$adb" "$tar" "$sign_key" "$trust_dir" \
-		$(find "$to_dir" -maxdepth 1 -name '*.apk' -print) \
+		$(find "$to_dir" "$repo_root/$to/noarch" -maxdepth 1 -name '*.apk' -print 2>/dev/null) \
 		|| die "destination index regeneration failed for $to (packages+ledger committed; rerun promote-repo for an already-present refresh)"
 	repo_install_index "$to_dir" "$adb" "$tar"
 	normalize_ownership "$to_dir/Packages.adb" "$to_dir/APKINDEX.tar.gz"
@@ -294,8 +343,10 @@ PY
 	# counted until files, ledger, and index are all committed.
 	for nvr in "${promoted_nvrs[@]}"; do
 		printf 'promote-repo: promoted %s: %s -> %s\n' "$nvr" "$from" "$to"
+		_nvr_subdir=$(awk -F'\t' -v n="$nvr" '$1 == n { print $2 }' "$workspace/promoted-archs.txt")
+		[ -n "$_nvr_subdir" ] || die "internal: promoted NVR missing from arch ledger: $nvr"
 		printf '{"ts":"%s","action":"promoted","from":"%s","to":"%s","nvr":"%s","sha256":"%s"}\n' \
-			"$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$from" "$to" "$nvr" "$(sha256sum "$to_dir/$nvr.apk" | cut -d' ' -f1)" \
+			"$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$from" "$to" "$nvr" "$(sha256sum "$repo_root/$to/$_nvr_subdir/$nvr.apk" | cut -d' ' -f1)" \
 			>> "$journal"
 	done
 	normalize_ownership "$journal"

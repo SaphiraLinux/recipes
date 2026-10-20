@@ -2,7 +2,15 @@
 
 pkgname=saphira-network
 pkgver=0.1
-pkgrel=12
+pkgrel=13
+# r13: the pidfile directory must exist before the daemon is required
+# to write into it. dhcpcd_up waited, bounded, for a pidfile under
+# /var/run/dhcpcd that nothing ever created - a fresh /var/run has no
+# such directory and dhcpcd does not create parents itself - so DHCP
+# failed after five silent seconds on every clean boot. dhcpcd_up now
+# creates it (and the OpenRC unit declares it), so the wait tests the
+# daemon instead of the directory. Proven by
+# tests/dhcpcd-startup.sh.
 # r12: a DHCP client that cannot start must not report that it started.
 # Found on a real BIOS/OpenRC image build: DHCP never worked and nothing
 # said so. `dhcpcd -q <iface>` daemonises - the parent exits 0 the moment

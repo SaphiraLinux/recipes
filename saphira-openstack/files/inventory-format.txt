@@ -1,0 +1,87 @@
+saphira-openstack inventory document format
+==========================================
+
+A plain-text, editable, reproducible configuration the operator designs
+and Saphira implements. Both the interactive wizard (`init`) and
+hand-written files feed the same validation and planning engine.
+
+Syntax
+------
+
+  # comment
+  [section]
+  key = value
+  list = item1, item2, item3
+
+Sections appear in a canonical order; keys are sorted within a section.
+Values are trimmed. The file is line-oriented; there is no nesting.
+
+Nothing in this format is implicit. If a field is not written, it does
+not exist: no default subnet, domain, hostname, interface, bridge, VLAN
+or storage device is ever assumed. Example files illustrate choices;
+they are never defaults.
+
+Sections
+--------
+
+[global]
+  domain      DNS name for this cloud (required)
+  init        openrc | systemd (required; explicit choice)
+
+[node NAME]
+  roles       controller, compute (at least one; multiple allowed)
+  address4    IPv4 management address (optional; independent of IPv6)
+  address6    IPv6 management address (optional; independent of IPv4)
+
+[network NAME]
+  purposes    comma list of: management, provider, tenant, storage
+              (a network may serve several purposes; management required)
+  existing    yes | no (yes: reference as-is; never recreate)
+  family      ipv4 | ipv6 | dual
+  cidr4/cidr6 network prefixes, per family (independent)
+  gateway4/gateway6 optional gateways, validated inside the CIDR
+  mode4/mode6 dhcp | static | none, per family
+  dns         DNS server (optional)
+  vlan        VLAN id 1-4094 (optional)
+  bridge      bridge name (optional)
+  interface   physical interface (optional)
+  ovs         OVS mapping bridge:port (optional)
+  take_ownership yes | no (default no; required to adopt an interface)
+
+[storage NAME]
+  type        zfs-pool | zfs-dataset | local | nfs | lvm | ceph
+  shared      yes | no
+  existing    yes | no (yes: import/attach only; never format/destroy)
+  devices     comma-separated devices (new zfs-pool only; never
+              auto-detected)
+
+[service NAME]
+  node        machine running this service (must hold a matching role)
+
+[operations]
+  init        openrc | systemd (must agree with [global] init)
+  endpoints   comma list of public, internal, admin (optional)
+  tls         none | selfsigned | provided
+  cert        path to the certificate (tls = provided only)
+  key         path to the key (tls = provided only)
+  credentials interactive (secrets are prompted at apply time, never stored)
+  db_node     controller node hosting the database
+  mq_node     controller node hosting the message queue
+  ha          none (HA stack pending)
+
+Validation
+----------
+
+The engine validates the whole document and reports every problem at
+once. It checks topology, per-family addressing (IPv4-only, IPv6-only and
+dual-stack all valid), gateways inside their CIDRs, VLAN ranges, names,
+OVS mappings, network uniqueness, storage backends against the catalog,
+service dependencies, node/role placement, and operational choices. It
+never invents a value and never refuses an operator-chosen subnet.
+
+Reproducibility
+---------------
+
+The document normalizes to a canonical form (fixed section order, sorted
+keys). The plan carries a plan_id (sha256 of the canonical document), so
+the same configuration always produces the same plan.

@@ -1,0 +1,27 @@
+[Unit]
+Description=OpenStack Networking (Neutron) API
+Documentation=man:gunicorn(1)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+User=neutron
+Group=neutron
+EnvironmentFile=-/etc/conf.d/neutron-api
+Environment=NEUTRON_API_BIND=127.0.0.1:9696
+Environment=NEUTRON_API_CONF=/etc/neutron/neutron.conf
+RuntimeDirectory=neutron
+RuntimeDirectoryMode=0750
+ExecStart=/usr/bin/gunicorn --name neutron-api \
+	--bind ${NEUTRON_API_BIND} --workers ${NEUTRON_API_WORKERS} \
+	--pid /var/run/neutron/neutron-api.pid \
+	--config ${NEUTRON_API_CONF} \
+	neutron.wsgi.api:application
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+KillMode=mixed
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

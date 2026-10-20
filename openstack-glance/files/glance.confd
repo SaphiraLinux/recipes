@@ -1,0 +1,17 @@
+# Glance API runtime settings (operator-editable).
+#
+# These are the WSGI container's own settings, not Glance's configuration
+# (which lives in /etc/glance/glance-api.conf). Nothing here is applied
+# until the operator enables and starts the service.
+
+# Address and port gunicorn listens on. Point this at a TLS-terminating
+# proxy (nginx/haproxy) for production; leave the default for a local
+# listener behind such a proxy.
+#GLANCE_BIND="127.0.0.1:9292"
+
+# Number of gunicorn worker processes.
+#GLANCE_WORKERS="4"
+
+# Path to the Glance configuration file (generate from
+# /etc/glance/glance-api.conf.sample, then edit).
+#GLANCE_CONF="/etc/glance/glance-api.conf"

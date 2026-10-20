@@ -1,0 +1,233 @@
+#!/bin/sh
+#
+# saphira-openstack - Saphira native OpenStack installer foundation.
+#
+# The operator designs the cloud; Saphira implements it. Three public
+# interfaces over ONE engine (lib/engine.sh: parse -> validate ->
+# normalize -> plan):
+#
+#   init       interactive terminal wizard: menus, explanations, Back,
+#              Review, Cancel. Writes an inventory document ONLY after
+#              explicit confirmation. Never applies anything.
+#   inventory  inspect and validate the operator's chosen configuration
+#   plan       display exactly what would be installed or changed, without
+#              changing the system
+#
+# Design invariants:
+#   * No hardcoded IP addresses, CIDRs, domains, interface names, bridges,
+#     VLANs, hostnames or storage devices. Examples illustrate; they are
+#     never defaults.
+#   * apk add saphira-openstack installs this tool only. Nothing is
+#     configured, nothing is modified, no OpenStack service is implied.
+#   * Read-only by default. The only writes are the confirmed inventory
+#     document (init) and an explicit --out directory (plan).
+#   * Unported OpenStack components are PENDING, never claimed deployed.
+#
+# usage: saphira-openstack <command> [options]
+#
+# Public commands:
+#   init [--from FILE] [--output FILE]
+#   inventory [--file PATH] [--check]
+#   plan [--file PATH] [--out DIR]
+#
+# Internal verbs (leading underscore; not operator-facing):
+#   _validate <file>              full engine validation of a document
+#   _catalog <services|networks|storage|operations>
+#   _detect <kind>                read-only inspection (interfaces, ovs,
+#                                 vlans, zfs, routes, init)
+#   _cidr4 <val> _cidr6 <val>     address-family validators
+#   _addr4 <val> _addr6 <val>
+#   _gateway4 <cidr> <gw>  _gateway6 <cidr> <gw>
+#   _dns <val> _vlan <val> _name <val> _ovsmap <val>
+#
+# Environment:
+#   SAPHIRA_OPENSTACK_STATE_DIR    wizard scratch (default: SAPHIRA_TMPDIR)
+#   SAPHIRA_OPENSTACK_INVENTORY    default document path
+#   SAPHIRA_OPENSTACK_NO_DETECT    set to skip hardware suggestions
+
+set -eu
+
+PROG=saphira-openstack
+
+die()
+{
+	printf '%s: %s\n' "$PROG" "$*" >&2
+	exit 1
+}
+
+warn()
+{
+	printf '%s: %s\n' "$PROG" "$*" >&2
+}
+
+# The tool directory: installed layout vs source tree, so the canonical
+# library and data paths resolve the same way during tests and in prod.
+bindir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) || die 'cannot locate tool directory'
+
+datadir=${SAPHIRA_OPENSTACK_DATADIR:-/usr/share/saphira/openstack}
+if [ -f "$bindir/lib/engine.sh" ]; then
+	libdir=$bindir/lib
+	catalog_dir=$bindir/catalog
+	examples_dir=$bindir/examples
+else
+	libdir=${SAPHIRA_OPENSTACK_LIBDIR:-$datadir/lib}
+	catalog_dir=${SAPHIRA_OPENSTACK_CATALOG_DIR:-$datadir/catalog}
+	examples_dir=${SAPHIRA_OPENSTACK_EXAMPLES_DIR:-$datadir/examples}
+fi
+
+[ -f "$libdir/engine.sh" ] || die "engine is missing: $libdir/engine.sh
+        The saphira-openstack package installs the engine beside this tool."
+
+. "$libdir/engine.sh"
+. "$libdir/detect.sh"
+. "$libdir/inventory.sh"
+. "$libdir/plan.sh"
+
+usage()
+{
+	cat >&2 <<USAGE
+usage:
+  $PROG init [--from FILE] [--output FILE]
+                          interactive wizard (design your cloud).
+                          --from loads an existing document as the
+                          editable base (every choice shown, kept
+                          unless explicitly changed).
+  $PROG inventory [--file PATH] [--check]
+  $PROG plan [--file PATH] [--out DIR]
+
+commands:
+  init          menu-driven wizard: topology, networking, storage, services,
+                operations. Back, Review, Cancel. Writes the inventory
+                document only after you confirm. Applies nothing.
+                --from FILE loads an existing document as the editable
+                base; --output FILE chooses where to write.
+  inventory     inspect and validate the chosen configuration.
+                --check: no output, exit 0 when valid.
+  plan          display exactly what would be installed or changed.
+                Read-only; writes only into --out DIR when asked.
+
+options:
+  --file PATH   inventory document (default: /etc/saphira-openstack/inventory.ini)
+  --out DIR     plan output directory (created only on request)
+
+Nothing here modifies the system. OpenStack services themselves are
+installed separately, once their packages exist.
+USAGE
+	exit 2
+}
+
+default_inventory()
+{
+	printf '%s\n' "${SAPHIRA_OPENSTACK_INVENTORY:-/etc/saphira-openstack/inventory.ini}"
+}
+
+cmd_inventory()
+{
+	file=$(default_inventory)
+	check=0
+	while [ "$#" -gt 0 ]; do
+		case "$1" in
+		--file) file=$2; shift 2 ;;
+		--check) check=1; shift ;;
+		*) usage ;;
+		esac
+	done
+	[ -f "$file" ] || die "inventory document not found: $file
+        Run '$PROG init' to design one, or pass --file."
+	if [ "$check" = 1 ]; then
+		os_validate "$file" >/dev/null
+		exit 0
+	fi
+	os_inventory_render "$file"
+}
+
+cmd_plan()
+{
+	file=$(default_inventory)
+	out=""
+	while [ "$#" -gt 0 ]; do
+		case "$1" in
+		--file) file=$2; shift 2 ;;
+		--out) out=$2; shift 2 ;;
+		*) usage ;;
+		esac
+	done
+	[ -f "$file" ] || die "inventory document not found: $file
+        Run '$PROG init' to design one, or pass --file."
+	[ -n "$out" ] || printf '%s\n' "$file" >/dev/null
+	os_plan_render "$file" "$out"
+}
+
+cmd_validate()
+{
+	[ "$#" -ge 1 ] || die "usage: $PROG _validate <file>"
+	os_validate "$1" >/dev/null
+}
+
+cmd_catalog()
+{
+	kind=${1:-}
+	case "$kind" in
+	services | networks | storage | operations)
+		cat "$catalog_dir/$kind.tsv"
+		;;
+	*)
+		die "usage: $PROG _catalog <services|networks|storage|operations>"
+		;;
+	esac
+}
+
+cmd_detect()
+{
+	kind=${1:-}
+	case "$kind" in
+	interfaces | ovs | vlans | zfs | routes | init | all)
+		os_detect "$kind"
+		;;
+	*)
+		die "usage: $PROG _detect <interfaces|ovs|vlans|zfs|routes|init|all>"
+		;;
+	esac
+}
+
+cmd_field()
+{
+	# Field-level validators used by the wizard for immediate feedback.
+	[ "$#" -ge 1 ] || die "usage: $PROG _<field> <args...>"
+	case "$1" in
+	_cidr4) [ "$#" -eq 2 ] || die 'usage: _cidr4 <cidr>'; os_valid_cidr4 "$2" ;;
+	_cidr6) [ "$#" -eq 2 ] || die 'usage: _cidr6 <cidr>'; os_valid_cidr6 "$2" ;;
+	_addr4) [ "$#" -eq 2 ] || die 'usage: _addr4 <addr>'; os_valid_addr4 "$2" ;;
+	_addr6) [ "$#" -eq 2 ] || die 'usage: _addr6 <addr>'; os_valid_addr6 "$2" ;;
+	_gateway4) [ "$#" -eq 3 ] || die 'usage: _gateway4 <cidr> <gw>'; os_gateway_in_cidr4 "$2" "$3" ;;
+	_gateway6) [ "$#" -eq 3 ] || die 'usage: _gateway6 <cidr> <gw>'; os_gateway_in_cidr6 "$2" "$3" ;;
+	_dns) [ "$#" -eq 2 ] || die 'usage: _dns <server>'; os_valid_dns "$2" ;;
+	_vlan) [ "$#" -eq 2 ] || die 'usage: _vlan <id>'; os_valid_vlan "$2" ;;
+	_name) [ "$#" -eq 2 ] || die 'usage: _name <name>'; os_valid_name "$2" ;;
+	_ovsmap) [ "$#" -eq 2 ] || die 'usage: _ovsmap <bridge:port>'; os_valid_ovsmap "$2" ;;
+	*) die "unknown field validator: $1" ;;
+	esac
+}
+
+cmd=${1:-}
+[ -n "$cmd" ] || usage
+shift || true
+case "$cmd" in
+inventory) cmd_inventory "$@" ;;
+plan) cmd_plan "$@" ;;
+_validate) cmd_validate "$@" ;;
+_catalog) cmd_catalog "$@" ;;
+	_detect) cmd_detect "$@" ;;
+_cidr4 | _cidr6 | _addr4 | _addr6 | _gateway4 | _gateway6 | _dns | _vlan | _name | _ovsmap)
+	cmd_field "$cmd" "$@"
+	;;
+init)
+	# The wizard runs in its own library; it owns the interactive flow.
+	OS_WIZARD_NO_MAIN=1
+	. "$libdir/wizard.sh"
+	os_wizard_main "$@"
+	;;
+*)
+	die "unknown command: $cmd"
+	;;
+esac

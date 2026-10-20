@@ -2,7 +2,7 @@
 
 pkgname=udev
 pkgver=261.2
-pkgrel=6
+pkgrel=7
 # r6: ship a prebuilt hardware database (lib/udev/hwdb.bin) compiled
 # from the staged sources at package build time. The database is
 # hardware-independent (a deterministic trie over static .hwdb
@@ -18,6 +18,11 @@ pkgrel=6
 # r5: rewrite the upstream 99-systemd.rules sysctl callout to
 # the packaged path (merged-usr /lib location does not exist;
 # every net add logged a failed callout). Fail closed on drift.
+# r7: ship the missing openrc service (/etc/init.d/udev). The package
+# carried the daemon, rules and helpers but no init integration, so
+# on openrc no udevd ever ran and /dev/disk/* was never populated
+# (proven Egg 2026-10-19). Single service by design: trigger and
+# settle run in start_post, so no separate trigger/settle units.
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="Standalone systemd udev device manager"
 license="LGPL-2.1-or-later"
@@ -41,7 +46,7 @@ makedepends="
     kmod-dev
     libcap-dev
     libucontext-dev
-    saphira-kernel-headers
+    saphira-linux-uapi-headers
     make
     meson
     ninja
@@ -124,6 +129,10 @@ recipe_install()
 	# udevadm, the standalone daemon, hwdb, rules and libudev.  Everything
 	# else the source builds belongs to the systemd package; the whitelist
 	# keeps that boundary explicit as upstream layout moves.
+	# Openrc service (see files/): installed before the whitelist
+	# shuffle below so the kept-tree move preserves it.
+	install -D -m 0755 "$RECIPE_DIR/files/udev.initd" \
+		"$PKGDEST/etc/init.d/udev"
 	kept="$PKGDEST.keep"
 	mkdir "$kept"
 	for item in \
@@ -133,6 +142,7 @@ recipe_install()
 		lib/systemd/systemd-udevd \
 		lib/udev \
 		etc/udev \
+		etc/init.d/udev \
 		usr/lib/libudev.so* \
 		usr/lib/libudev.a \
 		usr/include/libudev.h \
@@ -188,6 +198,12 @@ recipe_install()
 	if grep -q 'RUN+="/lib/systemd/' \
 		"$PKGDEST/lib/udev/rules.d/99-systemd.rules"; then
 		echo "ERROR: merged-usr RUN path remains in 99-systemd.rules" >&2
+		return 1
+	fi
+	# Stage1-leak guard (2026-10-19 fossil incident): a clean
+	# native build must never embed /saphirabuild stage paths.
+	if grep -rqF '/saphirabuild/' "$PKGDEST"; then
+		echo "ERROR: staged payload leaks /saphirabuild stage path" >&2
 		return 1
 	fi
 }

@@ -306,7 +306,16 @@ apply_network()
 	state_dir=${SAPHIRA_FIRSTBOOT_STATE_DIR:-/var/lib/saphira-firstboot}
 	active=$state_dir/active
 	completed=$state_dir/completed
-	test ! -e "$completed" || fail 'firstboot has already completed'
+	# The wizard commits (writes completed) BEFORE it applies the
+	# network, so a post-commit in-wizard apply always runs with both
+	# files present: completed proves setup is over, active proves a
+	# live wizard transaction is applying right now. A completed
+	# state with NO active transaction is stale - a previous run's
+	# record, not this one - and must still be refused, so a stale
+	# marker can never bypass this guard.
+	if test -e "$completed" && test ! -f "$active"; then
+		fail 'firstboot has already completed'
+	fi
 	test -d "$state_dir" || fail 'firstboot state directory is absent'
 	if test "${SAPHIRA_NETWORK_SKIP_OWNERSHIP:-0}" = 1; then
 		test "$(stat -c %a "$state_dir")" = 700 ||

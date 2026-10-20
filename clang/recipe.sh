@@ -31,7 +31,11 @@ makedepends="
 # Proven v0 flags: separate clang build against the installed LLVM,
 # linked against libclang.dylib-style shared library; tests/examples
 # off; static analyzer on. libclang.so and clang-c headers are removed
-# at install exactly as in v0 (libclang is a separate future port).
+# at install exactly as in v0: the native libclang recipe (same
+# llvm-project tree, install-libclang + clang-c headers) is the sole
+# owner of those paths (verified 2026-10-18: shipping them here would
+# collide with libclang-22.1.8-r1). Do not re-add without removing
+# them there first.
 # The BPF backend is a property of THIS build, not merely of the installed
 # LLVM. When llvm gained the BPF target, the already-installed clang still
 # failed `clang -target bpf` against the new libLLVM, while

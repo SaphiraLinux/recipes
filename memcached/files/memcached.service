@@ -1,0 +1,20 @@
+[Unit]
+Description=Distributed memory object caching system
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=memcached
+Group=memcached
+EnvironmentFile=-/etc/conf.d/memcached
+Environment=MEMCACHED_PORT=11211
+Environment=MEMCACHED_MEMORY=64
+Environment=MEMCACHED_CONNS=1024
+ExecStart=/usr/bin/memcached -p ${MEMCACHED_PORT} -m ${MEMCACHED_MEMORY} -c ${MEMCACHED_CONNS}
+RuntimeDirectory=memcached
+RuntimeDirectoryMode=0755
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

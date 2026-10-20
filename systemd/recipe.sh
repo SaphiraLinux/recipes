@@ -102,7 +102,7 @@ makedepends="
     libseccomp-dev
     libucontext-dev
     linux-pam-dev
-    saphira-kernel-headers
+    saphira-linux-uapi-headers
     lz4-dev
     make
     meson

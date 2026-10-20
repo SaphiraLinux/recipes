@@ -1,0 +1,34 @@
+[Unit]
+Description=OpenStack Compute (Nova) API
+Documentation=man:gunicorn(1)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+User=nova
+Group=nova
+# Defaults first, operator file last: EnvironmentFile assignments win
+# over Environment=, so /etc/conf.d/nova-api overrides these (the
+# reverse order silently ignored operator settings). WORKERS default
+# matches the initd nproc||4 fallback (systemd takes no command
+# substitution); missing default was a boot failure (gunicorn
+# --workers '' -> exit 2, proven on Hatchling).
+Environment=NOVA_API_BIND=127.0.0.1:8774
+Environment=NOVA_API_WORKERS=4
+Environment=NOVA_API_CONF=/etc/nova/nova.conf
+EnvironmentFile=-/etc/conf.d/nova-api
+RuntimeDirectory=nova
+RuntimeDirectoryMode=0750
+ExecStart=/usr/bin/gunicorn --name nova-api \
+	--bind ${NOVA_API_BIND} --workers ${NOVA_API_WORKERS} \
+	--pid /var/run/nova/nova-api.pid \
+	--config ${NOVA_API_CONF} \
+	nova.wsgi.osapi_compute:application
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+KillMode=mixed
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

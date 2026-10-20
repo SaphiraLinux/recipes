@@ -33,16 +33,20 @@ partitions a disk image, installs Saphira into it through the canonical
 installer, prepares the requested init system, installs a bootloader, and
 reports what went in.
 .PP
-It supports four targets, covering both init systems and both boot
-methods:
+It supports eight targets, covering both init systems, both boot
+methods, and both the minimal and the product profiles:
 .PP
 .RS
 .TS
 l l l.
-bios\-openrc     BIOS,   OpenRC
-bios\-systemd    BIOS,   systemd
-uefi\-openrc     UEFI,   OpenRC
-uefi\-systemd    UEFI,   systemd
+bios\-openrc     BIOS,   OpenRC,  minimal
+bios\-systemd    BIOS,   systemd, minimal
+bios\-saphira    BIOS,   OpenRC,  product
+bios\-saphirad   BIOS,   systemd, product
+uefi\-openrc     UEFI,   OpenRC,  minimal
+uefi\-systemd    UEFI,   systemd, minimal
+uefi\-saphira    UEFI,   OpenRC,  product
+uefi\-saphirad   UEFI,   systemd, product
 .TE
 .RE
 .PP
@@ -119,6 +123,34 @@ and services are enabled offline with
 .BR "systemctl \-\-root=/ enable" .
 Nothing is ever started: an image has no running init, and enabling is a
 persistent intent.
+.SH PHYSICAL DISKS
+.B "saphira\-image install\-to\-disk \-\-target"
+.I TARGET
+.B \-\-device
+.I DEV
+installs through the same engine onto a real disk instead of an image
+file: the same partition generator (sized to the whole device), the
+same installer and identity replay, the same init preparation and
+service enablement, the same PARTUUID-stable bootloader, the same
+measurement. Only the backing differs, and the bootloader targets the
+whole disk rather than a loop device.
+.PP
+There is no default device and no discovery. The tool refuses a
+missing path, a non-block file, a partition (it owns the whole table),
+any disk with a mounted partition or active swap, and the disk hosting
+the running system. The complete plan is always printed first;
+.B \-\-preview
+prints it and stops without touching the device, and a real run
+requires the operator to type the device path back before anything is
+partitioned. On failure the disk is unmounted and left as-is for
+diagnosis; nothing is wiped by the error path.
+.PP
+UEFI installs use the removable fallback bootloader path
+.RB ( BOOTX64.EFI ),
+so no NVRAM entry is written and installation works where firmware
+variables are unreachable. Writing a boot entry with
+.B efibootmgr
+remains a deliberate follow-up, not a silent requirement.
 .SH PARTITION PLANS
 The two plans are genuinely different and neither is derived from the
 other by arithmetic.
@@ -137,7 +169,8 @@ The firmware reads a FAT EFI System Partition. BIOS partitioning rules
 are deliberately not reused: a
 .B bios\-boot
 partition means nothing to UEFI firmware, and without a real ESP the
-firmware finds no bootloader at all. The ESP is formatted FAT32, mounted at
+firmware finds no bootloader at all. The ESP is 64 MiB, formatted
+FAT32, mounted at
 .IR /boot/efi ,
 and
 .B grub\-install
@@ -169,7 +202,7 @@ them.
 .SH OPTIONS
 .TP
 .BI \-\-target " NAME"
-One of the four targets.
+One of the eight targets.
 .TP
 .BI \-\-output " PATH"
 Image path. A
@@ -209,6 +242,29 @@ Install the profile but enable none of its services.
 .TP
 .B \-\-keep\-work
 Retain the scratch workspace when a build fails, for diagnosis.
+.TP
+.B install\-to\-disk \-\-target
+.I TARGET
+.B \-\-device
+.I DEV
+Install onto a physical disk. Accepts
+.BR \-\-preview ,
+.BR \-\-hostname ,
+.BR \-\-root\-password ,
+.BR \-\-kernel\-arg ,
+.BR \-\-arch ,
+.BR \-\-repository ,
+.BR \-\-netconf ,
+.BR \-\-role ,
+.BR \-\-role\-file ,
+.BR \-\-no\-enable ,
+.BR \-\-keep\-work .
+There is no
+.B \-\-output ,
+.B \-\-size
+or
+.B \-\-allocate :
+the disk's own capacity is the size.
 .SH EXIT STATUS
 Zero on success. Non\-zero on any refusal. A failed build removes the
 partial image it created; a pre\-existing output path is never touched.
@@ -229,6 +285,11 @@ path.
 Override the
 .B saphira\-chroot
 path.
+.TP
+.B SAPHIRA_IMAGE_PROFILES
+Override the profile tree the tool reads. Defaults to the shared tree
+.RI ( /usr/share/saphira/profiles ,
+or the install-tools source tree when run from a recipe checkout).
 .SH FILES
 .TP
 .I /usr/bin/saphira-image
@@ -239,10 +300,18 @@ the target matrix: one row per supported boot target, each naming a boot
 method, an init system and a profile. This is data, so adding a target is a
 line rather than a new implementation.
 .TP
-.I /usr/share/saphira/image/profiles/
-minimal profiles and role layers. A profile lists
+.I /usr/share/saphira/profiles/
+the single authoritative profile tree, owned by saphira-install-tools
+.RB ( saphira-profiles (5)).
+The image tool reads it (installed package, source tree, or
+.B SAPHIRA_IMAGE_PROFILES
+override) and stages what each build needs into scratch; it ships no
+profile namespace of its own. A profile lists
 .I intentions
-only; dependency closure belongs to APK metadata.
+only; dependency closure belongs to APK metadata. Profiles may
+.B @include
+other profiles; includes resolve inside the staged scratch tree and a
+missing include fails the build rather than guessing.
 .TP
 .I /usr/share/saphira/image/services.d/
 OPTIONAL package-to-service mapping, one file per package, one init

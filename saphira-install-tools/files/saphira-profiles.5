@@ -50,13 +50,21 @@ install. Validate a profile by resolving it against the repository
 index and proving every transitive dependency is satisfiable \-
 before touching image assembly.
 .SH PROFILES
+One tree,
+.IR /usr/share/saphira/profiles/ ,
+is the single authority. Image creation
+.RB ( saphira-image )
+and disk installation
+.RB ( saphira-install )
+consume it through the same code path; there is no second profile
+namespace.
 .TP
 .B base-system
 Init-neutral Saphira system: the package and bootloader material every
 installed machine carries, and no init system at all. Compose it with
 .B init-openrc
 or
-.BR init-systemd .
+.B init-systemd .
 .TP
 .B init-openrc
 .TQ
@@ -66,15 +74,33 @@ separately is what keeps
 .B base-system
 reusable: a base that named an init would force every caller to restate it.
 .TP
-.B saphira-openrc
+.B minimal-openrc
 .TQ
-.B saphira-systemd
-Convenience compositions of
-.B base-system
-with one of the
-.B init-*
-profiles. They exist so an installer can name one thing; they declare no
-intention of their own and duplicate nothing.
+.B minimal-systemd
+The minimum for a genuinely bootable, manageable machine: base, the
+kernel line, the init, the bootloader, filesystem tooling, remote
+access and timezone data. The two differ only in the init package.
+.TP
+.B saphira-openrc
+The Saphira 0.2.1 base system with OpenRC: the minimal set grown into
+a product (product identity, network framework, DHCP client,
+firewalling, ACPI handling, editor, ping).
+.TP
+.B saphirad-systemd
+The SaphiraD 0.2.1 base system with systemd: the systemd twin of the
+above (product identity differs, so the init choice is visible inside
+the running system).
+.TP
+.B role-networking
+.TQ
+.B role-dns
+.TQ
+.B role-firewall
+.TQ
+.B role-remote-access
+Role layers: additional intention lists composed on top of a minimal
+profile. Roles are profile data, not meta-packages: no new package
+name is invented for a role.
 .TP
 .B saphira-installer
 The installer userspace: enough software to INSTALL a machine, and

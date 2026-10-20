@@ -173,15 +173,21 @@ if as_root "$R" "$test_root/ghost" > "$test_root/8.log" 2>&1; then
 fi
 grep 'not declared, present, or base-seeded' "$test_root/8.log" >/dev/null
 
-# 8b. Packaged range: creation at UID/GID 888+ refuses (local-user-service
-# territory 888..999, humans 1000+); the error names the range.
+# 8b. Packaged range: creation anywhere in 0..999 succeeds (service
+# identities); 1000+ refuses (human territory) and names the range.
 printf 'user biguser 900 biggroup /var/lib/big /sbin/nologin\ngroup biggroup 900\n' > "$test_root/bigrange"
-if as_root "$R" "$test_root/bigrange" > "$test_root/8b.log" 2>&1; then
-	printf '%s\n' 'out-of-range identity unexpectedly created' >&2
+if ! as_root "$R" "$test_root/bigrange" > "$test_root/8b.log" 2>&1; then
+	printf '%s\n' 'in-range identity unexpectedly refused' >&2
 	exit 1
 fi
-grep 'outside packaged range 0..887' "$test_root/8b.log" >/dev/null
-test "$(grep -c '^biguser:' "$R/etc/passwd")" -eq 0
+test "$(grep -c '^biguser:' "$R/etc/passwd")" -eq 1
+printf 'user hugeuser 1000 hugegroup /var/lib/huge /sbin/nologin\ngroup hugegroup 1000\n' > "$test_root/bigger"
+if as_root "$R" "$test_root/bigger" > "$test_root/8b-human.log" 2>&1; then
+	printf '%s\n' 'human-range identity unexpectedly created' >&2
+	exit 1
+fi
+grep 'outside packaged range 0..999' "$test_root/8b-human.log" >/dev/null
+test "$(grep -c '^hugeuser:' "$R/etc/passwd")" -eq 0
 
 # 8d. Reserved identities are untouchable in BOTH modes: a fragment
 # naming root/wheel or allocating ID 0 is refused before any write,
@@ -546,5 +552,39 @@ if as_root "$R5" --disable "$test_root/sysbad" > "$test_root/17e.log" 2>&1; then
 fi
 grep 'sysusers takes no arguments' "$test_root/17e.log" >/dev/null
 
+# 18. Supplementary groups (fragment `user` 6th field, comma list).
+R6=$test_root/root6
+seed_root "$R6"
+printf 'user vmuser 661 vmgroup /var/lib/vm /sbin/nologin kvm,render\ngroup vmgroup 661\ngroup kvm 160\ngroup render 161\n' > "$test_root/supp"
+as_root "$R6" "$test_root/supp" > "$test_root/18.log" 2>&1
+grep '^vmuser:x:661:661:vmuser:/var/lib/vm:/sbin/nologin$' "$R6/etc/passwd" >/dev/null
+grep '^kvm:x:160:vmuser$' "$R6/etc/group" >/dev/null
+grep '^render:x:161:vmuser$' "$R6/etc/group" >/dev/null
+after_supp=$(sha256sum "$R6/etc/passwd" "$R6/etc/group" "$R6/etc/shadow")
+# 18b. Idempotent re-run: byte-identical databases.
+as_root "$R6" "$test_root/supp" > "$test_root/18b.log" 2>&1
+[ "$(sha256sum "$R6/etc/passwd" "$R6/etc/group" "$R6/etc/shadow")" = "$after_supp" ]
+# 18c. Base-seeded supplementary group needs no declaration.
+printf 'user seeduser 662 seedgroup /var/lib/seed /sbin/nologin man\ngroup seedgroup 662\n' > "$test_root/suppseed"
+as_root "$R6" "$test_root/suppseed" > "$test_root/18c.log" 2>&1
+grep '^man:x:13:seeduser$' "$R6/etc/group" >/dev/null
+# 18d. Unknown supplementary group fails closed.
+printf 'user baduser 663 badgroup /var/lib/bad /sbin/nologin nosuchgroup\ngroup badgroup 663\n' > "$test_root/suppbad"
+if as_root "$R6" "$test_root/suppbad" > "$test_root/18d.log" 2>&1; then
+	printf '%s\n' 'unknown supplementary group unexpectedly accepted' >&2
+	exit 1
+fi
+grep 'supplementary group is not declared' "$test_root/18d.log" >/dev/null
+# 18e. Reserved foundation group as supplementary fails closed.
+printf 'user privuser 664 privgroup /var/lib/priv /sbin/nologin wheel\ngroup privgroup 664\n' > "$test_root/suppriv"
+if as_root "$R6" "$test_root/suppriv" > "$test_root/18e.log" 2>&1; then
+	printf '%s\n' 'reserved supplementary group unexpectedly accepted' >&2
+	exit 1
+fi
+grep 'reserved foundation group' "$test_root/18e.log" >/dev/null
+# 18f. Disable mode leaves memberships (conservative removal).
+as_root "$R6" --disable "$test_root/supp" > "$test_root/18f.log" 2>&1
+grep '^kvm:x:160:vmuser$' "$R6/etc/group" >/dev/null
+
 [ "$host_before" = "$(sha256sum /etc/passwd /etc/group)" ]
-printf '%s\n' 'account reconciler unit tests (rootless): creation, idempotency, serialization, conflict refusal, range refusal, reserved-identity refusal, local convergence, credential refusal, disable/restore, idempotent disable, absent no-op, disable foreign retention (user/group/primary/mixed), state retention, reinstall convergence, file ownership/mode, file idempotency, file failure closure, file disable retention, fifo ownership, legacy auto-repair, sysusers stanza tolerance: OK'
+printf '%s\n' 'account reconciler unit tests (rootless): creation, idempotency, serialization, conflict refusal, range refusal, reserved-identity refusal, local convergence, credential refusal, disable/restore, idempotent disable, absent no-op, disable foreign retention (user/group/primary/mixed), state retention, reinstall convergence, file ownership/mode, file idempotency, file failure closure, file disable retention, fifo ownership, legacy auto-repair, sysusers stanza tolerance, supplementary membership: OK'

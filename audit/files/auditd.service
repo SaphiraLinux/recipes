@@ -1,0 +1,13 @@
+[Unit]
+Description=Linux audit daemon (auditd)
+Documentation=man:auditd(8)
+After=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/auditd -f
+Restart=on-failure
+	RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

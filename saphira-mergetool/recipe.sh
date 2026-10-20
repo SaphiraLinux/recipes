@@ -2,7 +2,7 @@
 
 pkgname=saphira-mergetool
 pkgver=0.1.0
-pkgrel=3
+pkgrel=4
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='Resolve apk .apk-new upgrade artifacts: diff, accept, keep, or merge'
 license='BUSL-1.1'

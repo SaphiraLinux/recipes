@@ -219,7 +219,7 @@ recipe_install()
 	# Service identity declaration (single owner: this package;
 	# slurm-accounting depends on slurm so the identity exists before
 	# slurmdbd is installed). slurm:153 is a new Saphira allocation in
-	# the 0..199 package range, documented here per namespace policy.
+	# the 101..999 service range, documented here per namespace policy.
 	# State dirs: ctld state (slurm-owned), slurmd spool (root-owned,
 	# slurmd runs as root), shared log dir.
 	install -D -m 0644 "$RECIPE_DIR/files/accounts.d/slurm" \

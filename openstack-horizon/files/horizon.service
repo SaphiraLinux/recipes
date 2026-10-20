@@ -1,0 +1,27 @@
+[Unit]
+Description=OpenStack Dashboard (Horizon)
+Documentation=man:gunicorn(1)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+User=horizon
+Group=horizon
+EnvironmentFile=-/etc/conf.d/horizon
+Environment=HORIZON_BIND=127.0.0.1:8000
+Environment=PYTHONPATH=/etc/horizon
+Environment=DJANGO_SETTINGS_MODULE=openstack_dashboard.settings
+RuntimeDirectory=horizon
+RuntimeDirectoryMode=0750
+ExecStart=/usr/bin/gunicorn --name horizon \
+	--bind ${HORIZON_BIND} --workers ${HORIZON_WORKERS} \
+	--pid /var/run/horizon/horizon.pid \
+	openstack_dashboard.wsgi:application
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+KillMode=mixed
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

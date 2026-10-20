@@ -12,7 +12,7 @@ SAPHIRA_GENESIS_EXCLUDE stay behind as historical r0 artifacts in the
 source archive; obsolete names are never bumped to make a count zero.
 
 Packages that deliberately maintain parallel pkgver lines (for example
-saphira-kernel and saphira-kernel-headers at 7.1.5 and 7.2.2) are declared
+saphira-kernel at 7.1.5 and 7.2.2) are declared
 in the generic version-lines policy file (SAPHIRA_VERSION_LINES_FILE,
 default /etc/saphira/version-lines.conf): every declared line keeps its
 highest published revision instead of collapsing to latest-per-name.

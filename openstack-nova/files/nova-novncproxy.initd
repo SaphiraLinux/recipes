@@ -1,0 +1,21 @@
+#!/sbin/openrc-run
+#
+# OpenRC service for the OpenStack Nova noVNC console proxy.
+#
+# Standalone eventlet daemon. Bind address and port come from
+# /etc/nova/nova.conf ([vnc] novncproxy_host/_port, default
+# 127.0.0.1:6080). Shipped unconditionally; never enabled or started
+# at install. Runs where consoles are served (usually controller).
+
+name="nova-novncproxy"
+description="OpenStack Nova noVNC console proxy"
+
+command="/usr/bin/nova-novncproxy"
+command_user="nova:nova"
+command_background="yes"
+pidfile="/var/run/nova/nova-novncproxy.pid"
+
+depend() {
+	need net
+	after firewall
+}

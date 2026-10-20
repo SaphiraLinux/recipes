@@ -51,6 +51,11 @@ scan_paths = /etc /srv/gopher-source
 With `--auto`, configured policies are applied and unmatched files are
 prompted for on a terminal (or reported as pending in scripts).
 
+Configured scan paths that do not exist are skipped with a warning
+(they cover optional components, e.g. `/srv/gopher-source` only
+exists with geomyidae installed). An explicit `--scan-path` that is
+not a directory is still a fatal error.
+
 ## Contract
 
 - Never deletes an installed original.

@@ -1,0 +1,61 @@
+openstack-horizon — OpenStack Dashboard (Horizon) 27.0.0 (2026.2 Hibiscus)
+============================================================================
+
+This package installs the Horizon dashboard: the Django project
+openstack_dashboard plus the openstack_auth Keystone backend, served
+by gunicorn. It installs software ONLY: nothing is enabled, started,
+migrated or credentialed at install time.
+
+What it ships
+-------------
+
+  openstack_dashboard.wsgi:application   the supported WSGI application
+  /etc/horizon/local/local_settings.py.example   operator settings template
+  /usr/share/horizon/conf            generator/policy inputs
+  /etc/init.d/horizon                OpenRC service (gunicorn)
+  /usr/lib/systemd/system/horizon.service   systemd service (gunicorn)
+  /etc/conf.d/horizon                WSGI container runtime settings
+
+Operator steps (NOT performed by this package)
+----------------------------------------------
+
+1. Write the Django settings from the example (SECRET_KEY, Keystone
+   endpoints, database, session backend, static root, ...):
+
+     cp /etc/horizon/local/local_settings.py.example \
+        /etc/horizon/local/local_settings.py
+     # edit /etc/horizon/local/local_settings.py
+     #
+     # /etc/horizon is on the service PYTHONPATH, so upgrades to this
+     # package never clobber the operator's file.
+
+2. Collect static assets into the operator-chosen static root
+   (served by nginx in production, never by gunicorn):
+
+     DJANGO_SETTINGS_MODULE=openstack_dashboard.settings \
+     PYTHONPATH=/etc/horizon \
+     python -m django collectstatic --noinput
+
+3. Initialise the session/auth database (sqlite for trials, MariaDB
+   via python-pymysql for real use):
+
+     DJANGO_SETTINGS_MODULE=openstack_dashboard.settings \
+     PYTHONPATH=/etc/horizon \
+     python -m django migrate --noinput
+
+4. Enable and start the service explicitly:
+
+     rc-update add horizon default && rc-service horizon start
+     # or
+     systemctl enable --now horizon
+
+Horizon authenticates against Keystone; there are no local dashboard
+users to create. Front it with nginx/haproxy for TLS and static
+files; gunicorn serves only the Django application.
+
+Independence
+------------
+
+Horizon depends on the Django stack, XStatic assets and the service
+client libraries. It does not run any OpenStack API itself and can be
+installed on its own.

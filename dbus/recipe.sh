@@ -18,7 +18,7 @@ dbus_sha256=9f8ca5eb51cbe09951aec8624b86c292990ae2428b41b856e2bed17ec65c8849
 # the systemd-libs/systemd-dev splits only. A packaged .service unit
 # never justifies a dependency on an init system.
 depends="expat systemd-libs"
-makedepends="meson ninja expat-dev gcc pkgconf saphira-kernel-headers systemd-dev"
+makedepends="meson ninja expat-dev gcc pkgconf saphira-linux-uapi-headers systemd-dev"
 subpackages="$pkgname-dev $pkgname-doc"
 recipe_build() {
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$RECIPE_DIR/files/dbus-1.16.0.tar.xz"

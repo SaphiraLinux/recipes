@@ -1,0 +1,5 @@
+# Nova serial proxy runtime settings (operator-editable).
+#
+# Bind address and port come from /etc/nova/nova.conf ([serial_console]
+# serialproxy_host/_port). Nothing here is applied until the operator
+# enables and starts the service.

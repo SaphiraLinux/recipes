@@ -1,0 +1,13 @@
+# Neutron service identity (fixed, in the preferred 0..199 packaged
+# range): user neutron UID 168, primary group neutron GID 168.
+# OpenStack services own the 164-170 block (164 keystone, 165 glance,
+# 166 placement, 167 nova, 168 neutron, 169-170 cinder/horizon).
+# Required by the shipped service units (systemd User=neutron,
+# OpenRC command_user neutron:neutron), neutron-db-manage and the
+# state/log directories. Agents escalate per-command through
+# neutron-rootwrap; they never run as root. UID 168 is not reused by
+# any other packaged identity.
+user neutron 168 neutron /var/lib/neutron /sbin/nologin
+group neutron 168
+dir /var/lib/neutron 0750 neutron neutron
+dir /var/log/neutron 0750 neutron neutron

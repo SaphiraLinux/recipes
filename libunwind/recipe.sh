@@ -2,13 +2,15 @@
 
 pkgname=libunwind
 pkgver=22.1.8
+# r3: ship a distro-integration libunwind.pc (LLVM upstream
+# provides none; mesa probes libunwind via pkg-config).
 # r2: static-PIE foundation repair (same class as musl r3). The static
 # archive was assembled from non-PIC objects (upstream only forces
 # POSITION_INDEPENDENT_CODE on the shared object library), breaking
 # every static-PIE link against -lunwind. Set the runtimes-native
 # CMAKE_POSITION_INDEPENDENT_CODE policy so the static objects are
 # PIC; the shared library already was and is unaffected.
-pkgrel=2
+pkgrel=3
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="LLVM libunwind: unwinding runtime providing _Unwind_* and .eh_frame based stack unwinding"
 license="Apache-2.0 WITH LLVM-exception"
@@ -77,4 +79,13 @@ recipe_install()
 	echo "piecheck: libunwind.a is static-PIE capable"
 	install -D -m 0644 "$SRC/libunwind/LICENSE.TXT" \
 		"$PKGDEST/usr/share/licenses/libunwind/LICENSE.TXT"
+	# LLVM's libunwind ships no pkg-config file, but mesa (and any
+	# other consumer) probes dependency('libunwind') via pkg-config
+	# first. Distro integration: install a minimal .pc templated
+	# with the package version (metee idiom). The -dev split owns
+	# /usr/lib/pkgconfig by the standard split rules.
+	sed "s/^Version:.*/Version: ${pkgver}/" \
+		"$RECIPE_DIR/files/libunwind.pc" > "$BUILDDIR/libunwind.pc"
+	install -D -m 0644 "$BUILDDIR/libunwind.pc" \
+		"$PKGDEST/usr/lib/pkgconfig/libunwind.pc"
 }

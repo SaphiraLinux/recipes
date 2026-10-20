@@ -20,7 +20,7 @@ makedepends="
 	gawk
 	binutils
 	gcc
-	saphira-kernel-headers
+	saphira-linux-uapi-headers
 	make
 	pppd
 "

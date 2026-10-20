@@ -11,7 +11,7 @@ url=https://saphira.vm2.uk/
 # Genesis lineage: this marker descends from akadata-base-abi (v0.1,
 # immutable-stage3-bootstrap). It exists only to anchor the generation-
 # zero ABI during the transition; the end state is its removal, with
-# musl, saphira-kernel-headers, gcc-libs and binutils as the real base packages.
+# musl, saphira-linux-uapi-headers, gcc-libs and binutils as the real base packages.
 
 recipe_build()
 {

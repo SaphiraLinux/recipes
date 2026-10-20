@@ -1,6 +1,11 @@
 pkgname=dhcpcd
 pkgver=10.5.2
-pkgrel=2
+pkgrel=3
+# r3: converge the state directory the client must write. The payload
+# ships /var/lib/dhcpcd root-owned; the dropped-privilege daemon
+# cannot store leases there, so the fragment now carries a dir stanza
+# for it. Also aligns the base seed home (/var/lib/dhcpcd) with the
+# fragment - installs refuse on drift.
 # r2: declare the service identity. dhcpcd drops privileges to this user
 # before it does anything else and refuses to run without it, so an image
 # carrying no `dhcpcd` account could not run DHCP at all - and, because
@@ -10,8 +15,10 @@ pkgrel=2
 # and there is no sysusers.d fragment anywhere in the closure to replay,
 # so the identity was simply unowned. This is the gap already fixed for
 # frr, lldpd and mysql: the package relies on a service account the
-# package never declared. uid 157, the next free slot above the declared
-# 100-199 package tier. Asserted by saphira-packager/tests/recipe-rules.sh
+# package never declared. dhcpcd is uid/gid 104, declared identically
+# in the fragment below and in saphira-baselayout's base seed
+# (accounts.tsv); the two must agree or installs refuse on drift.
+# Asserted by saphira-packager/tests/recipe-rules.sh
 # and by saphira-network/tests/dhcpcd-startup.sh.
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='dhcpcd DHCP/DHCPv6 client with IA_PD delegation (PPP WAN support)'

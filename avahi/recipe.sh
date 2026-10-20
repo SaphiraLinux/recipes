@@ -141,8 +141,8 @@ recipe_install()
 	# accounts.d fragment, and upstream claims no fixed ID (its own
 	# sysusers.d fragment asks for a dynamic _avahi, which Saphira
 	# deliberately replaces - nothing here invokes
-	# systemd-sysusers). UID 70 sits in the preferred 0..199
-	# packaged range - never reuse it for another identity.
+	# systemd-sysusers). UID 70 sits in the 0..100 system range
+	# (grandfathered service use) - never reuse it for another identity.
 	install -D -m 0644 "$RECIPE_DIR/files/accounts.d/avahi" \
 		"$PKGDEST/usr/share/saphira/accounts.d/avahi"
 }

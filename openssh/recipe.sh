@@ -1,8 +1,25 @@
 #!/bin/sh
 
 pkgname=openssh
-pkgver=10.5_p1
-pkgrel=5
+pkgver=10.6_p1
+pkgrel=3
+# r3: --with-default-path sets the canonical PATH for sshd sessions
+# (upstream default omits /usr/local and interleaves the pairs;
+# verified in 10.6 defines.h, flag verified in configure.ac). Same
+# value for root (SUPERUSER_PATH follows). Payload change.
+# r2 (via bumppkg, builder already staged r1): stop offering the RSA
+# host key (sshd_config now mldsa44 > ed25519 > ecdsa; client-side
+# RSA untouched). Payload change.
+# r1: upstream 10.6p1 (2026-10-06). All configure flags revalidated
+# against 10.6 ./configure --help (privsep-user/path, pid-dir, pam,
+# 4in6, libexecdir, runstatedir, without-selinux/rpath all present;
+# the removed --disable-fd-passing was never used). USE_MLDSA still
+# compiler-gated in defines.h (VLA + mixed declarations: gcc has
+# both), so ssh-keygen -A still emits the mldsa44 host key.
+# Provenance: TLS fetch from cdn.openbsd.org + release signature by
+# key 7168B983815A5EEF59A4ADFD2A3F414E736060BA (matches the published
+# portable fingerprint; local gpg keyboxd unavailable for full verify)
+# + hex sha256 pin.
 # r5: sshd OpenRC first-start host-key generation (ssh-keygen -A in
 # start_pre before sshd -t; idempotent, never replaces keys), matching
 # the systemd unit's ExecStartPre semantics. Without it sshd cannot
@@ -24,8 +41,8 @@ license="BSD-2-Clause"
 origin=openssh
 repo=main
 url=https://www.openssh.com/
-source=https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable/openssh-10.5p1.tar.gz
-sha256=d44d28a839ea9daf969cc69150fde59910b2b39361dad81a3bd6cbd19218db11
+source=https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable/openssh-10.6p1.tar.gz
+sha256=a9dc9565dffe8640f64d863cd29a32bc4a3dbdec0566a7fc44c5d6ee767d5f39
 
 # libmd is a runtime requirement on musl builds and was historically
 # missing from the inherited packaging's dependency list.
@@ -75,7 +92,8 @@ recipe_build()
 		--with-pam \
 		--with-4in6 \
 		--without-selinux \
-		--without-rpath
+		--without-rpath \
+		--with-default-path=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 	make
 }
 
@@ -99,7 +117,7 @@ recipe_install()
 	install -D -m 0644 "$RECIPE_DIR/files/pam.d/sshd" \
 		"$PKGDEST/etc/pam.d/sshd"
 	find "$PKGDEST/etc/ssh" -type f -name 'ssh_host_*' -delete
-	# 10.5p1: ssh-keygen -A also emits ssh_host_mldsa44_ed25519_key
+	# 10.6p1: ssh-keygen -A also emits ssh_host_mldsa44_ed25519_key
 	# (USE_MLDSA, on for gcc builds); sshd_config lists it first.
 	# FHS migration declaration (hotfix/var-packaging-bug-var-run-isnot-run):
 	# sshd starts as root, so the runtime dir is root-owned; makepkg

@@ -28,7 +28,7 @@ sha256=d62b38fae48ba83fca6181112d0c71018d8b0f2ce285dc79dc6a0367722ccabb
 # so both sides name the base recipe; -dev/-doc resolution to base
 # covers runtime only, not makedepends producers.
 depends="libcap libuv libxml2 liblmdb nghttp2 libmaxminddb libedit ncurses openssl userspace-rcu zlib"
-makedepends="gcc binutils make pkgconf perl openssl-dev libuv-dev libcap-dev libxml2-dev liblmdb nghttp2 libmaxminddb-dev libedit-dev ncurses-dev userspace-rcu-dev saphira-kernel-headers"
+makedepends="gcc binutils make pkgconf perl openssl-dev libuv-dev libcap-dev libxml2-dev liblmdb nghttp2 libmaxminddb-dev libedit-dev ncurses-dev userspace-rcu-dev saphira-linux-uapi-headers"
 
 recipe_build()
 {

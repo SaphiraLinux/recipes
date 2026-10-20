@@ -1,0 +1,4 @@
+# RabbitMQ runtime directory for the pid file; the node database
+# lives in /var/lib/rabbitmq.
+dir /var/run/rabbitmq 0750 rabbitmq rabbitmq
+rmdir-if-empty /run/rabbitmq

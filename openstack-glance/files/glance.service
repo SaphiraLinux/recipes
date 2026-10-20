@@ -1,0 +1,27 @@
+[Unit]
+Description=OpenStack Image (Glance) API
+Documentation=man:gunicorn(1)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+User=glance
+Group=glance
+EnvironmentFile=-/etc/conf.d/glance
+Environment=GLANCE_BIND=127.0.0.1:9292
+Environment=GLANCE_CONF=/etc/glance/glance-api.conf
+RuntimeDirectory=glance
+RuntimeDirectoryMode=0750
+ExecStart=/usr/bin/gunicorn --name glance \
+	--bind ${GLANCE_BIND} --workers ${GLANCE_WORKERS} \
+	--pid /var/run/glance/glance.pid \
+	--config ${GLANCE_CONF} \
+	glance.wsgi.api:application
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+KillMode=mixed
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

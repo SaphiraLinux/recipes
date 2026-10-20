@@ -96,6 +96,36 @@ def live_repo_dir(config: dict[str, str]) -> Path:
     return Path(config["SAPHIRA_REPO_DIR"]) / names[-1] / config["SAPHIRA_ARCH"]
 
 
+def live_repo_base(config: dict[str, str]) -> Path:
+    """The live generation repository root (parent of live_repo_dir).
+
+    Build namespaces bind THIS at /repository (not the arch dir) and
+    pass it to apk in directory form, so apk resolves the index at
+    <repo>/<arch>/ and each payload at <repo>/<package-arch>/ for
+    both build-arch and noarch packages. Binding only the arch dir
+    (with a file-form index) made every noarch fetch fail: file-form
+    apk resolves payloads flat beside the index file (strace-proven),
+    ignoring package arch entirely.
+    """
+    return live_repo_dir(config).parent
+
+
+def _repo_file(repo_dir: Path, filename: str) -> Path | None:
+    """Resolve a repository filename across the arch-split layout.
+
+    Callers pass an arch directory; the noarch sibling is searched too.
+    A filename claimed in both is a loud refusal (the publisher never
+    produces that state); absence returns None.
+    """
+    hits = [
+        candidate for archdir in (repo_dir, repo_dir.parent / "noarch")
+        if (candidate := archdir / filename).is_file()
+    ]
+    if len(hits) > 1:
+        die(f"filename claimed in two arch directories of {repo_dir.parent}: {filename}")
+    return hits[0] if hits else None
+
+
 def _version_line(version: str) -> str:
     """Version line: full version minus one trailing -rN packaging
     revision. apk treats the -r suffix as the packaging revision, so
@@ -856,10 +886,9 @@ class Transaction:
         command.extend(("--dev", "/dev", "--proc", "/proc", *self._ns_tmp_options()))
         for path in runtime:
             command.extend(("--ro-bind", path, path))
-        repo_dir = live_repo_dir(self.config)
         trust_key = Path(self.config["SAPHIRA_TRUST_KEY"])
         command.extend(("--bind", str(self.root), "/target"))
-        command.extend(("--ro-bind", str(repo_dir), "/repository"))
+        command.extend(("--ro-bind", str(live_repo_base(self.config)), "/repository"))
         command.extend(("--ro-bind", str(trust_key), f"/keys/{trust_key.name}"))
         command.extend(("--setenv", "PATH", "/usr/bin:/bin"))
         # Genesis transition: tolerate stage4-era payload overlaps
@@ -977,31 +1006,37 @@ class Transaction:
             name = re.split(r"[<>=~]", atom, maxsplit=1)[0]
             best: str | None = None
             best_version = ""
-            for path in sorted(repo.glob(f"{name}-*.apk")):
-                if not path.is_file() or path.is_symlink():
+            for archdir in (repo, repo.parent / "noarch"):
+                if not archdir.is_dir():
                     continue
-                dump = subprocess.run(
-                    [apk, "adbdump", str(path)], check=True, text=True,
-                    capture_output=True).stdout
-                ver = ""
-                for line in dump.splitlines():
-                    if line.startswith("  version: "):
-                        ver = line.split(": ", 1)[1].strip()
-                        break
-                if not _seed_atom_satisfies(apk, ver, atom):
-                    continue
-                if best is None:
-                    best, best_version = path.name, ver
-                    continue
-                newer = subprocess.run(
-                    [apk, "version", "-t", ver, best_version],
-                    check=True, text=True, capture_output=True).stdout.strip()
-                if newer == ">":
-                    best, best_version = path.name, ver
+                for path in sorted(archdir.glob(f"{name}-*.apk")):
+                    if not path.is_file() or path.is_symlink():
+                        continue
+                    dump = subprocess.run(
+                        [apk, "adbdump", str(path)], check=True, text=True,
+                        capture_output=True).stdout
+                    ver = ""
+                    for line in dump.splitlines():
+                        if line.startswith("  version: "):
+                            ver = line.split(": ", 1)[1].strip()
+                            break
+                    if not _seed_atom_satisfies(apk, ver, atom):
+                        continue
+                    if best is None:
+                        best, best_version = path.name, ver
+                        continue
+                    newer = subprocess.run(
+                        [apk, "version", "-t", ver, best_version],
+                        check=True, text=True, capture_output=True).stdout.strip()
+                    if newer == ">":
+                        best, best_version = path.name, ver
             if best is None:
                 die(f"seed package has no repository file: {name}")
+            best_path = _repo_file(repo, best)
+            if best_path is None:
+                die(f"seed package file vanished mid-scan: {best}")
             dump = subprocess.run(
-                [apk, "adbdump", str(repo / best)], check=True, text=True,
+                [apk, "adbdump", str(best_path)], check=True, text=True,
                 capture_output=True).stdout
             in_scripts = False
             has_scripts = False
@@ -1055,7 +1090,7 @@ class Transaction:
         self._bootstrap_bwrap([
             "--root", "/target", "--initdb", "--no-cache", "--no-network",
             "--repositories-file", "/dev/null", "--keys-dir", "/keys",
-            "--repository", "/repository/Packages.adb",
+            "--repository", "/repository",
             # Install files only, never converge: package scripts assume a
             # live system with a shell, but the seed root has no /bin/sh
             # until root-init creates it below, so any seed script fails
@@ -1158,7 +1193,6 @@ class Transaction:
                 ])
 
     def root_apk(self, arguments: list[str], *, allow_untrusted: bool = False) -> None:
-        repo_dir = live_repo_dir(self.config)
         trust_key = Path(self.config["SAPHIRA_TRUST_KEY"])
         # The merged overlay root lives in the holder's mount namespace, so
         # every root-touching session enters that namespace first; the bind
@@ -1168,14 +1202,14 @@ class Transaction:
             "--unshare-all", "--uid", "0", "--gid", "0", "--clearenv",
             "--bind", str(self.root), "/",
             "--dir", "/repository", "--dir", "/artifacts", "--dir", "/keys",
-            "--ro-bind", str(repo_dir), "/repository",
+            "--ro-bind", str(live_repo_base(self.config)), "/repository",
             "--ro-bind", str(self.artifacts), "/artifacts",
             "--ro-bind", str(trust_key), f"/keys/{trust_key.name}",
             "--dev", "/dev", "--proc", "/proc", *self._ns_tmp_options(),
             "--setenv", "PATH", "/usr/bin:/bin",
             "/usr/bin/apk", "--root", "/", "--no-cache", "--no-network",
             "--repositories-file", "/dev/null", "--keys-dir", "/keys",
-            "--repository", "/repository/Packages.adb",
+            "--repository", "/repository",
             # Non-live root: install files only, never converge.
             # Package scripts solely invoke the identity reconciler
             # (makepkg generates nothing else), whose chowns cannot
@@ -1266,7 +1300,7 @@ class Transaction:
             "--unshare-all", "--share-net", "--uid", "0", "--gid", "0", "--clearenv",
             "--bind", str(self.root), "/",
             "--dir", "/recipes", "--ro-bind", str(recipe_root), "/recipes",
-            "--dir", "/repository", "--ro-bind", str(live_repo_dir(self.config)), "/repository",
+            "--dir", "/repository", "--ro-bind", str(live_repo_base(self.config)), "/repository",
             "--dir", "/build", "--bind", str(self.stage), "/build",
             "--dir", "/artifacts", "--bind", str(self.artifacts), "/artifacts",
             "--dir", "/controller", "--ro-bind", str(worker), "/controller/buildpkg-single",
@@ -1470,12 +1504,18 @@ class Transaction:
         clear message, so a rebuild is required and the collision can never
         reach - or churn against - sign-apk-repo."""
         repo_dir = live_repo_dir(self.config)
-        live_filenames = [entry.name for entry in repo_dir.iterdir() if entry.is_file()]
+        live_filenames = [
+            entry.name
+            for archdir in (repo_dir, repo_dir.parent / "noarch")
+            if archdir.is_dir()
+            for entry in archdir.iterdir()
+            if entry.is_file()
+        ]
         for gen_name, gen_dir in self._generation_repo_dirs():
             if gen_dir == repo_dir:
                 continue
             for package in package_files:
-                if (gen_dir / package.name).is_file():
+                if _repo_file(gen_dir, package.name) is not None:
                     newer = _newer_live_nvr(live_filenames, package.name)
                     if newer is not None:
                         die(
@@ -1493,8 +1533,8 @@ class Transaction:
                         "for a genuinely new revision"
                     )
         for package in package_files:
-            published = repo_dir / package.name
-            if not published.is_file():
+            published = _repo_file(repo_dir, package.name)
+            if published is None:
                 continue
             new_hash = self._published_content_hash(package)
             pub_hash = self._published_content_hash(published)
@@ -1519,55 +1559,225 @@ class Transaction:
                 f"buildpkg {self.target}"
             )
 
-    def promote(self, receipts: list[dict[str, object]]) -> Path:
-        aggregate = {
-            "schema": "saphira-build-artifacts/v1",
-            "target": self.target,
-            "constructors": receipts,
-            "package_seed": json.loads(self.package_receipt.read_text(encoding="utf-8")),
+    def _publisher_lock_path(self) -> Path:
+        """Publisher mutual-exclusion marker.
+
+        sign-apk-repo holds ``<incoming>/<arch>/sign-apk-repo.lock`` as a
+        mkdir lock for the whole publication run. The builder must never
+        create, rename or supersede ``*-ready`` transactions while that
+        lock exists: doing so would invalidate the publisher's snapshot
+        (new ready appearing mid-run, or a snapshotted ready disappearing
+        via supersede). Fail closed with a retry message instead.
+        """
+        incoming_arch = Path(self.config["SAPHIRA_INCOMING_DIR"]) / self.config["SAPHIRA_ARCH"]
+        return incoming_arch / "sign-apk-repo.lock"
+
+    def _check_publisher_lock(self) -> None:
+        lock = self._publisher_lock_path()
+        if lock.exists() or lock.is_symlink():
+            die(
+                f"publication lock held: {lock} (sign-apk-repo is running; "
+                "retry after it completes - builder staging is refused while "
+                "the publisher snapshot is active)"
+            )
+
+    def _closure_hashes(self, plan: dict[str, object],
+                        receipts: list[dict[str, object]]) -> dict[str, object]:
+        """Exact build-time dependency artifact hashes.
+
+        Records, for every repository requirement and every locally-built
+        output, the filename plus both the file sha256 and the
+        signature-independent adbdump content hash (when readable).
+        The publisher compares these against the repository + staged set
+        at publish time to prove the consumer is not stale. Missing files
+        are recorded with null hashes so absence itself is auditable
+        (uncertainty, never silent).
+        """
+        repo_dir = live_repo_dir(self.config)
+        repo_entries: list[dict[str, object]] = []
+        for node in plan.get("repository", []):  # type: ignore[union-attr]
+            filename = node.get("artifact")  # type: ignore[union-attr]
+            name = node.get("name")  # type: ignore[union-attr]
+            version = node.get("version")  # type: ignore[union-attr]
+            path = repo_dir / filename if isinstance(filename, str) else repo_dir
+            sha: str | None = None
+            content: str | None = None
+            try:
+                if isinstance(filename, str) and path.is_file() and not path.is_symlink():
+                    sha = sha256_file(path)
+                    content = self._published_content_hash(path)
+            except (OSError, subprocess.CalledProcessError):
+                sha = None
+                content = None
+            repo_entries.append({
+                "name": name,
+                "version": version,
+                "artifact": filename,
+                "sha256": sha,
+                "content_hash": content,
+            })
+        local_entries: list[dict[str, object]] = []
+        receipt_by_producer = {r.get("producer"): r for r in receipts}
+        for node in plan.get("builds", []):  # type: ignore[union-attr]
+            producer = node.get("producer")  # type: ignore[union-attr]
+            receipt = receipt_by_producer.get(producer)
+            artifacts: list[dict[str, object]] = []
+            if isinstance(receipt, dict):
+                for art in receipt.get("artifacts", []):  # type: ignore[union-attr]
+                    fname = Path(str(art.get("artifact"))).name  # type: ignore[union-attr]
+                    artifacts.append({
+                        "name": art.get("name"),
+                        "artifact": fname,
+                        "sha256": art.get("sha256"),
+                    })
+            local_entries.append({
+                "producer": producer,
+                "version": node.get("version"),  # type: ignore[union-attr]
+                "target": bool(node.get("target")),  # type: ignore[union-attr]
+                "artifacts": artifacts,
+            })
+        return {
+            "schema": "saphira-build-closure/v1",
+            "target": plan.get("target"),
+            "target_producer": plan.get("target_producer"),
+            "repository": repo_entries,
+            "local": local_entries,
         }
-        with self.artifact_manifest.open("x", encoding="utf-8") as stream:
-            json.dump(aggregate, stream, sort_keys=True, separators=(",", ":"))
-            stream.write("\n")
+
+    def promote(self, receipts: list[dict[str, object]], plan: dict[str, object]) -> list[Path]:
+        """Stage one authoritative ready transaction per built producer.
+
+        Every locally-built dependency receives its own authoritative
+        transaction (target == producer), each carrying only that
+        producer's APKs plus its own manifest, the full resolver plan,
+        and the exact build-time closure hashes. The consumer transaction
+        never bundles dependency APKs as publishable outputs: bundled
+        copies were the duplicate factory (prettytable/oslo each carrying
+        their own wcwidth-r1 bytes). Cold-repository closures therefore
+        publish with ONE ordinary sign-apk-repo run in dependency order,
+        instead of one manual command per duplicate.
+
+        Returns the list of created ready paths (ordered by plan builds).
+        """
+        try:
+            package_seed = json.loads(self.package_receipt.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            die(f"package seed receipt is missing or invalid: {exc}")
+        try:
+            plan_text = self.plan_path.read_text(encoding="utf-8")
+            plan_on_disk = json.loads(plan_text)
+        except (OSError, json.JSONDecodeError) as exc:
+            die(f"resolver plan is missing or invalid: {exc}")
+        if plan_on_disk != plan:
+            die("resolver plan changed between resolve and promote (refusing to stage)")
         incoming_arch = Path(self.config["SAPHIRA_INCOMING_DIR"]) / self.config["SAPHIRA_ARCH"]
         incoming_arch.mkdir(parents=True, exist_ok=True)
+        self._check_publisher_lock()
+        closure = self._closure_hashes(plan, receipts)
+        receipt_by_producer: dict[str, dict[str, object]] = {}
+        for receipt in receipts:
+            producer = receipt.get("producer")
+            if not isinstance(producer, str) or not producer:
+                die("canonical makepkg receipt lacks a producer")
+            if producer in receipt_by_producer:
+                die(f"duplicate producer receipt: {producer}")
+            receipt_by_producer[producer] = receipt  # type: ignore[assignment]
+        builds = plan.get("builds")
+        if not isinstance(builds, list) or not builds:
+            die("resolver plan has no builds")
+        # Guard every staged payload before any incoming mutation, so a
+        # dirty rebuild can never reach the publisher.
+        all_package_files = sorted((self.artifacts / self.config["SAPHIRA_ARCH"]).glob("*.apk"))
+        if not all_package_files:
+            die("transaction constructed no APK artifacts")
+        self.guard_published_payload(all_package_files)
+        # Map every staged file back to its producer receipt (fail closed
+        # on orphans: every staged APK must belong to exactly one producer).
+        file_to_producer: dict[str, str] = {}
+        for producer, receipt in receipt_by_producer.items():
+            artifacts = receipt.get("artifacts")
+            if not isinstance(artifacts, list) or not artifacts:
+                die(f"producer receipt has no artifacts: {producer}")
+            for art in artifacts:
+                fname = Path(str(art.get("artifact"))).name  # type: ignore[union-attr]
+                if fname in file_to_producer:
+                    die(f"duplicate staged artifact across producers: {fname}")
+                file_to_producer[fname] = producer
+        for package in all_package_files:
+            if package.name not in file_to_producer:
+                die(f"staged artifact has no producer receipt: {package.name}")
         identifier = uuid.uuid4().hex[:12]
-        # Ready transactions are unpublished staging: supersede any older
-        # one for the same target so repeated rebuilds cannot accumulate
-        # duplicate transactions that later collide at publication under
-        # the immutable-filename rule. Renamed, never deleted, with a
-        # note - the visible lifecycle rules still apply to the renamed
-        # directories.
-        for stale in sorted(incoming_arch.glob(f"{self.target}-*-ready")):
-            retired = stale.with_name(stale.name + ".superseded-rebuilt")
-            os.rename(stale, retired)
-            (retired / "RETIRED-NOTE.txt").write_text(
-                f"Superseded automatically: a newer buildpkg run of {self.target} "
-                f"created {self.target}-{identifier}-ready, replacing this "
-                "unpublished staging transaction. Retained as evidence under "
-                "the visible lifecycle rules.\n",
+        # Supersede older unpublished staging per PRODUCER (not per top
+        # target), so repeated rebuilds cannot accumulate duplicates that
+        # later collide under the immutable-filename rule. Renamed, never
+        # deleted, with a note.
+        for node in builds:
+            producer = str(node.get("producer"))  # type: ignore[union-attr]
+            for stale in sorted(incoming_arch.glob(f"{producer}-*-ready")):
+                self._check_publisher_lock()
+                retired = stale.with_name(stale.name + ".superseded-rebuilt")
+                if retired.exists() or retired.is_symlink():
+                    die(f"automatic retirement target already exists: {retired}")
+                os.rename(stale, retired)
+                (retired / "RETIRED-NOTE.txt").write_text(
+                    f"Superseded automatically: a newer buildpkg run for {producer} "
+                    f"(as part of {self.target} closure {identifier}) created "
+                    f"{producer}-{identifier}-ready, replacing this "
+                    "unpublished staging transaction. Retained as evidence under "
+                    "the visible lifecycle rules.\n",
+                    encoding="utf-8",
+                )
+        ready_paths: list[Path] = []
+        with self.artifact_manifest.open("x", encoding="utf-8") as stream:
+            json.dump({
+                "schema": "saphira-build-artifacts/v1",
+                "target": self.target,
+                "constructors": receipts,
+                "package_seed": package_seed,
+            }, stream, sort_keys=True, separators=(",", ":"))
+            stream.write("\n")
+        for node in builds:
+            producer = str(node.get("producer"))  # type: ignore[union-attr]
+            receipt = receipt_by_producer[producer]
+            self._check_publisher_lock()
+            building = incoming_arch / f"{producer}-{identifier}-building"
+            ready = incoming_arch / f"{producer}-{identifier}-ready"
+            building.mkdir()
+            self.incoming_building = building
+            per_producer_aggregate = {
+                "schema": "saphira-build-artifacts/v1",
+                "target": producer,
+                "constructors": [receipt],
+                "package_seed": package_seed,
+            }
+            manifest_lines = []
+            for art in receipt.get("artifacts", []):  # type: ignore[union-attr]
+                fname = Path(str(art.get("artifact"))).name  # type: ignore[union-attr]
+                source = self.artifacts / self.config["SAPHIRA_ARCH"] / fname
+                if not source.is_file():
+                    shutil.rmtree(building, ignore_errors=True)
+                    die(f"graph-required local output is missing: {source}")
+                destination = building / fname
+                shutil.copy2(source, destination)
+                manifest_lines.append(f"{sha256_file(destination)}  {fname}")
+            (building / "artifact-manifest.json").write_text(
+                json.dumps(per_producer_aggregate, sort_keys=True, separators=(",", ":")) + "\n",
                 encoding="utf-8",
             )
-        building = incoming_arch / f"{self.target}-{identifier}-building"
-        ready = incoming_arch / f"{self.target}-{identifier}-ready"
-        building.mkdir()
-        self.incoming_building = building
-        package_files = sorted((self.artifacts / self.config["SAPHIRA_ARCH"]).glob("*.apk"))
-        if not package_files:
-            die("transaction constructed no APK artifacts")
-        self.guard_published_payload(package_files)
-        manifest_lines = []
-        for package in package_files:
-            destination = building / package.name
-            shutil.copy2(package, destination)
-            manifest_lines.append(f"{sha256_file(destination)}  {package.name}")
-        shutil.copy2(self.artifact_manifest, building / "artifact-manifest.json")
-        shutil.copy2(self.package_receipt, building / "package-seed.json")
-        (building / "target").write_text(self.target + "\n", encoding="utf-8")
-        (building / "manifest.sha256").write_text("\n".join(manifest_lines) + "\n", encoding="utf-8")
-        os.replace(building, ready)
-        self.incoming_building = None
-        return ready
+            shutil.copy2(self.package_receipt, building / "package-seed.json")
+            shutil.copy2(self.plan_path, building / "plan.json")
+            (building / "closure-hashes.json").write_text(
+                json.dumps(closure, sort_keys=True, separators=(",", ":")) + "\n",
+                encoding="utf-8",
+            )
+            (building / "target").write_text(producer + "\n", encoding="utf-8")
+            (building / "manifest.sha256").write_text("\n".join(manifest_lines) + "\n", encoding="utf-8")
+            # Keep the full-closure aggregate in the workspace for diagnosis
+            # (the per-producer copies above are what publish).
+            os.replace(building, ready)
+            self.incoming_building = None
+            ready_paths.append(ready)
+        return ready_paths
 
     def _stale_siblings(self) -> list[Path]:
         """Older retained workspaces for this target, oldest first (the
@@ -1735,7 +1945,12 @@ class BaseRoot:
         seed_names = shlex.split(self.config["SAPHIRA_BUILD_SEED"])
         try:
             archdir = live_repo_dir(self.config)
-            live_files = [entry.name for entry in archdir.glob("*.apk")]
+            live_files = [
+                entry.name
+                for sibling in (archdir, archdir.parent / "noarch")
+                if sibling.is_dir()
+                for entry in sibling.glob("*.apk")
+            ]
         except OSError:
             return []
         return _seed_drift_names(seed_names, resolved, live_files)
@@ -1933,9 +2148,11 @@ def main() -> int:
             return 1
         transaction.install_repository_requirements(plan)
         receipts = transaction.build(plan)
-        ready = transaction.promote(receipts)
+        ready_paths = transaction.promote(receipts, plan)
         transaction.succeed()
-        print(f"buildpkg: built {sys.argv[1]}; unsigned artifacts ready at {ready}")
+        for ready in ready_paths:
+            print(f"buildpkg: unsigned artifacts ready at {ready}")
+        print(f"buildpkg: built {sys.argv[1]}; {len(ready_paths)} authoritative transaction(s) staged")
         return 0
     except KeyboardInterrupt:
         message = "interrupted"

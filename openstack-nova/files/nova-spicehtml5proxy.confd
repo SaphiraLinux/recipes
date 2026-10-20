@@ -1,0 +1,5 @@
+# Nova SPICE proxy runtime settings (operator-editable).
+#
+# Bind address and port come from /etc/nova/nova.conf ([spice]
+# html5proxy_host/_port). Nothing here is applied until the operator
+# enables and starts the service.

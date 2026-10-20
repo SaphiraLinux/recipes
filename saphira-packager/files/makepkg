@@ -124,25 +124,19 @@ FHS_EMPTY: dict[str, list] = {"dirs": [], "replaces": [], "removals": []}
 # scripts run under apk with a minimal PATH.
 SYSUSERS_BIN = "/usr/bin/systemd-sysusers"
 IDENTITY_PROVIDER = "saphira-baselayout"
-# UID/GID namespace policy (operator-locked):
-#   0..199    preferred packaged system/service identities.
-#   200..887  reserved package/system expansion and documented legacy
-#             exceptions: accepted, but the build emits a notice and the
-#             fragment must document the exception (comment + recipe note).
-#   888..999  reserved for locally-compiled user services (useradd and
-#             hand-provisioned fixed IDs such as qmail's live here; the
-#             repository never hands these out, and the live reconciler
-#             never creates in them - but a pre-existing local account
-#             with attributes matching a declaration converges silently
-#             instead of blocking the install).
+# UID/GID namespace policy (operator-locked, original rule):
+#   0..100    system identities (typed foundation reservations plus
+#             long-established service IDs that predate the policy).
+#   101..999  service identities, however established (base seed,
+#             packaged fragments, or image/hand history grandfathered
+#             per host). New packaged identities take the first free ID.
 #   1000..    human users (firstboot territory, never packages).
+#   65534     the established nobody exception (never packaged).
 # Fixed IDs are the norm, not an exception: a recipe declares whatever
-# stable ID its service needs inside 0..199 (or a documented 200..887
-# exception), and the publish gate keeps the union collision-free. The
-# gate re-checks these tiers (defense in depth); makepkg fails the
-# build fast on anything outside 0..887.
-MAX_PACKAGED_ID = 887
-PREFERRED_MAX_ID = 199
+# stable ID its service needs, and the publish gate keeps the union
+# collision-free. The gate re-checks these bounds (defense in depth);
+# makepkg fails the build fast on anything outside 0..999.
+MAX_PACKAGED_ID = 999
 # The generated scripts exec the platform reconciler under /bin/sh and use
 # coreutils (stat/mkdir/chown/chmod/dirname); apk installs dependencies
 # first, so declaring these orders the shell and tools before any script
@@ -164,9 +158,8 @@ def parse_accounts_fragment(path: Path) -> tuple[dict[str, list[dict[str, str]]]
 
     Recipe authors declare identities only; makepkg generates the
     install scripts from this. Anything malformed fails the build.
-    Returns the parsed declaration plus range notices (200..887
-    expansion IDs must be documented exceptions - the notice names
-    them so the build log carries the reminder).
+    Returns the parsed declaration (101..999 is one service range;
+    there are no tier notices).
     """
     users: list[dict[str, str]] = []
     groups: list[dict[str, str]] = []
@@ -190,34 +183,37 @@ def parse_accounts_fragment(path: Path) -> tuple[dict[str, list[dict[str, str]]]
             if not ACCOUNT_NAME_RE.fullmatch(name):
                 die(f"account fragment {path}:{lineno}: invalid group name")
             if not ACCOUNT_ID_RE.fullmatch(gid) or not 0 <= int(gid) <= MAX_PACKAGED_ID:
-                die(f"account fragment {path}:{lineno}: GID must be 0..{MAX_PACKAGED_ID} (preferred 0..{PREFERRED_MAX_ID}; 888..999 are local-user-service territory, 1000+ human)")
+                die(f"account fragment {path}:{lineno}: GID must be 0..{MAX_PACKAGED_ID} (1000+ is human territory)")
             if name in RESERVED_GROUP_NAMES or int(gid) in RESERVED_GIDS:
                 die(f"account fragment {path}:{lineno}: group '{name}'/{int(gid)} is a reserved foundation identity and must never be package-declared")
             if not ACCOUNT_ID_RE.fullmatch(gid) or not 0 <= int(gid) <= MAX_PACKAGED_ID:
-                die(f"account fragment {path}:{lineno}: GID must be 0..{MAX_PACKAGED_ID} (preferred 0..{PREFERRED_MAX_ID}; 888..999 are local-user-service territory, 1000+ human)")
-            if int(gid) > PREFERRED_MAX_ID:
-                notices.append(f"account fragment {path}:{lineno}: GID {int(gid)} is in the 200..887 expansion range (preferred 0..{PREFERRED_MAX_ID}; expansion IDs must be documented exceptions)")
+                die(f"account fragment {path}:{lineno}: GID must be 0..{MAX_PACKAGED_ID} (1000+ is human territory)")
             groups.append({"name": name, "gid": str(int(gid))})
-        elif kind == "user" and len(parts) == 6:
-            _, name, uid, primary, home, shell = parts
+        elif kind == "user" and len(parts) in (6, 7):
+            _, name, uid, primary, home, shell = parts[:6]
+            supp = parts[6].split(",") if len(parts) == 7 else []
             if not ACCOUNT_NAME_RE.fullmatch(name):
                 die(f"account fragment {path}:{lineno}: invalid user name")
             if not ACCOUNT_NAME_RE.fullmatch(primary):
                 die(f"account fragment {path}:{lineno}: invalid primary group")
             if not ACCOUNT_ID_RE.fullmatch(uid) or not 0 <= int(uid) <= MAX_PACKAGED_ID:
-                die(f"account fragment {path}:{lineno}: UID must be 0..{MAX_PACKAGED_ID} (preferred 0..{PREFERRED_MAX_ID}; 888..999 are local-user-service territory, 1000+ human)")
+                die(f"account fragment {path}:{lineno}: UID must be 0..{MAX_PACKAGED_ID} (1000+ is human territory)")
             if name in RESERVED_USER_NAMES or int(uid) == 0:
                 die(f"account fragment {path}:{lineno}: user '{name}' is a reserved system identity (root/UID 0) and must never be package-declared")
             if primary in RESERVED_GROUP_NAMES:
                 die(f"account fragment {path}:{lineno}: primary group '{primary}' is a reserved foundation group; service users must not be anchored to it")
             if not ACCOUNT_ID_RE.fullmatch(uid) or not 0 <= int(uid) <= MAX_PACKAGED_ID:
-                die(f"account fragment {path}:{lineno}: UID must be 0..{MAX_PACKAGED_ID} (preferred 0..{PREFERRED_MAX_ID}; 888..999 are local-user-service territory, 1000+ human)")
-            if int(uid) > PREFERRED_MAX_ID:
-                notices.append(f"account fragment {path}:{lineno}: UID {int(uid)} is in the 200..887 expansion range (preferred 0..{PREFERRED_MAX_ID}; expansion IDs must be documented exceptions)")
+                die(f"account fragment {path}:{lineno}: UID must be 0..{MAX_PACKAGED_ID} (1000+ is human territory)")
             if not home.startswith("/") or not shell.startswith("/"):
                 die(f"account fragment {path}:{lineno}: home and shell must be absolute")
+            for dep in supp:
+                if not ACCOUNT_NAME_RE.fullmatch(dep):
+                    die(f"account fragment {path}:{lineno}: invalid supplementary group '{dep}' (comma-separated names, no spaces)")
+                if dep in RESERVED_GROUP_NAMES:
+                    die(f"account fragment {path}:{lineno}: supplementary group '{dep}' is a reserved foundation group; service users must not join it")
             users.append({"name": name, "uid": str(int(uid)), "primary": primary,
-                          "home": home, "shell": shell})
+                          "home": home, "shell": shell,
+                          "supplementary": ",".join(supp)})
         elif kind == "dir" and len(parts) == 5:
             _, dirpath, mode, owner, group = parts
             if not dirpath.startswith("/"):
@@ -487,8 +483,6 @@ def parse_sysusers_confs(payload_sysusers: Path, producer: str) -> tuple[dict[st
             else:
                 if name in RESERVED_GROUP_NAMES or num in RESERVED_GIDS:
                     die(f"sysusers conf {conf}:{lineno}: group '{name}'/{num} is a reserved foundation identity")
-            if num > PREFERRED_MAX_ID:
-                notices.append(f"sysusers conf {conf}:{lineno}: ID {num} is in the 200..887 expansion range (preferred 0..{PREFERRED_MAX_ID})")
             if kind == "u":
                 if name in seen_users:
                     die(f"sysusers conf {conf}:{lineno}: duplicate user '{name}'")

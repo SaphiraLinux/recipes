@@ -19,7 +19,7 @@ sha256=adb5e2b4f3129616b7d3b095c8838a2041dc5240bfbdc67cd02aeeae807defc9
 # _IOC request codes are unsigned by kernel design (musl takes int).
 # Surgical downgrade only (nginx/pahole precedent), never blanket.
 depends=""
-makedepends="binutils cmake gcc make pkgconf saphira-kernel-headers"
+makedepends="binutils cmake gcc make pkgconf saphira-linux-uapi-headers"
 subpackages="$pkgname-dev"
 
 recipe_build() {

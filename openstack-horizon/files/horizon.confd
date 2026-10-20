@@ -1,0 +1,14 @@
+# Horizon runtime settings (operator-editable).
+#
+# These are the WSGI container's own settings, not Horizon's Django
+# settings (which live in /etc/horizon/local/local_settings.py).
+# Nothing here is applied until the operator enables and starts the
+# service.
+
+# Address and port gunicorn listens on. Point this at a TLS-terminating
+# proxy (nginx/haproxy) for production; Django does not terminate TLS
+# itself. Leave the default for a local listener behind such a proxy.
+#HORIZON_BIND="127.0.0.1:8000"
+
+# Number of gunicorn worker processes.
+#HORIZON_WORKERS="4"

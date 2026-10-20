@@ -1,0 +1,14 @@
+[Unit]
+Description=Saphira boot-time utmp/wtmp accounting (once per boot)
+Documentation=https://saphira.vm2.uk/
+DefaultDependencies=yes
+After=local-fs.target
+Before=systemd-user-sessions.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/saphira-utmp-boot
+
+[Install]
+WantedBy=multi-user.target

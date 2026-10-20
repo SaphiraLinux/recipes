@@ -1,7 +1,7 @@
 #!/bin/sh
 pkgname=libffi
 pkgver=3.5.2
-pkgrel=2
+pkgrel=3
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='Foreign function interface library'
 license='MIT'
@@ -16,7 +16,11 @@ recipe_build() {
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$RECIPE_DIR/files/libffi-3.5.2.tar.gz"
 	cd "$SRC"
 	echo "$libffi_sha256  $RECIPE_DIR/files/libffi-3.5.2.tar.gz" | sha256sum -c -
-	./configure --prefix=/usr --sysconfdir=/etc --libdir=/usr/lib --disable-static --localstatedir=/var
+	./configure --prefix=/usr --sysconfdir=/etc --libdir=/usr/lib --localstatedir=/var
+	# No --disable-static: the static archive ships in -dev (automatic
+	# split) for qemu-user-static's fully static link (transitive via
+	# static glib). Shared-only main payload unchanged - dynamic
+	# linking stays the default everywhere.
 	make -j${JOBS:-$(nproc)}
 }
 recipe_install() {

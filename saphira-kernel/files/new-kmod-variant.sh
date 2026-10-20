@@ -62,12 +62,12 @@ for dir in "$root"/$base-*/recipe.sh; do
 	fi
 done
 [ -n "$template" ] || die "no existing variants of $base to copy"
-# Whether the family pins headers is family-specific: saphira-zfs pins
-# saphira-kernel-headers=<kver>, nvidia-open does not. Record which,
-# because the copy below must reproduce it rather than invent it.
-template_pins_headers=no
-grep -q "^[[:space:]]*saphira-kernel-headers=" "$root/$base-$template/recipe.sh" &&
-	template_pins_headers=yes
+# kmod UAPI deps name the single active line bare
+# (saphira-linux-uapi-headers, no version pin: there is only ever one
+# /usr/include provider, so pinning is meaningless). The copy inherits
+# the template's bare reference unchanged; assert it survived.
+grep -q "^[[:space:]]*saphira-linux-uapi-headers$" "$root/$base-$template/recipe.sh" ||
+	die "template $base-$template has no bare saphira-linux-uapi-headers dep"
 printf 'new-kmod-variant: template %s-%s -> %s-%s\n' "$base" "$template" "$base" "$kver"
 
 cp -r -- "$root/$base-$template" "$new" || die "copy failed"
@@ -81,14 +81,11 @@ sed -i \
 	-e "s/pkgname=$base-$template/pkgname=$base-$kver/" \
 	-e "s/for kernel $template/for kernel $kver/" \
 	-e "s/^KVER_SHORT=$template/KVER_SHORT=$kver/" \
-	-e "s/saphira-kernel-headers=$template/saphira-kernel-headers=$kver/" \
 	"$new/recipe.sh" || die "substitution failed"
 grep -q "pkgname=$base-$kver" "$new/recipe.sh" || die "pkgname substitution missed"
 grep -q "^KVER_SHORT=$kver" "$new/recipe.sh" || die "KVER_SHORT substitution missed"
-if [ "$template_pins_headers" = yes ]; then
-	grep -q "saphira-kernel-headers=$kver" "$new/recipe.sh" ||
-		die "headers pin substitution missed"
-fi
+grep -q "^[[:space:]]*saphira-linux-uapi-headers$" "$new/recipe.sh" ||
+	die "uapi dep missing after copy"
 case $base in
 	nvidia-open)
 		# Do not pattern-match an upstream filename. NVIDIA serves the
@@ -116,5 +113,5 @@ variant_staged=0
 printf 'new-kmod-variant: wrote %s/recipe.sh\n' "$new"
 printf 'new-kmod-variant: unlock checklist for %s:\n' "$kver"
 printf '  1. kernel tree built on Egg: /usr/src/linux-%s + `make scripts` (else staging skips it)\n' "$kver"
-printf '  2. saphira-kernel-headers=%s published (else resolvepkg fails closed)\n' "$kver"
+printf '  2. saphira-linux-uapi-headers published (else resolvepkg fails closed)\n'
 printf '  3. stage + build: build-kmod-set.sh %s-%s\n' "$base" "$kver"

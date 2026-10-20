@@ -21,7 +21,7 @@ makedepends="
 	gawk
 	gcc
 	gettext
-	saphira-kernel-headers
+	saphira-linux-uapi-headers
 	make
 "
 

@@ -1,0 +1,15 @@
+# Recognised history for the libvirt identities above (reconcile-only,
+# never auto-migrated): pre-packaging hosts hand-provisioned a local
+# kvm:994 group before the base seed carried kvm:160. Install stays
+# blocked until `saphira-identity reconcile libvirt --apply` migrates,
+# then `apk fix libvirt` converges.
+#
+# Deliberately NOT recorded: the hand-provisioned qemu:107 accounts on
+# those same hosts. UID 107 is alfred's published identity since
+# 2026-09-18 (renumber commit 116c097d, verified free at the time);
+# hand-provisioned local accounts have no standing against the
+# published record, so asserting 107 as qemu history was invalid and
+# the repository gate refuses it. Those accounts are foreign squatters:
+# remove them (after verifying no files need rechown) rather than
+# migrating them; the packaged qemu:173 is created fresh.
+legacy group kvm 994

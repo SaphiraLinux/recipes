@@ -1,0 +1,12 @@
+# LXC container logs. lxc-monitord holds its log open with no documented
+# reopen signal, so copytruncate is the correct rotation method.
+# missingok: the fragment activates whenever logrotate is installed,
+# possibly before any container ever runs.
+/var/log/lxc/*.log {
+    weekly
+    rotate 4
+    missingok
+    notifempty
+    compress
+    copytruncate
+}

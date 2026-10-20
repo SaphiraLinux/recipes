@@ -1,0 +1,68 @@
+saphira-openstack - Saphira native OpenStack installer foundation
+=================================================================
+
+This package contains a menu-driven installer foundation for designing an
+OpenStack cloud on Saphira Linux. It installs TOOLING ONLY. It does not
+install, configure or imply any OpenStack service, and `apk add
+saphira-openstack` modifies nothing on the machine.
+
+Three interfaces over one engine:
+
+  saphira-openstack init [--from FILE] [--output FILE]
+      Interactive terminal wizard. You design the cloud through menus:
+      topology, networking, storage, services, operations. Every choice is
+      yours; Back, Review and Cancel are always available. The wizard may
+      read the local machine read-only (interfaces, OVS bridges, VLANs,
+      ZFS pools, routes, init system) and offer detected values as
+      suggestions - never as decisions. Nothing is created, formatted,
+      adopted or modified without your explicit confirmation. On confirm,
+      the wizard writes an inventory document. Nothing is applied.
+      --from loads an existing document as the editable base: every
+      choice is shown, kept unless explicitly changed, and a keep-all
+      run reproduces the input plan byte-for-byte.
+
+  saphira-openstack inventory [--file PATH] [--check]
+      Inspect and validate the inventory document. Read-only.
+
+  saphira-openstack plan [--file PATH] [--out DIR]
+      Display exactly what would be installed or changed, without changing
+      the system. Writes only into an explicit --out directory.
+
+Design rules
+------------
+
+  * No hardcoded addresses, domains, hostnames, interfaces, bridges, VLANs
+    or storage devices. Examples illustrate; they are never defaults.
+  * IPv4 and IPv6 are independent everywhere. IPv4-only, IPv6-only and
+    dual-stack are all first-class.
+  * Existing networks and storage are used as-is; nothing is recreated,
+    formatted or destroyed without explicit approval.
+  * One network may serve several OpenStack purposes where the
+    configuration supports it.
+  * The inventory document is editable, exportable and reproducible; the
+    plan carries a plan_id so the same document always yields the same
+    plan.
+
+Status of OpenStack services
+-----------------------------
+
+Readiness is derived, never maintained. The component catalog maps each
+service to its provider APK; `inventory` and `plan` report a service as
+ready only when that package is installed or available in a configured
+apk repository here, and pending otherwise (no native package, or not
+obtainable from here). The wizard lets you design a complete cloud -
+the plan marks each component honestly and never claims an
+uninstallable service is deployable. Installing this package does not
+install OpenStack.
+
+For hermetic testing, SAPHIRA_OPENSTACK_PROVIDES names a file listing
+the available APKs instead of probing the live package manager.
+
+Files
+-----
+
+  /usr/sbin/saphira-openstack           the tool
+  /usr/libexec/saphira/openstack/      engine, wizard, inventory, plan, detect
+  /usr/share/saphira/openstack/        catalogs, examples, format doc
+  /usr/share/doc/saphira-openstack/    this README
+  /etc/saphira-openstack/inventory.ini where init writes (only on confirm)

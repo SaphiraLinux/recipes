@@ -1,0 +1,5 @@
+# memcached runtime directory only holds the pid path; cache data
+# stays in RAM by design. Owned by the service user: the daemon drops
+# privileges before writing its pidfile.
+dir /var/run/memcached 0755 memcached memcached
+rmdir-if-empty /run/memcached

@@ -1,0 +1,15 @@
+#!/sbin/openrc-run
+
+description="iSCSI initiator daemon (iscsid)"
+
+# iscsid runs as root (raw SCSI transport) with -f keeping it in the
+# foreground under supervise-daemon, so no pidfile.
+command="/usr/sbin/iscsid"
+command_args="-f"
+supervisor="supervise-daemon"
+
+depend()
+{
+	need localmount
+	use net
+}

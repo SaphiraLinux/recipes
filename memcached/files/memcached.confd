@@ -1,0 +1,9 @@
+# memcached runtime settings (operator-editable).
+#
+# The daemon drops to the memcached user itself (-u). Nothing here is
+# applied until the operator enables and starts the service.
+# Port 11211 is the default memcached port (point clients here).
+# Memory is in megabytes; raise for real deployments.
+#MEMCACHED_PORT="11211"
+#MEMCACHED_MEMORY="64"
+#MEMCACHED_CONNS="1024"

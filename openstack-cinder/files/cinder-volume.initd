@@ -1,0 +1,25 @@
+#!/sbin/openrc-run
+#
+# OpenRC service for the OpenStack Cinder volume manager.
+#
+# Standalone daemon managing volumes on the configured backends (LVM,
+# Ceph, NFS, ZFS) and exporting them through kernel LIO iSCSI
+# (rtslib-fb over configfs; targetcli is the optional interactive
+# frontend). Privileged backend operations escalate per-command
+# through cinder-rootwrap with the shipped filter policy; the daemon
+# itself runs as the cinder user. Reads /etc/cinder/cinder.conf
+# (operator-provided). Shipped unconditionally; never enabled or
+# started at install. Runs on storage nodes.
+
+name="cinder-volume"
+description="OpenStack Cinder volume manager"
+
+command="/usr/bin/cinder-volume"
+command_user="cinder:cinder"
+command_background="yes"
+pidfile="/var/run/cinder/cinder-volume.pid"
+
+depend() {
+	need net
+	after firewall
+}

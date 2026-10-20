@@ -19,7 +19,7 @@ apk_tools_sha256=8795712ce02457d29c0beb18f82851b408d1d47f98a0cbbbd33ab5ea496f665
 depends="openssl zlib zstd"
 makedepends="
 	gcc
-	saphira-kernel-headers
+	saphira-linux-uapi-headers
 	make
 	meson
 	ninja

@@ -1,0 +1,17 @@
+[Unit]
+Description=OpenStack Cinder backup manager
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cinder
+Group=cinder
+EnvironmentFile=-/etc/conf.d/cinder-backup
+ExecStart=/usr/bin/cinder-backup
+Restart=on-failure
+KillMode=mixed
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target

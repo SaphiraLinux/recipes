@@ -1,0 +1,14 @@
+#!/sbin/openrc-run
+
+description="Watchdog multiplexer for sanlock (wdmd)"
+
+# wdmd runs as root, foreground-native (no detach flag exists), under
+# supervise-daemon, so no pidfile. Part of the sanlock fencing
+# design -- same never-enable-without-review warning as sanlock.
+command="/usr/sbin/wdmd"
+supervisor="supervise-daemon"
+
+depend()
+{
+	need localmount
+}

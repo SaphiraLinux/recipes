@@ -20,7 +20,7 @@ depends=""
 # with $(MAKEINFO) directly, not via missing(1), so stubbing MAKEINFO
 # with true breaks the html rule (it mv's a file true never creates).
 # Upstream's docs build unmodified instead.
-makedepends="gcc binutils make saphira-kernel-headers texinfo"
+makedepends="gcc binutils make saphira-linux-uapi-headers texinfo"
 
 recipe_build()
 {

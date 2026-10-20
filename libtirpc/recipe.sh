@@ -20,7 +20,7 @@ makedepends="
     binutils
     gcc
     gawk
-    saphira-kernel-headers
+    saphira-linux-uapi-headers
     make
     pkgconf
 "

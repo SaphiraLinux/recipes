@@ -14,7 +14,7 @@ description="Saphira libvirt virtualization stack (modular daemon umbrella)"
 # Nothing is added to a runlevel at install; the operator explicitly
 # chooses rc-update add libvirtd. /sbin/service is OpenRC's own
 # frontend (openrc installs to /sbin on Saphira, non-usrmerged).
-LIBVIRT_SERVICES="virtlogd virtlockd virtqemud virtstoraged virtnetworkd virtnodedevd virtsecretd virtproxyd virtinterfaced virtnwfilterd"
+LIBVIRT_SERVICES="virtlogd virtlockd virtqemud virtlxcd virtstoraged virtnetworkd virtnodedevd virtsecretd virtproxyd virtinterfaced virtnwfilterd"
 
 depend()
 {
@@ -38,7 +38,7 @@ stop()
 	ebegin "Stopping Saphira libvirt stack"
 	st=0
 	# Reverse order: logd/lockd stop last.
-	for s in virtnwfilterd virtinterfaced virtproxyd virtsecretd virtnodedevd virtnetworkd virtstoraged virtqemud virtlockd virtlogd; do
+	for s in virtnwfilterd virtinterfaced virtproxyd virtsecretd virtnodedevd virtnetworkd virtstoraged virtlxcd virtqemud virtlockd virtlogd; do
 		/sbin/service $s stop || st=1
 	done
 	eend $st

@@ -1,0 +1,24 @@
+#!/sbin/openrc-run
+#
+# OpenRC service for the OpenStack Neutron L3 agent.
+#
+# Standalone daemon managing routers, namespaces, iptables and
+# conntrack entries. Privileged operations escalate per-command
+# through neutron-rootwrap; the agent itself runs as the neutron
+# user. Reads /etc/neutron/l3_agent.ini (operator-provided). Shipped
+# unconditionally; never enabled or started at install. Runs on
+# network nodes. Legacy VRRP HA needs keepalived (not packaged);
+# plain routing and DVR are unaffected.
+
+name="neutron-l3-agent"
+description="OpenStack Neutron L3 agent"
+
+command="/usr/bin/neutron-l3-agent"
+command_user="neutron:neutron"
+command_background="yes"
+pidfile="/var/run/neutron/neutron-l3-agent.pid"
+
+depend() {
+	need net
+	after firewall
+}

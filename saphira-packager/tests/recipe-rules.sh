@@ -19,6 +19,24 @@ recipe_var()
 	)
 }
 
+# apk version grammar: a pkgver may not contain a '.' immediately followed
+# by a letter. PEP 440 dot-suffixes (2.9.0.post0, 1.0.dev1, 1.0.rc1) are
+# rejected by apk at mkpkg time ("info field 'version' has invalid value"),
+# which surfaces only at package construction, long after the recipe looked
+# fine. The apk-native spelling is the '_' suffix form (2.9.0_p0,
+# 2026.09.08_rc1, 7.3_rc1); apk's patch level '_p<N>' sorts above the base
+# exactly as a post-release does. Incident: python-dateutil 2.9.0.post0 and
+# python-pytz 2026.3.post1 blocked ten OpenStack packages at makepkg.
+for _r in "$source_root"/*/recipe.sh; do
+	_v=$(sed -n 's/^pkgver=//p' "$_r")
+	case "$_v" in
+	*.[A-Za-z]*)
+		printf '%s\n' "${_r#"$source_root"/}: pkgver '$_v' has a '.' before a letter, which apk rejects (use the '_' suffix form, e.g. 2.9.0_p0 / 2026.09.08_rc1)" >&2
+		exit 1
+		;;
+	esac
+done
+
 # Incident: nginx 1.30.4-r4 configure failed its libxslt probe with
 # libxslt-dev installed (retained /build/nginx.buildpkg log), because
 # libxml2 headers were absent from the build root. libxslt headers
@@ -130,6 +148,21 @@ grep -Eq '^group dhcpcd 104$' "$dhcpcd_fragment" || {
 	printf '%s\n' 'dhcpcd fragment does not declare group dhcpcd 104' >&2
 	exit 1
 }
+grep -Eq '^dir /var/lib/dhcpcd 0755 dhcpcd dhcpcd$' "$dhcpcd_fragment" || {
+	printf '%s\n' 'dhcpcd fragment does not converge its state directory (dropped-privilege client cannot store leases)' >&2
+	exit 1
+}
+# The base seed and the fragment must agree exactly: the publish gate
+# refuses a fragment that drifts from the seed, so a home-directory
+# disagreement here is a broken fresh install, not a cosmetic diff.
+seed_home=$(awk '$1 == "dhcpcd" && $2 == "user" { print $5 }' "$source_root/saphira-baselayout/files/accounts.tsv")
+fragment_home=$(sed -n 's/^user dhcpcd [0-9][0-9]* dhcpcd \([^ ]*\) .*/\1/p' "$dhcpcd_fragment")
+if test -n "$seed_home" && test "$seed_home" = "$fragment_home"; then
+	printf '%s\n' 'ok       dhcpcd base-seed and fragment identities agree'
+else
+	printf '%s\n' "dhcpcd seed home ($seed_home) disagrees with fragment home ($fragment_home)" >&2
+	exit 1
+fi
 grep -q 'accounts.d/dhcpcd' "$source_root/dhcpcd/recipe.sh" || {
 	printf '%s\n' 'dhcpcd recipe does not install its accounts.d fragment' >&2
 	exit 1
@@ -147,6 +180,44 @@ if [ -n "$dup_ids" ]; then
 	exit 1
 fi
 printf '%s\n' 'ok       no duplicate service identity uids'
+
+# Historical identity claims must not collide with another package's
+# current claims. The repository gate refuses a published union in
+# which one id is claimed twice (e.g. a legacy sidecar asserting a
+# uid some other package now owns: hand-provisioned local accounts
+# have no standing against the published record). Mirror that rule
+# here so it fails in-tree, before staging: for each legacy user/group
+# entry, its uid (user namespace) and gid (group namespace) must be
+# single-claimed tree-wide. Claims identical to the base seed converge
+# silently (ground truth, not a package claim) and are exempt.
+legacy_dup=$(cd "$source_root" && {
+	seed_users=$(awk -F'\t' '$2 == "user" { print "u:"$3" "$1 }' saphira-baselayout/files/accounts.tsv 2>/dev/null)
+	seed_groups=$(awk -F'\t' '$2 == "group" { print "g:"$3" "$1 }' saphira-baselayout/files/accounts.tsv 2>/dev/null)
+	for frag in */files/accounts.d/*.legacy; do
+		[ -e "$frag" ] || continue
+		pkg=${frag%%/*}
+		awk -v pkg="$pkg" '
+			/^legacy user [^ ]+ [0-9]+ [0-9]+/ { print "u:"$4" "pkg":"$3; print "g:"$5" "pkg":"$3 }
+			/^legacy group [^ ]+ [0-9]+/ { print "g:"$4" "pkg":"$3 }' "$frag"
+	done
+	for frag in */files/accounts.d/*; do
+		case $frag in *.legacy) continue;; esac
+		[ -e "$frag" ] || continue
+		pkg=${frag%%/*}
+		awk -v pkg="$pkg" '
+			/^user [^ ]+ [0-9]+ / { print "u:"$3" "pkg":"$2 }
+			/^group [^ ]+ [0-9]+/ { print "g:"$3" "pkg":"$2 }' "$frag"
+	done
+	printf '%s\n%s\n' "$seed_users" "$seed_groups" | awk '{ print $1" seed:"$2 }'
+} 2>/dev/null | sort | awk '
+	{ id[$1] = id[$1] " " $2 }
+	END { for (k in id) { n = split(id[k], a, " "); ok = 1; for (i = 1; i <= n; i++) if (a[i] !~ /^seed:/ && a[i] != "") ok = 0;
+		if (!ok) { m = 0; for (i = 1; i <= n; i++) if (a[i] !~ /^seed:/ && a[i] != "") m++; if (m > 1) print k ":" id[k] } } }')
+if [ -n "$legacy_dup" ]; then
+	printf 'FAIL: historical identity claim collides with a current claim: %s\n' "$legacy_dup" >&2
+	exit 1
+fi
+printf '%s\n' 'ok       no historical identity claim collides'
 
 # Man hierarchy navigability: every page carries all eight required
 # sections, contains ASCII only (groff-clean output), and every
