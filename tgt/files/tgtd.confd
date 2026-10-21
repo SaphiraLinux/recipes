@@ -1,0 +1,7 @@
+# tgtd runtime settings (operator-editable).
+#
+# Extra daemon flags, e.g. tgtd_opts="--debug 1". Targets themselves
+# are managed live via tgtadm (cinder) or /etc/tgt/conf.d snippets,
+# never here. Nothing here is applied until the operator enables and
+# starts the service.
+tgtd_opts=""

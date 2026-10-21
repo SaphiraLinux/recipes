@@ -8,15 +8,21 @@ Wants=network-online.target
 Type=notify
 User=cinder
 Group=cinder
-EnvironmentFile=-/etc/conf.d/cinder-api
+# Defaults first, operator file last: EnvironmentFile assignments win
+# over Environment=, so /etc/conf.d/cinder-api overrides these.
+# WORKERS defaults to 4 (an empty default is a boot failure:
+# gunicorn --workers '' exits 2). --name is gone: gunicorn 26
+# removed it. --config points at the argv sanitizer below, NEVER at
+# cinder.conf (an INI file gunicorn would import as Python and die
+# on with SyntaxError).
 Environment=CINDER_API_BIND=127.0.0.1:8776
-Environment=CINDER_API_CONF=/etc/cinder/cinder.conf
+Environment=CINDER_API_WORKERS=4
+EnvironmentFile=-/etc/conf.d/cinder-api
 RuntimeDirectory=cinder
 RuntimeDirectoryMode=0750
-ExecStart=/usr/bin/gunicorn --name cinder-api \
+ExecStart=/usr/bin/gunicorn --config /etc/cinder/gunicorn.conf.py \
 	--bind ${CINDER_API_BIND} --workers ${CINDER_API_WORKERS} \
 	--pid /var/run/cinder/cinder-api.pid \
-	--config ${CINDER_API_CONF} \
 	cinder.wsgi.api:application
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure

@@ -8,12 +8,13 @@
 # Interactive. Asks which controller to serve, the credentials, and
 # which DISK to devote to volumes; creates the volume group, writes
 # cinder.conf, registers the cinder identity and the volumev3
-# endpoint on the controller, and then stops honestly at the one gate
-# that is not yet packaged: the iSCSI target daemon (tgt / open-iscsi
-# are not Saphira packages yet, so no host can export volumes today).
+# endpoint on the controller, installs and starts the iSCSI target
+# (tgt) and cinder-volume, and verifies the volume service answers.
 #
-# Everything the script CAN do, it does and verifies. What it cannot
-# do, it names precisely instead of pretending.
+# Guest attach additionally needs kernel iSCSI support on the
+# COMPUTE hosts plus open-iscsi running there; without it, volumes
+# create fine but cannot attach. The script says so when it detects
+# the gap instead of pretending.
 #
 # The cardinal rule, learned the expensive way: NEVER let LVM near a
 # disk you have not positively identified. One wrong pvcreate eats a
@@ -204,6 +205,11 @@ volume_driver = cinder.volume.drivers.lvm.LVMVolumeDriver
 volume_group = $VOLUME_GROUP
 target_protocol = iscsi
 target_helper = tgtadm
+# Thick provisioning: thin pools need a kernel device-mapper thin
+# target many Saphira kernels do not carry (proven on 7.2.3: thin
+# creation fails, thick works). Thick always works; revisit thin
+# only with a kernel that proves it.
+lvm_type = default
 [oslo_concurrency]
 lock_path = /var/lib/cinder/tmp
 EOF
@@ -214,19 +220,24 @@ log "NOTE: the controller also needs a 'cinder' database + grants for"
 log "mysql+pymysql://cinder@$CONTROLLER/cinder — create it there with"
 log "the same DB password before starting cinder-volume."
 
-# ---------------------------------------------------------------- phase 4: the honest gate
+# ---------------------------------------------------------------- phase 4: target + volume service
 
-log "== phase 4/4: iSCSI target gate"
-if which tgtadm >/dev/null 2>&1; then
-	log "tgtadm present: enabling cinder-volume"
-	systemctl enable --now cinder-volume 2>/dev/null || service cinder-volume start
-	log "storage node live. Create a volume to prove it."
-else
-	log ""
-	log "STOPPING HERE, HONESTLY: no iSCSI target daemon is installed"
-	log "(tgt / open-iscsi are not Saphira packages yet), so this host"
-	log "cannot export volumes. Everything else is ready: volume group,"
-	log "identity, endpoint, configuration. When the target packages"
-	log "land, install one and run this script again — it will pick up"
-	log "exactly here. Do NOT fake it with an unreviewed static binary."
+log "== phase 4/4: iSCSI target and volume service"
+if ! which tgtadm >/dev/null 2>&1; then
+	log "installing tgt (iSCSI target daemon)..."
+	apk add tgt || die "could not install tgt — check your repository access, then re-run (safe: everything is kept)"
 fi
+systemctl enable --now tgtd 2>/dev/null || service tgtd start
+systemctl is-active --quiet tgtd || die "tgtd failed to start"
+log "tgtd active"
+# cinder escalates through rootwrap like the neutron agents.
+if grep -q cinder-rootwrap /etc/sudoers.d/cinder 2>/dev/null; then
+	log "cinder sudoers present"
+else
+	printf '%s\n' "cinder ALL=(root) NOPASSWD: /usr/bin/cinder-rootwrap *" > /etc/sudoers.d/cinder
+	chmod 0440 /etc/sudoers.d/cinder
+	visudo -c -f /etc/sudoers.d/cinder || die "refusing to continue with a broken cinder sudoers"
+fi
+systemctl enable --now cinder-volume 2>/dev/null || service cinder-volume start
+log "storage node live. Prove it: create a 1 GB volume, watch it go"
+log "available, then attach it to a test instance and read it back."

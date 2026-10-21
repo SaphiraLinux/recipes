@@ -15,10 +15,9 @@ description="OpenStack Block Storage (Cinder) API"
 
 : "${CINDER_API_BIND:=127.0.0.1:8776}"
 : "${CINDER_API_WORKERS:=$(nproc 2>/dev/null || echo 4)}"
-: "${CINDER_API_CONF:=/etc/cinder/cinder.conf}"
 
 command="/usr/bin/gunicorn"
-command_args="--name cinder-api --bind ${CINDER_API_BIND} --workers ${CINDER_API_WORKERS} --pid /var/run/cinder/cinder-api.pid --config ${CINDER_API_CONF} cinder.wsgi.api:application"
+command_args="--config /etc/cinder/gunicorn.conf.py --bind ${CINDER_API_BIND} --workers ${CINDER_API_WORKERS} --pid /var/run/cinder/cinder-api.pid cinder.wsgi.api:application"
 command_user="cinder:cinder"
 command_background="yes"
 pidfile="/var/run/cinder/cinder-api.pid"

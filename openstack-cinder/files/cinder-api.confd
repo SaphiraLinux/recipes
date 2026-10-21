@@ -11,6 +11,3 @@
 
 # Number of gunicorn worker processes.
 #CINDER_API_WORKERS="4"
-
-# Path to the Cinder configuration file.
-#CINDER_API_CONF="/etc/cinder/cinder.conf"

@@ -1,0 +1,16 @@
+#!/sbin/openrc-run
+
+description="Linux SCSI target daemon (tgtd, iSCSI target for cinder)"
+
+# tgtd runs as root (raw SCSI transport). Foreground under
+# supervise-daemon, so no pidfile. Extra flags via tgtd_opts in
+# /etc/conf.d/tgtd (sourced automatically by name).
+command="/usr/sbin/tgtd"
+command_args="-f ${tgtd_opts}"
+supervisor="supervise-daemon"
+
+depend()
+{
+	need localmount
+	use net
+}

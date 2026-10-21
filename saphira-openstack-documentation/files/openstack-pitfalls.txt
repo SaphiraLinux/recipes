@@ -195,3 +195,19 @@ GENERAL RULES (the whole book in one page)
   hypervisors schedule nothing twice as fast.
 - Disks are forever (#storage guide): pvcreate does not ask twice.
   Snapshot first, YES in caps, never "temporary" production disks.
+
+STORAGE PROOF NOTES (cinder bring-up, 2026-10-20)
+- Thick first: cinder LVM defaults to thin pools, which need a
+  kernel dm-thin-pool target many Saphira kernels do not carry.
+  lvm_type=default always works; revisit thin only with a kernel
+  that proves it.
+- cinder-api needs the same gunicorn treatment as nova (no --name,
+  no --config pointing at INI, argv sanitizer file, workers
+  default) plus bind 0.0.0.0 via its conf.d (EnvironmentFile wins).
+- cinder escalates via cinder-rootwrap: needs its sudoers fragment.
+- Guest attach needs kernel iSCSI (CONFIG_ISCSI_TCP) on COMPUTES
+  plus open-iscsi running there; the target side (tgt) is proven
+  exporting a real LV (target ready, LUN online).
+- ZFS userspace + per-kernel modules are published; a loop-file
+  pool proved ONLINE with a clean scrub. Never test on the live
+  tank pool.

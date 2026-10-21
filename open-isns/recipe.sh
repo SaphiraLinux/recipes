@@ -54,8 +54,11 @@ recipe_install()
 	install -D -m 0644 "$RECIPE_DIR/files/isnsd.service" \
 		"$PKGDEST/usr/lib/systemd/system/isnsd.service"
 	# .a/.pc/headers to -dev via the fixed split predicates; the
-	# shared lib and isnsd stay in main.
-	for p in usr/lib/libisns.so usr/include/isns \
+	# shared lib and isnsd stay in main. Headers live under
+	# include/libisns (meson installs them there and consumers
+	# include <libisns/...> — verified against open-iscsi 2.1.13);
+	# there is no include/isns directory upstream.
+	for p in usr/lib/libisns.so usr/include/libisns \
 		usr/sbin/isnsd \
 		etc/init.d/isnsd \
 		usr/lib/systemd/system/isnsd.service; do

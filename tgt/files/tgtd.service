@@ -1,0 +1,14 @@
+[Unit]
+Description=Linux SCSI target daemon (tgtd, iSCSI target for cinder)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# tgtd runs as root (raw SCSI transport); -f keeps it foregrounded.
+EnvironmentFile=-/etc/conf.d/tgtd
+ExecStart=/usr/sbin/tgtd -f $tgtd_opts
+Restart=on-failure
+	RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

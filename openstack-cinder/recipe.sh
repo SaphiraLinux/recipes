@@ -22,7 +22,7 @@
 
 pkgname=openstack-cinder
 pkgver=29.0.0
-pkgrel=1
+pkgrel=2
 pkgarch=noarch
 pkgdesc='OpenStack Block Storage service (Cinder): API, scheduler, volume, backup'
 license='Apache-2.0'
@@ -114,6 +114,10 @@ recipe_build()
 	for f in "$RECIPE_DIR"/files/cinder-*.initd "$RECIPE_DIR"/files/cinder-*.confd; do
 		sh -n "$f" || return 1
 	done
+	# the argv sanitizer must at least compile (in-memory: the
+	# recipe tree is mounted read-only, so py_compile's
+	# __pycache__ write would fail the build)
+	python3 -c "compile(open('$RECIPE_DIR/files/gunicorn.conf.py').read(), 'gunicorn.conf.py', 'exec')" || return 1
 }
 
 recipe_install()
@@ -172,6 +176,11 @@ recipe_install()
 	done
 	install -D -m 0644 "$RECIPE_DIR/files/cinder.tmpfiles" \
 		"$PKGDEST/usr/lib/tmpfiles.d/cinder.conf"
+	# argv sanitizer for the gunicorn-served API (see files/): the
+	# unit loads it via --config so oslo.config never sees
+	# gunicorn's own flags.
+	install -D -m 0644 "$RECIPE_DIR/files/gunicorn.conf.py" \
+		"$PKGDEST/etc/cinder/gunicorn.conf.py"
 
 	# Service identity (fragment basename must equal the package name;
 	# the identity inside stays `cinder`), FHS runtime dir and log
@@ -200,6 +209,7 @@ recipe_install()
 		usr/lib/python3.14/site-packages/cinder/wsgi/api.py \
 		usr/lib/python3.14/site-packages/cinder/db/migrations/versions \
 		etc/cinder/api-paste.ini \
+		etc/cinder/gunicorn.conf.py \
 		etc/cinder/rootwrap.conf \
 		etc/cinder/rootwrap.d/volume.filters \
 		etc/init.d/cinder-api \

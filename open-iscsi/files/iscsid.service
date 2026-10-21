@@ -7,7 +7,7 @@ Wants=network-online.target
 # Type=notify: iscsid is sd_notify-native (upstream unit agrees).
 Type=notify
 NotifyAccess=main
-ExecStart=/usr/sbin/iscsid -f
+ExecStart=/sbin/iscsid -f
 Restart=on-failure
 	RestartSec=5
 
