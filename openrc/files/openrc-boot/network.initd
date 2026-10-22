@@ -1,7 +1,7 @@
 #!/sbin/openrc-run
 
 description="Configure Saphira user-space networking"
-command=/sbin/saphira-network-config
+command=/usr/sbin/saphira-network-config
 command_args=${network_args:-}
 
 depend()

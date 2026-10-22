@@ -1,0 +1,18 @@
+[Unit]
+Description=Portainer Community Edition (Docker management UI, loopback only)
+Documentation=https://docs.portainer.io/
+After=network-online.target dockerd.service
+Wants=network-online.target dockerd.service
+
+[Service]
+Type=simple
+# Pinned image (see recipe). Loopback only: remote access rides an SSH
+# tunnel, never a public port. The named volume survives container
+# replacement AND package removal; images are never pruned here.
+ExecStart=/usr/bin/docker run --rm --name portainer-ce -p 127.0.0.1:9443:9443 -v /var/run/docker.sock:/var/run/docker.sock -v portainer_data:/data portainer/portainer-ce:2.45.2
+ExecStop=/usr/bin/docker stop portainer-ce
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

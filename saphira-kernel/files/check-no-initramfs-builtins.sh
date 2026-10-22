@@ -32,9 +32,11 @@ nib_die()
 nib_required_symbols()
 {
 	# Root block/storage path (SATA/NVMe/virtio; VMD covers Intel
-	# RST-mode remap on N100 and similar boards).
-	printf '%s\n' ATA BLK_DEV_NVME BLK_DEV_SD DEVTMPFS EXT4_FS \
-		NVME_CORE SATA_AHCI SCSI VIRTIO_BLK VIRTIO_PCI VMD
+	# RST-mode remap on N100 and similar boards). EXT4_FS, BTRFS_FS
+	# and XFS_FS are all =y: any of them may be the root filesystem
+	# and there is no initramfs to load a module from.
+	printf '%s\n' ATA BLK_DEV_NVME BLK_DEV_SD BTRFS_FS DEVTMPFS EXT4_FS \
+		NVME_CORE SATA_AHCI SCSI VIRTIO_BLK VIRTIO_PCI VMD XFS_FS
 	# USB mass storage / recovery sticks.
 	printf '%s\n' USB_STORAGE USB_UAS USB_XHCI_HCD
 	# Disk layout and EFI boot.

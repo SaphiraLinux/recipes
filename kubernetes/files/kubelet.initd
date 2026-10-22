@@ -2,12 +2,13 @@
 
 description="Kubernetes node agent (kubelet)"
 
-# Mirrors the approved systemd unit: foreground under supervise-daemon.
-# No hardcoded --config/--kubeconfig (mirroring upstream): configuration
-# arrives via /etc/default/kubelet (KUBELET_KUBEADM_ARGS set by hand,
-# KUBELET_EXTRA_ARGS) and via /var/lib/kubelet/kubeadm-flags.env
-# (KUBELET_KUBEADM_ARGS written by kubeadm init/join at runtime),
-# exactly like upstream's kubeadm drop-in mechanism on systemd.
+# Mirrors the approved systemd unit + kubeadm drop-in (shipped by this
+# package; the kubeadm CLI never touches it): foreground under
+# supervise-daemon, no hardcoded paths. The drop-in carries
+# --bootstrap-kubeconfig/--kubeconfig/--config via Environment; this
+# script assembles the equivalent arguments explicitly, because OpenRC
+# has no drop-in mechanism. Flags from kubeadm (kubeadm-flags.env) and
+# the admin (/etc/default/kubelet) come last, exactly like upstream.
 # Neither init wraps the other; nothing is auto-enabled at install.
 command="/usr/bin/kubelet"
 command_args=""
@@ -26,15 +27,38 @@ start_pre()
 	# performs TLS bootstrap itself. Refusing early breaks join.
 	checkpath -d -m 0755 /var/lib/kubelet
 	checkpath -d -m 0755 /run/kubelet
+	# Kubeadm-managed paths first, mirroring the systemd drop-in's
+	# KUBELET_KUBECONFIG_ARGS + KUBELET_CONFIG_ARGS. Each only when its
+	# file exists: a joining node has bootstrap but no kubelet.conf yet,
+	# an init/join-complete node has kubelet.conf (bootstrap consumed),
+	# and --config arrives as soon as kubeadm writes it.
+	command_args=""
+	[ -f /etc/kubernetes/bootstrap-kubelet.conf ] &&
+		command_args="$command_args --bootstrap-kubeconfig=/etc/kubernetes/bootstrap-kubelet.conf"
+	[ -f /etc/kubernetes/kubelet.conf ] &&
+		command_args="$command_args --kubeconfig=/etc/kubernetes/kubelet.conf"
+	[ -f /var/lib/kubelet/config.yaml ] &&
+		command_args="$command_args --config=/var/lib/kubelet/config.yaml"
 	# kubeadm-owned flags first (dash-optional like EnvironmentFile=-);
 	# admin /etc/default/kubelet wins on conflict (sourced last).
+	# Defaulted up front: neither file may exist (stray start on an
+	# unjoined node), and an unset expansion must not fail the run.
+	KUBELET_KUBEADM_ARGS=${KUBELET_KUBEADM_ARGS:-}
+	KUBELET_EXTRA_ARGS=${KUBELET_EXTRA_ARGS:-}
 	if [ -f /var/lib/kubelet/kubeadm-flags.env ]; then
 		. /var/lib/kubelet/kubeadm-flags.env
 	fi
 	if [ -f /etc/default/kubelet ]; then
 		. /etc/default/kubelet
-		command_args="$KUBELET_KUBEADM_ARGS $KUBELET_EXTRA_ARGS"
-	elif [ -n "$KUBELET_KUBEADM_ARGS" ]; then
-		command_args="$KUBELET_KUBEADM_ARGS"
 	fi
+	# Appended, never assigned: the kubeadm-managed paths above must
+	# survive admin extras (an earlier revision overwrote them here,
+	# silently dropping --config on every node carrying the file).
+	# Word-splitting here is deliberate (flag vectors, not words).
+	for extra in "$KUBELET_KUBEADM_ARGS" "$KUBELET_EXTRA_ARGS"; do
+		[ -n "$extra" ] && command_args="$command_args $extra"
+	done
+	# start_pre must exit 0 for OpenRC to proceed; the loop above ends
+	# non-zero when both flag vectors are empty (stray start case).
+	return 0
 }

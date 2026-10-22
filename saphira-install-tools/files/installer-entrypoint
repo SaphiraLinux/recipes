@@ -1,0 +1,28 @@
+#!/bin/sh
+# installer-entrypoint: initramfs mode=ram entrypoint for the Saphira
+# USB installer. Finds the installer payload by filesystem label,
+# mounts it read-write and hands over to its init (which runs the
+# installer menu service on tty1). Never returns on success.
+#
+# No UUIDs, no device names, no cmdline parsing: the label
+# SAPHIRA-INSTALL is written by the image build and is the single
+# stable identity across USB sticks, ports and machines. Waits
+# boundedly for slow USB discovery, then fails loudly on /dev/console
+# (the one guaranteed channel) rather than hanging silently.
+set -eu
+
+mkdir -p /installroot
+dev=
+n=0
+while test "$n" -lt 10; do
+	dev=$(blkid -L SAPHIRA-INSTALL 2>/dev/null || true)
+	test -n "$dev" && break
+	n=$((n + 1))
+	sleep 1
+done
+if test -z "$dev"; then
+	echo "saphira-installer: payload labelled SAPHIRA-INSTALL not found" > /dev/console
+	exit 1
+fi
+mount -o rw "$dev" /installroot || exit 1
+exec /sbin/switch_root /installroot /sbin/init

@@ -3,6 +3,8 @@
 pkgname=saphira-zfs-7.2.9-ccram
 pkgver=2.4.4
 pkgrel=2
+disabled=yes
+disabled_reason='its kernel linux-ccram is disabled; a kmod without a buildable kernel tree blocks forever (was a permanent BLOCKED row)'
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='OpenZFS 2.4.4 kernel modules for kernel 7.2.9-ccram (kmods only; userspace is saphira-zfs-userspace)'
 license=CDDL

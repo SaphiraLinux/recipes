@@ -14,7 +14,11 @@
 # only package intentions, per saphira-profiles(5)) and is optional.
 pkgname=saphira-image-creator
 pkgver=0.1
-pkgrel=25
+pkgrel=26
+# r26: hybrid usb-installer target (bios-boot + ESP + installer root,
+# both GRUB loaders, ram-mode initramfs, menu service on, firstboot
+# off). One medium boots both firmwares into the installer menu; the
+# installed machine's init is chosen there, never here.
 # r25: ESP 512M(doc)/256M(actual) -> 64 MiB. The old comment claimed
 # 512 MiB while the constant staged 524288 sectors (256 MiB); both are
 # gone. 64 MiB holds the ~1.5 MiB EFI payload (GRUB only; kernel and
@@ -182,8 +186,12 @@ recipe_build()
 	local name boot init profile
 	while read -r name boot init profile; do
 		case $name in ''|'#'*) continue ;; esac
-		case $boot in bios|uefi) ;; *) echo "ERROR: target $name has boot=$boot" >&2; return 1 ;; esac
+		case $boot in bios|uefi|hybrid) ;; *) echo "ERROR: target $name has boot=$boot" >&2; return 1 ;; esac
 		case $init in openrc|systemd) ;; *) echo "ERROR: target $name has init=$init" >&2; return 1 ;; esac
+		if [ "$boot" = hybrid ] && [ "$init" != systemd ]; then
+			echo "ERROR: target $name: hybrid boot requires the systemd installer environment" >&2
+			return 1
+		fi
 		[ -n "$profile" ] || {
 			echo "ERROR: target $name names no profile" >&2
 			return 1

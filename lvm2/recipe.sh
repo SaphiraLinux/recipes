@@ -16,7 +16,13 @@
 
 pkgname=lvm2
 pkgver=2.03.39
-pkgrel=2
+pkgrel=3
+# r3: initramfs LVM-root hook (files/20-lvm-activate ->
+# /lib/saphira/initramfs/root.d/, suite-proven): vgchange -ay plus
+# mounting root=/dev/mapper/... at /newroot, else activation only so
+# /init mounts plain roots itself. Inert until a media builder names
+# it in an initramfs.conf with `bin vgchange`; the default base
+# initramfs is untouched.
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="Logical volume management"
 license="GPL-2.0-or-later LGPL-2.1-or-later"
@@ -46,6 +52,8 @@ makedepends="
 
 recipe_build()
 {
+	sh "$RECIPE_DIR/tests/lvm-activate-hook.sh" ||
+		{ echo "ERROR: lvm-activate-hook suite failed" >&2; return 1; }
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$RECIPE_DIR/files/v2_03_39.tar.gz"
 	echo "$sha256  $RECIPE_DIR/files/v2_03_39.tar.gz" | sha256sum -c -
 	# musl stdio patch (freopen + __GLIBC__ guards, see header).
@@ -59,4 +67,8 @@ recipe_build()
 recipe_install()
 {
 	make DESTDIR="$PKGDEST" install
+	# LVM-root initramfs hook (inert file until composed into an
+	# initramfs.conf; see its header for the composition contract).
+	install -D -m 0755 "$RECIPE_DIR/files/20-lvm-activate" \
+		"$PKGDEST/lib/saphira/initramfs/root.d/20-lvm-activate"
 }

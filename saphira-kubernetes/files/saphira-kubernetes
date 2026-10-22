@@ -1,0 +1,1176 @@
+#!/bin/sh
+# saphira-kubernetes: native Saphira management interface for Kubernetes.
+#
+# This is NOT another Kubernetes implementation. It understands local and
+# remote Saphira/Saphira-d hosts and gives the operator inventory, plan,
+# apply, verify and removal operations over them:
+#
+#   inventory  facts about components, runtimes, kernel, network, membership
+#   plan       ordered steps to converge a declarative cluster config
+#   apply      execute the plan (idempotent; --dry-run prints, --confirm runs)
+#   verify     health checks with PASS/FAIL and exit status (repeatable proof)
+#   drain      cordon + evict a node (warns about bare pods first)
+#   uncordon   return a node to scheduling
+#   remove-node  drain + delete + reset one node (never silent)
+#   remove-cluster  reset every member (never silent, never partial surprise)
+#
+# Safety rules (load-bearing, tested):
+#   - hosts are authorised by presence in the hosts file ONLY. Any other
+#     target is refused before any connection is opened.
+#   - SSH runs BatchMode (key-only, no password prompts that could hang
+#     automation) with a bounded timeout. Host keys are NOT auto-accepted:
+#     the operator enrols them (ssh-keyscan) as the explicit authorisation.
+#   - every mutating verb supports --dry-run (print, change nothing).
+#     apply/drain/remove-node/remove-cluster additionally require
+#     --confirm, which names nothing implicitly: the target is echoed.
+#   - removal lists exactly what will be destroyed first (workloads by
+#     namespace, cluster state, operator config to be kept).
+#   - plan/apply are idempotent: re-running a converged state is a no-op.
+#   - installing THIS package configures, enables and starts nothing.
+#
+# Configuration (also the stable interface saphira-image-creator
+# consumes; see CONFIG.md — same files, same schema, no duplication):
+#   $CONFDIR/hosts                    name<TAB>user@host per line
+#   $CONFDIR/clusters/<name>.conf     cluster desired state (KEY=VALUE)
+#   $CONFDIR/clusters/<name>.d/<node>.conf  per-node state (role,
+#     addresses, ASSIGNED PodCIDRs written back by apply)
+#
+# No hardcoded addresses, interfaces, gateways or Pod networks anywhere
+# in this tool: every value arrives via the cluster/node configuration.
+
+set -eu
+
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+export PATH
+
+VERSION=0.1
+CONFDIR=${SAPHIRA_KUBERNETES_CONFDIR:-/etc/saphira-kubernetes}
+SSH_BIN=${SAPHIRA_KUBERNETES_SSH:-ssh}
+SSH_OPTS="-o BatchMode=yes -o ConnectTimeout=10"
+DRY_RUN=0
+CONFIRM=""
+
+die()
+{
+	printf 'saphira-kubernetes: %s\n' "$*" >&2
+	exit 1
+}
+
+log()
+{
+	printf 'saphira-kubernetes: %s\n' "$*"
+}
+
+usage()
+{
+	cat <<'USAGE'
+usage: saphira-kubernetes [--dry-run] [--confirm] <verb> [args]
+  inventory [--host NAME...]       facts (local + authorised remotes)
+  plan --cluster NAME              ordered convergence steps (no changes)
+  apply --cluster NAME             execute plan (needs --confirm)
+  verify --cluster NAME [--deep]   health checks, exit 0 only if all pass
+  drain --cluster NAME --node NODE  cordon + evict (needs --confirm)
+  uncordon --cluster NAME --node NODE
+  remove-node --cluster NAME --node NODE   drain + delete + reset (confirm)
+  remove-cluster --cluster NAME     reset every member (confirm)
+  features --cluster NAME           declared vs live optional features
+  enable-feature --cluster NAME --feature NAME   converge one feature (confirm)
+  disable-feature --cluster NAME --feature NAME  remove one feature, never workloads (confirm)
+  portainer --host NAME status|enable|disable   Docker-host web UI (confirm to change)
+flags:
+  --cluster NAME   --node NODE   --feature NAME   --action ACT   --host NAME (repeatable, inventory only)
+  --control-plane NODE  worker joins use this member for endpoint+token
+  --dry-run   --confirm   --deep   --version   --help
+USAGE
+}
+
+need_confirm()
+{
+	[ "$CONFIRM" = "1" ] || die "$1 requires --confirm (nothing was changed; add --confirm to proceed, --dry-run to preview)"
+}
+
+# --- configuration -----------------------------------------------------
+
+conf_hosts_file()
+{
+	printf '%s/hosts' "$CONFDIR"
+}
+
+conf_cluster_file()
+{
+	printf '%s/clusters/%s.conf' "$CONFDIR" "$1"
+}
+
+conf_node_file()
+{
+	printf '%s/clusters/%s.d/%s.conf' "$CONFDIR" "$1" "$2"
+}
+
+# read_kv FILE: emit validated KEY=VALUE lines (strips comments/blanks).
+read_kv()
+{
+	local line
+	[ -f "$1" ] || die "configuration not found: $1"
+	while IFS= read -r line || [ -n "$line" ]; do
+		case $line in
+		''|\#*) continue ;;
+		*=*) printf '%s\n' "$line" ;;
+		*) die "malformed configuration line in $1: $line" ;;
+		esac
+	done < "$1"
+}
+
+# conf_get FILE KEY: print value or empty.
+conf_get()
+{
+	local k v
+	read_kv "$1" | while IFS== read -r k v; do
+		if [ "$k" = "$2" ]; then
+			printf '%s' "$v"
+			break
+		fi
+	done
+}
+
+# resolve_host NAME: print user@host for an authorised name, else refuse.
+# Authorisation IS presence in the hosts file. No fallback, no default.
+resolve_host()
+{
+	local line name target
+	[ -f "$(conf_hosts_file)" ] || die "no hosts file (nobody is authorised): $(conf_hosts_file)"
+	while IFS= read -r line || [ -n "$line" ]; do
+		case $line in
+		''|\#*) continue ;;
+		esac
+		name=${line%%[ 	]*}
+		target=${line#*[ 	]}
+		target=$(printf '%s' "$target" | sed 's/^[ 	]*//')
+		if [ "$name" = "$1" ]; then
+			case $target in
+			*?@?*) printf '%s' "$target"; return 0 ;;
+			*) die "malformed hosts entry for $1 (want name<TAB>user@host)" ;;
+			esac
+		fi
+	done < "$(conf_hosts_file)"
+	die "host not authorised (absent from $(conf_hosts_file)): $1"
+}
+
+validate_cluster_conf()
+{
+	local f mode req k
+	f=$(conf_cluster_file "$1")
+	[ -f "$f" ] || die "unknown cluster: $1 ($f missing)"
+	mode=$(conf_get "$f" MODE)
+	case $mode in
+	dual|ipv4|ipv6) ;;
+	*) die "cluster $1: MODE must be dual|ipv4|ipv6 (got '$mode')" ;;
+	esac
+	# Required subnets per mode; never defaulted, never guessed.
+	req=""
+	case $mode in
+	dual) req="POD_SUBNET_V4 POD_SUBNET_V6 SERVICE_SUBNET_V4 SERVICE_SUBNET_V6" ;;
+	ipv4) req="POD_SUBNET_V4 SERVICE_SUBNET_V4" ;;
+	ipv6) req="POD_SUBNET_V6 SERVICE_SUBNET_V6" ;;
+	esac
+	for k in $req; do
+		[ -n "$(conf_get "$f" "$k")" ] || die "cluster $1: $k is required for MODE=$mode"
+	done
+	[ -n "$(conf_get "$f" K8S_VERSION)" ] || die "cluster $1: K8S_VERSION is required"
+}
+
+cluster_nodes()
+{
+	local d f
+	d=$CONFDIR/clusters/$1.d
+	[ -d "$d" ] || return 0
+	for f in "$d"/*.conf; do
+		[ -f "$f" ] || continue
+		basename "$f" .conf
+	done
+}
+
+# --- execution ---------------------------------------------------------
+
+# run_on HOSTNAME CMD...: local stays local, anything else goes over the
+# authorised SSH route. With --dry-run, print and succeed.
+run_on()
+{
+	local host target
+	host=$1
+	shift
+	if [ "$host" = "local" ]; then
+		if [ "$DRY_RUN" = "1" ]; then
+			printf '+ [local] %s\n' "$*"
+			return 0
+		fi
+		"$@"
+		return $?
+	fi
+	target=$(resolve_host "$host")
+	if [ "$DRY_RUN" = "1" ]; then
+		printf '+ [%s] %s\n' "$host" "$*"
+		return 0
+	fi
+	# shellcheck disable=SC2086
+	$SSH_BIN $SSH_OPTS "$target" "$@"
+}
+
+# --- inventory ---------------------------------------------------------
+
+# Facts are KEY=VALUE lines. Local facts are gathered directly; remote
+# facts run the same probe commands over SSH (single collection path).
+facts_probe()
+{
+	local b
+	printf 'os=%s\n' "$(cat /etc/os-release 2>/dev/null | grep -E '^PRETTY_NAME=' | cut -d= -f2 | tr -d '"' || echo unknown)"
+	printf 'kernel=%s\n' "$(uname -r 2>/dev/null || echo unknown)"
+	if [ -d /run/systemd/system ]; then
+		printf 'init=systemd\n'
+	elif command -v rc-service >/dev/null 2>&1; then
+		printf 'init=openrc\n'
+	else
+		printf 'init=unknown\n'
+	fi
+	for b in kubelet kubeadm kube-proxy kubectl containerd ctr; do
+		if command -v "$b" >/dev/null 2>&1; then
+			printf '%s_version=%s\n' "$b" "$("$b" --version 2>/dev/null | head -1 || "$b" version --client 2>/dev/null | head -1 || echo present)"
+		else
+			printf '%s_version=%s\n' "$b" "absent"
+		fi
+	done
+	# Optional management clients: presence (or first --version line)
+	# only. These never gate lifecycle steps unless declared in FEATURES.
+	for b in helm crictl k9s lazydocker docker; do
+		if command -v "$b" >/dev/null 2>&1; then
+			printf '%s_version=%s\n' "$b" "$("$b" --version 2>/dev/null | head -1 || echo present)"
+		else
+			printf '%s_version=%s\n' "$b" "absent"
+		fi
+	done
+	if [ -f /opt/cni/bin/bridge ]; then printf 'cni_plugins=present\n'; else printf 'cni_plugins=absent\n'; fi
+	if [ -f /etc/kubernetes/admin.conf ] || [ -f /etc/kubernetes/kubelet.conf ]; then
+		printf 'kube_member=yes\n'
+	else
+		printf 'kube_member=no\n'
+	fi
+	if [ -f /sys/fs/cgroup/cgroup.controllers ]; then printf 'cgroup=v2\n'; else printf 'cgroup=v1-or-unknown\n'; fi
+	[ -f /etc/kubernetes/kubelet.conf ] && printf 'kubelet_joined=yes\n' || printf 'kubelet_joined=no\n'
+	if command -v iptables >/dev/null 2>&1; then
+		printf 'iptables_backend=%s\n' "$(readlink /usr/sbin/iptables 2>/dev/null || echo unknown)"
+	else
+		printf 'iptables_backend=absent\n'
+	fi
+	for m in overlay br_netfilter; do
+		if [ -d "/sys/module/$m" ]; then printf 'module_%s=yes\n' "$m"; else printf 'module_%s=no\n' "$m"; fi
+	done
+	if swapon --show 2>/dev/null | grep -q .; then printf 'swap=on\n'; else printf 'swap=off\n'; fi
+}
+
+cmd_inventory()
+{
+	local h
+	if [ "$#" -eq 0 ]; then
+		printf '# host: local\n'
+		facts_probe
+		return 0
+	fi
+	for h in "$@"; do
+		printf '# host: %s\n' "$h"
+		if [ "$h" = "local" ]; then
+			facts_probe
+		else
+			target=$(resolve_host "$h")
+			# shellcheck disable=SC2086
+			$SSH_BIN $SSH_OPTS "$target" \
+				'command -v kubelet >/dev/null && kubelet --version 2>/dev/null; kubeadm version -o short 2>/dev/null; kubectl version --client 2>/dev/null; containerd --version 2>/dev/null; uname -r; test -f /etc/kubernetes/kubelet.conf && echo kubelet_joined=yes || echo kubelet_joined=no; test -f /opt/cni/bin/bridge && echo cni_plugins=present || echo cni_plugins=absent; for b in helm crictl k9s lazydocker docker; do command -v $b >/dev/null 2>&1 && echo ${b}_version=present || echo ${b}_version=absent; done' \
+				|| die "inventory of $h failed"
+		fi
+	done
+}
+
+# --- plan --------------------------------------------------------------
+
+# plan compares desired cluster state against live inventory and prints
+# ordered steps. It changes nothing. Steps are stable strings so that
+# repeated runs diff cleanly (idempotence is observable).
+cmd_plan()
+{
+	local cluster cf ver node nf role host
+	cluster=$1
+	validate_cluster_conf "$cluster"
+	cf=$(conf_cluster_file "$cluster")
+	ver=$(conf_get "$cf" K8S_VERSION)
+	for node in $(cluster_nodes "$cluster"); do
+		nf=$(conf_node_file "$cluster" "$node")
+		role=$(conf_get "$nf" NODE_ROLE)
+		host=$(conf_get "$nf" NODE_HOST)
+		[ -n "$role" ] || die "node $node: NODE_ROLE required (control-plane|worker)"
+		[ -n "$host" ] || die "node $node: NODE_HOST required (local or hosts entry)"
+		case $role in
+		control-plane|worker) ;;
+		*) die "node $node: NODE_ROLE must be control-plane|worker" ;;
+		esac
+		printf 'step: ensure-packages %s [containerd cni-plugins kubectl kubernetes=%s]\n' "$host" "$ver"
+		printf 'step: ensure-containerd %s [SystemdCgroup, started]\n' "$host"
+		printf 'step: ensure-cni %s [assigned PodCIDRs]\n' "$host"
+		if [ "$role" = "control-plane" ]; then
+			printf 'step: kubeadm-init %s [cluster %s]\n' "$host" "$cluster"
+		else
+			printf 'step: kubeadm-join %s [cluster %s]\n' "$host" "$cluster"
+		fi
+	done
+		printf 'step: verify-cluster %s\n' "$cluster"
+	# Optional features converge after the cluster itself: tooling,
+	# never workloads. Steps are stable strings like the rest.
+	for feature in $(cluster_features "$cluster"); do
+		case $feature in
+		headlamp)
+			printf 'step: ensure-feature headlamp [cluster %s control-plane]\n' "$cluster" ;;
+		*)
+			for host in $(feature_hosts "$cluster" "$feature"); do
+				printf 'step: ensure-feature %s [%s %s]\n' "$host" "$feature" "$(feature_pkg "$feature")"
+			done ;;
+		esac
+	done
+}
+
+# --- apply -------------------------------------------------------------
+
+APK_PACKAGES="containerd cni-plugins kubectl kubernetes"
+
+apply_node_packages()
+{
+	local host
+	host=$1
+	if [ "$host" = "local" ]; then
+		if [ "$DRY_RUN" = "1" ]; then
+			printf '+ [local] apk add %s\n' "$APK_PACKAGES"
+			return 0
+		fi
+		if command -v sudo >/dev/null 2>&1 && [ "$(id -u)" -ne 0 ]; then
+			sudo apk add $APK_PACKAGES
+		else
+			apk add $APK_PACKAGES
+		fi
+		return 0
+	fi
+	resolve_host "$host" >/dev/null
+	run_on "$host" sh -c '"sudo apk add containerd cni-plugins kubectl kubernetes"'
+}
+
+# cni_conflist V4SUBNET V4GW V6SUBNET V6GW: bridge config matching the
+# node's ASSIGNED PodCIDRs (never the cluster supernet — every node gets
+# exactly its own allocation; a bridge alone never spans nodes).
+cni_conflist()
+{
+	cat <<EOF
+{
+  "cniVersion": "0.4.0",
+  "name": "k8s-podnet",
+  "plugins": [
+    {
+      "type": "bridge",
+      "bridge": "k8s-br0",
+      "isGateway": true,
+      "ipMasq": false,
+      "hairpinMode": true,
+      "ipam": {
+        "type": "host-local",
+        "ranges": [
+          [{"subnet": "$1", "gateway": "$2"}],
+          [{"subnet": "$3", "gateway": "$4"}]
+        ],
+        "routes": [
+          {"dst": "0.0.0.0/0"},
+          {"dst": "::/0"}
+        ]
+      }
+    }
+  ]
+}
+EOF
+}
+
+apply_node_cni()
+{
+	local host v4sub v4gw v6sub v6gw content
+	host=$1
+	v4sub=$2
+	v4gw=$3
+	v6sub=$4
+	v6gw=$5
+	content=$(cni_conflist "$v4sub" "$v4gw" "$v6sub" "$v6gw")
+	if [ "$DRY_RUN" = "1" ]; then
+		printf '+ [%s] write /etc/cni/net.d/10-k8s-podnet.conflist (%s + %s)\n' "$host" "$v4sub" "$v6sub"
+		return 0
+	fi
+	printf '%s' "$content" | run_on "$host" sh -c '"cat > /tmp/k8s-podnet.conflist && sudo mkdir -p /etc/cni/net.d && sudo cp /tmp/k8s-podnet.conflist /etc/cni/net.d/10-k8s-podnet.conflist"'
+}
+
+# kubeadm_init_config CLUSTER NODEFILE: InitConfiguration set. All
+# networks arrive from configuration; nothing here is hardcoded.
+kubeadm_init_config()
+{
+	local cf nf adv pod svc mode proxy
+	cf=$(conf_cluster_file "$1")
+	nf=$2
+	adv=$(conf_get "$nf" NODE_ADVERTISE)
+	pod=$(conf_get "$cf" POD_SUBNET_V6),$(conf_get "$cf" POD_SUBNET_V4)
+	svc=$(conf_get "$cf" SERVICE_SUBNET_V6),$(conf_get "$cf" SERVICE_SUBNET_V4)
+	mode=$(conf_get "$cf" MODE)
+	case $mode in
+	ipv4)
+		pod=$(conf_get "$cf" POD_SUBNET_V4)
+		svc=$(conf_get "$cf" SERVICE_SUBNET_V4)
+		;;
+	ipv6)
+		pod=$(conf_get "$cf" POD_SUBNET_V6)
+		svc=$(conf_get "$cf" SERVICE_SUBNET_V6)
+		;;
+	esac
+	proxy=$(conf_get "$cf" KUBE_PROXY_MODE)
+	[ -n "$proxy" ] || proxy=nftables
+	cat <<EOF
+apiVersion: kubeadm.k8s.io/v1beta4
+kind: InitConfiguration
+localAPIEndpoint:
+  advertiseAddress: $adv
+  bindPort: 6443
+nodeRegistration:
+  criSocket: unix:///run/containerd/containerd.sock
+  imagePullPolicy: IfNotPresent
+---
+apiVersion: kubeadm.k8s.io/v1beta4
+kind: ClusterConfiguration
+networking:
+  podSubnet: "$pod"
+  serviceSubnet: "$svc"
+  dnsDomain: cluster.local
+---
+apiVersion: kubeproxy.config.k8s.io/v1alpha1
+kind: KubeProxyConfiguration
+mode: $proxy
+clusterCIDR: "$pod"
+---
+apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+cgroupDriver: systemd
+EOF
+}
+
+apply_cluster()
+{
+	local cluster node nf role host v4sub v4gw v6sub v6gw cfg first
+	cluster=$1
+	validate_cluster_conf "$cluster"
+	first=1
+	for node in $(cluster_nodes "$cluster"); do
+		nf=$(conf_node_file "$cluster" "$node")
+		role=$(conf_get "$nf" NODE_ROLE)
+		host=$(conf_get "$nf" NODE_HOST)
+		log "apply $node ($role on $host)"
+		apply_node_packages "$host"
+		v4sub=$(conf_get "$nf" NODE_POD_V4)
+		v4gw=$(conf_get "$nf" NODE_POD_V4_GW)
+		v6sub=$(conf_get "$nf" NODE_POD_V6)
+		v6gw=$(conf_get "$nf" NODE_POD_V6_GW)
+		if [ -n "$v4sub$v6sub" ]; then
+			[ -n "$v4sub" ] || v4sub="none"
+			[ -n "$v4gw" ] || v4gw="none"
+			[ -n "$v6sub" ] || v6sub="none"
+			[ -n "$v6gw" ] || v6gw="none"
+			apply_node_cni "$host" "$v4sub" "$v4gw" "$v6sub" "$v6gw"
+		else
+			log "no per-node PodCIDRs recorded for $node yet; CNI step skipped (record them after first join, then re-apply)"
+		fi
+		if [ "$role" = "control-plane" ] && [ "$first" = "1" ]; then
+			first=0
+			if [ "$DRY_RUN" = "1" ]; then
+				printf '+ [%s] kubeadm init --config <generated> (skipped live if admin.conf exists)\n' "$host"
+			elif run_on "$host" sh -c '"test -f /etc/kubernetes/admin.conf || sudo test -f /etc/kubernetes/admin.conf"' >/dev/null 2>&1; then
+				log "control plane $node already initialised; adopting (skipped kubeadm init)"
+			else
+				cfg=$(kubeadm_init_config "$cluster" "$nf")
+				printf '%s' "$cfg" | run_on "$host" sh -c '"cat > /tmp/k8s-kubeadm-init.yaml && sudo kubeadm init --config /tmp/k8s-kubeadm-init.yaml --ignore-preflight-errors=SystemVerification"' \
+					|| die "kubeadm init failed on $node (see output above)"
+			fi
+		elif [ "$role" = "worker" ]; then
+			join_worker "$cluster" "$node" "$nf" "$host"
+		fi
+	done
+	# Declared management features converge last, after every member
+	# is a cluster member. Workloads are never part of this step.
+	apply_features "$cluster"
+}
+
+# worker_joined HOST: true when kubeadm already joined there (kubelet
+# has its own credentials). Used to adopt live nodes instead of
+# re-joining blindly.
+worker_joined()
+{
+	run_on "$1" sh -c '"test -f /etc/kubernetes/kubelet.conf || sudo test -f /etc/kubernetes/kubelet.conf"' >/dev/null 2>&1
+}
+
+# join_worker CLUSTER NODE NODEFILE HOST: join a worker using a token
+# minted fresh on the control plane at apply time. The token is never
+# written to configuration; it lives only in this process.
+join_worker()
+{
+	local cluster node nf host cpnf cphost cpadvertise token cahash
+	cluster=$1
+	node=$2
+	nf=$3
+	host=$4
+	[ -n "$CP_NODE" ] || die "worker $node needs --control-plane NODE (which member carries etcd/admin?)"
+	cpnf=$(conf_node_file "$cluster" "$CP_NODE")
+	[ -f "$cpnf" ] || die "unknown control-plane node: $CP_NODE"
+	[ "$(conf_get "$cpnf" NODE_ROLE)" = "control-plane" ] || die "$CP_NODE is not a control-plane member"
+	cphost=$(conf_get "$cpnf" NODE_HOST)
+	cpadvertise=$(conf_get "$cpnf" NODE_ADVERTISE)
+	[ -n "$cpadvertise" ] || die "control-plane $CP_NODE: NODE_ADVERTISE required (join endpoint)"
+	if [ "$DRY_RUN" = "1" ]; then
+		printf '+ [%s] kubeadm token create (fresh, never stored)\n' "$cphost"
+		printf '+ [%s] kubeadm join [%s]:6443 --token <fresh> (skipped live if kubelet.conf exists)\n' "$host" "$cpadvertise"
+		return 0
+	fi
+	if worker_joined "$host"; then
+		log "worker $node already joined; adopting (skipped kubeadm join)"
+		return 0
+	fi
+	token=$(run_on "$cphost" sh -c '"sudo kubeadm token create --ttl 2h"') || die "could not mint join token on $CP_NODE"
+	token=$(printf '%s' "$token" | tr -d '[:space:]')
+	[ -n "$token" ] || die "empty join token from $CP_NODE"
+	cahash=$(run_on "$cphost" sh -c '"sudo openssl x509 -pubkey -in /etc/kubernetes/pki/ca.crt -noout | sudo openssl pkey -pubin -outform der 2>/dev/null | sha256sum"' | awk '{print $1}')
+	[ -n "$cahash" ] || die "could not read CA hash on $CP_NODE"
+	run_on "$host" sh -c '"sudo kubeadm join ['"$cpadvertise"']:6443 --token '"$token"' --discovery-token-ca-cert-hash sha256:'"$cahash"' --cri-socket unix:///run/containerd/containerd.sock --ignore-preflight-errors=SystemVerification"' \
+		|| die "kubeadm join failed on $node (see output above; stale /etc/kubernetes state is the usual cause: kubeadm reset on the node, then re-apply)"
+}
+
+# --- verify ------------------------------------------------------------
+
+# verify runs read-only health checks against the control plane named in
+# the cluster config and exits 0 only if every check passes, so it is
+# directly usable as repeatable proof (and in scripts). Verification is
+# always live: --dry-run is meaningless for a health check and is
+# ignored here (documented, not silent).
+#
+# Remote kubectl runs under $KUBECTL_SUDO (default sudo): reading
+# /etc/kubernetes/admin.conf needs privilege on most hosts. Set
+# KUBECTL_SUDO empty when the SSH user is already root.
+KUBECTL_SUDO=${SAPHIRA_KUBERNETES_SUDO:-sudo}
+
+cmd_verify()
+{
+	local cluster deep cf failures cp_host node nf
+	cluster=$1
+	deep=${2:-}
+	validate_cluster_conf "$cluster"
+	DRY_RUN=0
+	cf=$(conf_cluster_file "$cluster")
+	failures=0
+	cp_host=""
+	for node in $(cluster_nodes "$cluster"); do
+		nf=$(conf_node_file "$cluster" "$node")
+		[ "$(conf_get "$nf" NODE_ROLE)" = "control-plane" ] && [ -z "$cp_host" ] && cp_host=$(conf_get "$nf" NODE_HOST)
+	done
+	[ -n "$cp_host" ] || die "cluster $cluster: no control-plane member with NODE_HOST"
+	KC="$KUBECTL_SUDO kubectl --kubeconfig /etc/kubernetes/admin.conf"
+	# rsh runs ONE shell command locally or over the authorised route.
+	# The command must not contain single quotes (it is single-quoted
+	# for the remote shell); all verify commands below obey this.
+	rsh()
+{
+		if [ "$cp_host" = "local" ]; then
+			sh -c "$1"
+		else
+			# shellcheck disable=SC2086
+			$SSH_BIN $SSH_OPTS "$(resolve_host "$cp_host")" "sh -c '$1'"
+		fi
+	}
+	# Filtering happens LOCALLY (full quoting power here); remote
+	# commands stay free of quotes and globs so SSH argv joining cannot
+	# mangle them. A check passes only on positive evidence: an
+	# unreachable control plane fails every check, never passes one.
+	if rsh "$KC cluster-info --request-timeout=10s" >/dev/null 2>&1; then
+		printf 'ok       api-reachable\n'
+	else
+		printf 'FAIL     api-reachable\n' >&2
+		failures=$((failures + 1))
+	fi
+	if nodes_out=$(rsh "$KC get nodes --no-headers" 2>/dev/null) && [ -n "$nodes_out" ] && \
+		! printf '%s' "$nodes_out" | awk '{print $2}' | grep -Eqv '^Ready$'; then
+		printf 'ok       nodes-ready\n'
+	else
+		printf 'FAIL     nodes-ready\n' >&2
+		failures=$((failures + 1))
+	fi
+	if pods_out=$(rsh "$KC get pods -n kube-system --no-headers" 2>/dev/null) && [ -n "$pods_out" ] && \
+		! printf '%s' "$pods_out" | awk '{print $3}' | grep -Eqv '^(Running|Completed)$'; then
+		printf 'ok       system-pods-running\n'
+	else
+		printf 'FAIL     system-pods-running\n' >&2
+		failures=$((failures + 1))
+	fi
+	if [ "$deep" = "--deep" ]; then
+		if rsh "$KC run verify-dns-probe --image=busybox:1.36 --restart=Never --command -- nslookup kubernetes.default.svc.cluster.local" >/dev/null 2>&1; then
+			printf 'ok       dns-service\n'
+		else
+			printf 'FAIL     dns-service\n' >&2
+			failures=$((failures + 1))
+		fi
+		rsh "$KC delete pod verify-dns-probe --ignore-not-found" >/dev/null 2>&1 || true
+	fi
+	if [ "$failures" -ne 0 ]; then
+		printf '%d FAILURES\n' "$failures" >&2
+		return 1
+	fi
+	for feature in $(cluster_features "$cluster"); do
+		if feature_live "$cluster" "$feature" >/dev/null 2>&1; then
+			printf 'ok       feature-%s\n' "$feature"
+		else
+			printf 'FAIL     feature-%s\n' "$feature" >&2
+			failures=$((failures + 1))
+		fi
+	done
+	if [ "$failures" -ne 0 ]; then
+		printf '%d FAILURES\n' "$failures" >&2
+		return 1
+	fi
+	printf 'cluster %s verifies clean\n' "$cluster"
+}
+
+# --- optional features -------------------------------------------------
+#
+# Cluster lifecycle (init/join/remove) stays separate from management
+# tooling: FEATURES in the cluster config declares optional tooling
+# only, never workloads. inventory reports the clients, plan prints
+# ensure-feature steps, apply converges them, verify checks them, and
+# enable/disable-feature converge or remove exactly one. UI removal
+# deletes only the UI's own objects: headlamp's namespace,
+# portainer's container+service. Workloads, images, volumes and
+# cluster configuration are never touched by any feature verb.
+#
+# Feature set (added, never renamed — CONFIG.md is the contract):
+#   helm      package manager client (control-plane members)
+#   crictl    CRI debugging client (every member)
+#   k9s       terminal UI client (control-plane members)
+#   headlamp  web UI Deployment+Service+RBAC in the headlamp namespace
+#             (applied from this package's manifests on the admin host)
+# Portainer lives on Docker hosts, not clusters: the portainer verb
+# addresses an authorised --host. lazydocker needs no lifecycle beyond
+# install (it is a client binary): package it, probe it in inventory.
+
+KNOWN_FEATURES="helm crictl k9s headlamp"
+HEADLAMP_DIR=${SAPHIRA_HEADLAMP_DIR:-/usr/share/headlamp}
+HEADLAMP_MANIFESTS="namespace serviceaccount clusterrolebinding deployment service"
+
+# cluster_features CLUSTER: the declared FEATURES words, validated.
+# Unknown names die here so no later step can act on them.
+cluster_features()
+{
+	local f
+	for f in $(conf_get "$(conf_cluster_file "$1")" FEATURES); do
+		case " $KNOWN_FEATURES " in
+		*" $f "*) printf '%s\n' "$f" ;;
+		*) die "cluster $1: unknown feature: $f (known:$KNOWN_FEATURES)" ;;
+		esac
+	done
+}
+
+# feature_pkg FEATURE: the apk package converging it (empty means
+# headlamp, which deploys manifests instead of installing remotely).
+feature_pkg()
+{
+	local f
+	f=$1
+	case $f in
+	helm) printf 'helm' ;;
+	crictl) printf 'crictl' ;;
+	k9s) printf 'k9s' ;;
+	headlamp) printf '' ;;
+	*) die "unknown feature: $f (known:$KNOWN_FEATURES)" ;;
+	esac
+}
+
+# feature_hosts CLUSTER FEATURE: members converging a binary feature.
+# crictl rides every member; helm/k9s need a kubeconfig, so control
+# planes only. headlamp is cluster-wide (no per-host install).
+feature_hosts()
+{
+	local cluster feature node nf role host
+	cluster=$1
+	feature=$2
+	for node in $(cluster_nodes "$cluster"); do
+		nf=$(conf_node_file "$cluster" "$node")
+		role=$(conf_get "$nf" NODE_ROLE)
+		host=$(conf_get "$nf" NODE_HOST)
+		case $feature in
+		crictl) printf '%s\n' "$host" ;;
+		helm|k9s) [ "$role" = "control-plane" ] && printf '%s\n' "$host" ;;
+		esac
+	done
+}
+
+# ensure_feature_apk HOST PKG: idempotent install (apk add converges;
+# re-running a converged host is a no-op).
+ensure_feature_apk()
+{
+	local host pkg
+	host=$1
+	pkg=$2
+	if [ "$host" = "local" ]; then
+		if [ "$DRY_RUN" = "1" ]; then
+			printf '+ [local] apk add %s\n' "$pkg"
+			return 0
+		fi
+		if command -v sudo >/dev/null 2>&1 && [ "$(id -u)" -ne 0 ]; then
+			sudo apk add "$pkg"
+		else
+			apk add "$pkg"
+		fi
+		return 0
+	fi
+	resolve_host "$host" >/dev/null
+	run_on "$host" sh -c '"sudo apk add '"$pkg"'"'
+}
+
+# remove_feature_apk HOST PKG: uninstall a client binary (binaries are
+# not workloads: nothing scheduled can depend on them).
+remove_feature_apk()
+{
+	local host pkg
+	host=$1
+	pkg=$2
+	if [ "$host" = "local" ]; then
+		if [ "$DRY_RUN" = "1" ]; then
+			printf '+ [local] apk del %s\n' "$pkg"
+			return 0
+		fi
+		if command -v sudo >/dev/null 2>&1 && [ "$(id -u)" -ne 0 ]; then
+			sudo apk del "$pkg"
+		else
+			apk del "$pkg"
+		fi
+		return 0
+	fi
+	resolve_host "$host" >/dev/null
+	run_on "$host" sh -c '"sudo apk del '"$pkg"'"'
+}
+
+# apply_headlamp CP_HOST: kubectl apply the packaged manifests in fixed
+# order. kubectl apply is idempotent, so re-apply is a no-op. The
+# manifests must exist on the ADMIN host (the headlamp package
+# installed here): a remote control plane cannot invent them, and this
+# tool never fetches manifests from the network at apply time.
+apply_headlamp()
+{
+	local cp_host f content
+	cp_host=$1
+	[ -d "$HEADLAMP_DIR" ] || die "headlamp package not installed on the admin host ($HEADLAMP_DIR missing): install it here, then re-apply"
+	for f in $HEADLAMP_MANIFESTS; do
+		[ -f "$HEADLAMP_DIR/$f.yaml" ] || die "headlamp manifest missing on the admin host: $HEADLAMP_DIR/$f.yaml"
+	done
+	if [ "$DRY_RUN" = "1" ]; then
+		printf '+ [%s] kubectl apply headlamp manifests (namespace serviceaccount clusterrolebinding deployment service)\n' "$cp_host"
+		return 0
+	fi
+	for f in $HEADLAMP_MANIFESTS; do
+		content=$(cat "$HEADLAMP_DIR/$f.yaml")
+		printf '%s' "$content" | run_on "$cp_host" sh -c '"cat > /tmp/headlamp-'"$f"'.yaml && sudo kubectl --kubeconfig /etc/kubernetes/admin.conf apply -f /tmp/headlamp-'"$f"'.yaml"' \
+			|| die "headlamp apply failed ($f)"
+	done
+	log "headlamp applied (ClusterIP service headlamp/headlamp; mint a token: kubectl -n headlamp create token headlamp-admin)"
+}
+
+# apply_features CLUSTER: converge every declared feature.
+apply_features()
+{
+	local cluster feature pkg host cp_host
+	cluster=$1
+	for feature in $(cluster_features "$cluster"); do
+		pkg=$(feature_pkg "$feature")
+		if [ -n "$pkg" ]; then
+			for host in $(feature_hosts "$cluster" "$feature"); do
+				log "apply feature $feature on $host"
+				ensure_feature_apk "$host" "$pkg"
+			done
+		else
+			cp_host=$(control_plane_host "$cluster")
+			log "apply feature headlamp via $cp_host"
+			apply_headlamp "$cp_host"
+		fi
+	done
+}
+
+# feature_live CLUSTER FEATURE: print live and return 0 when the
+# feature is present, return 1 otherwise (positive evidence only).
+feature_live()
+{
+	local cluster feature cp_host out host
+	cluster=$1
+	feature=$2
+	case $feature in
+	headlamp)
+		cp_host=$(control_plane_host "$cluster")
+		if out=$(do_kubectl "$cp_host" get deployment headlamp -n headlamp --no-headers 2>/dev/null) && [ -n "$out" ]; then
+			printf 'live\n'
+			return 0
+		fi
+		return 1
+		;;
+	*)
+		for host in $(feature_hosts "$cluster" "$feature"); do
+			run_on "$host" command -v "$feature" >/dev/null 2>&1 || return 1
+		done
+		printf 'live\n'
+		return 0
+		;;
+	esac
+}
+
+# cmd_features CLUSTER: declared-vs-live table (read-only).
+cmd_features()
+{
+	local cluster feature
+	cluster=$1
+	[ -n "$cluster" ] || die "features needs --cluster NAME"
+	validate_cluster_conf "$cluster"
+	cluster_features "$cluster" >/dev/null
+	for feature in $KNOWN_FEATURES; do
+		if cluster_features "$cluster" 2>/dev/null | grep -qx "$feature"; then
+			if feature_live "$cluster" "$feature" >/dev/null 2>&1; then
+				printf 'feature    %-10s declared live\n' "$feature"
+			else
+				printf 'feature    %-10s declared missing\n' "$feature"
+			fi
+		else
+			printf 'feature    %-10s undeclared\n' "$feature"
+		fi
+	done
+}
+
+# cmd_enable_feature CLUSTER FEATURE: converge exactly one declared
+# feature. Requires --confirm; honours --dry-run.
+cmd_enable_feature()
+{
+	local cluster feature pkg host cp_host
+	cluster=$1
+	feature=$2
+	[ -n "$cluster" ] && [ -n "$feature" ] || die "enable-feature needs --cluster NAME --feature NAME"
+	validate_cluster_conf "$cluster"
+	case " $KNOWN_FEATURES " in
+	*" $feature "*) ;;
+	*) die "unknown feature: $feature (known:$KNOWN_FEATURES)" ;;
+	esac
+	cluster_features "$cluster" | grep -qx "$feature" ||
+		die "feature $feature is not declared in cluster $cluster (add it to FEATURES first)"
+	need_confirm "enable-feature $feature"
+	pkg=$(feature_pkg "$feature")
+	if [ -n "$pkg" ]; then
+		for host in $(feature_hosts "$cluster" "$feature"); do
+			ensure_feature_apk "$host" "$pkg"
+		done
+	else
+		cp_host=$(control_plane_host "$cluster")
+		apply_headlamp "$cp_host"
+	fi
+}
+
+# cmd_disable_feature CLUSTER FEATURE: remove exactly one declared
+# feature and print what is kept. headlamp removal deletes ONLY the
+# headlamp namespace; client removal uninstalls binaries. Workloads,
+# images, volumes and cluster configuration are never touched.
+# Requires --confirm; honours --dry-run.
+cmd_disable_feature()
+{
+	local cluster feature pkg host cp_host
+	cluster=$1
+	feature=$2
+	[ -n "$cluster" ] && [ -n "$feature" ] || die "disable-feature needs --cluster NAME --feature NAME"
+	validate_cluster_conf "$cluster"
+	case " $KNOWN_FEATURES " in
+	*" $feature "*) ;;
+	*) die "unknown feature: $feature (known:$KNOWN_FEATURES)" ;;
+	esac
+	cluster_features "$cluster" | grep -qx "$feature" ||
+		die "feature $feature is not declared in cluster $cluster (nothing to disable)"
+	need_confirm "disable-feature $feature"
+	pkg=$(feature_pkg "$feature")
+	if [ -n "$pkg" ]; then
+		for host in $(feature_hosts "$cluster" "$feature"); do
+			remove_feature_apk "$host" "$pkg"
+		done
+		log "feature $feature removed (kept: everything else on $cluster)"
+	else
+		cp_host=$(control_plane_host "$cluster")
+		if [ "$DRY_RUN" = "1" ]; then
+			printf '+ [%s] kubectl delete namespace headlamp (UI objects only; workloads in other namespaces untouched)\n' "$cp_host"
+		else
+			do_kubectl "$cp_host" delete namespace headlamp --ignore-not-found \
+				|| die "headlamp removal failed"
+		fi
+		log "feature headlamp removed (kept: every workload, image, volume and cluster object outside the headlamp namespace)"
+	fi
+}
+
+# cmd_portainer HOST ACTION: host-scoped Docker web UI. status is
+# read-only; enable installs the package and starts the loopback-only
+# service on the host's own init; disable stops and disables it while
+# keeping the data volume, the image and every container. Purging is
+# printed, never executed.
+cmd_portainer()
+{
+	local host action
+	host=$1
+	action=$2
+	[ -n "$host" ] && [ -n "$action" ] || die "portainer needs --host NAME --action status|enable|disable"
+	resolve_host "$host" >/dev/null
+	case $action in
+	status)
+		run_on "$host" sh -c '"sudo docker inspect -f {{.State.Status}} {{.Config.Image}} portainer-ce 2>/dev/null || echo absent"'
+		;;
+	enable)
+		need_confirm "portainer enable on $host"
+		run_on "$host" sh -c '"sudo apk add portainer-ce"'
+		run_on "$host" sh -c '"if command -v systemctl >/dev/null 2>&1; then sudo systemctl enable --now portainer-ce; else sudo rc-update add portainer-ce default && sudo rc-service portainer-ce start; fi"'
+		log "portainer enabled on $host (https://127.0.0.1:9443, tunnel for remote; first run sets the admin password)"
+		;;
+	disable)
+		need_confirm "portainer disable on $host"
+		run_on "$host" sh -c '"if command -v systemctl >/dev/null 2>&1; then sudo systemctl disable --now portainer-ce; else sudo rc-service portainer-ce stop && sudo rc-update del portainer-ce default; fi"'
+		log "portainer disabled on $host (kept: portainer_data volume, image, all containers. purge: sudo docker volume rm portainer_data; sudo docker rmi portainer/portainer-ce:2.45.2)"
+		;;
+	*) die "portainer action must be status|enable|disable (got $action)" ;;
+	esac
+}
+
+# --- drain / removal ---------------------------------------------------
+
+# node_k8s_name CLUSTER NODE: the Kubernetes Node object name. Defaults
+# to the config name; set NODE_K8S_NAME when they differ (usual: config
+# names are stable handles, Node objects are hostnames).
+node_k8s_name()
+{
+	local n
+	n=$(conf_get "$(conf_node_file "$1" "$2")" NODE_K8S_NAME)
+	if [ -n "$n" ]; then printf '%s' "$n"; else printf '%s' "$2"; fi
+}
+
+# _desc_drain_common CLUSTER NODE WHAT: shared drain preamble. Lists
+# bare pods (no controller: eviction DESTROYS them, it does not
+# reschedule them) and requires --confirm. WHAT names the caller.
+_desc_drain_common()
+{
+	local cluster node what cp_host knode bare
+	cluster=$1
+	node=$2
+	what=$3
+	[ -n "$cluster" ] && [ -n "$node" ] || die "$what needs --cluster NAME --node NODE"
+	cp_host=$(control_plane_host "$cluster")
+	knode=$(node_k8s_name "$cluster" "$node")
+	# Bare-pod detection without jsonpath (whose quotes do not survive
+	# SSH argv joining): list the node's pods, then read owners via
+	# custom-columns (quoteless) and treat empty/<none> as bare.
+	bare=$(do_kubectl "$cp_host" get pods -A --field-selector "spec.nodeName=$knode" -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name,OWNERS:.metadata.ownerReferences --no-headers 2>/dev/null | awk '$3 == "" || $3 == "<none>" {print $1 "/" $2}' || true)
+	if [ -n "$bare" ]; then
+		printf 'WARNING: these pods have no controller and WILL BE DESTROYED by the %s (not rescheduled):\n%s\n' "$what" "$bare" >&2
+	fi
+	need_confirm "$what $node"
+	do_kubectl "$cp_host" drain "$knode" --ignore-daemonsets --delete-emptydir-data
+}
+
+# do_kubectl HOST ARGS...: kubectl with privilege + kubeconfig, honouring
+# --dry-run (print) like every other execution path in this tool.
+do_kubectl()
+{
+	local host
+	host=$1
+	shift
+	if [ "$DRY_RUN" = "1" ]; then
+		printf '+ [%s] kubectl %s\n' "$host" "$*"
+		return 0
+	fi
+	if [ "$host" = "local" ]; then
+		# shellcheck disable=SC2086
+		$KUBECTL_SUDO kubectl --kubeconfig /etc/kubernetes/admin.conf "$@"
+	else
+		# shellcheck disable=SC2086
+		$SSH_BIN $SSH_OPTS "$(resolve_host "$host")" $KUBECTL_SUDO kubectl --kubeconfig /etc/kubernetes/admin.conf "$@"
+	fi
+}
+
+cmd_drain()
+{
+	_desc_drain_common "$1" "$2" drain
+}
+
+control_plane_host()
+{
+	local node nf
+	validate_cluster_conf "$1"
+	for node in $(cluster_nodes "$1"); do
+		nf=$(conf_node_file "$1" "$node")
+		if [ "$(conf_get "$nf" NODE_ROLE)" = "control-plane" ]; then
+			conf_get "$nf" NODE_HOST
+			return 0
+		fi
+	done
+	die "cluster $1: no control-plane member"
+}
+
+cmd_uncordon()
+{
+	local cluster node cp_host knode
+	cluster=$1
+	node=$2
+	[ -n "$cluster" ] && [ -n "$node" ] || die "uncordon needs --cluster NAME --node NODE"
+	cp_host=$(control_plane_host "$cluster")
+	knode=$(node_k8s_name "$cluster" "$node")
+	do_kubectl "$cp_host" uncordon "$knode"
+}
+
+# remove-node: drain, delete the Node object, reset the machine. Lists
+# exactly what dies first. Never proceeds without --confirm.
+cmd_remove_node()
+{
+	local cluster node nf host role cp_host knode
+	cluster=$1
+	node=$2
+	[ -n "$cluster" ] && [ -n "$node" ] || die "remove-node needs --cluster NAME --node NODE"
+	nf=$(conf_node_file "$cluster" "$node")
+	[ -f "$nf" ] || die "unknown node $node in cluster $cluster"
+	host=$(conf_get "$nf" NODE_HOST)
+	role=$(conf_get "$nf" NODE_ROLE)
+	cp_host=$(control_plane_host "$cluster")
+	knode=$(node_k8s_name "$cluster" "$node")
+	printf 'remove-node %s (%s on %s) will:\n' "$node" "$role" "$host"
+	printf '  1. drain %s (evicts workloads; bare pods are destroyed)\n' "$node"
+	printf '  2. delete the Node object from the cluster\n'
+	printf '  3. kubeadm reset on %s (wipes /etc/kubernetes, kubelet state, CNI state)\n' "$host"
+	printf '  kept: %s (adopt by re-apply to rejoin)\n' "$nf"
+	need_confirm "remove-node $node"
+	do_kubectl "$cp_host" drain "$knode" --ignore-daemonsets --delete-emptydir-data
+	do_kubectl "$cp_host" delete node "$knode"
+	run_on "$host" sh -c '"sudo kubeadm reset --cri-socket unix:///run/containerd/containerd.sock --force"'
+	log "node $node removed (config kept at $nf)"
+}
+
+# remove-cluster: the most destructive verb in this tool. Enumerates
+# every member and refuses without --confirm. Operator configuration
+# (clusters/*.conf) is NEVER deleted by removal.
+cmd_remove_cluster()
+{
+	local cluster node nf host
+	cluster=$1
+	[ -n "$cluster" ] || die "remove-cluster needs --cluster NAME"
+	validate_cluster_conf "$cluster"
+	printf 'remove-cluster %s will reset EVERY member:\n' "$cluster"
+	for node in $(cluster_nodes "$cluster"); do
+		nf=$(conf_node_file "$cluster" "$node")
+		printf '  - %s (%s on %s)\n' "$node" "$(conf_get "$nf" NODE_ROLE)" "$(conf_get "$nf" NODE_HOST)"
+	done
+	printf 'destroyed: all workloads, all cluster state, all Pod networks.\n'
+	printf 'kept: %s/clusters/%s.conf and %s.d/ (re-apply rebuilds).\n' "$CONFDIR" "$cluster" "$cluster"
+	need_confirm "remove-cluster $cluster"
+	for node in $(cluster_nodes "$cluster"); do
+		nf=$(conf_node_file "$cluster" "$node")
+		host=$(conf_get "$nf" NODE_HOST)
+		run_on "$host" sh -c '"sudo kubeadm reset --cri-socket unix:///run/containerd/containerd.sock --force"'
+	done
+	log "cluster $cluster removed (configuration kept)"
+}
+
+# --- main --------------------------------------------------------------
+
+VERB=""
+CLUSTER=""
+NODE=""
+FEATURE=""
+ACTION=""
+DEEP=""
+HOSTS=""
+CP_NODE=""
+
+while [ "$#" -gt 0 ]; do
+	case $1 in
+	--dry-run) DRY_RUN=1 ;;
+	--confirm) CONFIRM=1 ;;
+	--cluster) CLUSTER=$2; shift ;;
+	--node) NODE=$2; shift ;;
+	--feature) FEATURE=$2; shift ;;
+	--action) ACTION=$2; shift ;;
+	--control-plane) CP_NODE=$2; shift ;;
+	--host) HOSTS="$HOSTS $1 $2"; shift ;;
+	--deep) DEEP="--deep" ;;
+	--version) printf 'saphira-kubernetes %s\n' "$VERSION"; exit 0 ;;
+	--help|-h) usage; exit 0 ;;
+	-*) die "unknown flag: $1 (see --help)" ;;
+	*)
+		if [ -z "$VERB" ]; then
+			VERB=$1
+		else
+			die "unexpected argument: $1 (see --help)"
+		fi
+		;;
+	esac
+	shift
+done
+
+# --host accumulation above kept flag+value pairs; normalise to values.
+HOST_LIST=""
+set -- $HOSTS
+while [ "$#" -gt 0 ]; do
+	[ "$1" = "--host" ] || die "internal error parsing --host"
+	HOST_LIST="$HOST_LIST $2"
+	shift 2
+done
+
+case $VERB in
+"") usage >&2; exit 1 ;;
+inventory) cmd_inventory $HOST_LIST ;;
+plan) [ -n "$CLUSTER" ] || die "plan needs --cluster NAME"; cmd_plan "$CLUSTER" ;;
+apply)
+	[ -n "$CLUSTER" ] || die "apply needs --cluster NAME"
+	need_confirm "apply --cluster $CLUSTER"
+	apply_cluster "$CLUSTER"
+	;;
+verify)
+	[ -n "$CLUSTER" ] || die "verify needs --cluster NAME"
+	cmd_verify "$CLUSTER" "$DEEP"
+	;;
+drain)
+	[ -n "$CLUSTER" ] && [ -n "$NODE" ] || die "drain needs --cluster NAME --node NODE"
+	cmd_drain "$CLUSTER" "$NODE"
+	;;
+uncordon)
+	[ -n "$CLUSTER" ] && [ -n "$NODE" ] || die "uncordon needs --cluster NAME --node NODE"
+	cmd_uncordon "$CLUSTER" "$NODE"
+	;;
+remove-node)
+	[ -n "$CLUSTER" ] && [ -n "$NODE" ] || die "remove-node needs --cluster NAME --node NODE"
+	cmd_remove_node "$CLUSTER" "$NODE"
+	;;
+remove-cluster)
+	[ -n "$CLUSTER" ] || die "remove-cluster needs --cluster NAME"
+	cmd_remove_cluster "$CLUSTER"
+	;;
+features)
+	[ -n "$CLUSTER" ] || die "features needs --cluster NAME"
+	cmd_features "$CLUSTER"
+	;;
+enable-feature)
+	[ -n "$CLUSTER" ] && [ -n "$FEATURE" ] || die "enable-feature needs --cluster NAME --feature NAME"
+	cmd_enable_feature "$CLUSTER" "$FEATURE"
+	;;
+disable-feature)
+	[ -n "$CLUSTER" ] && [ -n "$FEATURE" ] || die "disable-feature needs --cluster NAME --feature NAME"
+	cmd_disable_feature "$CLUSTER" "$FEATURE"
+	;;
+portainer)
+	[ -n "$ACTION" ] || die "portainer needs --action status|enable|disable"
+	set -- $HOST_LIST
+	[ "$#" -eq 1 ] || die "portainer needs exactly one --host NAME"
+	cmd_portainer "$1" "$ACTION"
+	;;
+*) die "unknown verb: $VERB (see --help)" ;;
+esac

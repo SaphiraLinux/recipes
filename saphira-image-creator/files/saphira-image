@@ -219,8 +219,14 @@ resolve_target()
 	# Fail closed on an invalid combination rather than guessing. A
 	# matrix row that names a boot or init this tool cannot produce is a
 	# bug, and guessing produces an image that boots nothing.
-	case $boot in bios | uefi) ;; *) die "target $name has an unsupported boot: $boot" ;; esac
+	case $boot in bios | uefi | hybrid) ;; *) die "target $name has an unsupported boot: $boot" ;; esac
 	case $init in openrc | systemd) ;; *) die "target $name has an unsupported init: $init" ;; esac
+	# The hybrid installer environment is SaphiraD by decision (v0):
+	# the installer running systemd says nothing about the installed
+	# machine, which the menu selects independently.
+	if [ "$boot" = hybrid ] && [ "$init" != systemd ]; then
+		die "target $name: hybrid boot requires the systemd installer environment"
+	fi
 	[ -f "$profiles_dir/$profile" ] ||
 		die "target $name names a profile that does not exist: $profiles_dir/$profile"
 	TARGET=$name
@@ -305,6 +311,11 @@ validate_arch()
 		die "unsupported --arch: $ARCH (known: x86_64, aarch64)"
 	if [ "$ARCH" != x86_64 ] && [ "$BOOT" = bios ]; then
 		die "--arch $ARCH cannot boot BIOS: there is no BIOS firmware for $ARCH. Use a uefi target."
+	fi
+	# Hybrid carries a bios-boot partition, which is meaningless
+	# without BIOS firmware: same refusal as plain bios.
+	if [ "$ARCH" != x86_64 ] && [ "$BOOT" = hybrid ]; then
+		die "--arch $ARCH cannot use the hybrid layout: it carries a BIOS boot partition. Use a uefi target."
 	fi
 }
 
@@ -431,6 +442,25 @@ start=$first_sector, size=$esp, type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B, name=
 start=$((first_sector + esp)), size=$root_sectors, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name="root"
 PLAN
 		;;
+	hybrid)
+		# USB installer: one medium boots both firmwares. p1 bios-boot
+		# for GRUB core.img (BIOS), p2 ESP (UEFI), p3 the installer
+		# root. Numbering is fixed by construction; root_device_for
+		# and esp_device_for below must match this plan.
+		esp=131072   # 64 MiB in 512-byte sectors
+		bios_boot=2048
+		root_sectors=$(( available - bios_boot - esp ))
+		[ "$root_sectors" -ge 65536 ] ||
+			die "size $SIZE is too small: bios-boot plus a 64M ESP leaves no usable root"
+		cat <<PLAN
+label: gpt
+# Hybrid: bios-boot (BIOS) + ESP (UEFI) + installer root. Either
+# firmware finds its bootloader; the installer payload is the same.
+start=$first_sector, size=$bios_boot, type=21686148-6449-6E6F-744E-656564454649, name="bios-boot"
+start=$((first_sector + bios_boot)), size=$esp, type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B, name="esp"
+start=$((first_sector + bios_boot + esp)), size=$root_sectors, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name="root"
+PLAN
+		;;
 	esac | assert_plan_fits "$total_sectors" "$first_sector"
 }
 
@@ -504,10 +534,22 @@ assert_plan_fits()
 
 root_device_for()
 {
-	# $1 loop device. p2 is root under both plans; p1 differs.
+	# $1 loop device. p2 is root under both classic plans; the
+	# hybrid plan carries bios-boot+ESP first, so root is p3 there.
 	case $BOOT in
 	bios) printf '%sp2' "$1" ;;
 	uefi) printf '%sp2' "$1" ;;
+	hybrid) printf '%sp3' "$1" ;;
+	esac
+}
+
+esp_device_for()
+{
+	# $1 loop device. The ESP is p1 under the uefi plan, p2 under
+	# the hybrid plan; bios plans have none.
+	case $BOOT in
+	uefi) printf '%sp1' "$1" ;;
+	hybrid) printf '%sp2' "$1" ;;
 	esac
 }
 
@@ -655,10 +697,10 @@ require_host_tools()
        (sfdisk/losetup), e2fsprogs (mkfs.ext4), dosfstools (mkfs.vfat) and
        grub (grub-install)."
 	case $BOOT in
-	uefi)
+	uefi|hybrid)
 		command -v mkfs.vfat >/dev/null 2>&1 ||
 			die "host tool missing: mkfs.vfat
-       A uefi target cannot be built without dosfstools: the firmware
+       A uefi or hybrid target cannot be built without dosfstools: the firmware
        requires a FAT EFI System Partition."
 		;;
 	esac
@@ -863,13 +905,18 @@ INITTAB
 		# (no serial hardware generally), so the wizard
 		# exclusively owns the port while it runs.
 		if [ -x "$mnt/usr/bin/systemctl" ]; then
-			units=
-			[ -f "$mnt/usr/lib/systemd/system/saphira-fhs-converge.service" ] &&
-				units="$units saphira-fhs-converge.service"
-			[ -f "$mnt/usr/lib/systemd/system/saphira-utmp-boot.service" ] &&
-				units="$units saphira-utmp-boot.service"
+		units=
+		[ -f "$mnt/usr/lib/systemd/system/saphira-fhs-converge.service" ] &&
+			units="$units saphira-fhs-converge.service"
+		[ -f "$mnt/usr/lib/systemd/system/saphira-utmp-boot.service" ] &&
+			units="$units saphira-utmp-boot.service"
+		# Firstboot configures INSTALLED machines; the installer
+		# environment gets the menu instead (prepare_installer
+		# below), so its service is never enabled here.
+		if [ "$PROFILE" != usb-installer ]; then
 			[ -f "$mnt/usr/lib/systemd/system/saphira-firstboot.service" ] &&
 				units="$units saphira-firstboot.service"
+		fi
 			[ -f "$mnt/usr/lib/systemd/system/sshd.service" ] &&
 				units="$units sshd.service"
 			# Device manager: the daemon binary ships in the udev
@@ -945,7 +992,7 @@ INITTAB
 		# boot" behaviour this placement exists to avoid. The
 		# firstboot-after-fhs-converge ordering is in the shipped unit
 		# itself, where it belongs, so no drop-in is needed for it.
-		if [ -f "$mnt/usr/lib/systemd/system/saphira-firstboot.service" ]; then
+		if [ -f "$mnt/usr/lib/systemd/system/saphira-firstboot.service" ] && [ "$PROFILE" != usb-installer ]; then
 			mkdir -p "$mnt/etc/systemd/system/multi-user.target.d" \
 				"$mnt/etc/systemd/system/nftables.service.d"
 			printf '[Unit]\nWants=saphira-firstboot.service\nAfter=saphira-firstboot.service\n' \
@@ -1407,8 +1454,19 @@ cmd_build()
 	bootdev=$(boot_device_for "$loop")
 	[ -b "$rootdev" ] || die "root partition device did not appear: $rootdev"
 	[ -b "$bootdev" ] || die "boot partition device did not appear: $bootdev"
+	if [ "$BOOT" = uefi ] || [ "$BOOT" = hybrid ]; then
+		espdev=$(esp_device_for "$loop")
+		[ -b "$espdev" ] || die "ESP device did not appear: $espdev"
+	fi
 
-	mkfs.ext4 -q -L saphira-root "$rootdev" || die 'cannot format root partition'
+	# Installer media carry the payload label the ram-mode
+	# entrypoint mounts by; installed systems keep saphira-root.
+	if [ "$PROFILE" = usb-installer ]; then
+		rootlabel=SAPHIRA-INSTALL
+	else
+		rootlabel=saphira-root
+	fi
+	mkfs.ext4 -q -L "$rootlabel" "$rootdev" || die 'cannot format root partition'
 	mount -o noatime "$rootdev" "$mnt" || die 'cannot mount root'
 	mounted=1
 
@@ -1417,10 +1475,10 @@ cmd_build()
 	# and a mounted ESP (even an empty fresh FAT) trips that guard.
 	# grub-install - which genuinely needs the ESP mounted - runs
 	# after the install step.
-	if [ "$BOOT" = uefi ]; then
+	if [ "$BOOT" = uefi ] || [ "$BOOT" = hybrid ]; then
 		# The ESP is a real, separate, FAT filesystem that the firmware
 		# reads.
-		mkfs.vfat -F 32 -n SaphiraESP "$bootdev" ||
+		mkfs.vfat -F 32 -n SaphiraESP "$espdev" ||
 			die 'cannot format the EFI System Partition'
 	fi
 
@@ -1567,8 +1625,51 @@ PY
 	# Init preparation, AFTER assembly so the packages are present.
 	prepare_init "$mnt"
 	enable_services "$mnt" "$profile_root/$profile_name"
+	prepare_installer "$mnt"
 	KERNEL_ARGS=$kernel_args
 	fix_kernel_cmdline "$mnt" "$rootdev"
+	build_installer_initramfs "$mnt"
+
+# prepare_installer: turn an assembled usb-installer root into an
+# install ENVIRONMENT (not an installed machine). No-op for every
+# other profile. The menu owns tty1 (getty masked so nothing fights
+# it); firstboot must never run here (its marker is removed and its
+# gate is never written: identity belongs to installed machines, and
+# prepare_init skips both when it sees this profile); the ram-mode
+# initramfs is built from the installed kernel and the shipped
+# composition, so grub-mkconfig below picks up its initrd line.
+prepare_installer()
+{
+	mnt=$1
+	[ "$PROFILE" = usb-installer ] || return 0
+	[ -x "$mnt/usr/bin/systemctl" ] ||
+		die "installer target but no systemctl in the image"
+	"$chroot_command" "$mnt" /usr/bin/systemctl --root=/ enable saphira-install-menu.service ||
+		die "cannot enable the installer menu"
+	"$chroot_command" "$mnt" /usr/bin/systemctl --root=/ mask getty@tty1.service ||
+		die "cannot mask getty@tty1 (it would fight the menu for the console)"
+	rm -f "$mnt/etc/saphira-firstboot-required"
+}
+
+# build_installer_initramfs: ram-mode initramfs for the usb-installer
+# root, written into its /boot next to the kernel. No-op for every
+# other profile. The kernel release is read from the installed
+# vmlinuz name, never guessed; the composition is the shipped
+# installer-initramfs.conf naming the label-mounting entrypoint.
+build_installer_initramfs()
+{
+	mnt=$1
+	[ "$PROFILE" = usb-installer ] || return 0
+	command -v saphira-mkinitramfs >/dev/null 2>&1 || die "installer target needs saphira-mkinitramfs on the build host (install saphira-initramfs-tools, or use a non-installer target)"
+	kernel=$(ls "$mnt"/boot/vmlinuz-* 2>/dev/null | head -1)
+	[ -n "$kernel" ] || die "installer target has no kernel in /boot (the usb-installer profile must carry one)"
+	krel=${kernel##*/vmlinuz-}
+	[ -n "$krel" ] || die "cannot derive the kernel release from $kernel"
+	saphira-mkinitramfs build --kernel "$krel" --root "$mnt" \
+		--config /usr/share/saphira/installer-initramfs.conf \
+		--output "$mnt/boot/initramfs-installer" ||
+		die "installer initramfs build failed"
+}
 
 	# Bootloader finalization, AFTER grub-mkconfig, on the generated file.
 # One thing grub-mkconfig cannot do on its own:
@@ -1637,9 +1738,9 @@ PY
 	# target version mismatch is impossible. The ESP is mounted here,
 	# after the install (which refuses a non-empty target) and only
 	# for the bootloader step that needs it.
-	if [ "$BOOT" = uefi ]; then
+	if [ "$BOOT" = uefi ] || [ "$BOOT" = hybrid ]; then
 		mkdir -p "$mnt/boot/efi"
-		mount "$bootdev" "$mnt/boot/efi" || die 'cannot mount the ESP'
+		mount "$espdev" "$mnt/boot/efi" || die 'cannot mount the ESP'
 		esp_mounted=1
 	fi
 	# The bootloader platform follows BOTH the boot method and the
@@ -1650,9 +1751,24 @@ PY
 	grub_args=
 	[ "$BOOT" = bios ] && grub_args="--target=i386-pc --recheck"
 	[ "$BOOT" = uefi ] && grub_args="--target=$ARCH-efi --efi-directory=/boot/efi --removable --recheck"
-	# shellcheck disable=SC2086
-	"$chroot_command" "$mnt" /usr/sbin/grub-install $grub_args "$loop" ||
-		die "grub-install failed ($BOOT)"
+	# Hybrid installs both loaders onto one medium: core.img into
+	# the bios-boot partition for BIOS firmware, the EFI binary
+	# onto the ESP for UEFI. --removable on both sides: no NVRAM
+	# on unknown machines, no efibootmgr dependency.
+	if [ "$BOOT" = hybrid ]; then
+		# shellcheck disable=SC2086
+		"$chroot_command" "$mnt" /usr/sbin/grub-install --target=i386-pc --recheck "$loop" ||
+			die "grub-install failed (hybrid BIOS side)"
+		# shellcheck disable=SC2086
+		"$chroot_command" "$mnt" /usr/sbin/grub-install --target=$ARCH-efi --efi-directory=/boot/efi --removable --recheck "$loop" ||
+			die "grub-install failed (hybrid UEFI side)"
+	elif [ -n "$grub_args" ]; then
+		# shellcheck disable=SC2086
+		"$chroot_command" "$mnt" /usr/sbin/grub-install $grub_args "$loop" ||
+			die "grub-install failed ($BOOT)"
+	else
+		die "internal: no grub platform for boot $BOOT"
+	fi
 	"$chroot_command" "$mnt" /usr/sbin/grub-mkconfig -o /boot/grub/grub.cfg ||
 		die 'grub-mkconfig failed'
 	test -s "$mnt/boot/grub/grub.cfg" || die 'grub.cfg is empty'
@@ -1771,6 +1887,11 @@ cmd_install_to_disk()
 
 	resolve_target "$TARGET"
 	validate_arch
+	# The installer environment is an image, never an installed
+	# system: writing it onto a disk as if it were a product would
+	# produce a machine that boots into an installer with no product.
+	[ "$PROFILE" != usb-installer ] ||
+		die "target $TARGET is installer media: build it as an image, do not install-to-disk it"
 	ENABLE=$enable
 	NETCONF=${netconf:-}
 

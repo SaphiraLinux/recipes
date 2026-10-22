@@ -2,7 +2,12 @@
 
 pkgname=saphira-zfs-userspace
 pkgver=2.4.4
-pkgrel=2
+pkgrel=3
+# r3: initramfs ZFS-root hook (files/20-zfs-import -> /lib/saphira/
+# initramfs/root.d/, suite-proven): imports the pool named by
+# root=ZFS= on the cmdline and mounts the dataset at /newroot, else a
+# no-op. Inert until a media builder names it in an initramfs.conf
+# with `bin zpool`; the default base initramfs is untouched.
 # r2: enable upstream systemd integration (Minimer proof: r1 installed
 # the OpenRC scripts but no systemd units, so a systemd host had no
 # ZFS import/mount/ZED boot lifecycle). Root cause: upstream
@@ -63,6 +68,10 @@ replaces="saphira-zfs"
 
 recipe_build()
 {
+	# Hook suite first. stdin is nulled: the suite must never consume
+	# the builder's stdin.
+	sh "$RECIPE_DIR/tests/zfs-import-hook.sh" < /dev/null ||
+		{ echo "ERROR: zfs-import-hook suite failed" >&2; return 1; }
 	export TAR_OPTIONS=--no-same-owner
 	# Newest staged tree configures the build; the output does not depend
 	# on which one (fail closed when none is staged).
@@ -130,4 +139,8 @@ recipe_install()
 		echo "ERROR: saphira-zfs-userspace payload is missing 50-zfs.preset" >&2
 		return 1
 	}
+	# ZFS-root initramfs hook (inert file until composed into an
+	# initramfs.conf; see its header for the composition contract).
+	install -D -m 0755 "$RECIPE_DIR/files/20-zfs-import" \
+		"$PKGDEST/lib/saphira/initramfs/root.d/20-zfs-import"
 }

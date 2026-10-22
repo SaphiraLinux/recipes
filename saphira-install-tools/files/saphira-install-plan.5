@@ -1,0 +1,145 @@
+.TH SAPHIRA-INSTALL-PLAN 5 "Saphira Linux" "Installation plan format"
+.SH NAME
+saphira-install-plan \- declarative installation manifest format
+.SH DESCRIPTION
+An installation manifest is one strict
+.B KEY=VALUE
+file describing firmware, init system, root filesystem, storage
+layout, role, repository and identity for a Saphira installation.
+.BR saphira-install-plan (8)
+validates it and prints the human-readable plan; the USB installer,
+the future UEFI pre-boot menu and
+.BR saphira-image (8)
+all consume the same format, so one file describes an installation
+everywhere.
+.PP
+The format is deliberately EFI-parseable: bare words, no quoting, no
+shell syntax, one pair per line,
+.B #
+comments and blanks allowed. Unknown keys are
+.B refused
+(a typo must fail validation, never install the wrong system), and
+.B credentials never belong in a manifest
+(firstboot sets passwords on the installed machine's own console;
+any key naming a password, secret, token or private key is refused).
+.SH KEYS
+.TP
+.B PLAN_VERSION
+Must be
+.BR 1 .
+.TP
+.B FIRMWARE
+.BR bios ,
+.BR uefi
+or
+.BR auto
+(autodetect at install time; both the BIOS boot partition and the ESP
+are written).
+.TP
+.B INIT
+.B openrc
+(Saphira) or
+.B systemd
+(SaphiraD).
+.TP
+.B ROOTFS
+.BR ext4 ,
+.BR xfs
+or
+.BR zfs .
+Btrfs is a supported kernel filesystem but is never an offered root.
+.TP
+.B LAYOUT
+.BR direct ,
+.BR lvm
+or
+.BR zpool .
+.B zpool
+requires
+.B ROOTFS=zfs
+(and vice versa: a pool is not a partition);
+.B lvm
+requires ext4 or XFS.
+.TP
+.B DISK
+Target device path
+.RB ( /dev/... ).
+The planner never touches it; the installer UI confirms destruction.
+.TP
+.B ROLE
+.BR base ,
+.BR docker ,
+.BR k8s-control ,
+.BR k8s-worker ,
+.BR openstack-controller ,
+.BR openstack-compute
+or
+.BR openstack-storage .
+Roles select package profiles and firstboot/role setup; single-service
+appliance roles arrive later and follow the same key.
+.TP
+.B PROFILE
+Package profile name resolvable in the profile tree
+.RB ( SAPHIRA_PROFILE_ROOT ,
+default
+.IR /usr/share/saphira/profiles ).
+Profiles describe package intentions only, never disk or network.
+.TP
+.B REPOSITORY
+.B https://
+package URL.
+.TP
+.B HOSTNAME
+Machine hostname (letters, digits, hyphens; set at assembly, honoured
+by firstboot).
+.TP
+.B POOL , DATASET , BOOT_SIZE
+ZFS only.
+.B POOL
+defaults by convention to
+.BR tank ;
+.B DATASET
+must live under it
+.RB ( tank/ROOTS/saphira ,
+.IR tank/ROOTS/saphirad ,
+...);
+.B BOOT_SIZE
+(e.g.
+.BR 1G )
+sizes the separate ext4
+.B /boot
+partition GRUB reads, so GRUB never needs to understand pool
+features. The remainder of the disk is a ZFS partition owned by the
+pool; the initramfs imports the pool and mounts the dataset at
+.BR / .
+.TP
+.B VG , LV_SIZE
+LVM only.
+.B VG
+names the volume group;
+.B LV_SIZE
+(e.g.
+.B 20G
+or
+.B %FREE
+) sizes the root logical volume. The installer initramfs activates
+the group before mounting.
+.SH KERNEL SUPPORT
+ext4/XFS availability is provable from a kernel
+.IR .config :
+.B --kernel-config
+points at one and validation fails closed when the filesystem symbol
+is not
+.BR =y .
+ZFS rides out-of-tree kernel modules no
+.I .config
+can prove; it is always reported as a
+.B needs:
+line the installer environment must honour (kmod present in the
+installer and the target, import hook in the initramfs).
+.SH FILES
+.I /usr/share/saphira/install-manifest.example
+.SH SEE ALSO
+.BR saphira-install-plan (8),
+.BR saphira-profiles (5),
+.BR saphira-install (8)

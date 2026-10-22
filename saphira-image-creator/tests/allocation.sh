@@ -166,6 +166,19 @@ else
 	bad 'the BIOS layout lost its bios-boot partition under an allocation'
 fi
 
+printf '%s\n' 'the hybrid USB layout carries all three partitions in order'
+
+plan usb-installer 8G > "$work/phyb" 2>&1
+if /usr/bin/grep -q 'name="bios-boot"' "$work/phyb" && /usr/bin/grep -q 'name="esp"' "$work/phyb" && /usr/bin/grep -q 'name="root"' "$work/phyb"; then
+	ok 'the hybrid layout has bios-boot, ESP and root'
+else
+	bad 'the hybrid layout is missing a partition'
+fi
+if /usr/bin/awk '/^start=/{print}' "$work/phyb" | /usr/bin/grep -q .; then
+	names=$(/usr/bin/grep -o 'name="[^"]*"' "$work/phyb" | /usr/bin/awk '{ printf "%s ", $0 } END { print "" }')
+	test "$names" = 'name="bios-boot" name="esp" name="root" ' && ok 'hybrid partitions are ordered bios-boot, ESP, root' || bad "hybrid partitions misordered: $names"
+fi
+
 if test "$failures" -ne 0; then
 	printf 'allocation: %d failure(s)\n' "$failures" >&2
 	exit 1

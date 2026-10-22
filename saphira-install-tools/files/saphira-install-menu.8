@@ -1,0 +1,51 @@
+.TH SAPHIRA-INSTALL-MENU 8 "Saphira Linux" "Installer menu"
+.SH NAME
+saphira-install-menu \- guided text-mode installer menu (v0)
+.SH SYNOPSIS
+.B saphira-install-menu
+.SH DESCRIPTION
+.BR saphira-install-menu
+is the v0 guided frontend of Saphira installation, run on the
+installer medium's console (normally tty1 via
+.IR saphira-install-menu.service ).
+Using dialog menus it walks firmware, init system, root filesystem,
+storage layout, role, hostname, installer networking and target
+disk, writes a
+.BR saphira-install-plan (5)
+manifest, shows the validated plan and the engine preview, requires
+two explicit destructive confirmations, then executes the existing
+.BR saphira-image (8)
+install-to-disk engine. v0 offers what the engine can do (ext4 on
+direct partitions, base role); every other choice is presented as
+explicitly-later with its reason, never silently accepted.
+.PP
+Credentials are never asked here and never belong in the manifest:
+firstboot sets them on the installed machine. The installer USB is
+excluded from target-disk selection; the chosen disk is repartitioned
+destructively after confirmation.
+.SH ENVIRONMENT
+.TP
+.B DIALOG_BIN
+Menu backend (default
+.BR dialog ;
+the suite stubs it).
+.TP
+.B INSTALL_TTY
+Console device (default
+.IR /dev/tty1 ,
+fallback
+.IR /dev/console ).
+The kernel command line
+.B saphira.install_tty=
+overrides the default the same way, so serial installs select the
+serial console at boot time.
+.TP
+.B SAPHIRA_REPOSITORY
+Package repository URL.
+.SH FILES
+.I /run/saphira-install.conf
+(the written manifest)
+.SH SEE ALSO
+.BR saphira-install-plan (5),
+.BR saphira-image (8),
+.BR saphira-firstboot (8)

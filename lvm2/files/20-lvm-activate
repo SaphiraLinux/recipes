@@ -1,0 +1,39 @@
+#!/bin/sh
+# 20-lvm-activate: root.d hook activating LVM groups and mounting an
+# LVM root at /newroot.
+#
+# Activation always runs when this hook is composed in (vgchange with
+# no groups is a no-op success): that covers root=/dev/mapper/...,
+# root=UUID=... on LVs (which /init then mounts itself once the group
+# is active), and plain direct roots (activation changes nothing).
+# When root= names a device-mapper device, this hook also performs
+# the mount; otherwise it returns and lets /init mount plain roots.
+# Composition (media builder): this hook named in initramfs.conf plus
+# `bin vgchange` (and mount, which the base already stages). Compose
+# it only into LVM layouts: a genuine activation failure exits
+# non-zero and /init stops rather than booting half-mounted.
+#
+# Test overrides (never set at boot): PROC_CMDLINE, NEWROOT.
+set -eu
+
+cmdline=${PROC_CMDLINE:-/proc/cmdline}
+newroot=${NEWROOT:-/newroot}
+
+vgchange -ay || {
+	echo "20-lvm-activate: vgchange -ay failed" >&2
+	exit 1
+}
+root=
+for tok in $(cat "$cmdline" 2>/dev/null || true); do
+	case $tok in
+	root=*) root=${tok#root=} ;;
+	esac
+done
+case $root in
+/dev/mapper/*) ;;
+*) exit 0 ;;
+esac
+mount "$root" "$newroot" || {
+	echo "20-lvm-activate: cannot mount $root at $newroot" >&2
+	exit 1
+}

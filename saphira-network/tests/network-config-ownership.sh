@@ -145,6 +145,19 @@ for mode in slaac dhcp static off; do
 	fi
 done
 
+# No consumer may reference the retired /sbin slot: openrc's network
+# init.d shipped command=/sbin/saphira-network-config long after the
+# tool moved to /usr/sbin, and the gate above (install sites only)
+# never saw references. This bricks OpenRC networking at boot.
+stray_refs=$(/usr/bin/grep -rn --include='*' -E '(^|[^/])sbin/saphira-network-config' \
+	"$root" 2>/dev/null | /usr/bin/grep -v '/tests/' | /usr/bin/grep -v '\.md:' || true)
+if test -z "$stray_refs"; then
+	ok 'no references to the retired /sbin slot outside tests'
+else
+	bad 'references to retired /sbin/saphira-network-config (use /usr/sbin):'
+	printf '%s\n' "$stray_refs" >&2
+fi
+
 if test "$failures" -ne 0; then
 	printf 'network-config-ownership: %d failure(s)\n' "$failures" >&2
 	exit 1

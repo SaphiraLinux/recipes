@@ -18,7 +18,12 @@ pkgname=saphira-kernel-7.2.2
 # automatic replacement.
 kernel_version=7.2.2
 pkgver=1
-pkgrel=7
+pkgrel=9
+# r9: CONFIG_XFS_FS=y (XFS root support; same built-in philosophy as
+# ext4/btrfs). Gate extended. Payload change.
+# r8: BTRFS_FS=y + BTRFS_FS_POSIX_ACL=y (btrfs root support; no
+# initramfs means the filesystem must be built in, not a module).
+# Gate extended. Payload change.
 # r5: origin="$pkgname" (version-specific identity end to end; no
 # generic saphira-kernel origin for independently versioned kernel
 # packages). Metadata change, revision bump.

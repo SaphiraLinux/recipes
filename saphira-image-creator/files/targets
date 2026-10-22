@@ -21,3 +21,8 @@ uefi-openrc     uefi  openrc   minimal-openrc
 uefi-systemd    uefi  systemd  minimal-systemd
 uefi-saphira    uefi  openrc   saphira-openrc
 uefi-saphirad   uefi  systemd  saphirad-systemd
+# USB installer: one hybrid medium (bios-boot + ESP + installer root)
+# booting both firmwares into the ram-mode installer environment.
+# systemd-only by v0 decision; the installed machine's init is chosen
+# in the menu, never here.
+usb-installer   hybrid  systemd  usb-installer

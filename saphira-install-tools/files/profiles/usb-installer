@@ -1,0 +1,8 @@
+# USB installer image profile: the bootable install environment.
+# Installer userspace and menu tooling, plus the boot kernel and
+# wireless firmware real hardware needs. The installed machine's
+# profile is chosen in the menu, never here: this profile describes
+# the installer, not its product.
+@saphira-installer
+saphira-kernel-7.2.3
+linux-firmware

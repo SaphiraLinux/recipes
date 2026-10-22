@@ -1,0 +1,24 @@
+#!/sbin/openrc-run
+
+description="Portainer Community Edition (Docker management UI, loopback only)"
+
+# Mirrors the approved systemd unit (docker run --rm, loopback 9443,
+# named volume portainer_data). The docker client runs foreground under
+# supervise-daemon; stopping the service stops the container, but the
+# data volume and the image are kept (purge explicitly, never here).
+# Nothing is auto-enabled at install.
+command="/usr/bin/docker"
+command_args="run --rm --name portainer-ce -p 127.0.0.1:9443:9443 -v /var/run/docker.sock:/var/run/docker.sock -v portainer_data:/data portainer/portainer-ce:2.45.2"
+supervisor="supervise-daemon"
+
+depend()
+{
+	use net
+	need localmount dockerd
+}
+
+stop_pre()
+{
+	# SIGTERM would kill only the client and orphan the container.
+	docker stop portainer-ce >/dev/null 2>&1 || true
+}

@@ -1,0 +1,100 @@
+Subject: [Saphira] Linux 7.3: run kthreads with init fs context (2.4.4 port)
+
+Saphira-Port-By: Muse Spark 1.3 Contributor for AKADATA LIMITED
+(Andrew Smalley, Director)
+Note: The API moved; the data must not. Re-derived hunk by hunk
+for 2.4.4 and proven by boot, not by inspection.
+
+Ports robn/zfs@e8a0a6cd4ed3 onto OpenZFS 2.4.4 (see recipe comments for the rebase notes).
+
+--- a/include/os/linux/Makefile.am
++++ b/include/os/linux/Makefile.am
+@@ -6,6 +6,7 @@
+ 	%D%/kernel/linux/compiler_compat.h \
+ 	%D%/kernel/linux/dcache_compat.h \
+ 	%D%/kernel/linux/kmap_compat.h \
++	%D%/kernel/linux/kthread_compat.h \
+ 	%D%/kernel/linux/mm_compat.h \
+ 	%D%/kernel/linux/mod_compat.h \
+ 	%D%/kernel/linux/page_compat.h \
+--- a/module/os/linux/spl/spl-taskq.c
++++ b/module/os/linux/spl/spl-taskq.c
+@@ -38,6 +38,7 @@
+ #include <sys/kstat.h>
+ #include <linux/cpuhotplug.h>
+ #include <linux/mod_compat.h>
++#include <linux/kthread_compat.h>
+ 
+ /* Linux 6.2 renamed timer_delete_sync(); point it at its old name for those. */
+ #ifndef HAVE_TIMER_DELETE_SYNC
+@@ -1107,7 +1108,8 @@
+ 			DTRACE_PROBE1(taskq_ent__start, taskq_ent_t *, t);
+ 
+ 			/* Perform the requested task */
+-			t->tqent_func(t->tqent_arg);
++			scoped_with_init_fs()
++			    t->tqent_func(t->tqent_arg);
+ 
+ 			DTRACE_PROBE1(taskq_ent__finish, taskq_ent_t *, t);
+ 
+--- a/module/os/linux/spl/spl-thread.c
++++ b/module/os/linux/spl/spl-thread.c
+@@ -29,6 +29,7 @@
+ #include <sys/tsd.h>
+ #include <sys/string.h>
+ #include <sys/misc.h>
++#include <linux/kthread_compat.h>
+ 
+ /*
+  * Thread interfaces
+@@ -59,8 +60,10 @@
+ 	kmem_free(tp->tp_name, tp->tp_name_size);
+ 	kmem_free(tp, sizeof (thread_priv_t));
+ 
+-	if (func)
+-		func(args);
++	if (func) {
++		scoped_with_init_fs()
++		    func(args);
++	}
+ 
+ 	return (0);
+ }
+--- /dev/null
++++ b/include/os/linux/kernel/linux/kthread_compat.h
+@@ -0,0 +1,35 @@
++// SPDX-License-Identifier: CDDL-1.0
++/*
++ * This file and its contents are supplied under the terms of the
++ * Common Development and Distribution License ("CDDL"), version 1.0.
++ * You may only use this file in accordance with the terms of version
++ * 1.0 of the CDDL.
++ *
++ * A full copy of the text of the CDDL should have accompanied this
++ * source.  A copy of the CDDL is also available via the Internet at
++ * https://opensource.org/license/CDDL-1.0.
++ */
++
++/*
++ * Copyright (c) 2026, TrueNAS.
++ */
++
++#ifndef _ZFS_KTHREAD_COMPAT_H
++#define	_ZFS_KTHREAD_COMPAT_H
++
++#include <linux/fs_struct.h>
++
++/*
++ * Linux 7.3 change. Kernel-internal threads no longer have access to the
++ * filesystem by default. Callers that need it should wrap the necessary code
++ * in `scoped_with_init_fs()`, which will make the filesystem availble until
++ * end of scope.
++ *
++ * For older kernels that do not provide this macro, we define it to be a
++ * no-op.
++ */
++#ifndef scoped_with_init_fs
++#define	scoped_with_init_fs()	if (1)
++#endif
++
++#endif

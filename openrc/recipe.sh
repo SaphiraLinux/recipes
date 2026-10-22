@@ -2,7 +2,7 @@
 
 pkgname=openrc
 pkgver=0.62.1
-pkgrel=5
+pkgrel=6
 # r5: Saphira bootmisc never migrates /var/run or /var/lock into
 # /run (upstream OpenRC does on every boot: an empty real directory
 # rmdir's cleanly and is then symlinked - proven by a 0.2.1 guest

@@ -1,0 +1,45 @@
+.TH SAPHIRA-INSTALL-PLAN 8 "Saphira Linux" "Installation planner"
+.SH NAME
+saphira-install-plan \- validate and display a Saphira installation manifest
+.SH SYNOPSIS
+.B saphira-install-plan validate|show
+.I MANIFEST
+.RB [ --kernel-config
+.IR PATH ]
+.RB [ --profile-root
+.IR DIR ]
+.SH DESCRIPTION
+.BR saphira-install-plan
+is the declarative front end of Saphira installation. A manifest file
+(see
+.BR saphira-install-plan (5))
+describes the whole installation; this tool validates it
+.RB ( validate )
+or prints the human-readable plan with storage sketch, kernel
+.BR needs :
+lines and the destructive target warning
+.RB ( show ).
+It writes nothing, touches no disk and opens no network: the USB
+installer, the future pre-boot menu and image creation share the
+same format and the same refusals.
+.PP
+.B --kernel-config
+points at a kernel
+.I .config
+so filesystem support is proven rather than assumed; without it the
+plan reports support as unproven (ZFS additionally needs its
+out-of-tree modules, which no
+.I .config
+can prove).
+.B --profile-root
+overrides the profile tree used to resolve
+.BR PROFILE .
+.SH EXIT STATUS
+0 when the manifest is valid; 1 with a refusal naming the exact
+offense otherwise.
+.SH FILES
+.I /usr/share/saphira/install-manifest.example
+.SH SEE ALSO
+.BR saphira-install-plan (5),
+.BR saphira-profiles (5),
+.BR saphira-install (8)

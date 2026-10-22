@@ -1,0 +1,46 @@
+#!/bin/sh
+# 20-zfs-import: root.d hook importing a ZFS pool and mounting the
+# root dataset at /newroot.
+#
+# Runs only when the kernel cmdline names a ZFS root
+# (root=ZFS=pool/dataset, as GRUB's 10_linux emits for ZFS roots);
+# otherwise it exits 0 so a shared initramfs image stays safe.
+# Composition (media builder): this hook named in initramfs.conf plus
+# `bin zpool` (and mount, which the base already stages).
+#
+# Import prefers /dev/disk/by-partuuid (deterministic device identity,
+# the Saphira convention) and falls back to a plain import, saying so.
+# Any failure exits non-zero: /init stops on the first hook failure
+# rather than switching into a half-mounted root.
+#
+# Test overrides (never set at boot): PROC_CMDLINE, NEWROOT.
+set -eu
+
+cmdline=${PROC_CMDLINE:-/proc/cmdline}
+newroot=${NEWROOT:-/newroot}
+
+root=
+for tok in $(cat "$cmdline" 2>/dev/null || true); do
+	case $tok in
+	root=ZFS=*) root=${tok#root=ZFS=} ;;
+	esac
+done
+test -n "$root" || exit 0
+
+pool=${root%%/*}
+test -n "$pool" && test "$pool" != "$root" || {
+	echo "20-zfs-import: malformed ZFS root: $root" >&2
+	exit 1
+}
+if zpool import -N -d /dev/disk/by-partuuid "$pool" 2>/dev/null; then
+	:
+elif zpool import -N "$pool" 2>/dev/null; then
+	echo "20-zfs-import: imported $pool without partuuid addressing" >&2
+else
+	echo "20-zfs-import: cannot import pool $pool" >&2
+	exit 1
+fi
+mount -t zfs "$root" "$newroot" || {
+	echo "20-zfs-import: cannot mount $root at $newroot" >&2
+	exit 1
+}

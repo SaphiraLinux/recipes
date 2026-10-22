@@ -2,7 +2,29 @@
 
 pkgname=saphira-install-tools
 pkgver=0.1
-pkgrel=22
+pkgrel=27
+# r27: menu console selection honours saphira.install_tty= on the
+# kernel cmdline (serial installs), with INSTALL_TTY env first and
+# /dev/console last. Serial operation is required, not a debug path.
+# r26: USB installer composition pieces (installer-entrypoint +
+# installer-initramfs.conf + usb-installer profile): the ram-mode
+# entrypoint mounts the payload by label and hands over; the conf
+# names it for saphira-mkinitramfs; the profile is installer
+# userspace + boot kernel + firmware (never the installed product).
+# r25: v0 guided installer menu (saphira-install-menu + tty1 service +
+# man page + suite) and its installer-profile closure (dialog,
+# saphira-image-creator backend). The menu chooses, the planner
+# validates, the existing engine writes; nothing here partitions.
+# r24: installer profile carries one creation tool per offered root
+# (xfsprogs, lvm2, saphira-zfs-userspace alongside e2fsprogs).
+# btrfs stays out: kernel-builtin but never an offered root.
+# r23: declarative installation planner (saphira-install-plan +
+# manifest format + example + suite). One strict KEY=VALUE manifest
+# describes firmware/init/rootfs/layout/role/repo/identity for the USB
+# installer, the future pre-boot menu and image-creator alike;
+# validation refuses unknown keys, duplicates, secrets and unprovable
+# kernel filesystem support. Execution stays where it is (planner
+# writes nothing).
 # r22: single authoritative profile tree. The product and role profiles
 # lived in saphira-image-creator's own files/profiles/ while the base,
 # init and installer profiles lived here, with two kernels (bare
@@ -62,6 +84,14 @@ makedepends=""
 recipe_build()
 {
 	local f
+	sh -n "$RECIPE_DIR/files/saphira-install-plan" ||
+		{ echo "ERROR: planner syntax check failed" >&2; return 1; }
+	sh -n "$RECIPE_DIR/files/saphira-install-menu" ||
+		{ echo "ERROR: menu syntax check failed" >&2; return 1; }
+	sh "$RECIPE_DIR/tests/install-plan.sh" ||
+		{ echo "ERROR: install-plan suite failed" >&2; return 1; }
+	sh "$RECIPE_DIR/tests/install-menu.sh" ||
+		{ echo "ERROR: install-menu suite failed" >&2; return 1; }
 	for f in "$RECIPE_DIR"/files/saphira-* "$RECIPE_DIR"/files/profiles/*; do
 		grep -q 'akadata-base-abi' "$f" && {
 			echo "ERROR: unmigrated akadata-base-abi reference in $f" >&2
@@ -115,9 +145,13 @@ recipe_build()
 
 recipe_install()
 {
-	for tool in saphira-chroot saphira-bootstrap saphira-genfstab saphira-assemble-rootfs saphira-install; do
+	for tool in saphira-chroot saphira-bootstrap saphira-genfstab saphira-assemble-rootfs saphira-install saphira-install-plan saphira-install-menu; do
 		install -D -m 0755 "$RECIPE_DIR/files/$tool" "$PKGDEST/usr/bin/$tool"
 	done
+	# Ram-mode installer entrypoint (runs inside the initramfs; see
+	# installer-initramfs.conf for the composition contract).
+	install -D -m 0755 "$RECIPE_DIR/files/installer-entrypoint" \
+		"$PKGDEST/lib/saphira/installer-entrypoint"
 	# Every profile is installed, not a hand-kept list. The list was the
 	# defect: saphira-chroot's --bind support and six new profiles shipped in
 	# a package that installed neither, because nothing about adding a
@@ -143,6 +177,18 @@ recipe_install()
 		"$PKGDEST/usr/share/man/man8/saphira-assemble-rootfs.8"
 	install -D -m 0644 "$RECIPE_DIR/files/saphira-install.8" \
 		"$PKGDEST/usr/share/man/man8/saphira-install.8"
+	install -D -m 0644 "$RECIPE_DIR/files/saphira-install-plan.5" \
+		"$PKGDEST/usr/share/man/man5/saphira-install-plan.5"
+	install -D -m 0644 "$RECIPE_DIR/files/saphira-install-plan.8" \
+		"$PKGDEST/usr/share/man/man8/saphira-install-plan.8"
+	install -D -m 0644 "$RECIPE_DIR/files/saphira-install-menu.8" \
+		"$PKGDEST/usr/share/man/man8/saphira-install-menu.8"
+	install -D -m 0644 "$RECIPE_DIR/files/saphira-install-menu.service" \
+		"$PKGDEST/usr/lib/systemd/system/saphira-install-menu.service"
+	install -D -m 0644 "$RECIPE_DIR/files/install-manifest.example" \
+		"$PKGDEST/usr/share/saphira/install-manifest.example"
+	install -D -m 0644 "$RECIPE_DIR/files/installer-initramfs.conf" \
+		"$PKGDEST/usr/share/saphira/installer-initramfs.conf"
 	install -D -m 0644 "$RECIPE_DIR/files/LICENSE" \
 		"$PKGDEST/usr/share/licenses/saphira-install-tools/LICENSE"
 }

@@ -1,0 +1,337 @@
+#!/bin/sh
+#
+# saphira-install-plan validate|show MANIFEST [--kernel-config PATH] [--profile-root DIR]
+#
+# Declarative installation planner: one manifest file describes firmware,
+# init system, root filesystem, storage layout, role, repository and
+# identity, and this tool validates it and prints the human-readable
+# installation plan. It writes nothing, touches no disk, opens no
+# network: validation is pure file logic so the USB installer, the
+# future UEFI pre-boot menu and saphira-image-creator all share the
+# same format and the same refusals.
+#
+# Format (strict KEY=VALUE, documented in saphira-install-plan(5)):
+# the file must be parseable by a future EFI application, so values
+# are bare words, never quoted, and unknown keys are refused rather
+# than ignored: a typo must fail here, not install the wrong system.
+#
+# Secrets never belong in a manifest: any key naming a password,
+# secret, token or private key is refused. Credentials are firstboot's
+# job, on the installed machine's own console.
+
+set -u
+
+PLAN_VERSION_SUPPORTED=1
+
+die()
+{
+	printf 'saphira-install-plan: %s\n' "$*" >&2
+	exit 1
+}
+
+usage()
+{
+	printf 'usage: saphira-install-plan validate|show MANIFEST [--kernel-config PATH] [--profile-root DIR]\n' >&2
+	exit 2
+}
+
+verb=
+manifest=
+kernel_config=
+profile_root=${SAPHIRA_PROFILE_ROOT:-/usr/share/saphira/profiles}
+while test $# -gt 0; do
+	case $1 in
+	validate|show) verb=$1; shift ;;
+	--kernel-config) kernel_config=${2:?missing PATH}; shift 2 ;;
+	--kernel-config=*) kernel_config=${1#*=}; shift ;;
+	--profile-root) profile_root=${2:?missing DIR}; shift 2 ;;
+	--profile-root=*) profile_root=${1#*=}; shift ;;
+	--) shift; break ;;
+	-*) usage ;;
+	*)
+		test -z "$manifest" || usage
+		manifest=$1; shift ;;
+	esac
+done
+test -n "$verb" && test -n "$manifest" || usage
+test -f "$manifest" || die "manifest not found: $manifest"
+
+# --- manifest parsing (strict) ---------------------------------------
+
+# plan_get KEY: value or empty. Malformed lines and unknown keys fail
+# the whole manifest: see the header comment for why.
+plan_keys="PLAN_VERSION FIRMWARE INIT ROOTFS LAYOUT DISK ROLE PROFILE REPOSITORY HOSTNAME POOL DATASET BOOT_SIZE VG LV_SIZE"
+
+plan_get()
+{
+	local k v count
+	count=0
+	while IFS= read -r line || test -n "$line"; do
+		case $line in
+		''|\#*) continue ;;
+		esac
+		case $line in
+		*=*) k=${line%%=*}; v=${line#*=} ;;
+		*) die "malformed manifest line: $line" ;;
+		esac
+		case " $plan_keys " in
+		*" $k "*) ;;
+		*) die "unknown manifest key: $k" ;;
+		esac
+		# Secrets are never a plan: refuse before any value is used.
+		case $k in
+		*PASSWORD*|*SECRET*|*TOKEN*|*PRIVATE*KEY*)
+			die "credentials do not belong in a manifest ($k): firstboot sets them on the installed machine" ;;
+		esac
+		if test "$k" = "$1"; then
+			count=$((count + 1))
+			test "$count" -gt 1 &&
+				die "duplicate manifest key: $k"
+			printf '%s' "$v"
+		fi
+	done < "$manifest"
+}
+
+# Validate every line once up front so unknown keys and secrets fail
+# even when the requested verb never reads that key.
+validate_lines()
+{
+	local line k
+	while IFS= read -r line || test -n "$line"; do
+		case $line in
+		''|\#*) continue ;;
+		esac
+		case $line in
+		*=*) k=${line%%=*} ;;
+		*) die "malformed manifest line: $line" ;;
+		esac
+		case " $plan_keys " in
+		*" $k "*) ;;
+		*) die "unknown manifest key: $k" ;;
+		esac
+		case $k in
+		*PASSWORD*|*SECRET*|*TOKEN*|*PRIVATE*KEY*)
+			die "credentials do not belong in a manifest ($k): firstboot sets them on the installed machine" ;;
+		esac
+	done < "$manifest"
+}
+
+# --- validation -------------------------------------------------------
+
+valid_name()
+{
+	case $1 in
+	''|*[!A-Za-z0-9._+-]*) return 1 ;;
+	esac
+	return 0
+}
+
+valid_hostname()
+{
+	case $1 in
+	''|*[!A-Za-z0-9-]*) return 1 ;;
+	esac
+	case $1 in
+	-*|*-) return 1 ;;
+	esac
+	return 0
+}
+
+valid_size()
+{
+	case $1 in
+	%FREE) return 0 ;;
+	''|*[!0-9MG]*) return 1 ;;
+	esac
+	case $1 in
+	*[MG]) num=${1%?} ;;
+	*) num=$1 ;;
+	esac
+	case $num in
+	''|*[!0-9]*) return 1 ;;
+	esac
+	return 0
+}
+
+# kconfig_has PATH SYMBOL: 0 when CONFIG_SYMBOL=y in a kernel config.
+kconfig_has()
+{
+	grep -q "^CONFIG_$2=y$" "$1" 2>/dev/null
+}
+
+validate_manifest()
+{
+	PLAN_VERSION=$(plan_get PLAN_VERSION)
+	FIRMWARE=$(plan_get FIRMWARE)
+	INIT=$(plan_get INIT)
+	ROOTFS=$(plan_get ROOTFS)
+	LAYOUT=$(plan_get LAYOUT)
+	DISK=$(plan_get DISK)
+	ROLE=$(plan_get ROLE)
+	PROFILE=$(plan_get PROFILE)
+	REPOSITORY=$(plan_get REPOSITORY)
+	HOSTNAME=$(plan_get HOSTNAME)
+	POOL=$(plan_get POOL)
+	DATASET=$(plan_get DATASET)
+	BOOT_SIZE=$(plan_get BOOT_SIZE)
+	VG=$(plan_get VG)
+	LV_SIZE=$(plan_get LV_SIZE)
+
+	test "$PLAN_VERSION" = "$PLAN_VERSION_SUPPORTED" ||
+		die "PLAN_VERSION must be $PLAN_VERSION_SUPPORTED (got '$PLAN_VERSION')"
+	case $FIRMWARE in
+	bios|uefi|auto) ;;
+	*) die "FIRMWARE must be bios|uefi|auto (got '$FIRMWARE')" ;;
+	esac
+	case $INIT in
+	openrc|systemd) ;;
+	*) die "INIT must be openrc|systemd (got '$INIT')" ;;
+	esac
+	case $ROOTFS in
+	ext4|xfs|zfs) ;;
+	*) die "ROOTFS must be ext4|xfs|zfs (got '$ROOTFS')" ;;
+	esac
+	case $LAYOUT in
+	direct|lvm|zpool) ;;
+	*) die "LAYOUT must be direct|lvm|zpool (got '$LAYOUT')" ;;
+	esac
+	# Layout and filesystem must agree in both directions.
+	case $LAYOUT in
+	zpool) test "$ROOTFS" = "zfs" ||
+		die "LAYOUT=zpool requires ROOTFS=zfs (got '$ROOTFS')" ;;
+	lvm) case $ROOTFS in
+		ext4|xfs) ;;
+		*) die "LAYOUT=lvm requires ROOTFS=ext4|xfs (got '$ROOTFS')" ;;
+		esac ;;
+	direct) test "$ROOTFS" != "zfs" ||
+		die "ROOTFS=zfs requires LAYOUT=zpool (a pool is not a partition)" ;;
+	esac
+	# Btrfs is a supported kernel filesystem but never an offered
+	# root: the installer menu must not present it.
+	case $DISK in
+	/dev/*) ;;
+	*) die "DISK must be a device path (got '$DISK')" ;;
+	esac
+	case $ROLE in
+	base|docker|k8s-control|k8s-worker|openstack-controller|openstack-compute|openstack-storage) ;;
+	*) die "ROLE must be base|docker|k8s-control|k8s-worker|openstack-controller|openstack-compute|openstack-storage (got '$ROLE')" ;;
+	esac
+	valid_name "$PROFILE" ||
+		die "invalid PROFILE name: $PROFILE"
+	test -f "$profile_root/$PROFILE" ||
+		die "PROFILE is unavailable: $PROFILE (not in $profile_root)"
+	case $REPOSITORY in
+	https://*) ;;
+	*) die "REPOSITORY must be https:// (got '$REPOSITORY')" ;;
+	esac
+	valid_hostname "$HOSTNAME" ||
+		die "invalid HOSTNAME: $HOSTNAME"
+	if test "$ROOTFS" = "zfs"; then
+		test -n "$POOL" || die "POOL is required for ROOTFS=zfs"
+		valid_name "$POOL" || die "invalid POOL name: $POOL"
+		test -n "$DATASET" || die "DATASET is required for ROOTFS=zfs"
+		case $DATASET in
+		"$POOL"/*) ;;
+		*) die "DATASET must live under POOL ($POOL/...; got '$DATASET')" ;;
+		esac
+		valid_size "$BOOT_SIZE" ||
+			die "BOOT_SIZE is required for ROOTFS=zfs (e.g. 1G; got '$BOOT_SIZE')"
+	else
+		test -z "$POOL$DATASET$BOOT_SIZE" ||
+			die "POOL/DATASET/BOOT_SIZE apply to ROOTFS=zfs only"
+	fi
+	if test "$LAYOUT" = "lvm"; then
+		test -n "$VG" || die "VG is required for LAYOUT=lvm"
+		valid_name "$VG" || die "invalid VG name: $VG"
+		valid_size "$LV_SIZE" ||
+			die "LV_SIZE is required for LAYOUT=lvm (e.g. 20G or %FREE; got '$LV_SIZE')"
+	else
+		test -z "$VG$LV_SIZE" ||
+			die "VG/LV_SIZE apply to LAYOUT=lvm only"
+	fi
+}
+
+# needs_lines: kernel/filesystem prerequisites the installer must
+# satisfy. Printed by show, enforced by validate --kernel-config:
+# ext4/xfs availability is provable from a kernel .config, so an
+# unprovable claim fails closed; ZFS rides out-of-tree kmods no
+# .config can prove, so it stays a needs: warning the installer
+# must honour (kmod installed in installer env and target).
+needs_lines()
+{
+	if test "$ROOTFS" = "zfs"; then
+		printf 'needs: ZFS kmod for the target kernel in installer env and target (no .config can prove out-of-tree modules)\n'
+		printf 'needs: zpool import + dataset mount hook in installer initramfs\n'
+		return 0
+	fi
+	case $ROOTFS in
+	ext4) sym=EXT4_FS ;;
+	xfs) sym=XFS_FS ;;
+	esac
+	if test -z "$kernel_config"; then
+		printf 'needs: kernel %s=y (unproven: no --kernel-config given)\n' "$sym"
+		return 0
+	fi
+	test -f "$kernel_config" ||
+		die "kernel config not found: $kernel_config"
+	if kconfig_has "$kernel_config" "$sym"; then
+		printf 'needs: kernel %s=y (proven from %s)\n' "$sym" "$kernel_config"
+	else
+		die "kernel cannot host ROOTFS=$ROOTFS ($sym is not =y in $kernel_config)"
+	fi
+	if test "$LAYOUT" = "lvm"; then
+		printf 'needs: LVM activation (vgchange) in installer initramfs\n'
+	fi
+}
+
+cmd_validate()
+{
+	validate_lines
+	validate_manifest
+	needs_lines >/dev/null
+	printf 'saphira-install-plan: %s is a valid installation plan\n' "$manifest"
+}
+
+layout_sketch()
+{
+	printf 'disk %s:\n' "$DISK"
+	case $FIRMWARE in
+	bios|auto) printf '  p1  bios-boot partition (GRUB core, GPT)\n' ;;
+	esac
+	case $FIRMWARE in
+	uefi|auto) printf '  pN  ESP FAT32 64M (GRUB EFI binaries)\n' ;;
+	esac
+	case $LAYOUT in
+	direct)
+		printf '  pN  root %s (whole remainder)\n' "$ROOTFS" ;;
+	lvm)
+		printf '  pN  LVM PV (remainder) -> VG %s -> LV root %s %s\n' \
+			"$VG" "$ROOTFS" "$LV_SIZE" ;;
+	zpool)
+		printf '  pN  /boot ext4 %s (GRUB reads this, never ZFS)\n' "$BOOT_SIZE"
+		printf '  pN  ZFS partition (remainder) -> pool %s -> dataset %s mounted at /\n' \
+			"$POOL" "$DATASET" ;;
+	esac
+}
+
+cmd_show()
+{
+	validate_lines
+	validate_manifest
+	printf 'Saphira installation plan (%s):\n' "$manifest"
+	case $FIRMWARE in
+	auto) printf '  firmware: auto-detect at install time (BIOS boot partition + ESP both written)\n' ;;
+	*) printf '  firmware: %s\n' "$FIRMWARE" ;;
+	esac
+	printf '  system: %s (%s)\n' "$INIT" "$PROFILE"
+	printf '  root: %s on %s\n' "$ROOTFS" "$LAYOUT"
+	printf '  role: %s, host %s, repo %s\n' "$ROLE" "$HOSTNAME" "$REPOSITORY"
+	layout_sketch
+	needs_lines
+	printf 'destructive: %s will be repartitioned (confirm in the installer UI; this tool writes nothing)\n' "$DISK"
+}
+
+case $verb in
+validate) cmd_validate ;;
+show) cmd_show ;;
+esac

@@ -68,24 +68,27 @@ refused()
 # --- 1. the target matrix ----------------------------------------------
 
 printf '%s\n' "image-creator: target matrix"
-for t in bios-openrc bios-systemd bios-saphira bios-saphirad uefi-openrc uefi-systemd uefi-saphira uefi-saphirad; do
+for t in bios-openrc bios-systemd bios-saphira bios-saphirad uefi-openrc uefi-systemd uefi-saphira uefi-saphirad usb-installer; do
 	out=$(sh "$tool" list-targets)
 	printf '%s\n' "$out" | grep -q "^$t " ||
 		fail "list-targets does not offer $t"
 done
-ok "all eight targets are offered (bios/uefi x openrc/systemd x minimal/product)"
+ok "all nine targets are offered (bios/uefi x openrc/systemd x minimal/product, plus the hybrid USB installer)"
 
-# The matrix must contain exactly those eight, and nothing else.
+# The matrix must contain exactly those nine, and nothing else.
 matrix_count=$(awk '{ l = $0; sub(/#.*$/, "", l); gsub(/^[ \t]+|[ \t]+$/, "", l) } l != "" { n++ } END { print n + 0 }' "$targets")
-[ "$matrix_count" -eq 8 ] ||
-	fail "target matrix has $matrix_count rows, expected exactly 8"
-ok "the matrix is exactly eight rows: adding a target is a line, not a tool"
+[ "$matrix_count" -eq 9 ] ||
+	fail "target matrix has $matrix_count rows, expected exactly 9"
+ok "the matrix is exactly nine rows: adding a target is a line, not a tool"
 
 # Every row must be a supported pair and name a profile that exists.
 while read -r name boot init profile; do
 	case $name in '' | '#'*) continue ;; esac
-	case $boot in bios | uefi) ;; *) fail "target $name has boot=$boot" ;; esac
+	case $boot in bios | uefi | hybrid) ;; *) fail "target $name has boot=$boot" ;; esac
 	case $init in openrc | systemd) ;; *) fail "target $name has init=$init" ;; esac
+	if [ "$boot" = hybrid ] && [ "$init" != systemd ]; then
+		fail "target $name: hybrid boot requires the systemd installer environment"
+	fi
 	[ -f "$profiles/$profile" ] || fail "target $name names a missing profile: $profile"
 done < "$targets"
 ok "every row is a supported boot/init pair with a real profile"

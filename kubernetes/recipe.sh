@@ -2,7 +2,7 @@
 
 pkgname=kubernetes
 pkgver=1.37.1
-pkgrel=3
+pkgrel=4
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='Kubernetes node components (kubelet, kubeadm, kube-proxy)'
 license='Apache-2.0'

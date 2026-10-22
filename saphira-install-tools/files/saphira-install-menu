@@ -1,0 +1,269 @@
+#!/bin/sh
+#
+# saphira-install-menu: v0 guided installer menu (text UI on tty1).
+#
+# dialog/newt terminal menu over the declarative planner: firmware,
+# init, rootfs, layout, role, hostname, network, disk -> manifest ->
+# plan validation -> install-to-disk --preview -> explicit confirm ->
+# execute. v0 offers what the engine can do today (ext4 direct, base
+# role); every other choice is shown as explicitly-later with its
+# reason, never silently accepted.
+#
+# Execution backend is the existing engine (saphira-image
+# install-to-disk); this tool adds choices and confirmation, never a
+# second disk writer. DIALOG_BIN overrides the dialog binary (tests
+# stub it); TTY defaults to /dev/tty1, falling back to /dev/console
+# for serial installs.
+
+set -u
+
+DIALOG=${DIALOG_BIN:-dialog}
+# Console selection: explicit env wins (tests), else the kernel
+# cmdline (serial installs pass saphira.install_tty=/dev/console),
+# else tty1 with /dev/console fallback. Serial operation is a
+# requirement, not a debug path: dialog is TERM-driven and works
+# over a serial line unchanged.
+if test -n "${INSTALL_TTY:-}"; then
+	TTY=$INSTALL_TTY
+else
+	TTY=/dev/tty1
+	for tok in $(cat /proc/cmdline 2>/dev/null || true); do
+		case $tok in
+		saphira.install_tty=*) TTY=${tok#saphira.install_tty=} ;;
+		esac
+	done
+fi
+test -c "$TTY" || TTY=/dev/console
+export TERM=${TERM:-linux}
+# Test-only overrides (never set on real media; the suite stubs dialog
+# and has no disks, interfaces or engine):
+#   SAPHIRA_MENU_SKIP_NET=1  skip network setup (NETCONF=test:dhcp)
+#   SAPHIRA_MENU_DISK=PATH   skip disk enumeration, use PATH
+#   SAPHIRA_MENU_NOEXEC=1    print the engine command, do not run it
+
+die()
+{
+	printf 'saphira-install-menu: %s\n' "$*" >&2
+	exit 1
+}
+
+command -v "$DIALOG" >/dev/null 2>&1 || die "menu backend missing: $DIALOG"
+command -v saphira-install-plan >/dev/null 2>&1 || die "planner missing"
+command -v saphira-image >/dev/null 2>&1 || die "install engine missing: saphira-image"
+
+backtitle="Saphira Linux installer (v0 text UI)"
+
+menu_pick()
+{
+	title=$1 text=$2
+	shift 2
+	"$DIALOG" --backtitle "$backtitle" --title "$title" \
+		--menu "$text" 0 0 0 "$@" 2>&1 >"$TTY" <"$TTY" || die "cancelled at $title (nothing was written)"
+}
+
+menu_info()
+{
+	"$DIALOG" --backtitle "$backtitle" --title "$1" --msgbox "$2" 0 0 <"$TTY" >"$TTY" || die "cancelled (nothing was written)"
+}
+
+menu_yesno()
+{
+	"$DIALOG" --backtitle "$backtitle" --title "$1" --yesno "$2" 0 0 <"$TTY" >"$TTY"
+}
+
+menu_input()
+{
+	"$DIALOG" --backtitle "$backtitle" --title "$1" --inputbox "$2" 0 0 "$3" 2>&1 >"$TTY" <"$TTY" || die "cancelled at $1 (nothing was written)"
+}
+
+# --- step 1: firmware --------------------------------------------------
+if test -d /sys/firmware/efi; then detected=uefi; else detected=bios; fi
+FIRMWARE=$(menu_pick "Firmware" "Boot mode (detected: $detected)." \
+	auto "Automatic ($detected)" \
+	bios "Legacy BIOS" \
+	uefi "UEFI")
+test "$FIRMWARE" = "auto" && FIRMWARE=$detected
+
+# --- step 2: init system ------------------------------------------------
+INITPICK=$(menu_pick "Operating system" "Which Saphira to install?" \
+	openrc "Saphira (OpenRC)" \
+	systemd "SaphiraD (systemd)")
+INIT=$INITPICK
+
+# --- step 3: root filesystem (v0: ext4 only) ---------------------------
+while :; do
+	ROOTFS=$(menu_pick "Root filesystem" "Filesystem for / (the kernel carries all three; only ext4 installs today)." \
+		ext4 "ext4 (supported)" \
+		xfs "XFS (later: engine path pending)" \
+		zfs "ZFS (later: pool/import path pending)")
+	case $ROOTFS in
+	ext4) break ;;
+	*) menu_info "Not yet" "$ROOTFS root is validated by the planner but the install engine cannot create it yet. Choose ext4 for v0." ;;
+	esac
+done
+
+# --- step 4: layout (v0: direct only) ----------------------------------
+while :; do
+	LAYOUT=$(menu_pick "Storage layout" "How / is provisioned." \
+		direct "Direct partition (supported)" \
+		lvm "LVM2 (later: LV flow pending)" \
+		zpool "ZFS pool (later: pool flow pending)")
+	case $LAYOUT in
+	direct) break ;;
+	*) menu_info "Not yet" "$LAYOUT layout is validated by the planner but the install engine cannot create it yet." ;;
+	esac
+done
+
+# --- step 5: role (v0: base only) --------------------------------------
+while :; do
+	ROLE=$(menu_pick "Deployment role" "What this machine will be." \
+		base "Base system (supported)" \
+		docker "Docker host (later)" \
+		k8s-control "Kubernetes control plane (later)" \
+		k8s-worker "Kubernetes worker (later)" \
+		openstack-controller "OpenStack controller (later)" \
+		openstack-compute "OpenStack compute (later)" \
+		openstack-storage "OpenStack storage (later)")
+	case $ROLE in
+	base) break ;;
+	*) menu_info "Not yet" "The $ROLE role arrives after base installation itself is proven. Choose base for v0." ;;
+	esac
+done
+case $INIT in
+openrc) PROFILE=saphira-openrc ;;
+systemd) PROFILE=saphirad-systemd ;;
+esac
+
+# --- step 6: hostname ----------------------------------------------------
+while :; do
+	HOSTNAME=$(menu_input "Hostname" "Machine hostname (letters, digits, hyphens):" "saphira-new")
+	case $HOSTNAME in
+	''|*[!A-Za-z0-9-]*|-*|*-) menu_info "Invalid" "Hostname must be letters, digits and hyphens, not starting or ending with a hyphen." ;;
+	*) break ;;
+	esac
+done
+
+# --- step 7: network (installer env needs it for packages) ---------------
+if test "${SAPHIRA_MENU_SKIP_NET:-0}" = "1"; then
+	NETCONF="test:dhcp"
+else
+NETMODE=$(menu_pick "Installer network" "The installer fetches packages from the repository, so it needs a network path." \
+	dhcp "DHCP on first wired interface" \
+	static "Static address (you enter CIDR, gateway, DNS)" \
+	skip "Skip (offline install is not supported in v0)")
+case $NETMODE in
+dhcp)
+	iface=
+	for d in /sys/class/net/e*; do
+		test -d "$d" || continue
+		case $d in *lo*) continue ;; esac
+		iface=$(basename "$d")
+		break
+	done
+	test -n "$iface" || die "no wired interface found for DHCP"
+	dhcpcd -q "$iface" >/dev/null 2>&1 ||
+		die "DHCP failed on $iface (check the cable, then re-run)"
+	NETCONF="$iface:dhcp"
+	;;
+static)
+	SIFACE=$(menu_input "Interface" "Interface name for the static address:" "eth0")
+	test -d "/sys/class/net/$SIFACE" || die "no such interface: $SIFACE"
+	SCIDR=$(menu_input "Address" "Static address in CIDR form (e.g. 192.0.2.10/24):" "")
+	SGW=$(menu_input "Gateway" "Default gateway address:" "")
+	SDNS=$(menu_input "DNS" "DNS servers, space separated:" "9.9.9.9 149.112.112.112")
+	ip addr replace "$SCIDR" dev "$SIFACE" || die "cannot assign $SCIDR to $SIFACE"
+	ip link set dev "$SIFACE" up
+	ip route replace default via "$SGW" dev "$SIFACE" || die "cannot route via $SGW"
+	printf '%s\n' "$SDNS" | tr ' ' '\n' | while read -r ns; do
+		test -n "$ns" && printf 'nameserver %s\n' "$ns"
+	done > /etc/resolv.conf
+	NETCONF="$SIFACE:static:$SCIDR:$SGW"
+	;;
+*) die "offline install is not supported in v0 (re-run and choose DHCP or static)" ;;
+esac
+fi
+
+# --- step 8: disk (stable by-id names; installer USB excluded) ------------
+if test -n "${SAPHIRA_MENU_DISK:-}"; then
+	DISK=$SAPHIRA_MENU_DISK
+else
+rootdev=$(findmnt -no SOURCE / 2>/dev/null || true)
+disks=
+for d in /dev/disk/by-id/*; do
+	test -e "$d" || continue
+	case $d in *-part*|*CD-ROM*|*cdrom*) continue ;; esac
+	dev=$(readlink -f "$d")
+	case " $disks " in *" $dev "*) continue ;; esac
+	case $rootdev in
+	"$dev"*|*"($dev)"*) continue ;;
+	esac
+	size=$(blockdev --getsize64 "$dev" 2>/dev/null || echo 0)
+	disks="$disks $d $dev/$((size / 1000000000))GB off"
+done
+test -n "$disks" || die "no installable disks found"
+# shellcheck disable=SC2086
+DISKID=$(menu_pick "Target disk" "EVERYTHING on the chosen disk will be destroyed. The installer USB is excluded." $disks)
+DISK=$(readlink -f "$DISKID")
+fi
+
+# --- step 9: manifest + plan + preview ------------------------------------
+MANIFEST=${SAPHIRA_MENU_MANIFEST:-/run/saphira-install.conf}
+REPOSITORY=${SAPHIRA_REPOSITORY:-https://packages.saphira.vm2.uk/hatched}
+{
+	printf 'PLAN_VERSION=1\nFIRMWARE=%s\nINIT=%s\nROOTFS=%s\nLAYOUT=%s\n' \
+		"$FIRMWARE" "$INIT" "$ROOTFS" "$LAYOUT"
+	printf 'DISK=%s\nROLE=%s\nPROFILE=%s\nREPOSITORY=%s\nHOSTNAME=%s\n' \
+		"$DISK" "$ROLE" "$PROFILE" "$REPOSITORY" "$HOSTNAME"
+} > "$MANIFEST"
+saphira-install-plan validate "$MANIFEST" ||
+	die "manifest refused (nothing was written)"
+PLAN=$(saphira-install-plan show "$MANIFEST")
+# Base role installs the product profiles (minimal-* targets are for
+# rescue/test images, never operator installs).
+case $INIT in
+openrc) TARGET="$FIRMWARE-saphira" ;;
+systemd) TARGET="$FIRMWARE-saphirad" ;;
+esac
+menu_info "Installation plan" "$PLAN"
+PREVIEW=$(saphira-image install-to-disk --target "$TARGET" --device "$DISK" \
+	--hostname "$HOSTNAME" --repository "$REPOSITORY" --netconf "$NETCONF" \
+	--preview 2>&1) || die "engine preview failed (nothing was written)"
+menu_info "Engine preview" "$PREVIEW"
+
+# --- step 10: explicit destructive confirmation ---------------------------
+menu_yesno "CONFIRM DESTRUCTION" "Write $PROFILE ($INIT) onto $DISK, destroying ALL data on that disk?" ||
+	die "aborted by operator (nothing was written)"
+menu_yesno "Really install?" "Last chance: $DISK will be repartitioned and $HOSTNAME installed now." ||
+	die "aborted by operator (nothing was written)"
+
+# Storage tools for non-ext4/direct targets come from the repository
+# (the installer has network by requirement), never from the USB
+# payload: the payload stays small and never IS a ZFS/LVM system
+# merely because it can install one.
+storage_pkgs=
+case $ROOTFS in
+xfs) storage_pkgs="$storage_pkgs xfsprogs" ;;
+zfs) storage_pkgs="$storage_pkgs saphira-zfs-userspace" ;;
+esac
+case $LAYOUT in
+lvm) storage_pkgs="$storage_pkgs lvm2" ;;
+esac
+if test -n "$storage_pkgs"; then
+	if test "${SAPHIRA_MENU_NOEXEC:-0}" = "1"; then
+		printf 'NOEXEC apk add%s\n' "$storage_pkgs"
+	else
+		# shellcheck disable=SC2086
+		apk add $storage_pkgs ||
+			die "cannot fetch storage tools ($storage_pkgs): check the installer network"
+	fi
+fi
+
+if test "${SAPHIRA_MENU_NOEXEC:-0}" = "1"; then
+	printf 'NOEXEC saphira-image install-to-disk --target %s --device %s --hostname %s --repository %s --netconf %s\n' \
+		"$TARGET" "$DISK" "$HOSTNAME" "$REPOSITORY" "$NETCONF"
+	exit 0
+fi
+saphira-image install-to-disk --target "$TARGET" --device "$DISK" \
+	--hostname "$HOSTNAME" --repository "$REPOSITORY" --netconf "$NETCONF" ||
+	die "installation failed (see output above; target disk is partially written)"
+menu_info "Done" "$HOSTNAME installed on $DISK. Remove the installer media and reboot; firstboot completes setup on the console."

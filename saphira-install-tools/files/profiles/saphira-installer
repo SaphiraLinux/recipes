@@ -32,6 +32,10 @@ findutils
 mawk
 
 # Storage: partition tables, filesystem creation, discovery, mounting.
+# Only the ext4/direct tooling ships here: XFS/LVM/ZFS creation tools
+# are apk-added by the menu per manifest (the installer has network by
+# requirement), so the payload stays small and clean-image guards keep
+# holding (the installer installs ZFS targets without BEING one).
 util-linux
 e2fsprogs
 dosfstools
@@ -66,6 +70,13 @@ vim
 # the installer, for BIOS and UEFI alike.
 grub
 efibootmgr
+
+# The v0 guided menu and the engine it drives. dialog is the text UI
+# backend (serial-safe); saphira-image-creator owns partitioning,
+# filesystems and bootloaders, so the menu shells out to it instead of
+# reimplementing disk writing.
+dialog
+saphira-image-creator
 
 # The canonical installation tooling itself. It is what turns a profile and
 # an empty directory into a coherent system, so the installer carries the

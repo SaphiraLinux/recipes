@@ -1,0 +1,23 @@
+# Example Saphira installation manifest (see saphira-install-plan(5)).
+# Strict KEY=VALUE, bare words, no quoting. Unknown keys fail
+# validation; credentials never belong here (firstboot sets them).
+PLAN_VERSION=1
+FIRMWARE=auto
+INIT=systemd
+ROOTFS=ext4
+LAYOUT=direct
+DISK=/dev/sda
+ROLE=base
+PROFILE=saphirad-systemd
+REPOSITORY=https://packages.saphira.vm2.uk/hatched
+HOSTNAME=saphira-new
+# ZFS example (uncomment as a block; LAYOUT must become zpool):
+#ROOTFS=zfs
+#LAYOUT=zpool
+#POOL=tank
+#DATASET=tank/ROOTS/saphirad
+#BOOT_SIZE=1G
+# LVM example (uncomment as a block; ROOTFS stays ext4 or xfs):
+#LAYOUT=lvm
+#VG=saphira
+#LV_SIZE=%FREE
