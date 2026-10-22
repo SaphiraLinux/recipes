@@ -1,0 +1,16 @@
+# php85-fpm named split: the FPM SAPI binary, its default command name,
+# pool configuration, init units (both formats, never enabled at install),
+# logrotate fragment and log directory. The php-fpm:103 identity fragment
+# AND the fhs migration fragment both stay in main: the publish gate
+# refuses cross-package identity moves, and fhs non-root owners must
+# resolve in the same output's accounts.d. The fpm split auto-pins main,
+# so identity + layout converge wherever the daemon runs. Shared
+# extensions, php.ini and conf.d stay in main too.
+usr/sbin/php-fpm85
+usr/sbin/php-fpm
+etc/php85/php-fpm.conf
+etc/php85/php-fpm.d
+etc/init.d/php-fpm85
+usr/lib/systemd/system/php-fpm85.service
+etc/logrotate.d/php-fpm
+var/log/php85

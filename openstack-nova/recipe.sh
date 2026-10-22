@@ -25,7 +25,7 @@
 
 pkgname=openstack-nova
 pkgver=34.0.0
-pkgrel=3
+pkgrel=4
 # r3: nova-api.service gains the missing NOVA_API_WORKERS default and
 # moves EnvironmentFile last so operator conf.d overrides unit
 # defaults (reverse order silently ignored operator BIND/CONF; empty
@@ -129,6 +129,15 @@ recipe_build()
 	for f in "$RECIPE_DIR"/files/nova-*.initd "$RECIPE_DIR"/files/nova-*.confd; do
 		sh -n "$f" || return 1
 	done
+	# the argv sanitizer must at least compile (in-memory: the
+	# recipe tree is mounted read-only, so py_compile's
+	# __pycache__ write would fail the build)
+	python3 -c "compile(open('$RECIPE_DIR/files/gunicorn.conf.py').read(), 'gunicorn.conf.py', 'exec')" || return 1
+	# the sudoers fragment must be a single non-empty rule set
+	# ending in a newline (sudo silently ignores a fragment whose
+	# last line is unterminated)
+	[ -s "$RECIPE_DIR/files/sudoers.d/nova" ] || return 1
+	[ -z "$(tail -c 1 "$RECIPE_DIR/files/sudoers.d/nova")" ] || return 1
 }
 
 recipe_install()
@@ -197,6 +206,13 @@ recipe_install()
 		"$PKGDEST/usr/share/saphira/fhs.d/openstack-nova"
 	install -D -m 0644 "$RECIPE_DIR/files/logrotate.d/nova" \
 		"$PKGDEST/etc/logrotate.d/nova"
+	# argv sanitizer for the gunicorn-served API (loaded via --config
+	# by the units above) and the nova privilege boundary (sudoers
+	# fragment, installed with sudo's required mode).
+	install -D -m 0644 "$RECIPE_DIR/files/gunicorn.conf.py" \
+		"$PKGDEST/etc/nova/gunicorn.conf.py"
+	install -D -m 0440 "$RECIPE_DIR/files/sudoers.d/nova" \
+		"$PKGDEST/etc/sudoers.d/nova"
 
 	install -D -m 0644 "$SRC/LICENSE" \
 		"$PKGDEST/usr/share/licenses/openstack-nova/LICENSE"
@@ -217,8 +233,10 @@ recipe_install()
 		usr/lib/python3.14/site-packages/nova/db/api/migrations \
 		usr/lib/python3.14/site-packages/nova/db/main/migrations \
 		etc/nova/api-paste.ini \
+		etc/nova/gunicorn.conf.py \
 		etc/nova/rootwrap.conf \
 		etc/nova/rootwrap.d/compute.filters \
+		etc/sudoers.d/nova \
 		etc/init.d/nova-api \
 		etc/init.d/nova-compute \
 		etc/conf.d/nova-api \

@@ -15,5 +15,12 @@
 # check_pidfile: live pid refuses start, dead pid overwritten;
 # socket.c bind_unix_address: unlinks before bind). Service files
 # only ensure the directory - no pid/socket cleanup anywhere.
+#
+# Mode is 0700 root:root, not 0755: chrony.conf(5) requires the
+# command-socket directory be accessible only to trusted users and
+# disables the socket on world access. This service runs as root
+# (-u root), so root-only is the correct arrangement (0750
+# chrony:chrony would be the alternative for an unprivileged user -
+# a separate improvement, not this fix).
 
-dir /var/run/chrony 0755 root root
+dir /var/run/chrony 0700 root root

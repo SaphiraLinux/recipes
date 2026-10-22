@@ -18,7 +18,7 @@ description="OpenStack Dashboard (Horizon)"
 : "${HORIZON_WORKERS:=$(nproc 2>/dev/null || echo 4)}"
 
 command="/usr/bin/gunicorn"
-command_args="--name horizon --bind ${HORIZON_BIND} --workers ${HORIZON_WORKERS} --pid /var/run/horizon/horizon.pid --pythonpath /etc/horizon --env DJANGO_SETTINGS_MODULE=openstack_dashboard.settings openstack_dashboard.wsgi:application"
+command_args="--bind ${HORIZON_BIND} --workers ${HORIZON_WORKERS} --pid /var/run/horizon/horizon.pid --pythonpath /etc/horizon --env DJANGO_SETTINGS_MODULE=openstack_dashboard.settings openstack_dashboard.wsgi:application"
 command_user="horizon:horizon"
 command_background="yes"
 pidfile="/var/run/horizon/horizon.pid"

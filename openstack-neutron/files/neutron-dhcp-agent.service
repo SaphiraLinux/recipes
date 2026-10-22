@@ -8,7 +8,9 @@ Type=simple
 User=neutron
 Group=neutron
 EnvironmentFile=-/etc/conf.d/neutron-dhcp-agent
-ExecStart=/usr/bin/neutron-dhcp-agent
+# Explicit config: the agent must read the operator's neutron.conf
+# (transport, root_helper) rather than whatever defaults apply.
+ExecStart=/usr/bin/neutron-dhcp-agent --config-file /etc/neutron/neutron.conf
 Restart=on-failure
 KillMode=mixed
 TimeoutStopSec=10

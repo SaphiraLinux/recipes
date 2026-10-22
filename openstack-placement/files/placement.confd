@@ -7,11 +7,7 @@
 # Address and port gunicorn listens on. Point this at a TLS-terminating
 # proxy (nginx/haproxy) for production; leave the default for a local
 # listener behind such a proxy.
-#PLACEMENT_BIND="127.0.0.1:8780"
+#PLACEMENT_BIND="127.0.0.1:8778"
 
 # Number of gunicorn worker processes.
 #PLACEMENT_WORKERS="4"
-
-# Path to the Placement configuration file (render from
-# /usr/share/placement/config-generator.conf, then edit).
-#PLACEMENT_CONF="/etc/placement/placement.conf"

@@ -2,7 +2,7 @@
 
 pkgname=iptables
 pkgver=1.8.13
-pkgrel=1
+pkgrel=2
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="Netfilter packet filter administration (OpenStack Neutron dependency)"
 license='GPL-2.0-or-later'
@@ -41,4 +41,19 @@ recipe_build()
 recipe_install()
 {
 	make -C "$BUILDDIR" DESTDIR="$PKGDEST" install
+	# Saphira is nftables-native: the 7.3 line carries no legacy table
+	# modules at all (proven live), and the legacy cores are now unset on
+	# every line. Upstream links the bare v4/v6 names at the legacy
+	# multiplexer; repoint them at the nft multiplexer so `iptables` means
+	# a working backend everywhere. The -legacy suffixed names keep
+	# pointing at legacy-multi (explicit opt-in, unchanged).
+	for link in iptables iptables-restore iptables-save \
+		ip6tables ip6tables-restore ip6tables-save; do
+		ln -sf xtables-nft-multi "$PKGDEST/usr/sbin/$link"
+	done
+	# Proof: the default entry points resolve to the nft multiplexer.
+	for link in iptables ip6tables; do
+		[ "$(readlink "$PKGDEST/usr/sbin/$link")" = "xtables-nft-multi" ] ||
+			{ echo "ERROR: $link does not resolve to nft" >&2; return 1; }
+	done
 }

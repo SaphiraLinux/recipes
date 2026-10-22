@@ -19,7 +19,7 @@
 
 pkgname=openstack-placement
 pkgver=16.0.0
-pkgrel=1
+pkgrel=2
 pkgarch=noarch
 pkgdesc='OpenStack Placement service: resource tracking API'
 license='Apache-2.0'
@@ -72,6 +72,10 @@ recipe_build()
 	# syntax-check the shipped init definitions
 	sh -n "$RECIPE_DIR/files/placement.initd" || return 1
 	sh -n "$RECIPE_DIR/files/placement.confd" || return 1
+	# the argv sanitizer must at least compile (in-memory: the
+	# recipe tree is mounted read-only, so py_compile's
+	# __pycache__ write would fail the build)
+	python3 -c "compile(open('$RECIPE_DIR/files/gunicorn.conf.py').read(), 'gunicorn.conf.py', 'exec')" || return 1
 }
 
 recipe_install()
@@ -125,6 +129,10 @@ recipe_install()
 		"$PKGDEST/usr/share/saphira/fhs.d/openstack-placement"
 	install -D -m 0644 "$RECIPE_DIR/files/logrotate.d/placement" \
 		"$PKGDEST/etc/logrotate.d/placement"
+	# argv sanitizer for the gunicorn-served API (loaded via --config
+	# by the units above).
+	install -D -m 0644 "$RECIPE_DIR/files/gunicorn.conf.py" \
+		"$PKGDEST/etc/placement/gunicorn.conf.py"
 
 	install -D -m 0644 "$SRC/LICENSE" \
 		"$PKGDEST/usr/share/licenses/openstack-placement/LICENSE"
@@ -139,6 +147,7 @@ recipe_install()
 		usr/lib/python3.14/site-packages/placement/db/sqlalchemy/alembic \
 		usr/share/placement/config-generator.conf \
 		usr/share/placement/policy-generator.conf \
+		etc/placement/gunicorn.conf.py \
 		etc/init.d/placement \
 		etc/conf.d/placement \
 		usr/lib/systemd/system/placement.service \

@@ -23,7 +23,7 @@
 
 pkgname=openstack-neutron
 pkgver=29.0.0
-pkgrel=1
+pkgrel=2
 pkgarch=noarch
 pkgdesc='OpenStack Networking service (Neutron): API, RPC, OVS/DHCP/L3/metadata agents'
 license='Apache-2.0'
@@ -113,6 +113,13 @@ recipe_build()
 	for f in "$RECIPE_DIR"/files/neutron-*.initd "$RECIPE_DIR"/files/neutron-*.confd; do
 		sh -n "$f" || return 1
 	done
+	# the argv sanitizer must at least compile (in-memory: the
+	# recipe tree is mounted read-only, so py_compile's
+	# __pycache__ write would fail the build)
+	python3 -c "compile(open('$RECIPE_DIR/files/gunicorn.conf.py').read(), 'gunicorn.conf.py', 'exec')" || return 1
+	# the sudoers fragment must be non-empty and newline-terminated
+	[ -s "$RECIPE_DIR/files/sudoers.d/neutron" ] || return 1
+	[ -z "$(tail -c 1 "$RECIPE_DIR/files/sudoers.d/neutron")" ] || return 1
 }
 
 recipe_install()
@@ -182,6 +189,13 @@ recipe_install()
 		"$PKGDEST/usr/share/saphira/fhs.d/openstack-neutron"
 	install -D -m 0644 "$RECIPE_DIR/files/logrotate.d/neutron" \
 		"$PKGDEST/etc/logrotate.d/neutron"
+	# argv sanitizer for the gunicorn-served API (loaded via --config
+	# by the api unit) and the neutron privilege boundary (sudoers
+	# fragment, installed with sudo's required mode).
+	install -D -m 0644 "$RECIPE_DIR/files/gunicorn.conf.py" \
+		"$PKGDEST/etc/neutron/gunicorn.conf.py"
+	install -D -m 0440 "$RECIPE_DIR/files/sudoers.d/neutron" \
+		"$PKGDEST/etc/sudoers.d/neutron"
 
 	install -D -m 0644 "$SRC/LICENSE" \
 		"$PKGDEST/usr/share/licenses/openstack-neutron/LICENSE"
@@ -200,7 +214,9 @@ recipe_install()
 		usr/lib/python3.14/site-packages/neutron/wsgi/api.py \
 		usr/lib/python3.14/site-packages/neutron/db/migration/alembic_migrations \
 		etc/neutron/api-paste.ini \
+		etc/neutron/gunicorn.conf.py \
 		etc/neutron/rootwrap.conf \
+		etc/sudoers.d/neutron \
 		etc/neutron/plugins/ml2/ml2_conf.ini \
 		etc/init.d/neutron-api \
 		etc/init.d/neutron-openvswitch-agent \

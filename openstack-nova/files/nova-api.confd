@@ -11,6 +11,3 @@
 
 # Number of gunicorn worker processes.
 #NOVA_API_WORKERS="4"
-
-# Path to the Nova configuration file.
-#NOVA_API_CONF="/etc/nova/nova.conf"

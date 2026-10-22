@@ -19,6 +19,7 @@ start_pre()
 {
 	# /var/run is persistent by design; the daemon recreates its own
 	# pid/socket (pid liveness-checked, socket unlinked before bind),
-	# so only the directory is ensured here.
-	checkpath -d -m 0755 /var/run/chrony
+	# so only the directory is ensured here. Mode 0700 root:root:
+	# chrony disables its command socket on world access.
+	checkpath -d -m 0700 /var/run/chrony
 }

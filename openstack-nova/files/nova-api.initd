@@ -15,10 +15,9 @@ description="OpenStack Compute (Nova) API"
 
 : "${NOVA_API_BIND:=127.0.0.1:8774}"
 : "${NOVA_API_WORKERS:=$(nproc 2>/dev/null || echo 4)}"
-: "${NOVA_API_CONF:=/etc/nova/nova.conf}"
 
 command="/usr/bin/gunicorn"
-command_args="--name nova-api --bind ${NOVA_API_BIND} --workers ${NOVA_API_WORKERS} --pid /var/run/nova/nova-api.pid --config ${NOVA_API_CONF} nova.wsgi.osapi_compute:application"
+command_args="--config /etc/nova/gunicorn.conf.py --bind ${NOVA_API_BIND} --workers ${NOVA_API_WORKERS} --pid /var/run/nova/nova-api.pid nova.wsgi.osapi_compute:application"
 command_user="nova:nova"
 command_background="yes"
 pidfile="/var/run/nova/nova-api.pid"

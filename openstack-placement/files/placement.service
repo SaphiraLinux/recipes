@@ -8,15 +8,20 @@ Wants=network-online.target
 Type=notify
 User=placement
 Group=placement
+# Defaults first, operator file last: EnvironmentFile assignments win
+# over Environment=. WORKERS defaults to 4 (an empty default is a
+# boot failure: gunicorn --workers '' exits 2). --name is gone:
+# gunicorn 26 removed it. --config loads the argv sanitizer, NEVER
+# placement.conf (an INI file gunicorn would import as Python and die
+# on with SyntaxError). Port is upstream's 8778, not a typo for 8780.
 EnvironmentFile=-/etc/conf.d/placement
-Environment=PLACEMENT_BIND=127.0.0.1:8780
-Environment=PLACEMENT_CONF=/etc/placement/placement.conf
+Environment=PLACEMENT_BIND=127.0.0.1:8778
+Environment=PLACEMENT_WORKERS=4
 RuntimeDirectory=placement
 RuntimeDirectoryMode=0750
-ExecStart=/usr/bin/gunicorn --name placement \
+ExecStart=/usr/bin/gunicorn --config /etc/placement/gunicorn.conf.py \
 	--bind ${PLACEMENT_BIND} --workers ${PLACEMENT_WORKERS} \
 	--pid /var/run/placement/placement.pid \
-	--config ${PLACEMENT_CONF} \
 	placement.wsgi.api:application
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure

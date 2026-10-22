@@ -1,0 +1,22 @@
+#!/sbin/openrc-run
+
+description="Docker Application Container Engine"
+
+# Mirrors the approved systemd unit (ExecStart=/usr/bin/dockerd):
+# foreground under supervise-daemon. Neither init wraps the other;
+# nothing is auto-enabled at install.
+command="/usr/bin/dockerd"
+command_args="--containerd=/run/containerd/containerd.sock"
+supervisor="supervise-daemon"
+
+depend()
+{
+	use net
+	need localmount containerd
+}
+
+start_pre()
+{
+	checkpath -d -m 0711 /var/lib/docker
+	checkpath -d -m 0755 /run/docker
+}

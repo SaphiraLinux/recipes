@@ -161,6 +161,53 @@ def _seed_atom_satisfies(apk: str, candidate: str, atom: str) -> bool:
     return rel == "<"
 
 
+CA_BUNDLE_REFRESH_COMMAND = "/usr/sbin/update-ca-certificates"
+
+_GENERATED_SCRIPT_BOILERPLATE = frozenset({
+    "#!/bin/sh", "set -eu", "set -e", "exit 0",
+})
+
+
+def _generated_hook_effective_lines(dump: str) -> list[str]:
+    """Effective shell lines from a package's generated post-install and
+    post-upgrade scripts, as shown by apk adbdump (2-space keys, deeper
+    indented block-scalar bodies). Seed assembly runs no package scripts,
+    so the seed gate must account for every effective line. Comments,
+    blanks and the generated boilerplate (shebang, set -eu, bare exit 0)
+    carry no effect. post-deinstall is out of scope: deinstall never runs
+    during seed assembly. Pure (unit-tested)."""
+    lines: list[str] = []
+    in_hook = False
+    for raw in dump.splitlines():
+        if re.fullmatch(r"  (post-install|post-upgrade): \|", raw):
+            in_hook = True
+            continue
+        if not in_hook:
+            continue
+        if re.match(r"^  \S", raw):
+            # Next adbdump key (e.g. post-deinstall): hook region ends.
+            in_hook = False
+            continue
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped in _GENERATED_SCRIPT_BOILERPLATE:
+            continue
+        lines.append(stripped)
+    return lines
+
+
+def _hook_refreshes_ca_bundle_only(dump: str) -> bool:
+    """Whether a seed package's install-time scripts do nothing but
+    rebuild the CA bundle. Seed assembly already runs exactly that step
+    explicitly (root-init CA bundle), so the effect is reproduced and the
+    package is covered. Bare invocations only: any argument, pipe,
+    redirect or second command fails closed. Pure (unit-tested)."""
+    lines = _generated_hook_effective_lines(dump)
+    return bool(lines) and all(
+        line == CA_BUNDLE_REFRESH_COMMAND for line in lines)
+
+
 def _seed_drift_names(seed_names: list[str], receipt_nvrs: dict[str, str],
                       live_filenames: list[str]) -> list[str]:
     """Seed names whose base receipt no longer resolves against the live
@@ -1054,6 +1101,7 @@ class Transaction:
                 "scripts": has_scripts,
                 "fhs": "usr/share/saphira/fhs.d/" in dump,
                 "accounts": "usr/share/saphira/accounts.d/" in dump,
+                "ca_refresh_only": _hook_refreshes_ca_bundle_only(dump),
             }
         return summary
 
@@ -1065,16 +1113,19 @@ class Transaction:
         # roots cannot satisfy script interpreters or helpers that only
         # exist later in seed order (first proven by baselayout r17:
         # #!/bin/sh with no /bin/sh yet, then ensure-fhs needing sed).
-        # Only fhs.d convergence is reproduced explicitly below; any
+        # Reproduced explicitly below are fhs.d convergence and the CA
+        # bundle refresh (root-init runs update-ca-certificates); any
         # other script-bearing seed package fails closed here instead
         # of diverging silently.
         script_summary = self._seed_script_summary()
         uncovered = sorted(
             name for name, info in script_summary.items()
-            if info["scripts"] and (info["accounts"] or not info["fhs"]))
+            if info["scripts"] and (info["accounts"] or not info["fhs"])
+            and not info["ca_refresh_only"])
         if uncovered:
             die("seed packages carry install scripts with effects seed assembly"
-                " does not reproduce (only fhs.d convergence runs here): "
+                " does not reproduce (only fhs.d convergence and the CA bundle"
+                " refresh run here): "
                 + ", ".join(f"{name} ({script_summary[name]['filename']})"
                             for name in uncovered))
         # /bin/sh for the root-initialization sessions below and the

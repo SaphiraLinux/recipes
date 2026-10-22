@@ -18,7 +18,7 @@
 
 pkgname=openstack-glance
 pkgver=33.0.0
-pkgrel=1
+pkgrel=2
 pkgarch=noarch
 pkgdesc='OpenStack Image service (Glance): API, manage, scrubber, cache tools'
 license='Apache-2.0'
@@ -89,6 +89,10 @@ recipe_build()
 	# syntax-check the shipped init definitions
 	sh -n "$RECIPE_DIR/files/glance.initd" || return 1
 	sh -n "$RECIPE_DIR/files/glance.confd" || return 1
+	# the argv sanitizer must at least compile (in-memory: the
+	# recipe tree is mounted read-only, so py_compile's
+	# __pycache__ write would fail the build)
+	python3 -c "compile(open('$RECIPE_DIR/files/gunicorn.conf.py').read(), 'gunicorn.conf.py', 'exec')" || return 1
 }
 
 recipe_install()
@@ -160,6 +164,10 @@ recipe_install()
 		"$PKGDEST/usr/share/saphira/fhs.d/openstack-glance"
 	install -D -m 0644 "$RECIPE_DIR/files/logrotate.d/glance" \
 		"$PKGDEST/etc/logrotate.d/glance"
+	# argv sanitizer for the gunicorn-served API (loaded via --config
+	# by the units above).
+	install -D -m 0644 "$RECIPE_DIR/files/gunicorn.conf.py" \
+		"$PKGDEST/etc/glance/gunicorn.conf.py"
 
 	install -D -m 0644 "$SRC/LICENSE" \
 		"$PKGDEST/usr/share/licenses/openstack-glance/LICENSE"
@@ -181,6 +189,7 @@ recipe_install()
 		usr/lib/python3.14/site-packages/glance/wsgi/api.py \
 		usr/lib/python3.14/site-packages/glance/db/sqlalchemy/alembic_migrations \
 		etc/glance/glance-api-paste.ini \
+		etc/glance/gunicorn.conf.py \
 		etc/glance/glance-api.conf.sample \
 		etc/glance/schema-image.json \
 		etc/init.d/glance \

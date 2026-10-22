@@ -1,0 +1,4 @@
+# php85-cgi named split: the CGI SAPI binary only. Deliberately no
+# web-server handler configuration is shipped or enabled: the binary is
+# available for explicit use, nothing wires it up automatically.
+usr/bin/php-cgi85

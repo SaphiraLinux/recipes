@@ -1,0 +1,24 @@
+#!/sbin/openrc-run
+
+description="containerd container runtime"
+
+# Mirrors the approved systemd unit (ExecStart=/usr/bin/containerd):
+# foreground under supervise-daemon. Neither init wraps the other;
+# nothing is auto-enabled at install.
+command="/usr/bin/containerd"
+command_args="--config /etc/containerd/config.toml"
+supervisor="supervise-daemon"
+
+depend()
+{
+	use net
+	need localmount
+}
+
+start_pre()
+{
+	# overlay snapshotter needs the module (/usr/sbin on non-usrmerged
+	# Saphira); state/socket dir ensured.
+	/usr/sbin/modprobe overlay
+	checkpath -d -m 0755 /run/containerd
+}

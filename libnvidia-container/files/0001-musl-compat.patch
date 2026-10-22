@@ -1,0 +1,121 @@
+musl libc compatibility (Saphira port).
+
+- nvc.c: gnu/lib-names.h is glibc-only; guard it and define LD_SO as the
+  musl loader (marker string only, no logic change; x86-64 generation).
+- nvc_info.c: libgen.h for basename (mutable buffers only here).
+- utils.c, nvc_mount.c: basename() sites taking string literals
+  (__FILE__, "params"/"version"/"registry") use the strrchr idiom:
+  POSIX basename may modify its argument. Safe under GNU too.
+- nvc.c, nvc_info.c, nvc_ldcache.c: secure_getenv shim (never setuid).
+- rpc.h: include <signal.h> for struct sigaction/SIG_IGN/sigaction()
+  used by call_rpc (arrived transitively on glibc).
+
+diff -Naur a/src/nvc.c b/src/nvc.c
+--- a/src/nvc.c	2026-07-21 00:31:40.000000000 +0000
++++ b/src/nvc.c	2026-10-21 04:07:10.814125371 +0000
+@@ -2,7 +2,12 @@
+  * Copyright (c) 2017-2018, NVIDIA CORPORATION. All rights reserved.
+  */
+ 
++#ifdef __GLIBC__
+ #include <gnu/lib-names.h>
++#else
++/* musl libc has no gnu/lib-names.h; LD_SO feeds only the .interp marker. */
++#define LD_SO "ld-musl-x86_64.so.1"
++#endif
+ 
+ #include <sys/types.h>
+ #include <sys/wait.h>
+@@ -18,6 +23,11 @@
+ #include <pci-enum.h>
+ #include <nvidia-modprobe-utils.h>
+ 
++#ifndef __GLIBC__
++/* musl omits secure_getenv; equivalent here (never setuid). */
++#define secure_getenv getenv
++#endif
++
+ #include "nvc_internal.h"
+ 
+ #include "common.h"
+diff -Naur a/src/nvc_info.c b/src/nvc_info.c
+--- a/src/nvc_info.c	2026-07-21 00:31:40.000000000 +0000
++++ b/src/nvc_info.c	2026-10-21 04:07:10.814309573 +0000
+@@ -5,6 +5,7 @@
+ #include <sys/sysmacros.h>
+ 
+ #include <errno.h>
++#include <libgen.h>
+ #include <limits.h>
+ #include <nvidia-modprobe-utils.h>
+ #include <stdio.h>
+@@ -12,6 +13,11 @@
+ #include <string.h>
+ #include <unistd.h>
+ 
++#ifndef __GLIBC__
++/* musl omits secure_getenv; equivalent here (never setuid). */
++#define secure_getenv getenv
++#endif
++
+ #include "nvc_internal.h"
+ 
+ #include "driver.h"
+diff -Naur a/src/nvc_ldcache.c b/src/nvc_ldcache.c
+--- a/src/nvc_ldcache.c	2026-07-21 00:31:40.000000000 +0000
++++ b/src/nvc_ldcache.c	2026-10-21 04:07:10.814443939 +0000
+@@ -27,6 +27,11 @@
+ #include <stdlib.h>
+ #include <unistd.h>
+ 
++#ifndef __GLIBC__
++/* musl omits secure_getenv; equivalent here (never setuid). */
++#define secure_getenv getenv
++#endif
++
+ #include "nvc_internal.h"
+ 
+ #include "error.h"
+diff -Naur a/src/nvc_mount.c b/src/nvc_mount.c
+--- a/src/nvc_mount.c	2026-07-21 00:31:40.000000000 +0000
++++ b/src/nvc_mount.c	2026-10-21 04:07:10.814768964 +0000
+@@ -176,7 +176,10 @@
+                 return (NULL);
+ 
+         for (size_t i = 0; i < size; ++i) {
+-                file = basename(files[i]);
++                /* strrchr idiom: files[] may hold string literals, which
++                 * POSIX basename is allowed to modify. Safe under GNU too. */
++                const char *base = strrchr(files[i], '/');
++                file = (char *)((base != NULL) ? base + 1 : files[i]);
+ 
+                 if (path_append(err, src, files[i]) < 0)
+                         goto fail;
+diff -Naur a/src/rpc.h b/src/rpc.h
+--- a/src/rpc.h	2026-07-21 00:31:40.000000000 +0000
++++ b/src/rpc.h	2026-10-21 04:07:10.814874839 +0000
+@@ -19,6 +19,8 @@
+ 
+ #include <sys/types.h>
+ 
++#include <signal.h>
++
+ #include <rpc/rpc.h>
+ 
+ #ifndef WITH_TIRPC
+diff -Naur a/src/utils.c b/src/utils.c
+--- a/src/utils.c	2026-07-21 00:31:40.000000000 +0000
++++ b/src/utils.c	2026-10-21 04:07:10.814556681 +0000
+@@ -89,7 +89,11 @@
+             strftime(buf, sizeof(buf), "%m%d %T", tm) == 0)
+                 strcpy(buf, "0000 00:00:00");
+ 
+-        fprintf(logfile, "%c%s.%06ld %ld %s:%lu] ", level, buf, tv.tv_usec, (long)syscall(SYS_gettid), basename(file), line);
++        /* strrchr idiom: POSIX basename may modify its argument, and file
++         * is typically the __FILE__ string literal. Safe under GNU too. */
++        const char *base = strrchr(file, '/');
++        base = (base != NULL) ? base + 1 : file;
++        fprintf(logfile, "%c%s.%06ld %ld %s:%lu] ", level, buf, tv.tv_usec, (long)syscall(SYS_gettid), base, line);
+         va_start(ap, fmt);
+         vfprintf(logfile, fmt, ap);
+         va_end(ap);

@@ -18,6 +18,10 @@ last resort for simple management — the commands are the product.
     ovs-bridge   add|del|list NAME [--remote HOST] [--mtu N]
     ovs-port     add|del|list BRIDGE PORT [--internal] [--vlan N] [--remote HOST]
     ovs-uplink   add BRIDGE NIC [--clone-mac] [--remote HOST]
+                 (clone-mac pins the NIC hwaddr on the BRIDGE only:
+                 correct when L3 lives on the bridge itself, WRONG when
+                 the address lives on a separate internal gateway port
+                 — see the MAC rule below)
                  del BRIDGE NIC [--remote HOST]
     ovs-bond     add BRIDGE PORT NIC... [--mode slb|lacp] [--remote HOST]
                  del BRIDGE PORT [--remote HOST]
@@ -26,6 +30,8 @@ last resort for simple management — the commands are the product.
                  del BRIDGE NAME [--remote HOST]
     ovs-patch    add BRIDGE-A PORT-A BRIDGE-B PORT-B [--remote HOST...]
     ovs-net      add|del|list NAME BRIDGE [--ipv4 CIDR] [--ipv6 CIDR]
+                 [--mac HH:..] (pins the address on the internal
+                 gateway port, runtime + unit file)
                  (the existing ovs-vmswitch behaviour: libvirt network +
                  systemd-networkd configs, as one do-task)
     ovs-status   [bridge|port|nic|tunnel]
@@ -39,8 +45,15 @@ Mapping to ovs-vsctl (phase 1 uses only this surface):
     ovs-port --internal-> add-port + set Interface PORT type=internal
     ovs-uplink add     -> pre-flight checks, then add-port BRIDGE NIC
                           (+ MAC clone: copy NIC hwaddr onto the bridge
-                          internal/bridge port so external ARP state and
-                          DHCP leases survive the move)
+                          so the switch-facing identity is stable.
+                          LIMIT, proven in production: this preserves
+                          nothing for L3 endpoints on separate internal
+                          ports, which source traffic under the PORT's
+                          MAC. Pin preserved hardware addresses on the
+                          L3 endpoint itself (ovs wan add does this;
+                          ovs net add takes --mac), never only on the
+                          bridge. A random gateway-port MAC reappears
+                          on every reboot unless pinned in the unit.)
     ovs-bond add       -> add-bond BRIDGE PORT NIC... with
                           lacp=active + bond_mode=lacp (when --mode lacp)
                           or bond_mode=balance-slb (default: no switch

@@ -8,7 +8,10 @@ Type=simple
 User=neutron
 Group=neutron
 EnvironmentFile=-/etc/conf.d/neutron-openvswitch-agent
-ExecStart=/usr/bin/neutron-openvswitch-agent
+# Both configs are required: without the plugin ini the agent starts
+# but reports empty bridge mappings and neutron refuses every port
+# bind (proven on Hatched). Missing files fail closed and loud.
+ExecStart=/usr/bin/neutron-openvswitch-agent --config-file /etc/neutron/neutron.conf --config-file /etc/neutron/plugins/ml2/openvswitch_agent.ini
 Restart=on-failure
 KillMode=mixed
 TimeoutStopSec=10

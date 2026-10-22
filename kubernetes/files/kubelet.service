@@ -1,0 +1,32 @@
+[Unit]
+Description=Kubernetes node agent (kubelet)
+Documentation=https://kubernetes.io/docs/reference/command-line-tools-reference/kubelet/
+After=network-online.target containerd.service
+Wants=network-online.target containerd.service
+
+[Service]
+# No hardcoded --config/--kubeconfig (mirroring upstream): configuration
+# arrives via EnvironmentFile below and via the packaged drop-in
+# (kubelet.service.d/10-kubeadm.conf, shipped by the kubernetes package;
+# the kubeadm CLI never touches it). Nothing is auto-enabled at install.
+#
+# Deliberately NO ConditionPathExists join gate here (and none in the
+# OpenRC init.d): kubeadm join starts the kubelet BEFORE any kubeconfig
+# exists — the kubelet performs TLS bootstrap itself, turning
+# bootstrap-kubelet.conf into kubelet.conf, and the wait phase deletes
+# the bootstrap file even on failure. A gate on kubelet.conf skips that
+# first start, the bootstrap never runs, and join dies at
+# kubelet-wait-bootstrap with the evidence already cleaned up (proven
+# live 2026-10-21). Upstream ships no gate either; a stray start on an
+# unjoined node just idles with kubelet's own clear error.
+EnvironmentFile=-/etc/default/kubelet
+ExecStart=/usr/bin/kubelet $KUBELET_KUBEADM_ARGS $KUBELET_EXTRA_ARGS
+Restart=always
+RestartSec=10
+KillMode=process
+Delegate=yes
+TasksMax=infinity
+OOMScoreAdjust=-999
+
+[Install]
+WantedBy=multi-user.target

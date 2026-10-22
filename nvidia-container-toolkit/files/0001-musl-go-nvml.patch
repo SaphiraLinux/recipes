@@ -1,0 +1,31 @@
+musl libc support for vendored go-nvml dl wrapper (Saphira port).
+
+musl's dlfcn.h lacks RTLD_DEEPBIND and RTLD_DI_ORIGIN, and musl's
+dlinfo(3) rejects the ORIGIN request at runtime. Both affected symbols
+are dead surface in this tree: the RTLD_DEEPBIND Go const is consumed
+nowhere, and DynamicLibrary.Path() (the sole dlinfo caller) is called
+nowhere in the toolkit or go-nvml. So:
+
+- RTLD_DEEPBIND defaults to 0 (drops deepbind symbol ordering for the
+  self-contained NVML library; no live path changes behavior).
+- RTLD_DI_ORIGIN defaults to 6 (glibc's value): Path() compiles and
+  links, and fails with a clean dlinfo error IF ever called — never
+  silently wrong.
+- Drop this patch when upstream go-nvml gains musl support.
+
+diff -Naur a/vendor/github.com/NVIDIA/go-nvml/pkg/dl/dl_linux.go b/vendor/github.com/NVIDIA/go-nvml/pkg/dl/dl_linux.go
+--- a/vendor/github.com/NVIDIA/go-nvml/pkg/dl/dl_linux.go	2026-09-16 21:07:03.000000000 +0000
++++ b/vendor/github.com/NVIDIA/go-nvml/pkg/dl/dl_linux.go	2026-10-21 05:01:53.978826780 +0000
+@@ -21,6 +21,12 @@
+ // #include <dlfcn.h>
+ // #include <stdlib.h>
+ // #include <linux/limits.h>
++// #ifndef RTLD_DEEPBIND
++// #define RTLD_DEEPBIND 0
++// #endif
++// #ifndef RTLD_DI_ORIGIN
++// #define RTLD_DI_ORIGIN 6
++// #endif
+ import "C"
+ import (
+ 	"fmt"

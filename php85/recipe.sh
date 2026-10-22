@@ -1,19 +1,25 @@
 #!/bin/sh
 
 pkgname=php85
-pkgver=8.5.10
-# 8.5.10 complete-runtime monolith: CLI + FPM + OPcache + the full useful
-# shared-extension set in one package. php85 IS the default Saphira PHP,
-# so it owns the unversioned php/php-fpm command names as well.
-pkgrel=3
+pkgver=8.5.12
+# 8.5.12 three-SAPI split: CLI + CGI + FPM ship as separate packages
+# (php85-cli, php85-cgi, php85-fpm) over the shared main runtime
+# (extensions, php.ini, conf.d). php85 IS the default Saphira PHP, so
+# the unversioned php/php-fpm names live in -cli/-fpm. CGI ships as a
+# binary only: no web-server handler is enabled automatically.
+# CVE references: CERT-EU "Critical Vulnerabilities in PHP" 21/10/2026
+# v1.1 ([1] php.net/archive/2026.php#2026-10-20-1, [4] php.net 21-Oct
+# security release 8.5.12/8.4.27/8.3.36/8.2.35, [6] GHSA-w8hw-w9fx-j79w /
+# CVE-2026-109618, [7] GHSA-6wmf-4rv5-p3rp / CVE-2026-109619).
+pkgrel=1
 pkgarch=${SAPHIRA_ARCH:-x86_64}
-pkgdesc="PHP 8.5 language runtime: CLI, FPM, opcache and shared extensions"
+pkgdesc="PHP 8.5.12 language runtime: CLI, FPM, opcache and shared extensions"
 license="PHP-3.01"
 origin=php85
 repo=main
 url=https://www.php.net/
-source=https://www.php.net/distributions/php-8.5.10.tar.xz
-sha256=6a8bebaa4d5a979a38db29a9373e9851f60c6b11f72172c585947e78f3081957
+source=https://www.php.net/distributions/php-8.5.12.tar.xz
+sha256=08bc2eba2a588654ade1357174aa646b761556c862dda0678345ee29ed481209
 
 # Required runtime closure, proven from the built payload (readelf -d in
 # recipe_install fails closed on any unresolved SONAME):
@@ -70,6 +76,9 @@ makedepends="
 
 subpackages="
     $pkgname-dev
+    $pkgname-cli
+    $pkgname-cgi
+    $pkgname-fpm
 "
 
 recipe_build()
@@ -84,10 +93,11 @@ recipe_build()
 	# --program-suffix=85 yields php85, php-fpm85, phpize85,
 	# php-config85; recipe_install adds the unversioned default names.
 	#
-	# Deliberately off: cgi (FPM covers server use), phpdbg, oci8/odbc/
+	# Deliberately off: phpdbg, oci8/odbc/
 	# firebird/imap/snmp/tidy/pspell (backing stacks absent in-tree -
 	# each a named follow-up port, not a silent drop), ffi (new attack
-	# surface, needs its own review).
+	# surface, needs its own review). CGI is ON (all three SAPIs ship);
+	# FPM covers server use and no CGI handler is enabled automatically.
 	./configure \
 		--prefix=/usr \
 		--sysconfdir=/etc \
@@ -111,7 +121,7 @@ recipe_build()
 		--with-password-argon2 \
 		--with-openssl --with-zlib --with-sqlite3 \
 		--with-fpm-user=php-fpm --with-fpm-group=php-fpm \
-		--disable-cgi --disable-phpdbg --disable-rpath
+		--disable-phpdbg --disable-rpath
 	make
 }
 
@@ -155,6 +165,11 @@ recipe_install()
 	ln -s php-config85 "$PKGDEST/usr/bin/php-config"
 	printf 'opcache.enable=1\nopcache.enable_cli=0\n' \
 		> "$PKGDEST/etc/php85/conf.d/00_opcache.ini"
+	# CVE-2026-109618 / CVE-2026-109619 hardening (defense in depth over
+	# the patched 8.5.12; see files/cve-mitigation.ini). Loads last so
+	# the kills cannot be overridden by extension inis.
+	install -m 0644 "$RECIPE_DIR/files/cve-mitigation.ini" \
+		"$PKGDEST/etc/php85/conf.d/99_cve_mitigation.ini"
 	# Built-in accelerator proof: with no shared target, the setting
 	# lines above are only meaningful if OPcache compiled in. Ask the
 	# just-built CLI directly (perl-recipe precedent: validate the
@@ -163,6 +178,23 @@ recipe_install()
 	# SIGPIPE, failing the pipeline despite a match.
 	"$SRC/sapi/cli/php" -m | grep -i 'Zend OPcache' > /dev/null || \
 		{ printf 'php85: OPcache not compiled in\n' >&2; exit 1; }
+	# Version identity proofs for all three SAPIs (fail closed; the CVE
+	# task ships a security release, so the built version is load-bearing).
+	# Plain greps (no -q): same pipefail/SIGPIPE hazard as above.
+	"$SRC/sapi/cli/php" -v | grep 'PHP 8\.5\.12' > /dev/null ||
+		{ printf 'php85: CLI is not 8.5.12\n' >&2; exit 1; }
+	"$SRC/sapi/cgi/php-cgi" -v | grep 'PHP 8\.5\.12' > /dev/null ||
+		{ printf 'php85: CGI is not 8.5.12\n' >&2; exit 1; }
+	"$SRC/sapi/fpm/php-fpm" -v | grep 'PHP 8\.5\.12' > /dev/null ||
+		{ printf 'php85: FPM is not 8.5.12\n' >&2; exit 1; }
+	# Upstream regression subset for the CVE area: the session lifecycle
+	# paths behind CVE-2026-109619. Targeted, not the full `make test`
+	# (hours, network-dependent, flaky): ext/session exercises upload
+	# progress, serialization and lifecycle handling against the patched
+	# code. run-tests writes its artifacts into the source tree (never
+	# the payload); any failure aborts the package.
+	(cd "$SRC" && sapi/cli/php run-tests.php -q -P ext/session/) ||
+		{ printf 'php85: session regression subset failed\n' >&2; exit 1; }
 	install_extension_ini mysqli mysqli
 	install_extension_ini pdo_mysql pdo_mysql
 	install_extension_ini pdo_sqlite pdo_sqlite
@@ -200,7 +232,7 @@ recipe_install()
 	# false failures in a loop). Consuming grep is deterministic.
 	readelf -d "$PKGDEST/usr/bin/php85" | grep 'libargon2\.so' > /dev/null ||
 		{ printf 'php85: libargon2 missing from php85 DT_NEEDED\n' >&2; exit 1; }
-	payload_elfs="$PKGDEST/usr/bin/php85 $PKGDEST/usr/sbin/php-fpm85"
+	payload_elfs="$PKGDEST/usr/bin/php85 $PKGDEST/usr/bin/php-cgi85 $PKGDEST/usr/sbin/php-fpm85"
 	payload_elfs="$payload_elfs $(find "$PKGDEST/usr/lib" -name '*.so' 2>/dev/null)"
 	for elf in $payload_elfs; do
 		for needed in $(readelf -d "$elf" 2>/dev/null |
@@ -234,6 +266,11 @@ recipe_install()
 	# Runtime identity declaration: php-fpm:103 required by the shipped
 	# pool config. makepkg generates the install scripts from this
 	# fragment; the package creates its identity at install time.
+	# The fragment STAYS in main (not the fpm split) deliberately: Unix
+	# identity reservations are keyed by name to one owning package, and
+	# the publish gate refuses cross-package moves (php85 owns php-fpm
+	# ID 103 since the monolith). The fpm split auto-pins main, so the
+	# identity is always present where the daemon runs.
 	install -D -m 0644 "$RECIPE_DIR/files/accounts.d/php85" \
 		"$PKGDEST/usr/share/saphira/accounts.d/php85"
 }

@@ -1,0 +1,18 @@
+#!/bin/sh
+# Rebuild the live trust store after this package changes the Mozilla set.
+#
+# Without this, installing or upgrading ca-certificates left
+# /etc/ssl/certs/ca-certificates.crt describing the PREVIOUS trust set.
+# That is not cosmetic: the 20261020 eMudhra distrust (emSign ECC Root
+# CA - G3 anchored a live rogue DV chain) took effect on egg only after
+# a manual update-ca-certificates run — every host that merely upgraded
+# the package kept trusting the compromised chain. Observed live.
+#
+# apk runs this AFTER the payload is in its final state, so the new
+# mozilla/*.crt set and /etc/ca-certificates.conf are on disk when the
+# store is rebuilt. A failure propagates (generated callers run under
+# set -eu): apk reports the error while the package still commits, loud
+# instead of silently stale.
+#
+# Absolute paths only: hooks run under apk with a minimal PATH.
+/usr/sbin/update-ca-certificates

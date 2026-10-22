@@ -1,0 +1,8 @@
+# Neutron privilege boundary for sudo (installed to /etc/sudoers.d/neutron).
+#
+# The agents escalate per-command: neutron-rootwrap for the filtered
+# facility (the designed path — see root_helper), privsep-helper for
+# privileged operations. Without this fragment agents die denied at
+# the first privileged call. This is the narrowest grant that works —
+# never ALL.
+neutron ALL=(root) NOPASSWD: /usr/bin/neutron-rootwrap *, /usr/bin/neutron-rootwrap-daemon *, /usr/bin/privsep-helper *

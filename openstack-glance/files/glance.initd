@@ -14,10 +14,9 @@ description="OpenStack Image (Glance) API"
 
 : "${GLANCE_BIND:=127.0.0.1:9292}"
 : "${GLANCE_WORKERS:=$(nproc 2>/dev/null || echo 4)}"
-: "${GLANCE_CONF:=/etc/glance/glance-api.conf}"
 
 command="/usr/bin/gunicorn"
-command_args="--name glance --bind ${GLANCE_BIND} --workers ${GLANCE_WORKERS} --pid /var/run/glance/glance.pid --config ${GLANCE_CONF} glance.wsgi.api:application"
+command_args="--config /etc/glance/gunicorn.conf.py --bind ${GLANCE_BIND} --workers ${GLANCE_WORKERS} --pid /var/run/glance/glance.pid glance.wsgi.api:application"
 command_user="glance:glance"
 command_background="yes"
 pidfile="/var/run/glance/glance.pid"

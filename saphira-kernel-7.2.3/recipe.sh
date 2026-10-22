@@ -18,7 +18,7 @@ pkgname=saphira-kernel-7.2.3
 # automatic replacement.
 kernel_version=7.2.3
 pkgver=1
-pkgrel=6
+pkgrel=8
 # r6: origin="$pkgname" (version-specific identity end to end; no
 # generic saphira-kernel origin for independently versioned kernel
 # packages). Metadata change, revision bump.

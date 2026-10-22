@@ -8,15 +8,20 @@ Wants=network-online.target
 Type=notify
 User=glance
 Group=glance
+# Defaults first, operator file last: EnvironmentFile assignments win
+# over Environment=. WORKERS defaults to 4 (an empty default is a
+# boot failure: gunicorn --workers '' exits 2). --name is gone:
+# gunicorn 26 removed it. --config loads the argv sanitizer, NEVER
+# glance-api.conf (an INI file gunicorn would import as Python and
+# die on with SyntaxError).
 EnvironmentFile=-/etc/conf.d/glance
 Environment=GLANCE_BIND=127.0.0.1:9292
-Environment=GLANCE_CONF=/etc/glance/glance-api.conf
+Environment=GLANCE_WORKERS=4
 RuntimeDirectory=glance
 RuntimeDirectoryMode=0750
-ExecStart=/usr/bin/gunicorn --name glance \
+ExecStart=/usr/bin/gunicorn --config /etc/glance/gunicorn.conf.py \
 	--bind ${GLANCE_BIND} --workers ${GLANCE_WORKERS} \
 	--pid /var/run/glance/glance.pid \
-	--config ${GLANCE_CONF} \
 	glance.wsgi.api:application
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure

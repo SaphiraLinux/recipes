@@ -11,6 +11,3 @@
 
 # Number of gunicorn worker processes.
 #NEUTRON_API_WORKERS="4"
-
-# Path to the Neutron configuration file.
-#NEUTRON_API_CONF="/etc/neutron/neutron.conf"

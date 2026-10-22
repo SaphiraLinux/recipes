@@ -8,15 +8,20 @@ Wants=network-online.target
 Type=notify
 User=neutron
 Group=neutron
+# Defaults first, operator file last: EnvironmentFile assignments win
+# over Environment=. WORKERS defaults to 4 (an empty default is a
+# boot failure: gunicorn --workers '' exits 2). --name is gone:
+# gunicorn 26 removed it. --config loads the argv sanitizer, NEVER
+# neutron.conf (an INI file gunicorn would import as Python and die
+# on with SyntaxError).
 EnvironmentFile=-/etc/conf.d/neutron-api
 Environment=NEUTRON_API_BIND=127.0.0.1:9696
-Environment=NEUTRON_API_CONF=/etc/neutron/neutron.conf
+Environment=NEUTRON_API_WORKERS=4
 RuntimeDirectory=neutron
 RuntimeDirectoryMode=0750
-ExecStart=/usr/bin/gunicorn --name neutron-api \
+ExecStart=/usr/bin/gunicorn --config /etc/neutron/gunicorn.conf.py \
 	--bind ${NEUTRON_API_BIND} --workers ${NEUTRON_API_WORKERS} \
 	--pid /var/run/neutron/neutron-api.pid \
-	--config ${NEUTRON_API_CONF} \
 	neutron.wsgi.api:application
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure

@@ -1,0 +1,6 @@
+# php85-cli named split: the CLI SAPI binary plus the default `php`
+# command name (php85 is the distro-default PHP). Built by --enable-cli;
+# the unversioned symlink is created by recipe_install itself. Shared
+# extensions, php.ini and conf.d stay in main (auto-pinned dependency).
+usr/bin/php85
+usr/bin/php

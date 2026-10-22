@@ -14,7 +14,7 @@
 
 pkgname=openstack-horizon
 pkgver=27.0.0
-pkgrel=2
+pkgrel=3
 pkgarch=noarch
 pkgdesc='OpenStack Dashboard (Horizon): Django web UI'
 license='Apache-2.0'

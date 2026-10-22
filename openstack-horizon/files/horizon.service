@@ -8,15 +8,22 @@ Wants=network-online.target
 Type=notify
 User=horizon
 Group=horizon
+# Defaults first, operator file last: EnvironmentFile assignments win
+# over Environment=. WORKERS defaults to 4 (an empty default is a
+# boot failure: gunicorn --workers '' exits 2). --name is gone:
+# gunicorn 26 removed it. (Django takes no --config: settings arrive
+# via --pythonpath/--env below, so no argv sanitizer is needed.)
 EnvironmentFile=-/etc/conf.d/horizon
 Environment=HORIZON_BIND=127.0.0.1:8000
+Environment=HORIZON_WORKERS=4
 Environment=PYTHONPATH=/etc/horizon
 Environment=DJANGO_SETTINGS_MODULE=openstack_dashboard.settings
 RuntimeDirectory=horizon
 RuntimeDirectoryMode=0750
-ExecStart=/usr/bin/gunicorn --name horizon \
+ExecStart=/usr/bin/gunicorn \
 	--bind ${HORIZON_BIND} --workers ${HORIZON_WORKERS} \
 	--pid /var/run/horizon/horizon.pid \
+	--pythonpath /etc/horizon --env DJANGO_SETTINGS_MODULE=openstack_dashboard.settings \
 	openstack_dashboard.wsgi:application
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure

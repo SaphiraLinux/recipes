@@ -1,8 +1,8 @@
 #!/bin/sh
 
 pkgname=ca-certificates
-pkgver=20260831
-pkgrel=4
+pkgver=20261020
+pkgrel=2
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='CA certificate bundle + Saphira native update-ca-certificates'
 license='MPL-2.0'
@@ -10,10 +10,14 @@ origin=ca-certificates
 repo=saphira
 url=https://curl.se/docs/caextract.html
 # cacert.pem snapshot: https://curl.se/ca/cacert.pem (Mozilla set)
-cacert_sha256=f66dff1bdf8f96060b8177976f8b7d9254bc89bc4db933d769f7384d28480bc9
+# 20261020: Mozilla removed three eMudhra roots after the emSign G3B
+# compromise (emSign ECC Root CA - G3 anchored the rogue DV chain);
+# emSign Root CA - G1 stays — Mozilla still trusts it. No other
+# additions or removals in this snapshot (verified subject-set diff).
+cacert_sha256=796f1389bfea13c0ed78f663b765baaff54a508e5483786bd6ece73c5e3e3cbe
 
 depends=""
-makedepends="gawk gcc make"
+makedepends="gawk gcc make openssl"
 
 recipe_build()
 {
@@ -25,6 +29,18 @@ recipe_build()
 	awk '/BEGIN CERT/{n++; f=sprintf("certs/mozilla/%04d.crt", n)} n{print > f}' \
 		"$RECIPE_DIR/files/cacert.pem"
 	[ "$(ls certs/mozilla | wc -l)" -gt 100 ] || { echo "cert split failed" >&2; return 1; }
+	# Security gate (fail closed): the three Mozilla-removed eMudhra
+	# roots must be absent — they anchored the compromised G3B chain.
+	# emSign Root CA - G1 must still be present (guards over-removal).
+	for c in certs/mozilla/*.crt; do
+		s=$(openssl x509 -in "$c" -noout -subject 2>/dev/null) || continue
+		case "$s" in
+		*emSign\ ECC\ Root\ CA\ -\ G3*|*emSign\ ECC\ Root\ CA\ -\ C3*|*emSign\ Root\ CA\ -\ C1*)
+			echo "ERROR: distrusted eMudhra root present: $s" >&2; return 1 ;;
+		esac
+	done
+	grep -l "emSign Root CA - G1" certs/mozilla/*.crt > /dev/null ||
+		{ echo "ERROR: emSign Root CA - G1 missing (over-removal?)" >&2; return 1; }
 	: > certlist
 	for c in certs/mozilla/*.crt; do
 		echo "mozilla/$(basename "$c")" >> certlist
@@ -47,4 +63,16 @@ recipe_install()
 	# verification reads /etc/ssl/cert.pem) plus apk-tools TLS.
 	ln -sf certs/ca-certificates.crt "$PKGDEST/etc/ssl/cert.pem"
 	ln -sf /etc/ssl/certs/ca-certificates.crt "$PKGDEST/etc/apk/ca.pem"
+	# Declared maintainer hooks: rebuild the live trust store after the
+	# mozilla payload lands. Both install and upgrade need it — an
+	# upgrade without this left the OLD store in place (observed: the
+	# 20261020 eMudhra distrust took effect on egg only after a manual
+	# run, so upgraded hosts kept trusting the rogue chain). makepkg
+	# embeds these into the package lifecycle scripts and strips the
+	# declaration from the payload.
+	install -d -m 0755 "$PKGDEST/usr/share/saphira/hooks.d/$pkgname"
+	install -m 0755 "$RECIPE_DIR/files/hooks-update-bundle" \
+		"$PKGDEST/usr/share/saphira/hooks.d/$pkgname/post-install"
+	install -m 0755 "$RECIPE_DIR/files/hooks-update-bundle" \
+		"$PKGDEST/usr/share/saphira/hooks.d/$pkgname/post-upgrade"
 }

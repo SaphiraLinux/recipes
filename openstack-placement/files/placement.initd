@@ -12,12 +12,11 @@
 name="placement"
 description="OpenStack Placement API"
 
-: "${PLACEMENT_BIND:=127.0.0.1:8780}"
+: "${PLACEMENT_BIND:=127.0.0.1:8778}"
 : "${PLACEMENT_WORKERS:=$(nproc 2>/dev/null || echo 4)}"
-: "${PLACEMENT_CONF:=/etc/placement/placement.conf}"
 
 command="/usr/bin/gunicorn"
-command_args="--name placement --bind ${PLACEMENT_BIND} --workers ${PLACEMENT_WORKERS} --pid /var/run/placement/placement.pid --config ${PLACEMENT_CONF} placement.wsgi.api:application"
+command_args="--config /etc/placement/gunicorn.conf.py --bind ${PLACEMENT_BIND} --workers ${PLACEMENT_WORKERS} --pid /var/run/placement/placement.pid placement.wsgi.api:application"
 command_user="placement:placement"
 command_background="yes"
 pidfile="/var/run/placement/placement.pid"

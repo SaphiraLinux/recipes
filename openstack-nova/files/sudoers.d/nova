@@ -1,0 +1,7 @@
+# Nova privilege boundary for sudo (installed to /etc/sudoers.d/nova).
+#
+# nova-compute spawns its helpers through sudo: privsep-helper for
+# privileged operations, nova-rootwrap for the legacy paths. Without
+# this fragment every spawn dies with FailedToDropPrivileges. This is
+# the narrowest grant that works — never ALL.
+nova ALL=(root) NOPASSWD: /usr/bin/privsep-helper *, /usr/bin/nova-rootwrap *

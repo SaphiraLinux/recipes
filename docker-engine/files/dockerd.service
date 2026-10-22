@@ -1,0 +1,26 @@
+[Unit]
+Description=Docker Application Container Engine
+Documentation=https://docs.docker.com
+After=network-online.target nss-lookup.target containerd.service time-set.target
+Wants=network-online.target containerd.service
+
+[Service]
+# Adapted from upstream contrib/init/systemd/docker.service: packaged
+# paths, direct start (no socket activation unit on Saphira), no
+# firewalld requirement. The --containerd flag is load-bearing: v29 uses
+# the containerd image store and requires its socket.
+Type=notify
+ExecStart=/usr/bin/dockerd --containerd=/run/containerd/containerd.sock
+ExecReload=/bin/kill -s HUP $MAINPID
+TimeoutStartSec=0
+RestartSec=2
+Restart=always
+LimitNPROC=infinity
+LimitCORE=infinity
+TasksMax=infinity
+Delegate=yes
+KillMode=process
+OOMScoreAdjust=-500
+
+[Install]
+WantedBy=multi-user.target

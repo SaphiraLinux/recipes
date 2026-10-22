@@ -1,0 +1,40 @@
+#!/sbin/openrc-run
+
+description="Kubernetes node agent (kubelet)"
+
+# Mirrors the approved systemd unit: foreground under supervise-daemon.
+# No hardcoded --config/--kubeconfig (mirroring upstream): configuration
+# arrives via /etc/default/kubelet (KUBELET_KUBEADM_ARGS set by hand,
+# KUBELET_EXTRA_ARGS) and via /var/lib/kubelet/kubeadm-flags.env
+# (KUBELET_KUBEADM_ARGS written by kubeadm init/join at runtime),
+# exactly like upstream's kubeadm drop-in mechanism on systemd.
+# Neither init wraps the other; nothing is auto-enabled at install.
+command="/usr/bin/kubelet"
+command_args=""
+supervisor="supervise-daemon"
+
+depend()
+{
+	use net
+	need localmount containerd
+}
+
+start_pre()
+{
+	# No join gate here (and none in the systemd unit): kubeadm join
+	# starts the kubelet BEFORE any kubeconfig exists — the kubelet
+	# performs TLS bootstrap itself. Refusing early breaks join.
+	checkpath -d -m 0755 /var/lib/kubelet
+	checkpath -d -m 0755 /run/kubelet
+	# kubeadm-owned flags first (dash-optional like EnvironmentFile=-);
+	# admin /etc/default/kubelet wins on conflict (sourced last).
+	if [ -f /var/lib/kubelet/kubeadm-flags.env ]; then
+		. /var/lib/kubelet/kubeadm-flags.env
+	fi
+	if [ -f /etc/default/kubelet ]; then
+		. /etc/default/kubelet
+		command_args="$KUBELET_KUBEADM_ARGS $KUBELET_EXTRA_ARGS"
+	elif [ -n "$KUBELET_KUBEADM_ARGS" ]; then
+		command_args="$KUBELET_KUBEADM_ARGS"
+	fi
+}

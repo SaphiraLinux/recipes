@@ -11,7 +11,3 @@
 
 # Number of gunicorn worker processes.
 #GLANCE_WORKERS="4"
-
-# Path to the Glance configuration file (generate from
-# /etc/glance/glance-api.conf.sample, then edit).
-#GLANCE_CONF="/etc/glance/glance-api.conf"
