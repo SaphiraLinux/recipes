@@ -5,6 +5,9 @@ After=network.target auditd.service
 [Service]
 Type=simple
 ExecStartPre=/bin/install -d -m 0755 -o root -g root /var/run/sshd
+# Login accounting databases (same contract as the initd start_pre):
+# created when absent only, never touching live history.
+ExecStartPre=/bin/sh -c 'for f in /var/log/wtmp /var/log/lastlog; do test -e "$f" -o -L "$f" || { : > "$f" && chmod 0644 "$f"; } || exit 1; done'
 ExecStartPre=/usr/bin/ssh-keygen -A
 ExecStart=/usr/sbin/sshd -D -e
 ExecReload=/bin/kill -HUP $MAINPID

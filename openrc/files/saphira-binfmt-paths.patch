@@ -1,0 +1,28 @@
+--- a/sh/binfmt.sh.in
++++ b/sh/binfmt.sh.in
+@@ -31,9 +31,14 @@
+ 		esac
+ 
+ 		local reg=${line#*:}
+-		[ -e /proc/sys/fs/binfmt_misc/${reg%%:*} ] && echo -1 > /proc/sys/fs/binfmt_misc/${reg%%:*}
++		# printf, never echo: echo emits the trailing newline as a
++		# separate writev segment and the kernel invokes .write once
++		# per segment; the lone-newline retry is rejected with EINVAL
++		# even though the operation already succeeded, so every file
++		# prints a spurious failure. One printf write succeeds whole.
++		[ -e /proc/sys/fs/binfmt_misc/${reg%%:*} ] && printf '%s' '-1' > /proc/sys/fs/binfmt_misc/${reg%%:*}
+ 
+-		echo "${line}" > /proc/sys/fs/binfmt_misc/register
++		printf '%s' "${line}" > /proc/sys/fs/binfmt_misc/register
+ 		rc=$?
+ 		if [ $rc -ne 0 ]; then
+ 			printf "binfmt: invalid entry on line %d of \`%s'\n" \
+@@ -54,7 +54,7 @@
+ else
+ 	# The hardcoding of these paths is intentional; we are following the
+ 	# systemd spec.
+-	binfmt_dirs='/usr/lib/binfmt.d/ /run/binfmt.d/ /etc/binfmt.d/'
++	binfmt_dirs='/usr/lib/binfmt.d /run/binfmt.d /etc/binfmt.d'
+ 	binfmt_basenames=''
+ 	binfmt_d=''
+ 

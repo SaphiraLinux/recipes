@@ -1,0 +1,7 @@
+#%PAM-1.0
+# Saphira util-linux runuser service. Root-only tool: pam_rootok
+# suffices for auth (mirrors shadow su); account/session stay explicit.
+auth            sufficient      pam_rootok.so
+auth            required        pam_unix.so
+account         required        pam_unix.so
+session         required        pam_unix.so

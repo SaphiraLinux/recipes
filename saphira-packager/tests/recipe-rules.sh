@@ -564,16 +564,23 @@ for pid1_fragment in \
 		exit 1
 	}
 done
-# The default-grub init= line (0ece176) remains only as belt-and-braces:
-# it rested on the bad assumption that the 261 /sbin/init symlink would
-# survive upgrade, which a clean package transition disproves. r4 ships a
-# real /sbin/init, so the kernel's ordinary search is the supported path -
-# acceptance boots must omit init= to prove it. The line stays (removing
-# it is baselayout scope) but nothing may depend on it.
-grep -Fq 'init=/usr/lib/systemd/systemd' "$source_root/saphira-baselayout/files/default-grub" || {
-	printf '%s\n' 'default-grub lost init= belt-and-braces (r4 /sbin/init is the supported path; test boots must omit init=)' >&2
+# No init= in the packaged default-grub, ever (SEV1 2026-10-22: the r21
+# init=/usr/lib/systemd/systemd override reached Egg's live grub.cfg through
+# the kernel upgrade hook and panicked the machine - an explicit init= never
+# falls back. The 0ece176 "belt-and-braces" premise was false and the gate
+# that required the line is inverted here. The kernel's /sbin/init search is
+# the only supported path; test boots must omit init= to prove it):
+grub_cmdline=$(sed -n 's/^GRUB_CMDLINE_LINUX="\(.*\)"$/\1/p' "$source_root/saphira-baselayout/files/default-grub")
+[ -n "$grub_cmdline" ] || {
+	printf '%s\n' 'default-grub has no parseable GRUB_CMDLINE_LINUX assignment' >&2
 	exit 1
 }
+case " $grub_cmdline " in
+*' init='*)
+	printf '%s\n' 'default-grub carries an init= override (bootloader must never name the init implementation; /sbin/init is canonical)' >&2
+	exit 1
+	;;
+esac
 
 # nginx /var/run contract (r11): a /usr/sbin service keeps runtime state
 # under /var/run, never /run; /run and /var/run are separate real trees,

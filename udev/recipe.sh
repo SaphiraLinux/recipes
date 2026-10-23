@@ -2,7 +2,13 @@
 
 pkgname=udev
 pkgver=261.2
-pkgrel=7
+pkgrel=8
+# r8: SEV1 init contract (2026-10-22): the meson path patch pinned kmod at
+# /bin/kmod, which does not exist - the kmod recipe installs /usr/bin/kmod,
+# so the shipped udevd carried a dead hotplug-modprobe path. Pinned to the
+# owning recipe's path, relative progs resolve under /sbin (every relative
+# entry is sbin-class on Saphira), and the payload asserts sbin/init absent
+# plus the daemon present (the keep-list skips missing entries silently).
 # r6: ship a prebuilt hardware database (lib/udev/hwdb.bin) compiled
 # from the staged sources at package build time. The database is
 # hardware-independent (a deterministic trie over static .hwdb
@@ -200,6 +206,19 @@ recipe_install()
 		echo "ERROR: merged-usr RUN path remains in 99-systemd.rules" >&2
 		return 1
 	fi
+	# SEV1 containment (2026-10-22): the upstream init-symlink layout
+	# (patches/0002 retargets its install dir) must never reach the
+	# payload, and the daemon itself must be present - the keep-list
+	# above silently skips missing entries, so an absent daemon would
+	# ship a daemon-less package with no error.
+	if [ -e "$PKGDEST/sbin/init" ] || [ -L "$PKGDEST/sbin/init" ]; then
+		echo "ERROR: sbin/init must not ship in the udev payload" >&2
+		return 1
+	fi
+	test -x "$PKGDEST/lib/systemd/systemd-udevd" || {
+		echo "ERROR: packaged udev daemon missing: lib/systemd/systemd-udevd" >&2
+		return 1
+	}
 	# Stage1-leak guard (2026-10-19 fossil incident): a clean
 	# native build must never embed /saphirabuild stage paths.
 	if grep -rqF '/saphirabuild/' "$PKGDEST"; then

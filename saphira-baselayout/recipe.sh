@@ -2,7 +2,14 @@
 
 pkgname=saphira-baselayout
 pkgver=0.1
-pkgrel=54
+pkgrel=55
+# r55: remove the r21 init= override from default-grub (SEV1 architectural
+# correction 2026-10-22: the r21 "kernel falls back, mixed fleet is safe"
+# premise is false - an explicit init= never falls back and a nonexistent
+# path panics, proven by the Egg boot failure that reached a live grub.cfg
+# through the kernel upgrade hook. The bootloader never names the init
+# implementation; /sbin/init is the sole canonical PID 1 entry point).
+# Payload change (default-grub conffile).
 # r54: systemd PATH drop-in sets DefaultEnvironment as well as
 # ManagerEnvironment (proven on Minimer: ManagerEnvironment alone
 # never reaches services, leaving daemons without /sbin:/bin;

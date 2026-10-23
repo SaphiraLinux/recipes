@@ -27,13 +27,11 @@ makedepends="
     skalibs-dev
 "
 
-# Packaged, not built: the s6 suite is staged while the rust
-# toolchain rebuild occupies the daemon. mdevd is order-independent
-# past skalibs. No service is enabled here: mdevd as the device
-# manager is an image-level decision (it replaces udev), and Egg
-# stays on its current stack regardless.
-disabled=yes
-disabled_reason='staged with the s6 suite while the rust rebuild holds the daemon; enable any time after skalibs'
+# Enabled 2026-10-23 (condition met: skalibs/skalibs-dev published):
+# the s6 suite staging hold is lifted for mdevd, which is
+# order-independent past skalibs. No service is enabled here: mdevd as
+# the device manager is an image-level decision (it replaces udev), and
+# Egg stays on its current stack regardless.
 
 recipe_build()
 {

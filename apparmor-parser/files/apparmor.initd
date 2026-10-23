@@ -1,0 +1,25 @@
+#!/sbin/openrc-run
+
+description="AppArmor policy loader"
+
+depend()
+{
+	need localmount
+	before net
+}
+
+start()
+{
+	ebegin "Loading AppArmor profiles"
+	# No profiles ship yet: an empty or absent directory is a no-op,
+	# never a failure. A present parser that fails is loud.
+	if [ -n "$(ls -A /etc/apparmor.d 2>/dev/null)" ]; then
+		/sbin/apparmor_parser -r /etc/apparmor.d || return 1
+	fi
+	eend 0
+}
+
+stop()
+{
+	return 0
+}

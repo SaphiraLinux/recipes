@@ -2,7 +2,13 @@
 
 pkgname=fakeroot
 pkgver=2.1.4
-pkgrel=1
+pkgrel=2
+# r2: SEV1 host-mutation removal (2026-10-22): recipe_build created
+# /usr/share/aclocal and symlinked /usr/bin/env on the machine running the
+# build - outside every authorized staging dir, and normalizing a merged-usr
+# compat link. Both are provided inside authorized build roots (the automake
+# recipe now ships its macro dir; root-init owns the ephemeral /usr/bin/env
+# shim); outside them the build fails instead of repairing the host.
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="Tool for simulating superuser privileges"
 license="GPL-3.0-or-later"
@@ -26,13 +32,17 @@ makedepends="
 
 recipe_build()
 {
-	# Repository automake 1.18.1-r0 lacks the unversioned macro directory
-	# that aclocal requires; create it here until repackaged automake lands.
-	[ -d /usr/share/aclocal ] || install -d /usr/share/aclocal
-	# Repository coreutils ships /bin/env while scripts such as libtoolize
-	# carry an absolute #!/usr/bin/env shebang; link it here until the
-	# coreutils packaging is repaired.
-	[ -e /usr/bin/env ] || [ -L /usr/bin/env ] || ln -s /bin/env /usr/bin/env
+	# No host mutation, ever (see r2 header): the macro dir and the env
+	# shim must already exist in an authorized build root. Fail closed
+	# outside one rather than writing to absolute host paths.
+	[ -d /usr/share/aclocal ] || {
+		echo "ERROR: /usr/share/aclocal missing (needs repackaged automake in the build root; refusing to create it on the host)" >&2
+		return 1
+	}
+	[ -e /usr/bin/env ] || [ -L /usr/bin/env ] || {
+		echo "ERROR: /usr/bin/env missing (authorized build roots provide the ephemeral shim; refusing to create it on the host)" >&2
+		return 1
+	}
 	# The verified upstream tag archive contains configure.ac rather than a
 	# generated configure script.  Generate it inside the Saphira build root.
 	autoreconf -fi

@@ -2,7 +2,24 @@
 
 pkgname=openssh
 pkgver=10.6_p1
-pkgrel=3
+pkgrel=5
+# r5: login accounting via libc headers, not configure overrides
+# (2026-10-23, proven by r4: CONF_WTMP/CONF_UTMP/CONF_LASTLOG defines
+# are DEAD whenever libc headers define the macros -- openssh defines.h
+# prefers _PATH_* and musl's utmp.h pointed them at /dev/null, so r4
+# shipped the env pins, passed its config.h assert, and still wrote
+# /dev/null/wtmp. musl 0003 now carries the real paths in utmp.h too;
+# the recipe pins nothing and instead asserts the built session binary
+# references the real databases. Service-side DB creation unchanged).
+# r4: login accounting paths (2026-10-23, proven by sshd-session errors
+# on Egg: "wtmp_write: problem writing /dev/null/wtmp" + missing
+# /var/log/lastlog). musl's <utmp.h> deliberately neuters WTMP_FILE and
+# UTMP_FILE to /dev/null/*, and configure trusts the system macro, so
+# the compiled sshd wrote accounting into /dev/null. All three pinned
+# explicitly (lastlog via its flag; wtmp/utmp have no flag, so set
+# configure's own location variables in its environment), proven in
+# config.h fail-closed below, plus the shipped empty lastlog database
+# (sshd never creates it). Payload change.
 # r3: --with-default-path sets the canonical PATH for sshd sessions
 # (upstream default omits /usr/local and interleaves the pairs;
 # verified in 10.6 defines.h, flag verified in configure.ac). Same
@@ -80,6 +97,11 @@ recipe_build()
 	# mapped-address handling on; no SELinux/RPATH. Shadow stays
 	# at upstream default (enabled) - never --without-shadow.
 	# Every flag proven against 10.5p1 ./configure --help.
+	# Login accounting paths are NOT pinned here: musl's headers are
+	# the single source of truth (defines.h prefers _PATH_* over any
+	# CONF_* override, so configure pins are silently dead -- proven
+	# by r4). musl 0003 carries the real paths in paths.h and utmp.h;
+	# the install step below asserts the built binary references them.
 	./configure \
 		--prefix=/usr \
 		--sysconfdir=/etc/ssh \
@@ -100,6 +122,21 @@ recipe_build()
 recipe_install()
 {
 	make DESTDIR="$PKGDEST" install-nokeys
+	# True accounting contract (see r5 header): the staged session
+	# binary must reference the real databases and never musl's old
+	# neutering. This asserts the linked result in the payload, not a
+	# config.h intermediate that the headers can silently override --
+	# an assert in recipe_build runs before install stages anything.
+	for needle in /var/log/wtmp /var/log/lastlog; do
+		strings -a "$PKGDEST/usr/lib/ssh/sshd-session" | grep -Fq "$needle" || {
+			echo "ERROR: sshd-session omits $needle (libc accounting headers?)" >&2
+			return 1
+		}
+	done
+	if strings -a "$PKGDEST/usr/lib/ssh/sshd-session" | grep -Fq '/dev/null/wtmp'; then
+		echo "ERROR: sshd-session references /dev/null/wtmp" >&2
+		return 1
+	fi
 	install -D -m 0755 "$SRC/contrib/ssh-copy-id" \
 		"$PKGDEST/usr/bin/ssh-copy-id"
 	install -d -m 0755 "$PKGDEST/etc/ssh" "$PKGDEST/var/empty"

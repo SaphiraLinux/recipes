@@ -11,7 +11,10 @@
 
 pkgname=audit
 pkgver=4.0.2
-pkgrel=1
+pkgrel=2
+# r2: --disable-zos-remote (2026-10-23): z/OS remote logging defaults on
+# and fails the build without openldap, which Saphira does not ship.
+# Payload change (unblocks the first build).
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="Linux audit framework userspace (libaudit, auditd)"
 license="GPL-2.0-or-later AND LGPL-2.1-or-later"
@@ -49,6 +52,7 @@ recipe_build()
 		--libdir=/usr/lib \
 		--with-libcap-ng=yes \
 		--without-python3 \
+		--disable-zos-remote \
 		--with-apparmor
 	make -j${JOBS:-$(nproc)}
 }

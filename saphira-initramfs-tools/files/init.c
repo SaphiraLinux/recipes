@@ -312,13 +312,18 @@ static void run_stage(const struct config *cfg, const char *stage)
  * failed to import a pool can leave a directory that looks right, and
  * switch_root into it produces an unbootable machine with no diagnostic. So
  * the check is: the newroot exists, it has an executable init, and the init
- * is one we can name.
+ * is the canonical one.
+ *
+ * SEV1 2026-10-22: exactly one candidate, /sbin/init. Saphira and SaphiraD
+ * are permanently non-usrmerged and /sbin/init is the sole canonical PID 1
+ * entry point - the installed system owns it, and the bootloader and the
+ * initramfs never select the init implementation. There are no fallback
+ * paths: /usr/sbin/init must never exist, /usr/lib/systemd/systemd names
+ * one implementation explicitly, and a missing /sbin/init is a broken
+ * installation that must fail visibly below, never boot around silently.
  */
 static const char *const init_candidates[] = {
 	"/sbin/init",
-	"/usr/sbin/init",
-	"/usr/lib/systemd/systemd",
-	"/bin/init",
 	NULL
 };
 
@@ -413,10 +418,13 @@ int main(void)
 	 * dependency of the initramfs for this reason alone, and the generator
 	 * pulls in its library closure automatically.
 	 */
-	execl("/usr/bin/switch_root", "switch_root", cfg.newroot, real_init,
+	/* SEV1 2026-10-22: canonical path first. util-linux ships
+	 * /sbin/switch_root on non-usrmerged Saphira; /usr/bin is a
+	 * fallthrough only, never the expected location. */
+	execl("/sbin/switch_root", "switch_root", cfg.newroot, real_init,
 	      (char *)NULL);
 	if (errno == ENOENT)
-		execl("/sbin/switch_root", "switch_root", cfg.newroot, real_init,
+		execl("/usr/bin/switch_root", "switch_root", cfg.newroot, real_init,
 		      (char *)NULL);
 	emergency("cannot exec switch_root", strerror(errno));
 	return 1;

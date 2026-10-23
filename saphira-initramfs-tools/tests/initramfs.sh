@@ -63,6 +63,23 @@ refused() {
 	ok "refused: $description"
 }
 
+# --- the newroot init contract (SEV1 2026-10-22) --------------------------
+#
+# /sbin/init is the sole canonical PID 1 entry point. The candidate list in
+# files/init.c must name it and nothing else: no /usr fallback, no
+# implementation-specific path, no second guess that could mask a broken
+# installation with a silent boot around it.
+printf '%s\n' 'initramfs: the newroot init contract'
+cands=$(sed -n '/init_candidates\[\] = {/,/};/p' "$root/saphira-initramfs-tools/files/init.c") ||
+	fail 'cannot extract init_candidates from files/init.c'
+printf '%s\n' "$cands" | grep -Fq '"/sbin/init"' ||
+	fail 'init_candidates does not name /sbin/init'
+paths=$(printf '%s\n' "$cands" | grep -o '"[^"]*"' | sort -u) ||
+	fail 'cannot list init_candidates paths'
+[ "$paths" = '"/sbin/init"' ] ||
+	fail "init_candidates names more than /sbin/init: $paths"
+ok 'init_candidates names exactly /sbin/init and nothing else'
+
 # --- the /init must be genuinely static ----------------------------------
 #
 # Asserted, not assumed. A dynamically linked /init builds perfectly well on

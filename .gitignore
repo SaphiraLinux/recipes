@@ -12,6 +12,7 @@ codex.history.md
 
 CALUDE.md
 *.md
+!PATCHES.md
 
 *.x509
 !wireless-regdb/files/saphira-regdb.x509

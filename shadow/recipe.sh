@@ -1,7 +1,11 @@
 #!/bin/sh
 pkgname=shadow
 pkgver=4.17.3
-pkgrel=11
+pkgrel=12
+# r12: --enable-lastlog (2026-10-23): ship the classic lastlog reader
+# (upstream default is off). openssh writes /var/log/lastlog; without
+# a reader the database is write-only. musl's struct lastlog carries
+# ll_host, so the configure check passes. Asserted below.
 # r11: ENV_SUPATH + ENV_PATH set to the canonical PATH (Saphira PATH
 # policy): upstream defaults omit /usr/local and interleave the
 # non-usrmerged pairs, so su/login sessions disagreed with the rest
@@ -84,12 +88,19 @@ recipe_build() {
 		CPPFLAGS="-I/usr/include/libxcrypt ${CPPFLAGS-}" \
 		--with-libpam --without-selinux \
 		--without-audit --enable-subordinate-ids \
-		--without-btrfs --disable-nls \
+		--without-btrfs --disable-nls --enable-lastlog \
 		--with-group-name-max-length=32
 	make -j${JOBS:-$(nproc)}
 }
 recipe_install() {
 	make -C "$SRC" DESTDIR="$PKGDEST" install
+	# The lastlog reader must ship: openssh writes the database, and a
+	# write-only database with no reader is an accounting gap, not a
+	# policy. lastlog lives in /usr/bin upstream.
+	[ -x "$PKGDEST/usr/bin/lastlog" ] || {
+		echo "ERROR: shadow payload is missing /usr/bin/lastlog (--enable-lastlog)" >&2
+		return 1
+	}
 	# saphira-baselayout owns
 	# /sbin/nologin; yield it until the baselayout migration replaces
 	# it, otherwise every shadow upgrade collides with apk fix.

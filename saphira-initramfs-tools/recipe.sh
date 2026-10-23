@@ -1,7 +1,12 @@
 #!/bin/sh
 pkgname=saphira-initramfs-tools
 pkgver=0.1
-pkgrel=2
+pkgrel=3
+# r3: SEV1 init contract (2026-10-22): the newroot candidate list is exactly
+# /sbin/init - /usr/sbin/init, /usr/lib/systemd/systemd and /bin/init
+# removed, so a broken installation fails visibly instead of booting around
+# silently; switch_root is tried at its canonical /sbin path first.
+# Payload change (static /init binary).
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='Saphira initramfs generator, static-musl /init and the early-userspace hook framework'
 license='BUSL-1.1'

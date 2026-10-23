@@ -12,3 +12,16 @@
  
  #define	_PATH_DEV	"/dev/"
  #define	_PATH_TMP	"/tmp/"
+--- musl-1.2.6-orig/include/utmp.h	2026-03-20 15:40:00.000000000 +0000
++++ musl-1.2.6/include/utmp.h	2026-10-23 00:00:00.000000000 +0000
+@@ -37,8 +37,8 @@
+
+ int login_tty(int);
+
+-#define _PATH_UTMP "/dev/null/utmp"
+-#define _PATH_WTMP "/dev/null/wtmp"
++#define _PATH_UTMP "/var/run/utmp"
++#define _PATH_WTMP "/var/log/wtmp"
+
+ #define UTMP_FILE _PATH_UTMP
+ #define WTMP_FILE _PATH_WTMP

@@ -15,6 +15,17 @@ depend()
 start_pre()
 {
 	checkpath -d -m 0755 /var/run/sshd
+	# Login accounting databases: sshd records logins here but creates
+	# neither file itself (proven by missing-lastlog and /dev/null-wtmp
+	# errors). Created when absent only, existing files never touched:
+	# /var/log/wtmp may be a live database with history, and payload
+	# files would collide with unowned fossils on upgraded hosts.
+	for acct in /var/log/wtmp /var/log/lastlog; do
+		if [ ! -e "$acct" ] && [ ! -L "$acct" ]; then
+			: > "$acct" || return 1
+			chmod 0644 "$acct" || return 1
+		fi
+	done
 	# First-start host keys, before any validation: ssh-keygen -A is
 	# idempotent (it generates only missing key types, never replaces
 	# existing keys), so this is safe on every start, and sshd -t

@@ -11,13 +11,19 @@ GRUB_DISTRIBUTOR="Saphira"
 # acceptance image booted on a machine with no serial hardware). A
 # deployment that genuinely has a serial console adds console=ttyS0 to its
 # own kernel line.
-GRUB_CMDLINE_LINUX="rootfstype=ext4 rw rootwait console=tty0 raid=noautodetect init=/usr/lib/systemd/systemd"
+GRUB_CMDLINE_LINUX="rootfstype=ext4 rw rootwait console=tty0 raid=noautodetect"
 # No nomodeset: Saphira needs kernel modesetting and the EFI framebuffer
 # for console (nomodeset blinds UEFI boxes: no efifb, and i915 ships as
 # a module with no initramfs to load it early). A machine that genuinely
 # needs modesetting off overrides this on its own kernel line.
-# init= is belt-and-braces only: systemd ships a real /sbin/init, so the
-# kernel's ordinary search is the supported path (test boots omit init=).
+# No init= override, ever: an explicit init= never falls back - if the named
+# path does not exist the kernel panics (proven on Egg 2026-10-22, where the
+# packaged init=/usr/lib/systemd/systemd reached a live grub.cfg through the
+# kernel upgrade hook and the machine had to be recovered). The kernel's
+# /sbin/init search is the only supported path, and the bootloader never
+# selects the init implementation. Merged-usr paths are invalid on
+# Saphira/SaphiraD: there is no /usr/sbin/init and no other PID 1 location.
+# Test boots must omit init= to prove the contract.
 # systemd.imds=no: Saphira is not a cloud image, so the IMDS metadata
 # generator can never enable here - but in auto mode it still opens the
 # hardware database at every boot and logs a failed lookup when none

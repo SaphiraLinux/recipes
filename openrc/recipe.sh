@@ -2,7 +2,18 @@
 
 pkgname=openrc
 pkgver=0.62.1
-pkgrel=6
+pkgrel=8
+# r8: binfmt.sh writer (2026-10-23): register/unregister writes use
+# printf '%s', never echo (proven by strace: bash echo emits the trailing
+# newline as a separate writev segment, the kernel runs .write once per
+# segment, and the lone-newline retry fails EINVAL after the operation
+# already succeeded - every fragment printed a spurious failure at every
+# boot while every registration worked). Locked by tests/binfmt-writer.sh.
+# r7: binfmt.sh diagnostic paths (2026-10-23): upstream lists the fragment
+# dirs with trailing slashes and joins with another slash, so every
+# binfmt error message prints a doubled path (/usr/lib/binfmt.d//x.conf).
+# Cosmetic for file access (// opens fine) but corrosive in the one place
+# you read while debugging a boot problem. No behavior change.
 # r5: Saphira bootmisc never migrates /var/run or /var/lock into
 # /run (upstream OpenRC does on every boot: an empty real directory
 # rmdir's cleanly and is then symlinked - proven by a 0.2.1 guest
@@ -51,6 +62,7 @@ recipe_build()
 	# and /var/lock into /run on every boot. Fails closed on upstream
 	# drift like the systemd split-run patches.
 	patch -d "$SRC" -Np1 -i "$RECIPE_DIR/files/saphira-no-run-migration.patch"
+	patch -d "$SRC" -Np1 -i "$RECIPE_DIR/files/saphira-binfmt-paths.patch"
 	meson setup build "$SRC" \
 		--bindir=/bin --sbindir=/sbin --libdir=/lib \
 		--libexecdir=/lib --buildtype=release \

@@ -17,7 +17,22 @@ pkgname=saphira-kernel-7.3
 # (T7), never an automatic replacement.
 kernel_version=7.3
 pkgver=1
-pkgrel=1
+pkgrel=4
+# r4: framebuffer console capability completion (2026-10-23):
+# FRAMEBUFFER_CONSOLE_DETECT_PRIMARY=y (the only requested symbol the
+# line lacked; verified present in 7.1.5..7.3 Kconfig), gate requires
+# VIRTIO, DRM_I915, DRM_KMS_HELPER, DRM_SIMPLEDRM, DRM_VIRTIO_GPU_KMS
+# (all already =y). Capabilities only - console selection stays outside
+# the kernel. Payload + gate change.
+# r3: SEV1 console correction (2026-10-23): built kernels define NO
+# command line at all (the r2 console=tty0 built-in still dictated
+# console policy from the kernel package; the bootloader owns the entire
+# line). CONFIG_CMDLINE_BOOL unset, CONFIG_CMDLINE empty, gate extended.
+# Payload change.
+# r2: SEV1 console contract (2026-10-23): CONFIG_CMDLINE names exactly
+# console=tty0 (the packaged dual line handed /dev/console to a serial
+# port and blinded VGA boots, last-console-wins). Build gate extended.
+# Payload change.
 # r1: initial 7.3 stable line. Config, gate and build flow inherit the
 # proven 7.3-rc1 shape; upstream tarball is the stable cdn release
 # (not a torvalds snapshot). Payload: full kernel build.

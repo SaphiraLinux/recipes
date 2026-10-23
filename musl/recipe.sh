@@ -10,7 +10,12 @@ pkgver=1.2.6
 # unchanged: libc.so keeps consuming the same LOBJS as before.
 # r4->r5 carries only the utmp/wtmp paths.h statements (no code,
 # no ABI): direct-file readers resolve the real database.
-pkgrel=5
+# r6: extend 0003 to utmp.h (2026-10-23, proven by openssh r4:
+# paths.h alone does not move WTMP_FILE/UTMP_FILE, and configure
+# CONF_* overrides are dead whenever the macros exist -- the header
+# is the single source of truth, so it carries the real paths too).
+# Headers only, no code, no ABI.
+pkgrel=6
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='musl libc 1.2.6 with the Saphira 1MiB pthread stack patch - the installable base libc'
 license='MIT'
@@ -36,7 +41,7 @@ in6_patch_sha256=28ea1e653d0b4e242065714c2018aed67d68ce06dc5cd8526ef735a1a5a06d0
 # libc behavior: musl's getutxent remains upstream-stubbed, so
 # coreutils who/uptime keep using their fallbacks, which is exactly
 # what makes uptime correct once no stale seed shadows the lookup.
-utmp_patch_sha256=49345f5ae4acf6e1cbedddb9a4f4a7c8077c1260c6a97bc487c7cb512aeae8e8
+utmp_patch_sha256=e8eab82e03d975af6d0dbd33af878e85dbe5909059c8871248868bd7fc7b11a6
 
 depends=""
 makedepends="

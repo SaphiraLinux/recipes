@@ -1553,10 +1553,11 @@ cmd_build()
 #     here via blkid. grub-mkconfig emits GRUB_CMDLINE_LINUX after
 #     its own probed root=, and the kernel takes the LAST root=, so
 #     appending the PARTUUID form wins without fighting the probe.
-#   init=<one init>    the baselayout default names the systemd
-#     binary, which is wrong on an OpenRC target (and redundant on
-#     a systemd one: both payloads ship a real /sbin/init, which is
-#     the kernel's own default). Strip every init= token for both.
+#   init=<one init>    baselayout defaults at r21..r54 named the systemd
+#     binary (SEV1 2026-10-22: removed from the packaged default after it
+#     reached a live grub.cfg and panicked Egg; the strip stays as
+#     defense-in-depth). Both payloads ship a real /sbin/init, which is
+#     the kernel's own default. Strip every init= token for both.
 #   getty autospawn  systemd's getty-generator spawns a serial getty
 #     for every kernel console= (proven: it HUP-killed the firstboot
 #     wizard fighting it for /dev/console). No serial getty may exist

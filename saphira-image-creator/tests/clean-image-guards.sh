@@ -108,10 +108,22 @@ printf '%s\n' '# kernel arguments belong to their target'
 # The packaged default is init-neutral. A systemd-only argument there is
 # target leakage: meaningless on OpenRC, and misleading in /proc/cmdline.
 default_grub=$root/../saphira-baselayout/files/default-grub
+packaged_cmdline=
+if test -r "$default_grub"; then
+	packaged_cmdline=$(/usr/bin/sed -n 's/^GRUB_CMDLINE_LINUX="\(.*\)"$/\1/p' "$default_grub")
+fi
 if test ! -r "$default_grub"; then
 	printf 'default-grub not readable, skipping: %s\n' "$default_grub" >&2
+elif test -z "$packaged_cmdline"; then
+	bad 'the packaged GRUB_CMDLINE_LINUX is missing or unparseable'
 elif /usr/bin/grep -E '^GRUB_CMDLINE_LINUX=.*systemd\.' "$default_grub" >/dev/null; then
 	bad 'the packaged GRUB_CMDLINE_LINUX carries a systemd-only argument'
+# SEV1 2026-10-22: the systemd\. check above is evaded by
+# init=/usr/lib/systemd/systemd (no dot after "systemd"), which reached a
+# live grub.cfg and panicked Egg - explicit init= never falls back. The
+# packaged default must carry no init= token at all.
+elif case " $packaged_cmdline " in *' init='*) true ;; *) false ;; esac; then
+	bad 'the packaged GRUB_CMDLINE_LINUX carries an init= override (bootloader must never name the init implementation)'
 else
 	ok 'the packaged GRUB_CMDLINE_LINUX is init-neutral'
 fi

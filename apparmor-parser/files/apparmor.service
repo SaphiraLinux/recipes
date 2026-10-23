@@ -1,0 +1,16 @@
+[Unit]
+Description=AppArmor policy loader
+# No profiles ship yet: without this gate an empty directory would
+# fail the boot transaction instead of passing silently.
+ConditionDirectoryNotEmpty=/etc/apparmor.d
+DefaultDependencies=no
+After=local-fs.target
+Before=sysinit.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/sbin/apparmor_parser -r /etc/apparmor.d
+
+[Install]
+WantedBy=sysinit.target

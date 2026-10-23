@@ -36,18 +36,23 @@ nib_required_symbols()
 	# and XFS_FS are all =y: any of them may be the root filesystem
 	# and there is no initramfs to load a module from.
 	printf '%s\n' ATA BLK_DEV_NVME BLK_DEV_SD BTRFS_FS DEVTMPFS EXT4_FS \
-		NVME_CORE SATA_AHCI SCSI VIRTIO_BLK VIRTIO_PCI VMD XFS_FS
+		NVME_CORE SATA_AHCI SCSI VIRTIO VIRTIO_BLK VIRTIO_PCI VMD XFS_FS
 	# USB mass storage / recovery sticks.
 	printf '%s\n' USB_STORAGE USB_UAS USB_XHCI_HCD
 	# Disk layout and EFI boot.
 	printf '%s\n' EFI_PARTITION EFI_STUB
 	# Local console: VGA text (BIOS), EFI framebuffer + fbcon (UEFI,
-	# where no VGA text mode exists), 8250 serial.
+	# where no VGA text mode exists), 8250 serial. DETECT_PRIMARY maps
+	# fbcon to the primary display automatically.
 	printf '%s\n' EARLY_PRINTK FB FB_EFI FRAMEBUFFER_CONSOLE \
-		SERIAL_8250 SERIAL_8250_CONSOLE SERIAL_EARLYCON SYSFB \
-		SYSFB_SIMPLEFB VGA_CONSOLE VT VT_CONSOLE
-	# KMS for virtio-vga UEFI guests (handoff target of the fbcon above).
-	printf '%s\n' DRM DRM_VIRTIO_GPU
+		FRAMEBUFFER_CONSOLE_DETECT_PRIMARY SERIAL_8250 \
+		SERIAL_8250_CONSOLE SERIAL_EARLYCON SYSFB SYSFB_SIMPLEFB \
+		VGA_CONSOLE VT VT_CONSOLE
+	# KMS: virtio-gpu (QEMU/KVM guests, UEFI handoff target of the fbcon
+	# above), i915 (Intel integrated graphics), SimpleDRM (early
+	# UEFI/firmware framebuffer before native drivers bind).
+	printf '%s\n' DRM DRM_I915 DRM_KMS_HELPER DRM_SIMPLEDRM \
+		DRM_VIRTIO_GPU DRM_VIRTIO_GPU_KMS
 	# KMS framebuffer console: without fbdev emulation a modesetting
 	# driver takes over the VGA console and shows nothing (proven blind
 	# on N100/i915: efifb hands off, no fbcon ever appears). Physical
@@ -93,6 +98,30 @@ check_no_initramfs_builtins()
 			fails=$((fails + 1))
 		fi
 	done
+	# SEV1 console contract (2026-10-23, corrected): built kernels define
+	# NO command line at all - the bootloader owns the entire kernel
+	# command line. Any built-in console= (even console=tty0) dictates
+	# console policy from the kernel package, and a serial one hands
+	# /dev/console to an absent port (last-console-wins blinded VGA
+	# boots). CONFIG_CMDLINE_OVERRIDE=y would let a built-in overrule
+	# the bootloader outright. Deployments with a real serial console
+	# set it explicitly on their own kernel line.
+	if grep -q '^CONFIG_CMDLINE_BOOL=y$' "$1"; then
+		printf 'no-initramfs-builtins: %s: CONFIG_CMDLINE_BOOL is set (built kernels define no cmdline)\n' \
+			"$label" >&2
+		fails=$((fails + 1))
+	fi
+	cmdline=$(sed -n 's/^CONFIG_CMDLINE="\(.*\)"$/\1/p' "$1")
+	if [ -n "$cmdline" ]; then
+		printf 'no-initramfs-builtins: %s: CONFIG_CMDLINE is not empty: %s\n' \
+			"$label" "$cmdline" >&2
+		fails=$((fails + 1))
+	fi
+	if grep -q '^CONFIG_CMDLINE_OVERRIDE=y$' "$1"; then
+		printf 'no-initramfs-builtins: %s: CONFIG_CMDLINE_OVERRIDE is set (the bootloader cmdline must win)\n' \
+			"$label" >&2
+		fails=$((fails + 1))
+	fi
 	if [ "$fails" -ne 0 ]; then
 		nib_die "$label: $fails required builtin(s) not =y (see above)"
 		return 1

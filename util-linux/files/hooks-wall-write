@@ -1,0 +1,29 @@
+#!/bin/sh
+# Converge wall/write to the upstream setgid-tty pair (2755 root:tty).
+#
+# The clean build root carries no tty group, so full ownership cannot
+# be staged at build time (numeric chown to an unmapped GID fails in
+# the rootless namespace): the build asserts the staged 2755 mode, and
+# this hook supplies the group at install/upgrade time.
+#
+# A missing binary fails loudly (the payload always ships both). A
+# missing tty group is a warning, not a failure: every real Saphira
+# root carries it via the base seed, so its absence means an
+# artificial root (the builder's --no-scripts install test), where the
+# staged ownership stands and wall/write stay root-usable. This mirrors
+# the kernel hook's absent-GRUB no-op: absent tooling is legitimate,
+# failure never swallowed (the warning names the consequence).
+#
+# Absolute paths only: hooks run under apk with a minimal PATH.
+for tool in /usr/bin/wall /usr/bin/write; do
+	if [ ! -e "$tool" ] && [ ! -L "$tool" ]; then
+		printf '%s\n' "util-linux: $tool missing from payload" >&2
+		exit 1
+	fi
+	if awk -F: '$1 == "tty" {found=1} END {exit !found}' /etc/group 2>/dev/null; then
+		/bin/chgrp tty "$tool"
+		/bin/chmod 2755 "$tool"
+	else
+		printf '%s\n' "util-linux: group tty absent, leaving $tool group-root (non-root wall/write will fail)" >&2
+	fi
+done

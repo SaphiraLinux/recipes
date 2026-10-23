@@ -1664,7 +1664,11 @@ PY
 # canonical path cannot move to /usr/sbin like the split halt/
 # poweroff/reboot/shutdown siblings). A third claimant still fails.
 mkdir -p "$stage/systemd/pkg/sbin" "$stage/openrc/pkg/sbin"
-ln -s ../lib/systemd/systemd "$stage/systemd/pkg/sbin/init"
+# SEV1 2026-10-22: the systemd side ships a real file, never a cross-tree
+# symlink into /usr (../lib/systemd/systemd normalizes the merged shape).
+# The openrc side keeps its same-dir openrc-init link, which mirrors live
+# systems and stays inside the distinct /sbin tree.
+printf '%s\n' 'fake-pid1' > "$stage/systemd/pkg/sbin/init"
 ln -s openrc-init "$stage/openrc/pkg/sbin/init"
 printf '%s\n' '{"arch":"x86_64","build_time":30,"license":"MIT","name":"systemd","origin":"systemd","outputs":[{"dependencies":[],"description":"systemd","name":"systemd","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r1"}' > "$stage/systemd/manifest.json"
 printf '%s\n' '{"arch":"x86_64","build_time":30,"license":"MIT","name":"openrc","origin":"openrc","outputs":[{"dependencies":[],"description":"openrc","name":"openrc","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r1"}' > "$stage/openrc/manifest.json"
