@@ -1,0 +1,8 @@
+# Device-access group for Android USB nodes. plugdev (GID 177) is
+# seed-owned (accounts.tsv) for exactly this purpose; the declaration
+# here is identical and converges. It also repairs the latent gap for
+# every other consumer referencing plugdev: the seed row alone never
+# materializes the group (proven absent on Egg despite the TSV row),
+# and this fragment creates it wherever android-tools installs.
+# No user, no daemon, no state: group-only, like libvirt.
+group plugdev 177
