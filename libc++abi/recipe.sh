@@ -28,9 +28,13 @@ makedepends="
     python3
 "
 
-# Proven v0 flags: runtimes build driven by the native clang with the
-# Saphira musl target, LLVM libunwind as the unwinder, compiler-rt
-# builtins, static and shared c++abi installed, tests/assertions off.
+# Combined-runtimes configure (libc++ recipe precedent): the standalone
+# cxxabi-only configure fails on generated libcxx headers (__config,
+# version) — three failed builds Sep-Oct (rc=1 in cmake/ninja, never in
+# packaging). Configuring libunwind+libcxxabi+libcxx together generates
+# them; we still build and install ONLY the cxxabi target, so this
+# package owns exactly the ABI runtime and nothing else. Native clang,
+# Saphira musl target, LLVM unwinder, compiler-rt, tests off.
 recipe_build()
 {
 	cmake -G Ninja "$SRC/runtimes" -B "$BUILDDIR" \
@@ -45,13 +49,17 @@ recipe_build()
 		-DCMAKE_C_FLAGS="${CFLAGS-}" -DCMAKE_CXX_FLAGS="${CXXFLAGS-}" \
 		-DCMAKE_EXE_LINKER_FLAGS="${LDFLAGS-}" \
 		-DCMAKE_SHARED_LINKER_FLAGS="${LDFLAGS-}" \
-		-DLLVM_ENABLE_RUNTIMES='libunwind;libcxxabi' \
-		-DLIBCXXABI_INCLUDE_TESTS=OFF -DLIBCXXABI_ENABLE_ASSERTIONS=OFF \
-		-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY \
+		-DLLVM_DEFAULT_TARGET_TRIPLE=x86_64-akadata-linux-musl \
+		-DLLVM_ENABLE_RUNTIMES='libunwind;libcxxabi;libcxx' \
+		-DLLVM_INCLUDE_TESTS=OFF \
+		-DLIBCXX_INCLUDE_BENCHMARKS=OFF -DLIBCXX_INCLUDE_DOCS=OFF \
+		-DLIBCXXABI_INCLUDE_TESTS=OFF -DLIBUNWIND_INCLUDE_TESTS=OFF \
+		-DLIBCXXABI_ENABLE_ASSERTIONS=OFF \
+		-DLIBUNWIND_ENABLE_ASSERTIONS=OFF \
 		-DLIBCXXABI_USE_LLVM_UNWINDER=ON \
-		-DLIBCXXABI_LIBCXX_INCLUDES=$SRC/libcxx/include \
-		-DLIBCXXABI_LIBUNWIND_INCLUDES=/usr/include \
-		-DLIBCXXABI_USE_COMPILER_RT=ON \
+		-DLIBCXXABI_USE_COMPILER_RT=ON -DLIBUNWIND_USE_COMPILER_RT=ON \
+		-DLIBCXX_USE_COMPILER_RT=ON -DLIBCXX_HAS_MUSL_LIBC=ON \
+		-DLIBCXX_ENABLE_ABI_LINKER_SCRIPT=OFF \
 		-DLIBCXXABI_INSTALL_STATIC_LIBRARY=ON \
 		-DLIBCXXABI_INSTALL_SHARED_LIBRARY=ON
 	ninja -C "$BUILDDIR" cxxabi
@@ -60,6 +68,13 @@ recipe_build()
 recipe_install()
 {
 	DESTDIR="$PKGDEST" ninja -C "$BUILDDIR" install-cxxabi
+	# Ownership split (collision-proven 2026-10-28): the two c++/v1
+	# cxxabi headers stay with the libc++ package, which stages them
+	# from the same combined runtimes build and already publishes them
+	# (signing refuses dual-owned paths). This package ships the ABI
+	# runtime (shared + static) only.
+	rm -rf "$PKGDEST/usr/include/c++/v1/__cxxabi_config.h" \
+	       "$PKGDEST/usr/include/c++/v1/cxxabi.h"
 	install -D -m 0644 "$SRC/libcxxabi/LICENSE.TXT" \
 		"$PKGDEST/usr/share/licenses/libc++abi/LICENSE.TXT"
 	# Proven v0 leak check: no build paths may survive in ELF metadata.

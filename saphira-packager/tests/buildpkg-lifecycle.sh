@@ -170,6 +170,35 @@ txn.fail("prepare never got there")
 assert not (alien / "FAILED").exists(), "T6: unmarked workspace blessed"
 assert (alien / "sentinel").read_text() == "keep\n", "T6: alien touched"
 
+# T7: timings flush on both paths. fail() keeps the workspace copy;
+# succeed() removes the workspace, so the daemon copy (via
+# $SAPHIRA_TIMINGS_DIR) is the durable record in both cases.
+import os as _os
+_os.environ["SAPHIRA_TIMINGS_DIR"] = str(build_root / "daemon-logs")
+try:
+    txn = transaction("timed")
+    txn.prepare()
+    txn.timings["phases"]["resolve_s"] = 1.5
+    txn.timings["builds"]["timed"] = 2.5
+    txn.fail("boom-timed")
+    ws = build_root / "timed.buildpkg"
+    data = json.loads((ws / "timings.json").read_text())
+    assert data["schema"] == "saphira-build-timings/v1", "T7: schema"
+    assert data["target"] == "timed", "T7: target"
+    assert data["phases"]["resolve_s"] == 1.5, "T7: phases"
+    assert data["builds"]["timed"] == 2.5, "T7: builds"
+    assert isinstance(data["total_s"], (int, float)), "T7: total"
+    assert json.loads((build_root / "daemon-logs" / "timings.json").read_text()) == data, \
+        "T7: daemon copy"
+    txn2 = transaction("timed2")
+    txn2.prepare()
+    txn2.succeed()
+    assert not (build_root / "timed2.buildpkg").exists(), "T7: workspace retained"
+    data2 = json.loads((build_root / "daemon-logs" / "timings.json").read_text())
+    assert data2["target"] == "timed2", "T7: succeed copy"
+finally:
+    del _os.environ["SAPHIRA_TIMINGS_DIR"]
+
 # T7: the canonical remover is fail-closed on identity.
 try:
     module._remove_workspace_tree(build_root, pathlib.Path("/tmp/evil.buildpkg"))
@@ -184,6 +213,9 @@ PY
 # --- Part B: main() end to end with a refusing stub resolver ---------------
 repo_dir=$test_root/repo
 mkdir -p "$repo_dir/testgen/x86_64" "$test_root/recipes" "$test_root/incoming"
+# Plan-phase identity gate reads the registry from the recipe root.
+mkdir -p "$test_root/recipes/saphira-baselayout/files"
+printf '%s\n' '# name	type	id	primary-group	home	shell	supplementary-groups	init' > "$test_root/recipes/saphira-baselayout/files/accounts.tsv"
 : > "$repo_dir/testgen/x86_64/probe-seed-pkg-1-r1.apk"
 stub_main=$test_root/main-bindir
 mkdir -p "$stub_main"
@@ -247,5 +279,12 @@ grep 'pre-build refusal; workspace removed, no diagnostic retained' \
 test ! -e "$build_root/refused-pkg.buildpkg"
 test -z "$(find "$build_root" -maxdepth 1 -name 'refused-pkg.buildpkg*' -print -quit)"
 test -z "$(grep -rls "upperdir=$build_root/refused-pkg.buildpkg/upper" /proc/[0-9]*/mountinfo 2>/dev/null)"
+# Refusals exit 2, never 1: downstream (queue attempt class, dashboards,
+# SBU math) must distinguish "never built" from "built and failed".
+set +e
+run_main_buildpkg refused-pkg > "$test_root/refusal-rc.out" 2> "$test_root/refusal-rc.err"
+rc=$?
+set -e
+[ "$rc" -eq 2 ] || { printf '%s\n' "Part B: refusal exit $rc, want 2" >&2; exit 1; }
 
 printf '%s\n' 'buildpkg cleanup-lifecycle (refusal/success/failure-cap/no-bless) tests: OK'

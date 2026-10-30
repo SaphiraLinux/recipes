@@ -16,7 +16,10 @@
 
 pkgname=lvm2
 pkgver=2.03.39
-pkgrel=3
+pkgrel=4
+# r4: three-way split (main tools, lvm2-libs runtime, lvm2-dev headers);
+# headers no longer force tool installs, main takes lvm2-libs for its
+# linked binaries. Payload change.
 # r3: initramfs LVM-root hook (files/20-lvm-activate ->
 # /lib/saphira/initramfs/root.d/, suite-proven): vgchange -ay plus
 # mounting root=/dev/mapper/... at /newroot, else activation only so
@@ -36,9 +39,17 @@ sha256=af2969dd2dff34663bb6f5777b8636f17956e5403c8d809231009fdea9dc46d8
 # 2026-10-17 grub-2.14 dependency build: lvm2 failed with
 # "fatal error: libaio.h: No such file or directory"). libaio-dev
 # supplies the headers at build time, libaio the runtime library.
+#
+# Three-way split (headers must never force tool installs): lvm2-dev
+# carries usr/include plus the link-time names, lvm2-libs the SONAME
+# runtime (standalone, no parent pin), and main keeps the tools, udev
+# state, config and the initramfs hook. Consumers take -dev to build
+# and -libs to run; nothing takes main for headers.
+subpackages="lvm2-dev lvm2-libs"
 depends="
     readline
     libaio
+    lvm2-libs
 "
 
 makedepends="

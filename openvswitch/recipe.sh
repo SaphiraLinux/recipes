@@ -2,7 +2,10 @@
 
 pkgname=openvswitch
 pkgver=3.7.1
-pkgrel=6
+pkgrel=7
+# r7: drop the autodetected libunbound linkage (unbound-dev out of
+# makedepends, unbound out of depends) plus a build-time guard that
+# fails closed if it ever relinks. Payload change.
 # r4 (never committed, unpublishable as built): fhs.d/ensure-fhs era -
 # maintainer scripts called the retired helper (exit 127) and the
 # rundir choice lived only in the build tree.
@@ -33,8 +36,16 @@ openvswitch_sha256=b8936c2e95a024d37123536ca843648bc2f1d2520921f991dd3d06248859b
 
 # r0 was a legacy bootstrap build with NO depends metadata: ovs-vsctl
 # failed at runtime on clean installs (libunbound.so.8, libevent-2.1.so.7
-# unresolved). r1 is the native recipe with the real runtime closure.
-depends="openssl zlib unbound libevent"
+# unresolved). r1 answered by declaring both - but the unbound half was
+# upstream configure autodetection (OVS_CHECK_UNBOUND is AC_CHECK_LIB
+# with no --without flag), not a requirement: unbound-dev present at
+# build time silently linked every binary, and the make-dep became an
+# install-dep that drags the DNS server onto every OVS machine. A make
+# depend is never an install depend: unbound-dev is out, HAVE_UNBOUND
+# stays no by absence, and the guard at the end of recipe_build fails
+# closed if the linkage ever reappears. libevent stays (genuine
+# runtime linkage, same r0 evidence).
+depends="openssl zlib libevent"
 makedepends="
 	binutils
 	gawk
@@ -45,7 +56,6 @@ makedepends="
 	openssl-dev
 	pkgconf
 	python3
-	unbound-dev
 	zlib-dev
 "
 
@@ -61,6 +71,15 @@ recipe_build()
 		--with-rundir=/var/run/openvswitch \
 		--disable-static --enable-shared --disable-libcapng
 	make -j${JOBS:-$(nproc)}
+	# Make-deps never become install-deps (see the depends comment):
+	# fail closed if libunbound linkage ever reappears (a re-added
+	# unbound-dev would silently relink every binary via autodetect).
+	for ovs_bin in vswitchd/ovs-vswitchd ovsdb/ovsdb-server utilities/ovs-vsctl utilities/ovs-ofctl; do
+		if readelf -d "$ovs_bin" | grep -q libunbound; then
+			printf 'ovs %s links libunbound\n' "$ovs_bin" >&2
+			return 1
+		fi
+	done
 }
 
 recipe_install()

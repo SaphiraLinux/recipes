@@ -1,0 +1,6 @@
+lib/firmware/amd
+lib/firmware/amd-ucode
+lib/firmware/amdgpu
+lib/firmware/amdnpu
+lib/firmware/amdtee
+lib/firmware/radeon

@@ -1,0 +1,49 @@
+.TH SAPHIRA-FIRSTBOOT-IMAGE 8 "October 2026" "Saphira Linux" "System Manager's Manual"
+.SH NAME
+saphira-firstboot-image \- dedicated installer wizard for the USB creator appliance
+.SH SYNOPSIS
+.B saphira-firstboot-image
+.SH DESCRIPTION
+The USB creator appliance boots into this wizard instead of a login
+prompt or the ordinary
+.BR saphira-firstboot (8).
+It guides the operator through choosing a destination disk, product,
+firmware mode, filesystem, hostname, networking, DNS and root
+password, shows the complete installation plan, requires an explicit
+destructive confirmation, then installs onto the selected real disk
+and offers a reboot.
+.PP
+The appliance is a temporary installation environment, never the
+destination: every answer goes into the INSTALLED system only. The
+wizard writes only the confirmed whole disk, never builds image
+files, never modifies the created image afterwards except for the
+documented network/DNS files, and never permits the appliance's own
+boot disk as a target. Passwords live in memory only and are never
+logged. Cancellation writes nothing at any point.
+.SH FILES
+.TP
+.I /etc/saphira-image-firstboot-required
+Setup owed marker, written at assembly. Spent on verified completion.
+.TP
+.I /var/lib/saphira-image-firstboot/
+Session state (0600). Holds network staging, never passwords.
+.SH ENVIRONMENT
+.TP
+.B SAPHIRA_IMAGE_TTY
+Console device (default: /dev/console).
+.TP
+.B SAPHIRA_IMAGE_MARKER
+Marker path override (tests).
+.TP
+.B SAPHIRA_IMAGE_DISK
+Skip disk enumeration, use this device (tests).
+.TP
+.B SAPHIRA_IMAGE_NOEXEC
+Print the engine command instead of running it (tests).
+.TP
+.B SAPHIRA_TMPDIR
+Scratch root (never host /tmp).
+.SH SEE ALSO
+.BR saphira-image (8),
+.BR saphira-firstboot (8),
+.BR saphira-install-plan (5)

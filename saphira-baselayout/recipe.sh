@@ -2,7 +2,40 @@
 
 pkgname=saphira-baselayout
 pkgver=0.1
-pkgrel=55
+pkgrel=64
+# r62: backfilled identity registry (86 packaged/systemd rows; existing
+# rows byte-identical) plus firstboot arming on the apk skeleton's empty
+# root hash (0.2.2 images shipped locked-root with no marker and no
+# wizard path). Payload change (seed + helper).
+# r61: plugdev seed group 164 -> 177 (164 belongs to the published
+# keystone service identity, claimed before the seed row existed;
+# the seed vacates per its own rule. udev rules name the group, so
+# the move is free). Unblocks publication (repo gate refused the
+# GID collision on every transaction). Payload change (seed).
+# r60: FHS converge ordering fix + plugdev group:
+# the unit no longer orders against tmpfiles-setup-dev (upstream runs
+# it before local-fs-pre: cycle + udevd dragged behind local mounts,
+# Minimer boot proof) while the full tmpfiles-setup stage stays
+# ordered after; plugdev:164 joins the device-owner seed block so
+# libjaylink udev rules stop warning and J-Link works for members.
+# r59: sysusers three-phase replay + utmp:20/empower:21 seed (2026-10-23):
+# groups resolve before users in dependency order; missing automatic
+# identities fail naming the manifest; name-form GIDs resolve via
+# lookup. Payload change (reconciler + seed).
+# r58: firstboot wizard fixes (2026-10-23, both proven in a VM boot):
+# empty unfinished-steps array initialized (=() — the all-success path
+# died at the final report with "unbound variable"); empty DNS choice
+# resolves to the advertised default before calling dns-provider
+# (raw "" failed with "unknown DNS provider"). Payload change.
+# r57: sysusers UID[:GID] replay (2026-10-23): upstream root 0:0 and
+# nobody 65534:65534 lines converge instead of skipping; divergent
+# GIDs resolve against declared groups, undeclared GIDs and malformed
+# IDs fail closed. Payload change (reconciler).
+# r56: systemd graph fixes (2026-10-23): Environment= moved to
+# [Service] (it was ignored in [Unit], so the wizard never saw its
+# at-boot marker); firstboot drops the redundant cross-transaction
+# After=fhs-converge edge (transaction order already separates them;
+# the edge is the reported-cycle shape). Payload change (unit).
 # r55: remove the r21 init= override from default-grub (SEV1 architectural
 # correction 2026-10-22: the r21 "kernel falls back, mixed fleet is safe"
 # premise is false - an explicit init= never falls back and a nonexistent
@@ -468,7 +501,9 @@ install -m 0644 "$RECIPE_DIR/files/libexec/permissions-override.sh" \
 		"$PKGDEST/usr/lib/systemd/system/saphira-fhs-converge.service"
 	# Firstboot invocation (both inits): the wizard runs only while
 	# /etc/saphira-firstboot-required exists (assembly writes it when
-	# root ships locked); without the marker both are no-ops, so the
+	# root ships locked or with the apk skeleton's empty hash - both
+	# are unprovisioned; a supplied --root-password spends it again);
+	# without the marker both are no-ops, so the
 	# image enables them unconditionally via prepare_init.
 	install -D -m 0755 "$RECIPE_DIR/files/saphira-firstboot.initd" \
 		"$PKGDEST/etc/init.d/saphira-firstboot"

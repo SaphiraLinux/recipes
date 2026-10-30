@@ -1,7 +1,7 @@
 #!/bin/sh
 
 pkgname=brotli
-pkgver=1.2.0
+pkgver=1.2.1
 pkgrel=1
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='Generic-purpose lossless compression (RFC 7932), libraries and CLI'
@@ -9,8 +9,8 @@ license='MIT'
 origin=brotli
 repo=saphira
 url=https://github.com/google/brotli
-# Vendored: https://github.com/google/brotli/archive/refs/tags/v1.2.0.tar.gz
-brotli_sha256=816c96e8e8f193b40151dad7e8ff37b1221d019dbcb9c35cd3fadbfe6477dfec
+# Vendored: https://github.com/google/brotli/archive/refs/tags/v1.2.1.tar.gz
+brotli_sha256=98d35d11a78dc453aebb7d10c3748f3f73ff78c8267c0dc697b8631f67bf7e8f
 
 depends=""
 makedepends="
@@ -24,9 +24,9 @@ subpackages="$pkgname-dev $pkgname-doc"
 
 recipe_build()
 {
-	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$RECIPE_DIR/files/brotli-1.2.0.tar.gz"
+	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$RECIPE_DIR/files/brotli-1.2.1.tar.gz"
 	cd "$SRC"
-	echo "$brotli_sha256  $RECIPE_DIR/files/brotli-1.2.0.tar.gz" | sha256sum -c -
+	echo "$brotli_sha256  $RECIPE_DIR/files/brotli-1.2.1.tar.gz" | sha256sum -c -
 	cmake -S "$SRC" -B "$BUILDDIR" \
 		-DCMAKE_BUILD_TYPE=Release \
 		-DCMAKE_INSTALL_PREFIX=/usr \

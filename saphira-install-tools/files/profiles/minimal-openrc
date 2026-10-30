@@ -22,14 +22,24 @@
 #                       creator refuses to use it there).
 #   openssh             login/access. A server with no remote access is
 #                       not manageable.
+#   saphira-network     the supported network-configuration framework
+#                       (static per-interface files, DHCP when configured).
+#                       Owns the iproute2 dependency, so iproute2 is not
+#                       named here (proven in the repository closure).
+#   dhcpcd              DHCP client, used by saphira-network only when a
+#                       config selects DHCP (firstboot offers it).
+#   vim                 the base editor. A headless server with no editor
+#                       is not administrable.
 #   tzdata              a server with no timezone cannot reason about
 #                       logs, certificates or scheduling.
 #
 # Deliberately absent, each a decision rather than an oversight:
 #   - a graphical stack of any kind (see the headless policy);
 #   - ca-certificates is already inside saphira-base;
-#   - editors, mail, DNS, DHCP and web services: those are ROLE layers
-#     (see the role-* profiles), not part of a minimal boot.
+#   - mail, DNS and web services: those are ROLE layers (see the
+#     role-* profiles), not part of a minimal boot. vim, saphira-network
+#     and dhcpcd are IN by decision: a manageable machine needs an
+#     editor and a working network configuration out of the box.
 saphira-base
 saphira-kernel-7.2.3
 openrc
@@ -37,4 +47,7 @@ grub
 e2fsprogs
 dosfstools
 openssh
+saphira-network
+dhcpcd
+vim
 tzdata

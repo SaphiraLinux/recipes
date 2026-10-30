@@ -34,7 +34,19 @@ mkdir -p "$repo" "$incoming" "$stage" "$artifacts" "$keys" "$test_root/package-t
 openssl genrsa -traditional -out "$test_root/test-repository.rsa" 2048 >/dev/null 2>&1
 openssl rsa -in "$test_root/test-repository.rsa" -pubout -out "$keys/test-repository.rsa.pub" >/dev/null 2>&1
 
-printf '%s\n' '# name	type	id	primary-group	home	shell	supplementary-groups' 'root	user	0	root	/root	/bin/bash	wheel' 'root	group	0	-	-	-	-' 'man	group	13	-	-	-	-' > "$test_root/accounts.tsv"
+printf '%s\n' '# name	type	id	primary-group	home	shell	supplementary-groups' 'root	user	0	root	/root	/bin/bash	wheel' 'root	group	0	-	-	-	-' 'man	group	13	-	-	-	-' 'svcuser	user	660	svcgroup	/var/lib/svca	/sbin/nologin	-' 'svcgroup	group	660	-	-	-	-' 'eviluser	user	660	evilgroup	/var/lib/evilD	/sbin/nologin	-' 'evilgroup	group	661	-	-	-	-' > "$test_root/accounts.tsv"
+# Hermetic recipe root for the makepkg builds below: fixture identities
+# are registered here so builds pass the TSV gate; the signer reads the
+# fixture TSV above (same rows: build-time and publish-time registries
+# agree, and the reservation layer still owns cross-package collision).
+mkdir -p "$test_root/baseroot/saphira-baselayout/files"
+printf 'pkgrel=1\n' > "$test_root/baseroot/saphira-baselayout/recipe.sh"
+printf '%s\n' \
+	'# name	type	id	primary-group	home	shell	supplementary-groups	init' \
+	'svcuser	user	660	svcgroup	/var/lib/svca	/sbin/nologin	-' 'svcgroup	group	660	-	-	-	-' \
+	'eviluser	user	660	evilgroup	/var/lib/evilD	/sbin/nologin	-' 'evilgroup	group	661	-	-	-	-' \
+	> "$test_root/baseroot/saphira-baselayout/files/accounts.tsv"
+export SAPHIRA_RECIPE_ROOT=$test_root/baseroot
 
 run_signer()
 {

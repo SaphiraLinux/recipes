@@ -184,12 +184,12 @@ printf '%s\n' '# the commit point is the root password, and it is immediate'
 # suite is for: the marker must be spent directly after the root password
 # is set, and before the administrator, network, DNS and repository steps
 # that used to be able to arm it again.
-commit_line=$(/usr/bin/grep -n '^commit_completion || {' "$wizard" | /usr/bin/head -1 | /usr/bin/cut -d: -f1)
-rootpw_line=$(/usr/bin/grep -n '^set_password root mandatory$' "$wizard" | /usr/bin/head -1 | /usr/bin/cut -d: -f1)
-admin_line=$(/usr/bin/grep -n "heading 'Administrator account'" "$wizard" | /usr/bin/head -1 | /usr/bin/cut -d: -f1)
-net_line=$(/usr/bin/grep -n "heading 'Network configuration'" "$wizard" | /usr/bin/head -1 | /usr/bin/cut -d: -f1)
-dns_line=$(/usr/bin/grep -n "heading 'DNS'" "$wizard" | /usr/bin/head -1 | /usr/bin/cut -d: -f1)
-repo_line=$(/usr/bin/grep -n "heading 'Package repository'" "$wizard" | /usr/bin/head -1 | /usr/bin/cut -d: -f1)
+commit_line=$(/usr/bin/grep -n '^commit_completion || {' "$wizard" | /usr/bin/head -1 | cut -d: -f1)
+rootpw_line=$(/usr/bin/grep -n '^set_password root mandatory$' "$wizard" | /usr/bin/head -1 | cut -d: -f1)
+admin_line=$(/usr/bin/grep -n "heading 'Administrator account'" "$wizard" | /usr/bin/head -1 | cut -d: -f1)
+net_line=$(/usr/bin/grep -n "heading 'Network configuration'" "$wizard" | /usr/bin/head -1 | cut -d: -f1)
+dns_line=$(/usr/bin/grep -n "heading 'DNS'" "$wizard" | /usr/bin/head -1 | cut -d: -f1)
+repo_line=$(/usr/bin/grep -n "heading 'Package repository'" "$wizard" | /usr/bin/head -1 | cut -d: -f1)
 
 if test -n "$rootpw_line" && test -n "$commit_line" &&
 	test "$commit_line" -gt "$rootpw_line"; then
@@ -211,8 +211,8 @@ done
 # check to read it. Deleting it at the commit point (before the
 # administrator section runs) made every resume impossible: the check
 # below would always see an empty file.
-resume_line=$(/usr/bin/grep -n 'test -s "$pending_user"' "$wizard" | /usr/bin/head -1 | /usr/bin/cut -d: -f1)
-clear_line=$(/usr/bin/grep -n 'rm -f -- "$pending_user"' "$wizard" | /usr/bin/head -1 | /usr/bin/cut -d: -f1)
+resume_line=$(/usr/bin/grep -n 'test -s "$pending_user"' "$wizard" | /usr/bin/head -1 | cut -d: -f1)
+clear_line=$(/usr/bin/grep -n 'rm -f -- "$pending_user"' "$wizard" | /usr/bin/head -1 | cut -d: -f1)
 if test -n "$resume_line" && test -n "$clear_line" && test "$clear_line" -gt "$resume_line"; then
 	ok 'the pending username is cleared after the resume check, not at the commit point'
 else
@@ -367,6 +367,142 @@ if SERVICE_COMMAND=/bin/false service_start "$marker" "$body"; then
 	ok 'marker absent: the service returns success without running the wizard'
 else
 	bad 'marker absent: the service must not run the wizard'
+fi
+
+printf '%s\n' '# full interactive completion with every step succeeding'
+
+fakebin=$work/fakebin
+
+# Regression: an all-success run used to die at the final report with
+# "unfinished_steps: unbound variable" (a bare `declare -a` leaves the
+# array unset for `set -u`, so the empty-array count crashed). Every
+# fully successful setup therefore failed AFTER applying. The drive
+# below answers the whole flow; fakes stand in for passwd/useradd/id
+# (which would otherwise touch the test host) and the network/dns
+# backends, and the sysfs override yields zero interfaces.
+fakebin=$work/fakebin
+mkdir -p "$fakebin" "$work/emptynet"
+printf '#!/bin/sh\nexit 0\n' > "$fakebin/passwd"
+printf '#!/bin/sh\nexit 0\n' > "$fakebin/useradd"
+cp /usr/bin/id "$fakebin/id.real" ||
+	{ echo 'cannot stage real id for delegation' >&2; exit 1; }
+printf '#!/bin/sh\nif test "$1" = "-gn"; then echo wheel; exit 0; fi\nexec "%s/id.real" "$@"\n' "$fakebin" > "$fakebin/id"
+chmod 0755 "$fakebin/passwd" "$fakebin/useradd" "$fakebin/id" "$fakebin/id.real"
+# The wizard exports a fixed PATH, so fakes cannot ride PATH: overlay
+# them onto the real binaries instead. Only inside the user+mount
+# namespace this suite re-execs into (FIRSTBOOT_COMPLETION_NS=1):
+# there the mounts are private and vanish on exit. As real root the
+# suite runs directly on the host, where renaming host binaries would
+# be vandalism, so the interactive drive below is skipped there.
+if test "${FIRSTBOOT_COMPLETION_NS:-0}" = 1; then
+mount --bind "$fakebin/passwd" /usr/bin/passwd ||
+	{ echo 'cannot overlay fake passwd' >&2; exit 1; }
+mount --bind "$fakebin/useradd" /usr/sbin/useradd ||
+	{ echo 'cannot overlay fake useradd' >&2; exit 1; }
+mount --bind "$fakebin/id" /usr/bin/id ||
+	{ echo 'cannot overlay fake id' >&2; exit 1; }
+OVERLAID=1
+else
+OVERLAID=0
+fi
+
+if test "$OVERLAID" != 1; then
+	printf '%s\n' '# (running as real root: interactive drive skipped, overlays unsafe here)'
+	ok 'interactive drive skipped as root (namespace-only coverage)'
+else
+recorder=$work/dns-provider-seen
+{
+	printf '#!/bin/sh\n'
+	printf 'if test "$1" = dns-provider; then printf "%%s\\n" "$2" > "%s"; ' "$recorder"
+	printf 'case "$2" in 1) printf "9.9.9.9 149.112.112.112|2620:fe::fe 2620:fe::9\\n";; 2|3) printf "x|x\\n";; *) echo "unknown DNS provider: $2" >&2; exit 1;; esac; exit 0; fi\n'
+	printf 'exit 0\n'
+} > "$helper"
+chmod 0755 "$helper"
+rm -f "$marker" "$state/completed"
+: > "$marker"
+set_shadow "$shadow_locked"
+mkdir -p "$root/etc" "$root/var/lib/dbus"
+PATH="$fakebin:$PATH" SYSFS_NET_DIR="$work/emptynet" \
+SAPHIRA_FIRSTBOOT_REPOSITORIES_FILE="$root/etc/apk-repositories" \
+	out=$(printf '\nR00tTest1!\nR00tTest1!\ntestadmin\nTest Admin\nAdm1nTest1!\nAdm1nTest1!\n1\n\n\nY\n' |
+	timeout -k 2 60 env \
+	PATH="$fakebin:$PATH" \
+	SYSFS_NET_DIR="$work/emptynet" \
+	SAPHIRA_FIRSTBOOT_MARKER=$marker \
+	SAPHIRA_FIRSTBOOT_STATE_DIR=$state \
+	SAPHIRA_FIRSTBOOT_ROOT=$root \
+	SAPHIRA_FIRSTBOOT_NETWORK_APPLY=$helper \
+	SAPHIRA_FIRSTBOOT_REPOSITORIES_FILE="$root/etc/apk-repositories" \
+	SAPHIRA_FIRSTBOOT_SKIP_OWNERSHIP=1 \
+		"$wizard" 2>&1)
+status=$?
+if test "$status" -eq 0; then
+	ok 'all-success run exits 0'
+else
+	bad "all-success run expected exit 0, got $status"
+	printf '%s\n' "$out" | head -5 >&2
+fi
+case $out in
+*'unbound variable'*)
+	bad 'all-success run must not die on the empty unfinished-steps array'
+	;;
+*)
+	ok 'all-success run survives the final report with zero unfinished steps'
+	;;
+esac
+case $out in
+*'Initial setup is complete for testadmin.'*)
+	ok 'all-success run prints the completion statement'
+	;;
+*)
+	bad 'all-success run must print the completion statement'
+	printf '%s\n' "$out" | tail -5 >&2
+	;;
+esac
+
+printf '%s\n' '# an empty DNS choice takes the advertised default'
+
+# Regression: the prompt reads "Choice [1]:" but the empty answer
+# reached dns-provider as "" and failed with "unknown DNS provider: ",
+# failing the service after everything had applied. The resolved value
+# must travel, not the raw answer.
+rm -f "$marker" "$state/completed"
+rm -f "$recorder"
+: > "$marker"
+set_shadow "$shadow_locked"
+PATH="$fakebin:$PATH" SYSFS_NET_DIR="$work/emptynet" \
+SAPHIRA_FIRSTBOOT_REPOSITORIES_FILE="$root/etc/apk-repositories" \
+	out=$(printf '\nR00tTest1!\nR00tTest1!\ntestadmin\nTest Admin\nAdm1nTest1!\nAdm1nTest1!\n\n\n\nY\n' |
+	timeout -k 2 60 env \
+	PATH="$fakebin:$PATH" \
+	SYSFS_NET_DIR="$work/emptynet" \
+	SAPHIRA_FIRSTBOOT_MARKER=$marker \
+	SAPHIRA_FIRSTBOOT_STATE_DIR=$state \
+	SAPHIRA_FIRSTBOOT_ROOT=$root \
+	SAPHIRA_FIRSTBOOT_NETWORK_APPLY=$helper \
+	SAPHIRA_FIRSTBOOT_REPOSITORIES_FILE="$root/etc/apk-repositories" \
+	SAPHIRA_FIRSTBOOT_SKIP_OWNERSHIP=1 \
+		"$wizard" 2>&1)
+status=$?
+if test "$status" -eq 0; then
+	ok 'empty DNS choice exits 0'
+else
+	bad "empty DNS choice expected exit 0, got $status"
+	printf '%s\n' "$out" | head -5 >&2
+fi
+if test "$(cat "$recorder" 2>/dev/null)" = 1; then
+	ok 'empty DNS choice resolves to provider 1'
+else
+	bad "empty DNS choice must reach dns-provider as 1 (saw '$(cat "$recorder" 2>/dev/null)')"
+fi
+case $out in
+*'unknown DNS provider'*)
+	bad 'empty DNS choice must not fail provider lookup'
+	;;
+*)
+	ok 'empty DNS choice produces no provider error'
+	;;
+esac
 fi
 
 if test "$failures" -ne 0; then

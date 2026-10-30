@@ -2,7 +2,7 @@
 
 pkgname=libc++
 pkgver=22.1.8
-pkgrel=2
+pkgrel=3
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="LLVM libc++: C++ standard library"
 license="Apache-2.0 WITH LLVM-exception"
@@ -68,11 +68,13 @@ recipe_build()
 recipe_install()
 {
 	DESTDIR="$PKGDEST" ninja -C "$BUILDDIR" install
-	# The standalone libc++abi/libunwind packages own their files; the
-	# combined runtimes install must not double-ship them (upgrade
-	# overwrite errors). This covers libs, static archives and headers
-	# (libunwind-dev also owns its headers; libc++abi's headers would
-	# collide with a future libc++abi publish - both are stripped).
+	# The standalone libunwind package owns its files; the combined
+	# runtimes install must not double-ship them (upgrade overwrite
+	# errors). This covers libunwind libs, static archives and
+	# top-level headers (libunwind-dev also owns its headers).
+	# The two c++/v1 cxxabi headers stay HERE (see NOTE below):
+	# install-cxxabi would stage them into the standalone libc++abi
+	# payload too, and signing refuses dual-owned paths.
 	rm -rf "$PKGDEST/usr/lib/libc++abi.so"* "$PKGDEST/usr/lib/libunwind.so"* \
 	       "$PKGDEST/usr/lib/libc++abi.a" "$PKGDEST/usr/lib/libunwind.a" \
 	       "$PKGDEST/usr/include/mach-o" \
@@ -81,9 +83,12 @@ recipe_install()
 	       "$PKGDEST/usr/include/libunwind.modulemap" \
 	       "$PKGDEST/usr/include/unwind.h" \
 	       "$PKGDEST/usr/include/unwind_arm_ehabi.h" \
-	       "$PKGDEST/usr/include/unwind_itanium.h" \
-	       "$PKGDEST/usr/include/cxxabi.h" \
-	       "$PKGDEST/usr/include/__cxxabi_config.h"
+	       "$PKGDEST/usr/include/unwind_itanium.h"
+	# NOTE (ownership split, collision-proven 2026-10-28): the two
+	# c++/v1 cxxabi headers (__cxxabi_config.h, cxxabi.h) STAY in this
+	# package. The combined runtimes install stages them here and the
+	# standalone libc++abi package must not claim them (signing
+	# refuses dual-owned paths). libc++abi ships libs only.
 	install -D -m 0644 "$SRC/libcxx/LICENSE.TXT" \
 		"$PKGDEST/usr/share/licenses/libc++/LICENSE.TXT"
 	# Proven v0 leak check: no build paths may survive in ELF metadata.

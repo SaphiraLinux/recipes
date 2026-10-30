@@ -1,0 +1,31 @@
+# Example /etc/conf.d/minio — copy to /etc/conf.d/minio and edit.
+# Read by both the OpenRC unit (auto-sourced) and the systemd unit
+# (EnvironmentFile, which overrides the compiled-in defaults below).
+# Plain VAR=value lines only. This file is NEVER shipped by the package,
+# so upgrades cannot touch operator credentials.
+
+# REQUIRED: no defaults. MinIO exits without these; the units check first
+# with a clear error instead of a cryptic startup failure.
+#MINIO_ROOT_USER=minioadmin
+#MINIO_ROOT_PASSWORD=change-me-to-at-least-8-chars
+
+# Data volumes (space-separated for multi-drive; default single dir).
+#MINIO_VOLUMES=/var/lib/minio
+
+# Listen addresses (default :9000 S3, :9001 console).
+#MINIO_ADDRESS=:9000
+#MINIO_CONSOLE_ADDRESS=:9001
+
+# Telemetry to MinIO SUBNET. Default off in the shipped units; enable
+# only for instances you intend to register.
+#MINIO_CALLHOME=off
+
+# Extra server flags, e.g. MINIO_OPTS="--json".
+#MINIO_OPTS=
+
+# TLS: there is no certs-dir flag on the `server` subcommand
+# (--certs-dir is global and the shipped units do not use it). Place
+# PEM files at the minio user's default location instead:
+#   /var/lib/minio/.minio/certs/public.crt
+#   /var/lib/minio/.minio/certs/private.key  (0600, minio:minio)
+# The server enables TLS automatically when both are present.

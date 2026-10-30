@@ -206,6 +206,7 @@ recipe_build()
 	# instead of carrying a version lie. Remove together with the
 	# 000* patches when that lands.
 	./configure --prefix=/usr --sysconfdir=/etc \
+		--localstatedir=/var \
 		--with-linux="$_kdir" --with-linux-obj="$_kdir" \
 		--with-config=all --enable-linux-experimental || return 1
 	make -j${JOBS:-$(nproc)} || return 1

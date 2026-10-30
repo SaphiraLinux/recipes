@@ -1,7 +1,11 @@
 #!/bin/sh
 pkgname=sudo
 pkgver=1.9.17_p2
-pkgrel=8
+pkgrel=9
+# r9: visudo editor fallback (2026-10-23): `Defaults
+# editor=/usr/bin/vim:/usr/bin/vi` so visudo prefers vim without a
+# /usr/bin/vi compat symlink (which Saphira never ships). Payload
+# change (sudoers).
 # r8: owned /etc/sudoers (existing grants verbatim + canonical
 # secure_path): without it sudo inherits whatever PATH the caller
 # had, which varies silently across console/ssh/cron/service
@@ -25,10 +29,11 @@ origin=sudo
 repo=saphira
 url=https://www.sudo.ws/
 sudo_sha256=4a38a1ab3adb1199257edc2a7c4a2bd714665eb605b04368843b06dada2cfcfb
-# linux-pam: linked at build (headers in the single-output package,
-# no -dev split) and needed at runtime.
+# linux-pam: linked at build (headers in linux-pam-dev since the r4
+# split; the single-output comment above predates it) and needed at
+# runtime.
 depends="zlib linux-pam saphira-pambase"
-makedepends="zlib-dev linux-pam gcc make"
+makedepends="zlib-dev linux-pam-dev gcc make"
 subpackages="$pkgname-doc"
 recipe_build() {
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$RECIPE_DIR/files/sudo-1.9.17_p2.tar.gz"

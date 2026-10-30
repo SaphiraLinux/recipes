@@ -1,0 +1,6 @@
+# tmpfiles.d entry for syslog-ng. Runtime PID/control paths live under
+# /var/run/syslog-ng because RuntimeDirectory= only covers /run, and the
+# persistent state file lives under /var/lib/syslog-ng. /var/run and /var
+# are separate from /run by design; root owns both directories.
+d /var/run/syslog-ng 0755 root root -
+d /var/lib/syslog-ng 0755 root root -

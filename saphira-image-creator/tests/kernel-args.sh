@@ -30,7 +30,7 @@ trap 'rm -rf "$work"' EXIT
 # against a fixture, so this cannot drift from what builds the image.
 rewrite()
 {
-	local defgrub=$1 partuuid=$2 getty_opt=$3 kernel_args=$4
+	local defgrub=$1 roottoken=$2 getty_opt=$3 kernel_args=$4
 	BOOT=${BOOT:-bios}
 	INIT=${INIT:-openrc}
 	mnt=$(dirname "$(dirname "$defgrub")")
@@ -38,7 +38,7 @@ rewrite()
 	# Extract the embedded transform and run it.
 	sed -n "/^import re$/,/^PY$/p" "$image" |
 		sed '$d' > "$work/transform.py"
-	python3 "$work/transform.py" "$defgrub" "$partuuid" "$getty_opt" "$kernel_args"
+	python3 "$work/transform.py" "$defgrub" "$roottoken" "$getty_opt" "$kernel_args"
 }
 
 fixture()
@@ -57,7 +57,7 @@ value_of()
 printf '%s\n' '# no --kernel-arg: the image keeps the packaged default'
 
 f=$(fixture plain 'rootfstype=ext4 rw rootwait console=tty0 raid=noautodetect root=/dev/loop0p2')
-rewrite "$f" 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' '' '' 2>/dev/null
+rewrite "$f" 'root=PARTUUID=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' '' '' 2>/dev/null
 value=$(value_of "$f")
 case $value in
 *'root=PARTUUID=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'*)
@@ -77,7 +77,7 @@ esac
 printf '%s\n' '# --kernel-arg appends what was asked for'
 
 f=$(fixture serial 'rootfstype=ext4 rw rootwait console=tty0 root=/dev/loop0p2')
-rewrite "$f" 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' '' 'console=ttyS0,115200' 2>/dev/null
+rewrite "$f" 'root=PARTUUID=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' '' 'console=ttyS0,115200' 2>/dev/null
 value=$(value_of "$f")
 case $value in
 *'console=ttyS0,115200'*) ok 'a requested serial console is present' ;;
@@ -95,7 +95,7 @@ esac
 printf '%s\n' '# several arguments accumulate'
 
 f=$(fixture multi 'console=tty0 root=/dev/loop0p2')
-rewrite "$f" 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' '' 'console=ttyS0,115200 quiet' 2>/dev/null
+rewrite "$f" 'root=PARTUUID=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' '' 'console=ttyS0,115200 quiet' 2>/dev/null
 value=$(value_of "$f")
 case $value in
 *'console=ttyS0,115200'*'quiet'*) ok 'multiple arguments are all applied' ;;
@@ -105,7 +105,7 @@ esac
 printf '%s\n' '# an argument already present is not duplicated'
 
 f=$(fixture dupe 'console=tty0 quiet root=/dev/loop0p2')
-rewrite "$f" 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' '' 'quiet' 2>/dev/null
+rewrite "$f" 'root=PARTUUID=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' '' 'quiet' 2>/dev/null
 value=$(value_of "$f")
 n=$(printf '%s\n' "$value" | tr ' ' '\n' | grep -cx 'quiet')
 if test "$n" -eq 1; then
@@ -117,7 +117,7 @@ fi
 printf '%s\n' '# systemd-only arguments stay systemd-only'
 
 f=$(fixture systemd 'console=tty0 root=/dev/loop0p2')
-INIT=systemd rewrite "$f" 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' \
+INIT=systemd rewrite "$f" 'root=PARTUUID=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' \
 	' systemd.getty_auto=0 systemd.imds=no' 'console=ttyS0,115200' 2>/dev/null
 value=$(value_of "$f")
 case $value in
@@ -128,7 +128,7 @@ esac
 printf '%s\n' '# an OpenRC target never gains them'
 
 f=$(fixture openrc 'console=tty0 root=/dev/loop0p2')
-rewrite "$f" 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' '' 'console=ttyS0,115200' 2>/dev/null
+rewrite "$f" 'root=PARTUUID=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' '' 'console=ttyS0,115200' 2>/dev/null
 value=$(value_of "$f")
 case $value in
 *'systemd.'*) bad "an OpenRC target gained a systemd argument: $value" ;;

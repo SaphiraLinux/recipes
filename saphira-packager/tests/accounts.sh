@@ -424,6 +424,93 @@ as_root "$R" "$test_root/qffifo" > "$test_root/15f.log" 2>&1
 as_root "$R" "$test_root/qffifo" > "$test_root/15f2.log" 2>&1
 [ "$(stat -c '%u:%g %a' "$R/var/qmail/trigger")" = "663:663 622" ]
 
+# 15g. dir-children: one rule converges each numbered child with
+# dir-stanza semantics (missing children created, ownership/mode
+# set, re-run idempotent). The parent is never listed, so
+# undeclared siblings and live content alongside are untouched.
+printf 'user dcuser 664 dcgroup /var/lib/dc /sbin/nologin\ngroup dcgroup 664\ndir /var/lib/dc/queue 0750 dcuser dcgroup\ndir-children /var/lib/dc/queue 0..2 0700 dcuser dcgroup\n' > "$test_root/dcfrag"
+RD=$test_root/rootdc
+seed_root "$RD"
+mkdir -p "$RD/var/lib/dc/queue/1"
+printf 'live' > "$RD/var/lib/dc/queue/1/msg"
+printf 'sibling' > "$RD/var/lib/dc/queue/stray"
+as_root "$RD" "$test_root/dcfrag" > "$test_root/15g.log" 2>&1
+[ "$(stat -c '%u:%g %a' "$RD/var/lib/dc/queue/0")" = "664:664 700" ]
+[ "$(stat -c '%u:%g %a' "$RD/var/lib/dc/queue/1")" = "664:664 700" ]
+[ "$(stat -c '%u:%g %a' "$RD/var/lib/dc/queue/2")" = "664:664 700" ]
+[ "$(stat -c '%u:%g %a' "$RD/var/lib/dc/queue")" = "664:664 750" ]
+[ "$(cat "$RD/var/lib/dc/queue/1/msg")" = "live" ]
+[ "$(cat "$RD/var/lib/dc/queue/stray")" = "sibling" ]
+as_root "$RD" "$test_root/dcfrag" > "$test_root/15g2.log" 2>&1
+[ "$(stat -c '%u:%g %a' "$RD/var/lib/dc/queue/0")" = "664:664 700" ]
+# Check mode reports drift per expanded child.
+as_root_cmd "$RD" chmod 0755 "$RD/var/lib/dc/queue/0"
+if as_root "$RD" --check "$test_root/dcfrag" > "$test_root/15g-check.log" 2>&1; then
+	printf '%s\n' 'dir-children drift unexpectedly clean' >&2
+	exit 1
+fi
+grep 'drift' "$test_root/15g-check.log" >/dev/null
+# Malformed rules fail closed: bad shape, non-range, reversed,
+# oversized, leading zeros, relative/dotdot/trailing-slash
+# parent, bad mode.
+printf 'user dcuser 664 dcgroup /var/lib/dc /sbin/nologin\ngroup dcgroup 664\ndir-children /var/lib/dc/queue 0700 dcuser dcgroup\n' > "$test_root/dcbadshape"
+printf 'user dcuser 664 dcgroup /var/lib/dc /sbin/nologin\ngroup dcgroup 664\ndir-children /var/lib/dc/queue foo 0700 dcuser dcgroup\n' > "$test_root/dcbadrange"
+printf 'user dcuser 664 dcgroup /var/lib/dc /sbin/nologin\ngroup dcgroup 664\ndir-children /var/lib/dc/queue 2..0 0700 dcuser dcgroup\n' > "$test_root/dcreversed"
+printf 'user dcuser 664 dcgroup /var/lib/dc /sbin/nologin\ngroup dcgroup 664\ndir-children /var/lib/dc/queue 0..64 0700 dcuser dcgroup\n' > "$test_root/dcbig"
+printf 'user dcuser 664 dcgroup /var/lib/dc /sbin/nologin\ngroup dcgroup 664\ndir-children /var/lib/dc/queue 00..02 0700 dcuser dcgroup\n' > "$test_root/dczero"
+printf 'user dcuser 664 dcgroup /var/lib/dc /sbin/nologin\ngroup dcgroup 664\ndir-children var/lib/dc/queue 0..2 0700 dcuser dcgroup\n' > "$test_root/dcrelative"
+printf 'user dcuser 664 dcgroup /var/lib/dc /sbin/nologin\ngroup dcgroup 664\ndir-children /var/lib/../dc/queue 0..2 0700 dcuser dcgroup\n' > "$test_root/dcdotdot"
+printf 'user dcuser 664 dcgroup /var/lib/dc /sbin/nologin\ngroup dcgroup 664\ndir-children /var/lib/dc/queue/ 0..2 0700 dcuser dcgroup\n' > "$test_root/dcslash"
+printf 'user dcuser 664 dcgroup /var/lib/dc /sbin/nologin\ngroup dcgroup 664\ndir-children /var/lib/dc/queue 0..2 999 dcuser dcgroup\n' > "$test_root/dcbadmode"
+for bad in dcbadshape dcbadrange dcreversed dcbig dczero dcrelative dcdotdot dcslash dcbadmode; do
+	if as_root "$RD" "$test_root/$bad" > "$test_root/15g-$bad.log" 2>&1; then
+		printf '%s\n' "malformed dir-children $bad unexpectedly accepted" >&2
+		exit 1
+	fi
+	if as_root "$RD" --disable "$test_root/$bad" > "$test_root/15g-$bad-dis.log" 2>&1; then
+		printf '%s\n' "malformed dir-children $bad unexpectedly accepted (disable)" >&2
+		exit 1
+	fi
+done
+grep 'dir-children needs 5 fields' "$test_root/15g-dcbadshape.log" >/dev/null
+grep 'must be lo..hi' "$test_root/15g-dcbadrange.log" >/dev/null
+grep 'lo exceeds hi' "$test_root/15g-dcreversed.log" >/dev/null
+grep 'exceeds 64' "$test_root/15g-dcbig.log" >/dev/null
+grep 'canonical decimal' "$test_root/15g-dczero.log" >/dev/null
+grep 'must be absolute' "$test_root/15g-dcrelative.log" >/dev/null
+grep 'must be normalized' "$test_root/15g-dcdotdot.log" >/dev/null
+grep 'must not end in /' "$test_root/15g-dcslash.log" >/dev/null
+grep 'invalid mode' "$test_root/15g-dcbadmode.log" >/dev/null
+# Disable ignores children: corrupt ownership, --disable exits 0,
+# children byte-untouched (mode is still 755 from the drift probe
+# above - check mode never converges).
+as_root_cmd "$RD" chown 0:0 "$RD/var/lib/dc/queue/0"
+as_root "$RD" --disable "$test_root/dcfrag" > "$test_root/15g-dis.log" 2>&1
+[ "$(stat -c '%u:%g %a' "$RD/var/lib/dc/queue/0")" = "0:0 755" ]
+grep '^dcuser:x:664:' "$RD/etc/passwd" >/dev/null
+
+# 15h. Homes never relax: a pre-existing restrictive home keeps its
+# mode while ownership still converges; the later dir stanza then
+# agrees instead of repairing. The log must never show a 0755
+# converge for either home - that line proves the intermediate chmod
+# fired, which post-hoc state alone cannot disprove.
+printf 'user privuser 665 privgroup /var/lib/priv /sbin/nologin\ngroup privgroup 665\ndir /var/lib/priv 0700 privuser privgroup\nuser bareuser 666 baregroup /var/lib/bare /sbin/nologin\ngroup baregroup 666\n' > "$test_root/privfrag"
+RP=$test_root/rootpriv
+seed_root "$RP"
+mkdir -p "$RP/var/lib/priv" "$RP/var/lib/bare"
+as_root_cmd "$RP" chmod 0700 "$RP/var/lib/priv" "$RP/var/lib/bare"
+as_root "$RP" "$test_root/privfrag" > "$test_root/15h.log" 2>&1
+[ "$(stat -c '%u:%g %a' "$RP/var/lib/priv")" = "665:665 700" ]
+[ "$(stat -c '%u:%g %a' "$RP/var/lib/bare")" = "666:666 700" ]
+if grep -q 'mode set to 755' "$test_root/15h.log"; then
+	printf '%s\n' 'home was relaxed to 0755 mid-run' >&2
+	exit 1
+fi
+# Missing homes are still created 0755 and owned.
+as_root_cmd "$RP" rmdir "$RP/var/lib/bare"
+as_root "$RP" "$test_root/privfrag" > "$test_root/15h2.log" 2>&1
+[ "$(stat -c '%u:%g %a' "$RP/var/lib/bare")" = "666:666 755" ]
+
 # 16. Legacy auto-repair: a present identity exactly matching the
 # sidecar migrates to canonical IDs in place (exit 0), with backup;
 # a re-run then converges silently. Groups repair first (pre-pass),
@@ -587,4 +674,4 @@ as_root "$R6" --disable "$test_root/supp" > "$test_root/18f.log" 2>&1
 grep '^kvm:x:160:vmuser$' "$R6/etc/group" >/dev/null
 
 [ "$host_before" = "$(sha256sum /etc/passwd /etc/group)" ]
-printf '%s\n' 'account reconciler unit tests (rootless): creation, idempotency, serialization, conflict refusal, range refusal, reserved-identity refusal, local convergence, credential refusal, disable/restore, idempotent disable, absent no-op, disable foreign retention (user/group/primary/mixed), state retention, reinstall convergence, file ownership/mode, file idempotency, file failure closure, file disable retention, fifo ownership, legacy auto-repair, sysusers stanza tolerance, supplementary membership: OK'
+printf '%s\n' 'account reconciler unit tests (rootless): creation, idempotency, serialization, conflict refusal, range refusal, reserved-identity refusal, local convergence, credential refusal, disable/restore, idempotent disable, absent no-op, disable foreign retention (user/group/primary/mixed), state retention, reinstall convergence, file ownership/mode, file idempotency, file failure closure, file disable retention, fifo ownership, dir-children fan-out, home mode preservation, legacy auto-repair, sysusers stanza tolerance, supplementary membership: OK'

@@ -1,0 +1,13 @@
+# dashboard service identity (canonical, fixed): user and group dashboard,
+# UID/GID 178. The dashboard binds the unprivileged port 8899 and only
+# reads the world-readable queue database, so it runs from first start
+# as its own identity and needs no root phase, no supplementary groups,
+# and no state of its own (home is /var/lib/dashboard, created for a
+# process that writes nothing).
+# UID 178 is the first free ID above 177 plugdev: accounts.tsv carries
+# no 178-199 and no tree fragment claims one (the tree-wide "178" hits
+# are kernel enum values and patch line numbers, not identities) -
+# verified before assigning; never reuse it for another identity.
+user dashboard 178 dashboard /var/lib/dashboard /sbin/nologin
+group dashboard 178
+dir /var/lib/dashboard 0755 dashboard dashboard

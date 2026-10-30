@@ -1,0 +1,66 @@
+# Image-creator appliance profile: a bootable USB environment whose
+# sole purpose is creating working Saphira Linux images.
+#
+# Intentions ONLY. The package manager owns dependency closure; never
+# enumerate resolved dependencies here (saphira-profiles(5)).
+#
+# This profile describes the appliance, never its products: the flavors
+# it writes (BIOS/UEFI, openrc/systemd, saphira/saphirad, ext4/ZFS) are
+# chosen in the menu at runtime. Each entry earns its place:
+#
+#   saphira-base        libc/loader, filesystem layout, apk, shell, core
+#                       runtime, account and package tooling.
+#   saphira-kernel      the kernel and its modules. Boot is impossible
+#                       without it. The appliance itself boots ext4;
+#                       ZFS is a creation target, never the appliance root.
+#   openrc              the init system for this appliance (v0 decision).
+#   grub                the bootloader, installed to the USB medium.
+#   e2fsprogs           mkfs.ext4/fsck for ext4 roots, appliance and target.
+#   dosfstools          mkfs.vfat. Harmless on bios-*: the creator refuses
+#                       to use it there, and UEFI targets need it.
+#   dialog              the menu system. No menu without it.
+#   udev                the device manager: /dev/disk/by-id never
+#                       exists without it (proven Egg 2026-10-19), and
+#                       the menu refuses to run without persistent
+#                       disk identifiers.
+#   vim                 console editor for install manifests.
+#   openssh             enabled at first setup with root login (v0
+#                       decision): a headless appliance with no remote
+#                       access is not manageable.
+#   util-linux          sfdisk, wipefs, blockdev, blkid: partitioning and
+#                       device handling for real-disk writes.
+#   kmod                modprobe/insmod: the appliance loads the ZFS
+#                       module itself before creating pools.
+#   saphira-image-creator
+#                       the image build engine the menu drives.
+#   saphira-install-tools
+#                       profiles, planner, installer and menu tooling.
+#   saphira-zfs-7.2.3   ZFS kmod matching the appliance kernel: the
+#                       appliance must create pools, so the module lives
+#                       here, not only in its products.
+#   saphira-zfs-userspace
+#                       zpool/zfs binaries for pool creation.
+#
+# Deliberately absent, each a decision rather than an oversight:
+#   - saphira-firstboot: the appliance runs firstboot's account, root
+#     password and network/DNS stages ONCE as setup, then the creator
+#     menu owns the console permanently;
+#   - network services, firmware families, editors beyond vim: the
+#     appliance creates images, it is not a server;
+#   - a graphical stack of any kind (see the headless policy).
+saphira-base
+saphira-kernel-7.2.3
+openrc
+grub
+e2fsprogs
+dosfstools
+dialog
+udev
+vim
+openssh
+util-linux
+kmod
+saphira-image-creator
+saphira-install-tools
+saphira-zfs-7.2.3
+saphira-zfs-userspace

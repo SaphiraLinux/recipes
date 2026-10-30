@@ -1,0 +1,12 @@
+# grub-tools runtime edges, one per proven linkage (readelf over every
+# moved binary; the base pin is added automatically by the splitter):
+# fuse3: grub-mount links libfuse3 (monolith package today; a fuse3-libs
+#   follow-up would narrow this, like lvm2-libs did for libdevmapper).
+# lvm2-libs: the moved tools link libdevmapper (global -ldevmapper flag).
+# xz: mknetdir/mkrescue/mkstandalone/editenv link liblzma (monolith
+#   today; xz-libs follow-up, same pattern).
+# libtasn1: grub-protect links it (drops with protect if that fork goes).
+fuse3
+lvm2-libs
+xz
+libtasn1

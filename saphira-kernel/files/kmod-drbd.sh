@@ -33,6 +33,66 @@ kmod_srcball()
 	fi
 }
 
+
+kmod_prepare_tree()
+{
+	# $1 = KVER_SHORT. Ensures a usable kernel tree at
+	# $SRC/linux-<short>, entirely under /build. A tree already
+	# staged there (via buildpkg /input) is honoured only after
+	# proving its .config matches the published kernel config;
+	# otherwise a fresh tree is prepared from the vendored tarball
+	# plus the published kernel's own built .config
+	# (/boot/config-<short>-akadata, shipped by the installed
+	# saphira-kernel-<short> package). Either way no operator
+	# staging is required and /usr/src is never read or written.
+	#
+	# modules_prepare depth: MODVERSIONS is off on every supported
+	# line, so scripts + generated headers + sign-file suffice for
+	# external Kbuild (no full kernel compile). The x86-64-v3 policy
+	# patch is applied so module codegen matches the shipped kernel.
+	# certs/ is not staged: prepare does not descend into it, and
+	# signing uses /keys/module-signing.pem directly.
+	_kshort=$1
+	_kdir="$SRC/linux-$_kshort"
+	_kconfig="/boot/config-$_kshort-akadata"
+	[ -f "$_kdir/Makefile" ] && _staged=1 || _staged=0
+	if [ "$_staged" = "1" ]; then
+		[ -f "$_kdir/.config" ] ||
+			{ echo "ERROR: staged tree has no .config: $_kdir" >&2; return 1; }
+		_tree_cfg=$(grep -vE '^[[:space:]]*(#|$)' "$_kdir/.config" | sed -e 's/[[:space:]]*$//' | LC_ALL=C sort)
+		_pub_cfg=$(grep -vE '^[[:space:]]*(#|$)' "$_kconfig" | sed -e 's/[[:space:]]*$//' | LC_ALL=C sort)
+		[ "$_tree_cfg" = "$_pub_cfg" ] ||
+			{ echo "ERROR: staged tree .config disagrees with published $_kconfig (stale tree?)" >&2; return 1; }
+	else
+		[ -f "$_kconfig" ] ||
+			{ echo "ERROR: published kernel config missing at $_kconfig (install saphira-kernel-$_kshort?)" >&2; return 1; }
+		_krecipe="$RECIPE_DIR/../saphira-kernel-$_kshort"
+		_kball="$RECIPE_DIR/../saphira-kernel-$_kshort/files/linux-$_kshort.tar.xz"
+		[ -f "$_kball" ] || _kball="$RECIPE_DIR/../saphira-kernel-$_kshort/files/linux-$_kshort.tar.gz"
+		[ -f "$_kball" ] ||
+			{ echo "ERROR: no vendored linux-$_kshort tarball in saphira-kernel-$_kshort/files" >&2; return 1; }
+		(cd "$(dirname "$_kball")" && sha256sum -c "$(basename "$_kball").sha256") ||
+			{ echo "ERROR: kernel tarball failed its sha256 sidecar" >&2; return 1; }
+		rm -rf -- "$_kdir"
+		mkdir -p "$_kdir"
+		tar --no-same-owner -C "$_kdir" --strip-components=1 -xf "$_kball" ||
+			{ echo "ERROR: kernel tarball extraction failed" >&2; return 1; }
+		[ -f "$_krecipe/files/x86-64-v3.patch" ] ||
+			{ echo "ERROR: sibling policy patch missing for $_kshort" >&2; return 1; }
+		patch -d "$_kdir" -Np1 -i "$_krecipe/files/x86-64-v3.patch" || return 1
+		cp "$_kconfig" "$_kdir/.config" ||
+			{ echo "ERROR: cannot seed tree .config" >&2; return 1; }
+		(cd "$_kdir" && make modules_prepare -j${JOBS:-$(nproc)}) ||
+			{ echo "ERROR: kernel modules_prepare failed" >&2; return 1; }
+	fi
+	if [ ! -x "$_kdir/scripts/sign-file" ]; then
+		(cd "$_kdir" && make scripts -j${JOBS:-$(nproc)}) ||
+			{ echo "ERROR: kernel scripts build failed" >&2; return 1; }
+	fi
+	[ -x "$_kdir/scripts/sign-file" ] ||
+		{ echo "ERROR: $_kdir/scripts/sign-file not built" >&2; return 1; }
+}
+
 kmod_drbd_build()
 {
 	# $1 = KVER_SHORT, $2 = files/ tarball, $3 = sha256.
@@ -49,8 +109,8 @@ kmod_drbd_build()
 		echo "ERROR: module signing key exposed but unreadable at $_key (UID ACL missing on the host key? builds must never go unsigned)" >&2
 		return 1
 	fi
-	[ -f "$_kdir/Makefile" ] ||
-		{ echo "ERROR: kernel build tree missing at $_kdir (staged /input?)" >&2; return 1; }
+	kmod_prepare_tree "$_kshort" ||
+		{ echo "ERROR: no usable kernel tree for $_kshort (self-prepare failed and none staged)" >&2; return 1; }
 	_kfull=$(kmod_kver_full "$_kdir") ||
 		{ echo "ERROR: cannot derive kernel release from $_kdir/Makefile" >&2; return 1; }
 	[ -x "$_kdir/scripts/sign-file" ] ||

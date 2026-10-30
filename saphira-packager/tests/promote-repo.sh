@@ -74,8 +74,23 @@ run_signer()
 	SAPHIRA_REPO_DIR=$test_root/repository SAPHIRA_INCOMING_DIR=$test_root/incoming \
 	SAPHIRA_PACKAGE_TMP=$test_root/package-tmp SAPHIRA_SIGN_KEY=$test_root/test-repository.rsa \
 	SAPHIRA_TRUST_KEY=$keys/test-repository.rsa.pub SAPHIRA_REPO_NAMES=hatchling \
+	SAPHIRA_ACCOUNTS_TSV=$test_root/accounts.tsv \
 		unshare --map-root-user "$sign_repo"
 }
+
+# Fixture registry: the natown carrier identities must be registered
+# for both the builder (hermetic recipe root) and the signer (fixture
+# TSV). natown is fictional by design, so it lives only in fixtures -
+# real sysusers-native identities (systemd-*) are already backfilled
+# in the genuine registry.
+mkdir -p "$test_root/baseroot/saphira-baselayout/files"
+printf 'pkgrel=1\n' > "$test_root/baseroot/saphira-baselayout/recipe.sh"
+printf '%s\n' \
+	'# name	type	id	primary-group	home	shell	supplementary-groups	init' \
+	'natown	user	680	natown	/var/lib/natpubsvc	/sbin/nologin	-' 'natown	group	680	-	-	-	-' \
+	> "$test_root/baseroot/saphira-baselayout/files/accounts.tsv"
+export SAPHIRA_RECIPE_ROOT=$test_root/baseroot
+printf '%s\n' '# name	type	id	primary-group	home	shell	supplementary-groups' 'root	user	0	root	/root	/bin/bash	wheel' 'root	group	0	-	-	-	-' 'man	group	13	-	-	-	-' 'natown	user	680	natown	/var/lib/natpubsvc	/sbin/nologin	-' 'natown	group	680	-	-	-	-' > "$test_root/accounts.tsv"
 
 run_promoter()
 {
@@ -85,6 +100,7 @@ run_promoter()
 	SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
 	SAPHIRA_REPO_DIR=$test_root/repository \
 	SAPHIRA_SIGN_KEY=$test_root/test-repository.rsa SAPHIRA_TRUST_KEY=$keys/test-repository.rsa.pub \
+	SAPHIRA_ACCOUNTS_TSV=$test_root/accounts.tsv \
 	SUDO_UID=0 SAPHIRA_REPO_GROUP=root \
 		unshare --map-root-user "$promote_repo" "$@"
 }

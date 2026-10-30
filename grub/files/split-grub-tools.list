@@ -1,0 +1,31 @@
+# grub-tools named split: manual, rescue and image-creation utilities
+# that no boot path and no automated maintenance flow invokes. Kept
+# installable, never forced into minimal images.
+# Placement rule (verified per binary with readelf + caller analysis):
+# base keeps grub-install and its proven callees (grub-mkimage,
+# grub-probe, grub-bios-setup), grub-mkconfig and its scripts, and the
+# /usr/lib/grub module payload. Everything here runs by hand only.
+# sparc64-setup/macbless are other-arch setup tools; relocated, not
+# deleted (dropping shipped files is a separate decision).
+usr/bin/grub-editenv
+usr/bin/grub-file
+usr/bin/grub-fstest
+usr/bin/grub-glue-efi
+usr/bin/grub-kbdcomp
+usr/bin/grub-menulst2cfg
+usr/bin/grub-mknetdir
+usr/bin/grub-mkpasswd-pbkdf2
+usr/bin/grub-mkrelpath
+usr/bin/grub-mkrescue
+usr/bin/grub-mkstandalone
+usr/bin/grub-mount
+usr/bin/grub-protect
+usr/bin/grub-render-label
+usr/bin/grub-script-check
+usr/bin/grub-syslinux2cfg
+usr/bin/grub-mklayout
+usr/sbin/grub-macbless
+usr/sbin/grub-ofpathname
+usr/sbin/grub-reboot
+usr/sbin/grub-set-default
+usr/sbin/grub-sparc64-setup

@@ -1,0 +1,30 @@
+.TH SAPHIRA-EARLYFW 8 "October 2026" "Saphira" "System Administration"
+.SH NAME
+saphira-earlyfw \- build per-kernel early-firmware boot images
+.SH SYNOPSIS
+.B saphira-earlyfw --all
+.RI [ --root " DIR"] " [" --boot " DIR"] [" --include " DIR"]...
+.SH DESCRIPTION
+Built-in drivers initialize before the real root is mounted, so
+.I /lib/firmware
+on the root is not there yet. saphira-earlyfw packs the firmware
+those drivers need into per-kernel
+.I /boot/earlyfw-<release>.img
+files (firmware only: no
+.IR /init ,
+no modules, no early userspace), plus
+.I /boot/amd-ucode.img
+when AMD blobs are installed. Intel microcode ships static in the
+.B intel-ucode
+package instead.
+.PP
+Selection is hardware-driven (PCI display controllers via sysfs
+against the map, plus baseline includes for generic images); missing
+firmware for present hardware fails loudly, and grub.cfg is
+regenerated afterwards. Images whose kernel is gone are pruned.
+.SH FILES
+.I /usr/share/saphira/earlyfw/pci.map
+.br
+.I /etc/saphira/earlyfw.conf
+.SH SEE ALSO
+.BR saphira-mkinitramfs (8)

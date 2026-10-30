@@ -20,7 +20,7 @@ makedepends="
     binutils
     cmake
     gcc
-    llvm>=22.1.8-r1
+    llvm-dev>=22.1.8-r4
     ninja
     python3
     zlib-dev

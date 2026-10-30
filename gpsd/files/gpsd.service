@@ -9,7 +9,9 @@ Wants=network.target
 
 [Service]
 # Mirrors files/gpsd.initd exactly. -N keeps gpsd in the foreground, so
-# Type=simple and there is no PIDFile to track.
+# Type=simple and there is no PIDFile to track. -n polls the receivers
+# immediately instead of waiting for the first client to connect (the
+# correct behaviour for a boot-started daemon with no client yet).
 #
 # $OPTIONS and $DEVICES expand from /etc/conf.d/gpsd, the same names
 # gpsd.hotplug honors, and the init script substitutes them the same way.
@@ -17,8 +19,15 @@ Wants=network.target
 # and gpsd would start with no device at all.
 EnvironmentFile=-/etc/conf.d/gpsd
 Type=simple
+# /var/run is Saphira-persistent by design, never wiped: recreate the
+# runtime dir owned by the service identity and clear a stale control
+# socket from an unclean shutdown before the daemon binds it.
+# RuntimeDirectory= is deliberately NOT used: systemd always creates it
+# under /run, but the compiled rundir (and the OpenRC init script, and
+# gpsdctl/hotplug clients) is /var/run/gpsd - separate real trees here.
+ExecStartPre=+/bin/install -d -o gpsd -g gpsd -m 0755 /var/run/gpsd
+ExecStartPre=-/bin/rm -f /var/run/gpsd/gpsd.sock
 ExecStart=/usr/sbin/gpsd -N -n $OPTIONS $DEVICES
-RuntimeDirectory=gpsd
 # GPS devices vanish on USB re-plug, so a lost daemon must come back.
 Restart=on-failure
 RestartSec=2
@@ -27,16 +36,14 @@ RestartSec=2
 # devices and creates its own socket directory.
 #
 # Deliberately NOT set: PrivateDevices. The entire purpose of this
-# daemon is to read /dev/gps*, /dev/ttyACM* and /dev/ttyUSB*, and
-# PrivateDevices=yes would hide every one of them.
+# daemon is to read /dev/gps*, /dev/ttyACM*, /dev/ttyUSB* and
+# /dev/pps*, and PrivateDevices=yes would hide every one of them.
 #
-# Deliberately NOT set: User=. The init script's comment says gpsd
-# "opens its devices as root and then drops to nobody by itself", but the
-# same command line passes -n, which is gpsd's do-not-drop-privileges
-# flag. The two claims contradict each other and the -n flag is the one
-# in the command line, so this unit starts it as root exactly as the
-# init script does rather than guessing. Resolving it needs a gpsd(8)
-# reading, not a systemd unit.
+# Deliberately NOT set: User=. gpsd opens its devices as root and then
+# setuid/setgid-drops to the compiled gpsd_user/gpsd_group (gpsd:gpsd,
+# declared in accounts.d/gpsd) itself; starting it pre-dropped would
+# stop it opening anything. The unit starts it as root exactly as the
+# init script does.
 
 PrivateTmp=yes
 ProtectHome=yes

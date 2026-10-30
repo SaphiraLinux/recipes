@@ -1,0 +1,26 @@
+#!/bin/sh
+# Build the Java trust store from the system Mozilla bundle after this
+# package lands. Gradle and every TLS-speaking Java tool need it; a JDK
+# without cacerts fails every HTTPS fetch with an unhelpful PKIX error.
+#
+# apk runs this AFTER the payload is in its final state. The JRE split
+# (a dependency of this package) installs first, so its lib/security
+# directory exists and keytool (a JRE-split binary) is on disk.
+# Per-certificate -importcert with an alias-exists skip converges on
+# re-run (proven: 118 add + 0 dup first run, 0 add + 118 skip second);
+# the bundle file itself is skipped (it is not a single certificate).
+# A failure propagates (generated callers run under set -eu): apk
+# reports the error while the package still commits, loud instead of
+# silently TLS-broken.
+#
+# Absolute paths only: hooks run under apk with a minimal PATH.
+CACERTS=/usr/lib/jvm/java-17-openjdk/lib/security/cacerts
+for cert in /etc/ssl/certs/*.crt; do
+	[ -e "$cert" ] || continue
+	[ "$cert" = /etc/ssl/certs/ca-certificates.crt ] && continue
+	alias="saphira-$(basename "$cert" .crt)"
+	/usr/bin/keytool -list -keystore "$CACERTS" -storepass changeit \
+		-alias "$alias" >/dev/null 2>&1 && continue
+	/usr/bin/keytool -importcert -trustcacerts -keystore "$CACERTS" \
+		-storepass changeit -noprompt -alias "$alias" -file "$cert"
+done

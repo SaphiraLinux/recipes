@@ -39,6 +39,7 @@ run_makepkg()
 	shift
 	PATH=$test_root/bin:/usr/bin:/bin \
 	SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
+	SAPHIRA_RECIPE_ROOT=${SAPHIRA_RECIPE_ROOT:-$test_root/baseroot} \
 	SAPHIRA_BUILD_ROOT=$stage \
 	SAPHIRA_INCOMING_DIR=$artifacts \
 	SAPHIRA_PACKAGE_TMP=$package_tmp \
@@ -46,6 +47,43 @@ run_makepkg()
 	SAPHIRA_BOOTSTRAP_TARGET=fakeroot \
 		"$makepkg" "$producer" "$@"
 }
+
+# Fixture identity registry: makepkg validates every fragment against
+# accounts.tsv, so hermetic tests carry their own registry root with
+# exactly the identities the fixtures below declare. Mutation tests
+# (allocation staging) copy this root and point SAPHIRA_RECIPE_ROOT
+# at the copy, leaving the shared registry untouched.
+mkdir -p "$test_root/baseroot/saphira-baselayout/files"
+printf 'pkgrel=1\n' > "$test_root/baseroot/saphira-baselayout/recipe.sh"
+printf '%s\n' \
+	'# name	type	id	primary-group	home	shell	supplementary-groups	init' \
+	'iduser	user	660	idgroup	/var/lib/idsvc	/sbin/nologin	-' \
+	'idgroup	group	660	-	-	-	-' \
+	'supuser	user	661	supgroup	/var/lib/supsvc	/sbin/nologin	-' \
+	'supgroup	group	661	-	-	-	-' \
+	'devgrp	group	662	-	-	-	-' \
+	'plugdev	group	663	-	-	-	-' \
+	'fuser	user	664	fgroup	/var/lib/filesvc	/sbin/nologin	-' \
+	'fgroup	group	664	-	-	-	-' \
+	'leguser	user	664	leggroup	/var/lib/legacy	/sbin/nologin	-' \
+	'leggroup	group	664	-	-	-	-' \
+	'natuser	user	671	natuser	/var/empty	/sbin/nologin	-' \
+	'natuser	group	671	-	-	-	-' \
+	'natgroup	group	672	-	-	-	-' \
+	'fhsuser	user	661	fhsgroup	/var/lib/fhssvc	/sbin/nologin	-' \
+	'fhsgroup	group	661	-	-	-	-' \
+	'hookiduser	user	661	hookidgroup	/var/lib/hookidsvc	/sbin/nologin	-' \
+	'hookidgroup	group	661	-	-	-	-' \
+	'capsuser	user	662	capsgroup	/var/lib/capsvc	/sbin/nologin	-' \
+	'capsgroup	group	662	-	-	-	-' \
+	'biguser	user	900	biggroup	/var/lib/big	/sbin/nologin	-' \
+	'biggroup	group	900	-	-	-	-' \
+	'miduser	user	250	midgroup	/var/lib/mid	/sbin/nologin	-' \
+	'midgroup	group	250	-	-	-	-' \
+	'reguser	user	665	reggroup	/var/lib/regmm	/sbin/nologin	-' \
+	'reguser	group	665	-	-	-	-' \
+	'reggroup	group	665	-	-	-	-' \
+	> "$test_root/baseroot/saphira-baselayout/files/accounts.tsv"
 
 mkdir -p "$stage/make/pkg/usr/bin" "$stage/make/subpkg/make-doc/usr/share/doc/make"
 printf '%s\n' make > "$stage/make/pkg/usr/bin/make"
@@ -644,6 +682,61 @@ if run_makepkg legacystray > "$test_root/legacystray.log" 2>&1; then
 fi
 grep 'foreign account fragments' "$test_root/legacystray.log" >/dev/null
 printf '%s\n' 'account legacy sidecar refusal: ok (malformed, undeclared, identical, reserved, lone, stray)'
+
+# TSV authority: fragment identities must match the registry (base
+# names only - versions never enter). A registered name with a
+# different ID fails with the exact report; a new name stages the
+# registry append plus the baselayout bump and stops for commit;
+# an allocated ID under a new name fails.
+mkdir -p "$stage/regmm/pkg/usr/bin" "$stage/regmm/pkg/usr/share/saphira/accounts.d"
+printf '%s\n' regmm > "$stage/regmm/pkg/usr/bin/regmm"
+printf '%s\n' 'user reguser 660 reggroup /var/lib/regmm /sbin/nologin' 'group reguser 660' 'group reggroup 665' > "$stage/regmm/pkg/usr/share/saphira/accounts.d/regmm"
+write_manifest regmm '{"arch":"x86_64","build_time":20,"license":"MIT","name":"regmm","origin":"regmm","outputs":[{"dependencies":[],"description":"regmm","name":"regmm","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r0"}'
+if run_makepkg regmm > "$test_root/regmm.log" 2>&1; then
+	printf '%s\n' 'registry mismatch unexpectedly packaged' >&2
+	exit 1
+fi
+grep 'identity mismatch' "$test_root/regmm.log" >/dev/null
+grep 'Package:  regmm' "$test_root/regmm.log" >/dev/null
+grep 'Identity: reguser' "$test_root/regmm.log" >/dev/null
+grep 'Declared: UID 660, GID 660' "$test_root/regmm.log" >/dev/null
+grep 'Registry: UID 665, GID 665' "$test_root/regmm.log" >/dev/null
+grep 'immutable' "$test_root/regmm.log" >/dev/null
+printf '%s\n' 'registry mismatch refusal: ok (exact report, base names)'
+# New identity: first run stages the append + bump and builds
+# nothing; rerun against the staged registry builds. The shared
+# fixture registry stays untouched (throwaway root copy).
+cp -r "$test_root/baseroot" "$test_root/regroot"
+mkdir -p "$stage/regnew/pkg/usr/bin" "$stage/regnew/pkg/usr/share/saphira/accounts.d"
+printf '%s\n' regnew > "$stage/regnew/pkg/usr/bin/regnew"
+printf '%s\n' 'user newuser 680 newgroup /var/lib/regnew /sbin/nologin' 'group newgroup 680' > "$stage/regnew/pkg/usr/share/saphira/accounts.d/regnew"
+write_manifest regnew '{"arch":"x86_64","build_time":20,"license":"MIT","name":"regnew","origin":"regnew","outputs":[{"dependencies":[],"description":"regnew","name":"regnew","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r0"}'
+if SAPHIRA_RECIPE_ROOT=$test_root/regroot run_makepkg regnew > "$test_root/regnew.log" 2>&1; then
+	printf '%s\n' 'unstaged allocation unexpectedly packaged' >&2
+	exit 1
+fi
+grep 'identity allocation staged for regnew: newgroup, newuser' "$test_root/regnew.log" >/dev/null
+grep 'then rebuild. No package was built' "$test_root/regnew.log" >/dev/null
+grep '^newuser	user	680	newgroup	/var/lib/regnew	/sbin/nologin	-$' "$test_root/regroot/saphira-baselayout/files/accounts.tsv" >/dev/null
+grep '^newgroup	group	680	-	-	-	-$' "$test_root/regroot/saphira-baselayout/files/accounts.tsv" >/dev/null
+grep '^pkgrel=2$' "$test_root/regroot/saphira-baselayout/recipe.sh" >/dev/null
+[ ! -e "$artifacts/x86_64/regnew-1-r0.apk" ]
+grep -c newuser "$test_root/baseroot/saphira-baselayout/files/accounts.tsv" | grep -q '^0$'
+grep '^pkgrel=1$' "$test_root/baseroot/saphira-baselayout/recipe.sh" >/dev/null
+SAPHIRA_RECIPE_ROOT=$test_root/regroot run_makepkg regnew >/dev/null 2>&1
+test -f "$artifacts/x86_64/regnew-1-r0.apk"
+printf '%s\n' 'registry staging two-phase: ok (stage, rebuild, hermetic)'
+# Allocated ID under a new name fails closed.
+mkdir -p "$stage/regtaken/pkg/usr/bin" "$stage/regtaken/pkg/usr/share/saphira/accounts.d"
+printf '%s\n' regtaken > "$stage/regtaken/pkg/usr/bin/regtaken"
+printf '%s\n' 'user takenuser 660 takengroup /var/lib/regtaken /sbin/nologin' 'group takengroup 660' > "$stage/regtaken/pkg/usr/share/saphira/accounts.d/regtaken"
+write_manifest regtaken '{"arch":"x86_64","build_time":20,"license":"MIT","name":"regtaken","origin":"regtaken","outputs":[{"dependencies":[],"description":"regtaken","name":"regtaken","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r0"}'
+if run_makepkg regtaken > "$test_root/regtaken.log" 2>&1; then
+	printf '%s\n' 'allocated ID unexpectedly packaged' >&2
+	exit 1
+fi
+grep 'already allocated' "$test_root/regtaken.log" >/dev/null
+printf '%s\n' 'registry allocated-ID refusal: ok'
 
 
 # Maintainer hooks: a recipe may declare lifecycle hooks that refresh

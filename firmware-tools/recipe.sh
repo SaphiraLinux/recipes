@@ -1,7 +1,14 @@
 #!/bin/sh
 pkgname=firmware-tools
 pkgver=0.1
-pkgrel=1
+pkgrel=2
+# r2: LICENSE gains an explicit scope section (2026-10-23): BUSL-1.1
+# covers ONLY the Saphira-authored grouping/notice, never the GPL/MIT
+# member software (each keeps its upstream licence, listed in the
+# scope table). The license= field stays BUSL-1.1 for the wrapper per
+# Saphira-owned-software policy (saphira-base metapackage precedent);
+# changing it would need an explicit policy decision, not a silent
+# relicense of Saphira's own compilation copyright.
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='Saphira firmware toolkit group (safe inspection/programming tools)'
 license='BUSL-1.1'

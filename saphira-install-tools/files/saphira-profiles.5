@@ -102,11 +102,24 @@ Role layers: additional intention lists composed on top of a minimal
 profile. Roles are profile data, not meta-packages: no new package
 name is invented for a role.
 .TP
+.B role-zfs
+ZFS kernel module and userspace for a flavor whose root lives on a
+pool. Required for every ZFS root (the engine refuses one whose
+target lacks it); the module line follows the kernels the product
+flavors pin.
+.TP
 .B saphira-installer
 The installer userspace: enough software to INSTALL a machine, and
 deliberately not enough to be one. It carries no kernel and no init
 system. The bootable installer payload is this profile plus a kernel plus
 an initramfs.
+.TP
+.B image-creator-appliance
+The USB image-creator appliance: a bootable environment whose sole
+purpose is creating working Saphira images. OpenRC, BIOS boot, menu
+on the console instead of firstboot, sshd with root login, and the
+ZFS module plus userspace so it can create pools. Its products are
+chosen at runtime, never here.
 .PP
 Note the naming distinction, because the two are one keystroke apart:
 .B base-system

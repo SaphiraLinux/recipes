@@ -642,11 +642,51 @@ for fixture in elder youngster; do
 done
 apk adbsign --allow-untrusted --sign-key "$test_root/test-repository.rsa" "$artifacts/x86_64/elder-1-r1.apk"
 cp "$artifacts/x86_64/elder-1-r1.apk" "$repo/elder-1-r1.apk"
-# Account identity gate: the global authority is the TSV reservation map
-# plus every published accounts.d fragment. A staged package declaring
-# a fresh identity publishes and registers it; a staged UID collision
-# or a TSV redeclaration refuses publication with nothing mutated.
-printf '%s\n' '# name	type	id	primary-group	home	shell	supplementary-groups' 'root	user	0	root	/root	/bin/bash	wheel' 'root	group	0	-	-	-	-' 'man	group	13	-	-	-	-' > "$test_root/accounts.tsv"
+# Account identity gate: accounts.tsv is the sole mint. A staged package
+# declaring a registered identity publishes (and registers reservations);
+# a staged UID collision, a TSV contradiction, or a name with no registry
+# row refuses publication with nothing mutated. makepkg enforces the same
+# rule at build time against the recipe tree, so the hermetic builds below
+# carry their own registry root; the signer reads the fixture TSV.
+printf '%s\n' '# name	type	id	primary-group	home	shell	supplementary-groups' 'root	user	0	root	/root	/bin/bash	wheel' 'root	group	0	-	-	-	-' 'man	group	13	-	-	-	-' \
+	'acctuser	user	670	acctgroup	/var/lib/acctsvc	/sbin/nologin	-' 'acctgroup	group	670	-	-	-	-' \
+	'eviluser	user	670	acctgroup	/var/lib/acctevil	/sbin/nologin	-' \
+	'natown	user	680	natown	/var/lib/natpubsvc	/sbin/nologin	-' 'natown	group	680	-	-	-	-' \
+	'rangeuser	user	900	rangegroup	/var/lib/range	/sbin/nologin	-' 'rangegroup	group	900	-	-	-	-' \
+	'miduser	user	250	midgroup	/var/lib/acctmid	/sbin/nologin	-' 'midgroup	group	250	-	-	-	-' \
+	'fileuser	user	673	filegroup	/var/lib/filepub	/sbin/nologin	-' 'filegroup	group	673	-	-	-	-' \
+	'fileeviluser	user	674	fileevilgroup	/var/lib/fileevil	/sbin/nologin	-' 'fileevilgroup	group	674	-	-	-	-' \
+	'legacyuser	user	674	legacygroup	/var/lib/legacypub	/sbin/nologin	-' 'legacygroup	group	674	-	-	-	-' \
+	'pairuser	user	676	pairgroup	/var/lib/legacypair	/sbin/nologin	-' 'pairgroup	group	676	-	-	-	-' \
+	'genfoo1	user	690	genfoo1	/var/lib/genfoo1	/sbin/nologin	-' 'genfoo1	group	690	-	-	-	-' \
+	'genfoo2	user	691	genfoo2	/var/lib/genfoo2	/sbin/nologin	-' 'genfoo2	group	691	-	-	-	-' \
+	'spokes	group	2	-	-	-	-' \
+	> "$test_root/accounts.tsv"
+# Hermetic recipe root for the makepkg builds below: every fixture
+# fragment identity is registered here, so builds pass the TSV gate.
+# (eviluser shares UID 670 with acctuser by design - the signer, not
+# the builder, owns cross-package collision refusal.)
+mkdir -p "$test_root/baseroot/saphira-baselayout/files"
+printf 'pkgrel=1\n' > "$test_root/baseroot/saphira-baselayout/recipe.sh"
+printf '%s\n' \
+	'# name	type	id	primary-group	home	shell	supplementary-groups	init' \
+	'acctuser	user	670	acctgroup	/var/lib/acctsvc	/sbin/nologin	-' 'acctgroup	group	670	-	-	-	-' \
+	'eviluser	user	670	acctgroup	/var/lib/acctevil	/sbin/nologin	-' \
+	'natown	user	680	natown	/var/lib/natpubsvc	/sbin/nologin	-' 'natown	group	680	-	-	-	-' \
+	'man	group	13	-	-	-	-' \
+	'rangeuser	user	900	rangegroup	/var/lib/range	/sbin/nologin	-' 'rangegroup	group	900	-	-	-	-' \
+	'miduser	user	250	midgroup	/var/lib/acctmid	/sbin/nologin	-' 'midgroup	group	250	-	-	-	-' \
+	'hugeuser	user	900	hugegroup	/var/lib/huge	/sbin/nologin	-' 'hugegroup	group	900	-	-	-	-' \
+	'rootuser	user	671	rootgroup	/var/lib/acctroot	/sbin/nologin	-' 'rootgroup	group	671	-	-	-	-' \
+	'spokeuser	user	672	spokegroup	/var/lib/acctspokes	/sbin/nologin	-' 'spokegroup	group	672	-	-	-	-' \
+	'fileuser	user	673	filegroup	/var/lib/filepub	/sbin/nologin	-' 'filegroup	group	673	-	-	-	-' \
+	'fileeviluser	user	674	fileevilgroup	/var/lib/fileevil	/sbin/nologin	-' 'fileevilgroup	group	674	-	-	-	-' \
+	'legacyuser	user	674	legacygroup	/var/lib/legacypub	/sbin/nologin	-' 'legacygroup	group	674	-	-	-	-' \
+	'pairuser	user	676	pairgroup	/var/lib/legacypair	/sbin/nologin	-' 'pairgroup	group	676	-	-	-	-' \
+	'genfoo1	user	690	genfoo1	/var/lib/genfoo1	/sbin/nologin	-' 'genfoo1	group	690	-	-	-	-' \
+	'genfoo2	user	691	genfoo2	/var/lib/genfoo2	/sbin/nologin	-' 'genfoo2	group	691	-	-	-	-' \
+	> "$test_root/baseroot/saphira-baselayout/files/accounts.tsv"
+export SAPHIRA_RECIPE_ROOT=$test_root/baseroot
 mkdir -p "$stage/acctsvc/pkg/usr/bin" "$stage/acctsvc/pkg/usr/share/saphira/accounts.d"
 printf '%s\n' acctsvc > "$stage/acctsvc/pkg/usr/bin/acctsvc"
 printf '%s\n' 'user acctuser 670 acctgroup /var/lib/acctsvc /sbin/nologin' 'group acctgroup 670' 'dir /var/lib/acctsvc 0755 acctuser acctgroup' > "$stage/acctsvc/pkg/usr/share/saphira/accounts.d/acctsvc"
@@ -1005,12 +1045,17 @@ SAPHIRA_ACCOUNTS_TSV=$test_root/accounts.tsv run_signer > "$test_root/tsvpub.out
 test -f "$repo/accttsv-1-r0.apk"
 grep 'staged gate:' "$test_root/tsvpub.out" >/dev/null
 # A redeclaration CONFLICTING with the base seed (same name, other GID)
-# refuses just as loudly as a fragment collision.
+# refuses just as loudly as a fragment collision. The build runs against
+# a registry copy carrying the divergent row (proving toolchain
+# disagreement is caught), while the signer reads the canonical one.
+cp -r "$test_root/baseroot" "$test_root/clashroot"
+sed -i 's/^man\tgroup\t13\t/man\tgroup\t14\t/' "$test_root/clashroot/saphira-baselayout/files/accounts.tsv"
 mkdir -p "$stage/acctclash/pkg/usr/bin" "$stage/acctclash/pkg/usr/share/saphira/accounts.d"
 printf '%s\n' acctclash > "$stage/acctclash/pkg/usr/bin/acctclash"
 printf '%s\n' 'group man 14' > "$stage/acctclash/pkg/usr/share/saphira/accounts.d/acctclash"
 printf '%s\n' '{"arch":"x86_64","build_time":14,"license":"MIT","name":"acctclash","origin":"acctclash","outputs":[{"dependencies":[],"description":"acctclash","name":"acctclash","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r0"}' > "$stage/acctclash/manifest.json"
 SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
+SAPHIRA_RECIPE_ROOT=$test_root/clashroot \
 SAPHIRA_BUILD_ROOT=$stage SAPHIRA_INCOMING_DIR=$artifacts \
 SAPHIRA_PACKAGE_TMP=$test_root/makepkg-tmp SAPHIRA_FAKEROOT_BOOTSTRAP=1 \
 SAPHIRA_BOOTSTRAP_TARGET=fakeroot "$makepkg" acctclash >/dev/null
@@ -1029,15 +1074,42 @@ fi
 grep 'conflicts with base seed' "$test_root/clashpub.err" >/dev/null
 test ! -f "$repo/acctclash-1-r0.apk"
 mv "$clashpub" "$clashpub.superseded-conflict"
-# An identity anywhere in 0..999 publishes (one service range; the
-# backstop refuses only human-range IDs). (The crafted receipt lets
-# the gate's input be controlled directly.)
+# A staged identity with no registry row refuses at the signer even
+# though a divergent builder registry accepted the build: the signer's
+# registry is the authority at publish time. (Builds against a registry
+# copy carrying the row; signs against the canonical one without it.)
+cp -r "$test_root/baseroot" "$test_root/regpubroot"
+printf '%s\n' 'regpuser	user	681	regpgroup	/var/lib/regpub	/sbin/nologin	-' 'regpgroup	group	681	-	-	-	-' >> "$test_root/regpubroot/saphira-baselayout/files/accounts.tsv"
+mkdir -p "$stage/regpub/pkg/usr/bin" "$stage/regpub/pkg/usr/share/saphira/accounts.d"
+printf '%s\n' regpub > "$stage/regpub/pkg/usr/bin/regpub"
+printf '%s\n' 'user regpuser 681 regpgroup /var/lib/regpub /sbin/nologin' 'group regpgroup 681' > "$stage/regpub/pkg/usr/share/saphira/accounts.d/regpub"
+printf '%s\n' '{"arch":"x86_64","build_time":20,"license":"MIT","name":"regpub","origin":"regpub","outputs":[{"dependencies":[],"description":"regpub","name":"regpub","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r0"}' > "$stage/regpub/manifest.json"
+SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
+SAPHIRA_RECIPE_ROOT=$test_root/regpubroot \
+SAPHIRA_BUILD_ROOT=$stage SAPHIRA_INCOMING_DIR=$artifacts \
+SAPHIRA_PACKAGE_TMP=$test_root/makepkg-tmp SAPHIRA_FAKEROOT_BOOTSTRAP=1 \
+SAPHIRA_BOOTSTRAP_TARGET=fakeroot "$makepkg" regpub >/dev/null
+regpubdir=$incoming/regpub-ready
+mkdir "$regpubdir"
+cp "$artifacts/x86_64/regpub-1-r0.apk" "$regpubdir/"
+printf '%s\n' regpub > "$regpubdir/target"
+printf '%s\n' '{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}' > "$regpubdir/package-seed.json"
+regpubsha=$(sha256sum "$regpubdir/regpub-1-r0.apk" | awk '{ print $1 }')
+printf '%s\n' '{"schema":"saphira-build-artifacts/v1","target":"regpub","constructors":[{"constructor":"makepkg","producer":"regpub","artifacts":[{"name":"regpub","artifact":"regpub-1-r0.apk","sha256":"'"$regpubsha"'","backend":"userns-maproot","accounts":{"users":[{"name":"regpuser","uid":"681","primary":"regpgroup","home":"/var/lib/regpub","shell":"/sbin/nologin"}],"groups":[{"name":"regpgroup","gid":"681"}],"dirs":[]}}]}],"package_seed":{"schema":"saphira-package-seed/v1","generation":"test","seed":["test"],"resolved":[]}}' > "$regpubdir/artifact-manifest.json"
+(CDPATH= cd -- "$regpubdir" && sha256sum regpub-1-r0.apk > manifest.sha256)
+if SAPHIRA_ACCOUNTS_TSV=$test_root/accounts.tsv run_signer > "$test_root/regpub.out" 2> "$test_root/regpub.err"; then
+	printf '%s\n' 'unregistered staged identity unexpectedly published' >&2
+	exit 1
+fi
+grep 'no registry row' "$test_root/regpub.err" >/dev/null
+test ! -f "$repo/regpub-1-r0.apk"
+mv "$regpubdir" "$regpubdir.superseded-conflict"
+printf '%s\n' 'registry registration refusal: ok (signer registry rules publish time)'
+# An identity anywhere in 0..999 publishes when registered (one
+# service range; the backstop refuses only human-range IDs).
 mkdir -p "$stage/acctrange/pkg/usr/bin" "$stage/acctrange/pkg/usr/share/saphira/accounts.d"
 printf '%s\n' acctrange > "$stage/acctrange/pkg/usr/bin/acctrange"
 printf '%s\n' 'user rangeuser 900 rangegroup /var/lib/range /sbin/nologin' 'group rangegroup 900' > "$stage/acctrange/pkg/usr/share/saphira/accounts.d/acctrange"
-mkdir -p "$stage/acctrange/pkg/usr/bin" "$stage/acctrange/pkg/usr/share/saphira/accounts.d"
-printf '%s\n' acctrange > "$stage/acctrange/pkg/usr/bin/acctrange"
-printf '%s\n' 'user rangeuser 671 rangegroup /var/lib/range /sbin/nologin' 'group rangegroup 671' > "$stage/acctrange/pkg/usr/share/saphira/accounts.d/acctrange"
 printf '%s\n' '{"arch":"x86_64","build_time":15,"license":"MIT","name":"acctrange","origin":"acctrange","outputs":[{"dependencies":[],"description":"acctrange","name":"acctrange","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"1-r0"}' > "$stage/acctrange/manifest.json"
 SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
 SAPHIRA_BUILD_ROOT=$stage SAPHIRA_INCOMING_DIR=$artifacts \

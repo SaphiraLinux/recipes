@@ -1,7 +1,7 @@
 #!/bin/sh
 
 pkgname=setuptools
-pkgver=80.10.2
+pkgver=84.2.1
 pkgrel=1
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="Python package build system"
@@ -9,8 +9,8 @@ license="MIT"
 origin=setuptools
 repo=saphira
 url=https://pypi.org/project/setuptools/
-source=https://files.pythonhosted.org/packages/76/95/faf61eb8363f26aa7e1d762267a8d602a1b26d4f3a1e758e92cb3cb8b054/setuptools-80.10.2.tar.gz
-sha256=8b0e9d10c784bf7d262c4e5ec5d4ec94127ce206e8738f29a437945fbc219b70
+source=https://files.pythonhosted.org/packages/70/b3/c19426f783614d625699a4b247faf628ea9ab1db228674491767b417f9e1/setuptools-84.2.1.tar.gz
+sha256=3ff8b3b5492a0aa66960f4419365a86b84e013070d4313e4d4a6894f5d64d6bc
 
 depends="
     python3

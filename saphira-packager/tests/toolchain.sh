@@ -65,14 +65,41 @@ tune_branch_scale()
 # distribution identity, and GCC/Rust target specs are the one place it is
 # correct rather than stale.
 
+# The triplet is deliberately NOT asserted as a literal any more. Every
+# toolchain recipe derives it from $pkgarch, which is what SAPHIRA_ARCH
+# sets and what makepkg labels the package with. Deriving the build from
+# the SAME value the package is labelled with is the load-bearing
+# invariant: it is what stops an x86_64 payload being published as
+# arch=aarch64, since makepkg trusts the manifest arch and nothing
+# downstream re-derives it.
+#
+# So assert three things per recipe: the derivation, the fail-closed
+# refusal for an unknown architecture, and that x86_64 still resolves to
+# the Saphira x86_64 triplet. This is strictly stronger than the literal
+# it replaces, which could not tell correct derivation from a hardcoded
+# string.
 TRIPLET=x86_64-akadata-linux-musl
 for pkg in gcc binutils; do
-	grep -q -- "--target=$TRIPLET" "$root/$pkg/recipe.sh" ||
-		fail "$pkg does not configure --target=$TRIPLET"
-	grep -q -- "--host=$TRIPLET" "$root/$pkg/recipe.sh" ||
-		fail "$pkg does not configure --host=$TRIPLET"
+	r=$root/$pkg/recipe.sh
+	grep -q 'case "\$pkgarch" in' "$r" ||
+		fail "$pkg does not derive its architecture from \$pkgarch"
+	grep -q 'unsupported SAPHIRA_ARCH' "$r" ||
+		fail "$pkg does not fail closed on an unsupported SAPHIRA_ARCH"
+	grep -q "ARCH_TRIPLET=$TRIPLET" "$r" ||
+		fail "$pkg does not map x86_64 to $TRIPLET"
 done
-ok "gcc and binutils target $TRIPLET"
+for pkg in gcc binutils; do
+	r=$root/$pkg/recipe.sh
+	for t in build host target; do
+		grep -q -- "--$t=\"\$ARCH_TRIPLET\"" "$r" ||
+			fail "$pkg does not configure --$t from the derived triplet"
+	done
+done
+grep -q 'ARCH=\$KARCH' "$root/saphira-linux-uapi-headers/recipe.sh" ||
+	fail "saphira-linux-uapi-headers does not pass a derived ARCH= to make"
+grep -q 'KARCH=arm64' "$root/saphira-linux-uapi-headers/recipe.sh" ||
+	fail "saphira-linux-uapi-headers does not map aarch64 to ARCH=arm64"
+ok "gcc, binutils and saphira-linux-uapi-headers derive their architecture and fail closed"
 
 # No package may assume a GNU triplet. This is the whole point of the
 # branded triplet: a single x86_64-linux-gnu would silently link against
@@ -226,9 +253,15 @@ fi
 # assertable statically is that the canonical mechanisms are still
 # present, because they are what every other package inherits silently.
 
-grep -q -- '--with-arch=x86-64-v3' "$root/gcc/recipe.sh" ||
-	fail "gcc no longer sets the x86-64-v3 default via --with-arch"
-ok "gcc sets the x86-64-v3 baseline as its default"
+# Assert the MAPPING, not a literal: x86_64 must still resolve to the v3
+# baseline, and the baseline must reach configure through --with-arch.
+# A per-architecture derivation is only correct if the x86_64 arm still
+# carries the policy it always had.
+grep -q 'GCC_ARCH=x86-64-v3' "$root/gcc/recipe.sh" ||
+	fail "gcc no longer maps x86_64 to the x86-64-v3 baseline"
+grep -q -- '--with-arch="$GCC_ARCH"' "$root/gcc/recipe.sh" ||
+	fail "gcc no longer reaches --with-arch through the derived value"
+ok "gcc sets the x86-64-v3 baseline for x86_64 via the derived --with-arch"
 
 grep -q 'base.cpu = "x86-64-v3"' "$root/rustc/files/akadata-target.patch" ||
 	fail "the akadata Rust target no longer defaults to x86-64-v3"

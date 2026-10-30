@@ -6,6 +6,10 @@ pkgver=1.30.5
 # in ngx_http_v3_module with OpenSSL <= 3.5.0; Saphira builds http_v3).
 # New upstream version: pkgrel resets to 1. Carries forward the r11
 # /var/run runtime contract, feature set, and rule locks unchanged.
+# r3: ngx_brotli headers track brotli 1.2.1 (CVE-2026-111497 decoder
+# fix): the 1.2.0 tarball is gone, so this also unbreaks the build,
+# plus a version-match guard so the next brotli bump fails here loudly
+# instead of silently building stale headers. Payload change.
 # r7: connector unbundled (r6 was drafted but never published):
 # the ModSecurity v3 nginx connector now ships as the separate
 # nginx-mod-modsecurity package, built against this exact source
@@ -39,7 +43,7 @@ pkgver=1.30.5
 # these hold transient response bodies, so world-readable temp
 # storage was never intended). client_body and the other temp
 # paths keep 0755 (no signal either way). Payload change, bumps.
-pkgrel=2
+pkgrel=3
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="Saphira webDragon HTTP server and reverse proxy"
 license="BSD-2-Clause"
@@ -127,10 +131,18 @@ recipe_build()
 	# The module tarball carries its git submodule path as an empty
 	# dir; clear it or mv nests one level too deep and configure
 	# fails to find deps/brotli/c.
+	# Headers must track the brotli recipe version exactly. A brotli
+	# security bump must update this pin + bumppkg together: a deleted
+	# old tarball breaks loudly below (tar fails), and this guard
+	# refuses a retained-but-stale pin before anything compiles.
+	brotli_pin="brotli-1.2.1"
+	brotli_ver=$(sed -n 's/^pkgver=//p' "$RECIPE_DIR/../brotli/recipe.sh")
+	[ "brotli-$brotli_ver" = "$brotli_pin" ] ||
+		{ echo "ERROR: ngx_brotli headers pin $brotli_pin but brotli recipe is at $brotli_ver" >&2; return 1; }
 	mkdir -p "$SRC/modules/ngx_brotli/deps"
-	tar --no-same-owner -C "$SRC/modules/ngx_brotli/deps" -xf "$RECIPE_DIR/../brotli/files/brotli-1.2.0.tar.gz"
+	tar --no-same-owner -C "$SRC/modules/ngx_brotli/deps" -xf "$RECIPE_DIR/../brotli/files/$brotli_pin.tar.gz"
 	rm -rf "$SRC/modules/ngx_brotli/deps/brotli"
-	mv "$SRC/modules/ngx_brotli/deps/brotli-1.2.0" "$SRC/modules/ngx_brotli/deps/brotli"
+	mv "$SRC/modules/ngx_brotli/deps/$brotli_pin" "$SRC/modules/ngx_brotli/deps/brotli"
 	# layout-exception: nginx uses its own configure dialect (no GNU
 	# dir flags except --prefix, deliberately rooted at
 	# /var/lib/nginx); every installed path below is already explicit

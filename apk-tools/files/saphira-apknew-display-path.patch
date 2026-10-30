@@ -1,0 +1,11 @@
+--- a/src/database.c
++++ b/src/database.c
+@@ -3086,7 +3086,7 @@
+ 					} else {
+ 						// All files differ. Use the package's file as .apk-new.
+ 						ctrl = APK_FS_CTRL_APKNEW;
+-						apk_msg(out, "  Installing file to " DIR_FILE_FMT "%s",
++						apk_msg(out, "  Installing file to /" DIR_FILE_FMT "%s",
+ 						    DIR_FILE_PRINTF(diri->dir, file),
+ 						    db->ctx->apknew_suffix);
+ 					}

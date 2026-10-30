@@ -1,0 +1,84 @@
+# Installer appliance profile: a bootable USB environment whose
+# sole purpose is creating Saphira Linux installations onto a separate
+# real disk via the console creator menu.
+#
+# Intentions ONLY. The package manager owns dependency closure; never
+# enumerate resolved dependencies here (saphira-profiles(5)).
+#
+# This profile describes the appliance, never its products: the
+# product, firmware, filesystem, and hostname are chosen in the menu
+# at runtime and written into the INSTALLED system only. Credentials,
+# users, networking, and DNS are never chosen here: destinations boot
+# locked-root into ordinary saphira-firstboot. Each entry earns its place:
+#
+#   saphira-base        libc/loader, filesystem layout, apk, shell, core
+#                       runtime, account and package tooling.
+#   saphira-kernel      the kernel and its modules. Boot is impossible
+#                       without it. The appliance itself boots ext4.
+#   systemd             the init system for this appliance; the creator
+#                       menu ships as a systemd unit and owns tty1.
+#                       The installed system chooses its own init independently.
+#   grub                both bootloader targets (i386-pc and EFI
+#                       removable) are installed into the appliance
+#                       image at creation.
+#   e2fsprogs           mkfs.ext4/fsck for ext4 roots.
+#   dosfstools          mkfs.vfat for the ESP.
+#   dialog              the menu system. No menu without it.
+#   udev                the device manager: /dev/disk/by-id never
+#                       exists without it (proven Egg 2026-10-19), and
+#                       the menu refuses to run without persistent
+#                       disk identifiers.
+#   bash                the appliance shell scripts run under bash.
+#   vim                 console editor for install manifests.
+#   iproute2            ip for the menu network status and static
+#                       address setup (saphira-network is absent here).
+#   findutils           file discovery used by installer tooling
+#                       (saphira-network is absent here).
+#   iputils             ping: the menu refuses a write unless the
+#                       repository host answers (3-second reply timeout
+#                       per family).
+#   util-linux          sfdisk, wipefs, blockdev, lsblk, blkid:
+#                       partitioning, safety checks and real-disk writes.
+#   kmod                modprobe/insmod: the appliance loads the ZFS
+#                       module itself before creating pools.
+#   saphira-image-creator
+#                       the image build engine the menu drives.
+#   saphira-install-tools
+#                       profiles, planner, installer and menu tooling.
+#   saphira-zfs-7.2.3   ZFS kmod matching the appliance kernel: the
+#                       appliance must create pools, so the module lives
+#                       here, not only in its products.
+#   saphira-zfs-userspace
+#                       zpool/zfs binaries for pool creation.
+#
+# Deliberately absent, each a decision rather than an oversight:
+#   - saphira-image-firstboot: no wizard runs here; the menu owns the
+#     console and destinations run ordinary firstboot themselves;
+#   - saphira-network and dhcpcd: systemd-networkd owns the appliance
+#     NIC through the creator's wired DHCP default; destinations carry
+#     their own network stack and firstboot;
+#   - saphira-firstboot on the appliance: the binary may ship with the
+#     base, but its marker is never armed here;
+#   - openssh and passwords: the appliance has an empty root, no SSH,
+#     and no password prompts; destination credentials belong to the
+#     destination's firstboot, never to this menu;
+#   - a graphical stack of any kind (see the headless policy).
+saphira-base
+saphira-kernel-7.2.3
+systemd
+grub
+e2fsprogs
+dosfstools
+dialog
+udev
+bash
+vim
+iproute2
+findutils
+iputils
+util-linux
+kmod
+saphira-image-creator
+saphira-install-tools
+saphira-zfs-7.2.3
+saphira-zfs-userspace

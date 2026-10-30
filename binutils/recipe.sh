@@ -2,9 +2,30 @@
 
 pkgname=binutils
 pkgver=2.46.1
-pkgrel=3
+pkgrel=4
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='GNU binary utilities (as, ld, ar, nm, objcopy, readelf) - Genesis 16.2 toolchain'
+# Architecture plumbing. pkgarch comes from SAPHIRA_ARCH, so everything the
+# build is told to target is derived from that SAME value: a package can no
+# longer be built for one architecture and labelled as another. An
+# unrecognised architecture fails closed rather than defaulting, because a
+# silent default is exactly how a mislabelled package reaches a signed
+# repository.
+case "$pkgarch" in
+x86_64)
+	ARCH_TRIPLET=x86_64-akadata-linux-musl
+	;;
+aarch64)
+	ARCH_TRIPLET=aarch64-akadata-linux-musl
+	;;
+riscv64)
+	ARCH_TRIPLET=riscv64-akadata-linux-musl
+	;;
+*)
+	echo "ERROR: unsupported SAPHIRA_ARCH '$pkgarch' for binutils" >&2
+	return 1
+	;;
+esac
 license='GPL-3.0-or-later'
 origin=binutils
 repo=saphira
@@ -37,9 +58,9 @@ recipe_build()
 		--sysconfdir=/etc \
 		--localstatedir=/var \
 		--with-sysroot=/ \
-		--build=x86_64-akadata-linux-musl \
-		--host=x86_64-akadata-linux-musl \
-		--target=x86_64-akadata-linux-musl \
+		--build="$ARCH_TRIPLET" \
+		--host="$ARCH_TRIPLET" \
+		--target="$ARCH_TRIPLET" \
 		--enable-ld=default \
 		--enable-plugins \
 		--enable-64-bit-bfd \

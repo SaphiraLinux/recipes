@@ -21,13 +21,14 @@ sha256=dcd814b43677475a6eb1c96aef89b2b5b87ec100b4412c728fa28153b15a09bc
 # Handwritten makefiles honour BINDIR/LIBDIR/HEADIR/VARDIR. LIBDIR
 # defaults to lib64 (forbidden) -- overridden. Daemon link needs
 # uuid (util-linux-dev), aio (libaio-dev), blkid (util-linux-dev)
-# and devmapper headers (lvm2 main carries libdevmapper.h: no -dev
-# split exists, same as libparted usage elsewhere).
+# and devmapper headers (lvm2-dev; the headers moved out of lvm2
+# main with its three-way split, so the bare lvm2 makedepend that
+# used to provide them now resolves to lvm2-dev).
 makedepends="
     binutils
     gcc
     libaio-dev
-    lvm2
+    lvm2-dev
     make
     util-linux-dev
 "

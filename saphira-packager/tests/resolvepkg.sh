@@ -174,6 +174,19 @@ if run_resolver cycle-a > "$test_root/cycle.json" 2> "$test_root/cycle.log"; the
 	exit 1
 fi
 grep 'dependency cycle detected' "$test_root/cycle.log" >/dev/null
+# Producer depending on its own FRESH split output is satisfied by the
+# current build, not a cycle (lvm2 on lvm2-libs with no published copy
+# anywhere: the trusted-repository self-hosting exemption has nothing
+# to grab, so without handling the planner dies on its own producer).
+# The A -> B -> A case above must keep dying; self-edges must plan as
+# a single node with the split in required outputs.
+recipe selfhost 1 'selfhost-libs' 'selfhost-libs'
+run_resolver selfhost > "$test_root/selfhost.json"
+assert_plan "$test_root/selfhost.json" '
+assert [node["producer"] for node in plan["builds"]] == ["selfhost"]
+[node] = [node for node in plan["builds"] if node["producer"] == "selfhost"]
+assert "selfhost-libs" in node["required_outputs"], node["required_outputs"]
+'
 recipe unsupported-target 1 'attr!=2'
 if run_resolver unsupported-target > "$test_root/unsupported.json" 2> "$test_root/unsupported.log"; then
 	printf '%s\n' 'unsupported constraint unexpectedly succeeded' >&2

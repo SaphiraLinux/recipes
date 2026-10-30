@@ -1,0 +1,7 @@
+# qemu-virgl runtime providers (ELF-proven 2026-10-23): the GL
+# modules need the virgl renderer library, an EGL/GBM provider (mesa)
+# and the GL dispatcher (libepoxy). Base qemu pins this split's
+# producer release automatically.
+virglrenderer
+mesa
+libepoxy

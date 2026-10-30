@@ -1,0 +1,6 @@
+# llvm-tools runs on the shared runtime (base pin) plus the C++
+# runtime its binaries DT_NEEDED (libstdc++/libgcc_s, read off the
+# staged binaries 2026-10-23). Base llvm pulls zlib/libffi/libxml2
+# transitively; gcc-libs is named here so the tools survive any
+# future trim of the base runtime deps.
+gcc-libs

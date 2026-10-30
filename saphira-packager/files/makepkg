@@ -29,6 +29,10 @@ PACKAGE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
 ACCOUNT_NAME_RE = re.compile(r"^[A-Za-z0-9_.][A-Za-z0-9_.-]*$")
 ACCOUNT_ID_RE = re.compile(r"^[0-9]+$")
 ACCOUNT_MODE_RE = re.compile(r"^0*[1-7][0-7]{2,3}$")
+# dir-children ranges are canonical decimal only (no leading zeros:
+# lo/hi feed integer arithmetic on both the build and live paths).
+DIR_CHILDREN_RANGE_RE = re.compile(r"(0|[1-9][0-9]*)\.\.(0|[1-9][0-9]*)")
+DIR_CHILDREN_MAX = 64
 # root, wheel, spokes, and IDs 0-2 are foundation reservations, typed
 # by kind: the USER root and UID 0 are refused; the GROUPS root, wheel
 # and spokes and GIDs 0, 1 and 2 are refused, as is anchoring any
@@ -221,6 +225,26 @@ def parse_accounts_fragment(path: Path) -> tuple[dict[str, list[dict[str, str]]]
             if not ACCOUNT_MODE_RE.fullmatch(mode):
                 die(f"account fragment {path}:{lineno}: invalid mode")
             dirs.append({"path": dirpath, "mode": mode, "owner": owner, "group": group})
+        elif kind == "dir-children" and len(parts) == 6:
+            # Bounded fan-out over numbered siblings: validated here,
+            # expanded into plain dir entries so every downstream
+            # surface (receipts, gates) sees the effective set. The
+            # live reconciler performs the same expansion on computed
+            # names without ever listing the parent.
+            _, parent, range_s, mode, owner, group = parts
+            if (not parent.startswith("/") or posixpath.normpath(parent) != parent
+                    or ".." in PurePosixPath(parent).parts or parent.endswith("/")):
+                die(f"account fragment {path}:{lineno}: dir-children parent must be absolute and normalized")
+            if not ACCOUNT_MODE_RE.fullmatch(mode):
+                die(f"account fragment {path}:{lineno}: invalid mode")
+            m = DIR_CHILDREN_RANGE_RE.fullmatch(range_s)
+            if not m:
+                die(f"account fragment {path}:{lineno}: dir-children range must be canonical decimal lo..hi")
+            lo, hi = int(m.group(1)), int(m.group(2))
+            if lo > hi or hi - lo + 1 > DIR_CHILDREN_MAX:
+                die(f"account fragment {path}:{lineno}: dir-children range out of bounds (lo <= hi, at most {DIR_CHILDREN_MAX} children)")
+            for n in range(lo, hi + 1):
+                dirs.append({"path": f"{parent}/{n}", "mode": mode, "owner": owner, "group": group})
         elif kind == "file" and len(parts) == 5:
             _, fpath, mode, owner, group = parts
             if (not fpath.startswith("/") or posixpath.normpath(fpath) != fpath
@@ -250,7 +274,161 @@ def parse_accounts_fragment(path: Path) -> tuple[dict[str, list[dict[str, str]]]
         else:
             die(f"account fragment {path}:{lineno}: malformed stanza")
     return ({"users": users, "groups": groups, "dirs": dirs, "files": files,
-             "sysusers": sysusers}, notices)
+              "sysusers": sysusers}, notices)
+
+
+# ---------------------------------------------------------------------------
+# TSV identity authority (accounts.tsv rules package declarations)
+# ---------------------------------------------------------------------------
+
+# Identity decisions take the package BASE NAME only. No NVR, version, or
+# revision ever enters an identity comparison: r1/r2/r999 of one package
+# reference the same immutable allocation. Enforcement below receives the
+# output base name; there is deliberately no version parameter, so a
+# revision-scoped reassignment is inexpressible here. Tree-wide fragment
+# union (two packages claiming one ID) stays with recipe-rules and the
+# signer; this gate covers fragment-vs-registry only.
+
+def tsv_registry_path() -> Path:
+    root = os.environ.get("SAPHIRA_RECIPE_ROOT", "/recipes")
+    return Path(root) / "saphira-baselayout/files/accounts.tsv"
+
+
+def load_tsv_identities(tsv_path: Path) -> dict[tuple[str, str], str]:
+    """Map (kind, name) -> id. Fail closed on unreadable TSV, malformed
+    rows, duplicate names, or any init flag outside {empty, systemd}."""
+    try:
+        text = tsv_path.read_text(encoding="utf-8")
+    except OSError:
+        die(f"cannot read identity registry: {tsv_path} "
+            f"(SAPHIRA_RECIPE_ROOT={os.environ.get('SAPHIRA_RECIPE_ROOT', '/recipes')})")
+        raise AssertionError("unreachable")
+    mapping: dict[tuple[str, str], str] = {}
+    for lineno, raw in enumerate(text.splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split("\t")
+        if len(parts) < 7 or parts[1] not in ("user", "group"):
+            die(f"identity registry {tsv_path}:{lineno}: malformed row")
+        if len(parts) > 8 or (len(parts) == 8 and parts[7] not in ("", "systemd")):
+            die(f"identity registry {tsv_path}:{lineno}: init flag must be empty or 'systemd'")
+        if (parts[1], parts[0]) in mapping:
+            die(f"identity registry {tsv_path}:{lineno}: duplicate identity '{parts[0]}'")
+        mapping[(parts[1], parts[0])] = parts[2]
+    return mapping
+
+
+def enforce_tsv_authority(package_name: str, users: list, groups: list,
+                           *, allow_stage: bool, origin: str,
+                           extra_names: set | None = None) -> None:
+    """Fail closed unless every given identity matches accounts.tsv.
+
+    - registered name, same ID -> ok (only path that builds).
+    - registered name, different ID -> hard mismatch failure (exact
+      report; existing assignments are immutable, correct the
+      declaration and rebuild).
+    - unregistered name -> with allow_stage (fragment census): validate
+      the numeric ID is free in its namespace, stage the TSV append
+      plus the saphira-baselayout pkgrel bump, then stop without
+      building so the allocation is committed first. Without
+      allow_stage (sysusers-native identities, whose attributes live
+      in sysusers.d rather than the fragment): fail with guidance to
+      register the TSV row by hand.
+    All mismatches are checked before anything is staged: a declaration
+    holding both a mismatch and a new identity stages nothing.
+    Dangling primary/supplementary references (resolving in neither the
+    declaration, the registry, nor root) fail here too: the live
+    reconciler refuses them at install, so the build refuses first.
+    """
+    tsv_path = tsv_registry_path()
+    registry = load_tsv_identities(tsv_path)
+    declared_users = {u["name"]: u for u in users}
+    declared_groups = {g["name"]: g for g in groups}
+
+    def mismatch(name: str) -> "NoReturn":
+        declared_uid = declared_users[name]["uid"] if name in declared_users else "-"
+        declared_gid = declared_groups[name]["gid"] if name in declared_groups else "-"
+        registry_uid = registry.get(("user", name), "-")
+        registry_gid = registry.get(("group", name), "-")
+        die("identity mismatch\n\n"
+            f"Package:  {package_name}\n"
+            f"Identity: {name}\n"
+            f"Declared: UID {declared_uid}, GID {declared_gid}\n"
+            f"Registry: UID {registry_uid}, GID {registry_gid}\n"
+            "\nExisting identity assignments are immutable.\n"
+            "Correct the package declaration before rebuilding.")
+
+    for name in sorted(set(declared_users) | set(declared_groups)):
+        known_user = ("user", name) in registry
+        known_group = ("group", name) in registry
+        if name in declared_users and known_user and declared_users[name]["uid"] != registry[("user", name)]:
+            mismatch(name)
+        if name in declared_groups and known_group and declared_groups[name]["gid"] != registry[("group", name)]:
+            mismatch(name)
+
+    # Dangling references: every primary and supplementary group must
+    # resolve in the declaration, the registry, or the root built-in.
+    # (The live reconciler fails these closed too; catching them here
+    # refuses the build instead of the install.)
+    resolvable = set(declared_users) | set(declared_groups) | (extra_names or set())
+    resolvable |= {n for (k, n) in registry} | {"root", "0"}
+    for user in users:
+        refs = [user["primary"]] + ([s for s in user.get("supplementary", "").split(",") if s])
+        for ref in refs:
+            if ref not in resolvable:
+                die(f"{package_name}: user '{user['name']}' references unresolvable group '{ref}' "
+                    f"(declare it, or register it in {tsv_path})")
+
+    new_names = sorted(n for n in set(declared_users) | set(declared_groups)
+                       if (("user", n) not in registry and n in declared_users)
+                       or (("group", n) not in registry and n in declared_groups))
+    if not new_names:
+        return
+    if not allow_stage:
+        die(f"{package_name}: new {origin} identities ({', '.join(new_names)}) have no registry row in "
+            f"{tsv_path}: register the allocation by hand (attributes live in {origin}, not the "
+            f"fragment), then rebuild. No package was built.")
+    staged: list[str] = []
+    for name in new_names:
+        if name in declared_users:
+            u = declared_users[name]
+            if ("user", name) not in registry:
+                if u["uid"] in {v for (k, v) in registry.items() if k[0] == "user"}:
+                    die(f"{package_name}: UID {u['uid']} for new identity '{name}' is already allocated "
+                        f"in {tsv_path}")
+                staged.append("\t".join([name, "user", u["uid"], u["primary"], u["home"],
+                                          u["shell"], u.get("supplementary", "") or "-"]))
+        if name in declared_groups:
+            g = declared_groups[name]
+            if ("group", name) not in registry:
+                if g["gid"] in {v for (k, v) in registry.items() if k[0] == "group"}:
+                    die(f"{package_name}: GID {g['gid']} for new identity '{name}' is already allocated "
+                        f"in {tsv_path}")
+                staged.append("\t".join([name, "group", g["gid"], "-", "-", "-", "-"]))
+    if not staged:
+        return
+    try:
+        text = tsv_path.read_text(encoding="utf-8")
+    except OSError:
+        die(f"cannot stage identity allocation: {tsv_path} unreadable")
+        raise AssertionError("unreachable")
+    if text and not text.endswith("\n"):
+        text += "\n"
+    tsv_path.write_text(text + "".join(line + "\n" for line in staged), encoding="utf-8")
+    base_recipe = tsv_path.parent.parent / "recipe.sh"
+    try:
+        recipe_text = base_recipe.read_text(encoding="utf-8")
+    except OSError:
+        die(f"cannot stage identity allocation: {base_recipe} unreadable")
+        raise AssertionError("unreachable")
+    bumped, count = re.subn(r"^pkgrel=(\d+)$", lambda m: f"pkgrel={int(m.group(1)) + 1}",
+                            recipe_text, count=1, flags=re.MULTILINE)
+    if count != 1:
+        die(f"cannot stage identity allocation: exactly one pkgrel= line required in {base_recipe}")
+    base_recipe.write_text(bumped, encoding="utf-8")
+    die(f"identity allocation staged for {package_name}: {', '.join(new_names)}. "
+        f"Commit {tsv_path} and {base_recipe}, then rebuild. No package was built.")
 
 
 def parse_maintainer_hooks(hooks_root: Path, name: str) -> dict[str, str]:
@@ -1263,6 +1441,13 @@ def main() -> int:
                 if has_accounts_fragment:
                     accounts, range_notices = parse_accounts_fragment(fragment_path)
                     accounts["legacy"] = {"users": [], "groups": []}
+                    # Census snapshot: the native sysusers merge below
+                    # appends to these same lists, and TSV enforcement
+                    # treats census (fragment-attributed, stageable) and
+                    # native (sysusers.d-attributed, hand-registered)
+                    # identities differently.
+                    census_users = list(accounts["users"])
+                    census_groups = list(accounts["groups"])
                     for notice in range_notices:
                         print(f"makepkg: notice: {notice}")
                     for file_entry in accounts.get("files", []):
@@ -1365,6 +1550,28 @@ def main() -> int:
                 if sidecar_path.is_file():
                     accounts["legacy"] = parse_legacy_sidecar(sidecar_path)
                     check_legacy_consistency(name, accounts)
+                # TSV authority: every declared identity must match
+                # accounts.tsv (base names only - versions never enter
+                # identity decisions). Census first (mismatch fails,
+                # new names stage the registry append and stop), then
+                # sysusers-native names merged above (mismatch fails,
+                # new names need a hand-written TSV row). Legacy
+                # history above is untouched: it guards the past,
+                # never the allocation.
+                if has_accounts_fragment:
+                    native_users = accounts["users"][len(census_users):]
+                    native_groups = accounts["groups"][len(census_groups):]
+                    enforce_tsv_authority(
+                        name, census_users, census_groups,
+                        allow_stage=True, origin="fragment",
+                        extra_names={u["name"] for u in native_users}
+                                    | {g["name"] for g in native_groups})
+                    if native_users or native_groups:
+                        enforce_tsv_authority(
+                            name, native_users, native_groups,
+                            allow_stage=False, origin="sysusers.d",
+                            extra_names={u["name"] for u in census_users}
+                                        | {g["name"] for g in census_groups})
                 artifact = artifact_dir / f"{name}-{manifest['version']}.apk"
                 if artifact.exists() or artifact.is_symlink():
                     die(f"artifact already exists in private transaction: {artifact}")

@@ -1,0 +1,11 @@
+# JRE runtime edges, one per proven linkage (readelf over every
+# shipped binary after the first build; widened or trimmed then):
+# freetype+fontconfig (libfontmanager/headless AWT), ca-certificates
+# (source bundle for the cacerts hook), cups (java.desktop printing
+# links libcups), alsa-lib (libjsound links libasound). The base pin
+# is added automatically by the splitter.
+freetype
+fontconfig
+ca-certificates
+cups
+alsa-lib

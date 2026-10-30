@@ -1,7 +1,17 @@
 #!/bin/sh
 pkgname=saphira-initramfs-tools
 pkgver=0.1
-pkgrel=3
+pkgrel=6
+# r6: earlyfw-<release>.img naming (was initramfs-<release>.img),
+# legacy-name pruning, updated man page. Payload change.
+# r5: saphira-earlyfw stages under a usable directory in its own root
+# (SAPHIRA_TMPDIR when valid, else /tmp) instead of the build host's
+# /build/tmp - the old default bricked image assembly chrooted into
+# targets that have no /build tree. Payload change (script).
+# r4: early-firmware images (2026-10-23): saphira-earlyfw builds the
+# per-kernel firmware-only boot images built-in drivers (i915 GuC/DMC)
+# need before the root mount, plus amd-ucode.img when those blobs are
+# installed. Payload addition (script + map + conf + man).
 # r3: SEV1 init contract (2026-10-22): the newroot candidate list is exactly
 # /sbin/init - /usr/sbin/init, /usr/lib/systemd/systemd and /bin/init
 # removed, so a broken installation fails visibly instead of booting around
@@ -125,4 +135,12 @@ recipe_install()
 		"$PKGDEST/usr/share/man/man8/saphira-mkinitramfs.8"
 	install -D -m 0644 "$src/build-hooks.d/README" \
 		"$PKGDEST/usr/share/doc/saphira-initramfs-tools/build-hooks.d.README"
+	install -D -m 0755 "$src/saphira-earlyfw" \
+		"$PKGDEST/usr/sbin/saphira-earlyfw"
+	install -D -m 0644 "$src/earlyfw-pci.map" \
+		"$PKGDEST/usr/share/saphira/earlyfw/pci.map"
+	install -D -m 0644 "$src/earlyfw.conf" \
+		"$PKGDEST/etc/saphira/earlyfw.conf"
+	install -D -m 0644 "$src/saphira-earlyfw.8" \
+		"$PKGDEST/usr/share/man/man8/saphira-earlyfw.8"
 }

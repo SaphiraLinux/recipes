@@ -1,0 +1,27 @@
+[Unit]
+Description=MinIO S3-compatible object storage (isolated instances)
+Documentation=https://min.io/docs/minio/linux/index.html
+After=network.target
+
+[Service]
+Type=simple
+User=minio
+Group=minio
+# /etc/conf.d/minio is optional (dash prefix): compiled-in defaults
+# below apply until the operator creates it. Same file and variable
+# names as the OpenRC unit; plain VAR=value lines work for both.
+EnvironmentFile=-/etc/conf.d/minio
+# Defaults serve a single-drive standalone instance for testing.
+# MINIO_ROOT_USER/MINIO_ROOT_PASSWORD have NO defaults and the unit
+# refuses to start without them (ExecStartPre). Telemetry defaults
+# off: isolated instances must not phone home.
+Environment=MINIO_VOLUMES=/var/lib/minio
+Environment=MINIO_ADDRESS=:9000
+Environment=MINIO_CONSOLE_ADDRESS=:9001
+Environment=MINIO_CALLHOME=off
+ExecStartPre=/bin/sh -c 'test -n "$MINIO_ROOT_USER" -a -n "$MINIO_ROOT_PASSWORD"'
+ExecStart=/usr/sbin/minio server ${MINIO_VOLUMES} --address ${MINIO_ADDRESS} --console-address ${MINIO_CONSOLE_ADDRESS} ${MINIO_OPTS}
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

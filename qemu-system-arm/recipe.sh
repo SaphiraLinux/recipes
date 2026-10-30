@@ -92,6 +92,7 @@ makedepends="
     keyutils-dev
     mesa
     mesa-dev
+    libglvnd-dev
     libepoxy
     libepoxy-dev
     virglrenderer

@@ -2,7 +2,7 @@
 
 pkgname=coreutils
 pkgver=9.7
-pkgrel=5
+pkgrel=6
 # r5: supersede the unreproducible r4 (built from a tree state with no
 # commit; pkgrel=4 appears nowhere in history). Payload unchanged from
 # r3; this revision exists so the repository carries coreutils whose
@@ -54,4 +54,16 @@ recipe_install()
 	# rule is that documentation lives in per-package -doc splits, and
 	# procps-ng-doc owns uptime(1)'s man page. Strip the doc trees.
 	rm -rf "$PKGDEST/usr/share/man" "$PKGDEST/usr/share/info"
+	# /bin/env is the real file (this recipe builds --bindir=/bin).
+	# /usr/bin/env is an alias symlink to it, never a second copy:
+	# the upstream shebang convention (#!/usr/bin/env perl and
+	# friends) needs the usr/bin path to resolve, and openssl's
+	# Configure fails outright without it ("bad interpreter"). By the
+	# default-provider-owns-the-alias rule (mawk owns usr/bin/awk,
+	# bash owns bin/sh) this package owns the alias. Cross-dir link,
+	# so relative form ../../bin/env -- no absolute paths in payload.
+	# The controller's root-init creates the same link only when
+	# absent, so package ownership is picked up, not fought.
+	mkdir -p "$PKGDEST/usr/bin"
+	ln -sf ../../bin/env "$PKGDEST/usr/bin/env"
 }

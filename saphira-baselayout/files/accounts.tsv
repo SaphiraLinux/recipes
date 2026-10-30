@@ -1,4 +1,4 @@
-# name	type	id	primary-group	home	shell	supplementary-groups
+# name	type	id	primary-group	home	shell	supplementary-groups	init
 root	user	0	root	/root	/bin/bash	wheel
 root	group	0	-	-	-	-
 wheel	group	1	-	-	-	root
@@ -71,6 +71,17 @@ ftp	user	18	ftp	/srv/ftp	/sbin/nologin	-
 ftp	group	18	-	-	-	-
 proxyto	user	19	proxyto	/var/empty	/sbin/nologin	-
 proxyto	group	19	-	-	-	-
+# System groups with no users, declared by upstream sysusers.d (systemd
+# basic.conf) and required complete for deterministic databases. utmp
+# tracks login-accounting groups; empower is upstream systemd's
+# administrator-group companion. Neither is referenced by anything in
+# Saphira today, but a missing declared group is an image-build error,
+# not a notice, so they are seeded rather than skipped. Fixed low IDs
+# continuing the classic block - deliberately NOT Egg's historical
+# 998/999 local assignments, which live in the local/admin range no
+# package or seed may allocate from.
+utmp	group	20	-	-	-	-
+empower	group	21	-	-	-	-
 # Device-owner groups referenced by shipped udev rules and tmpfiles
 # fragments (no corresponding users: purely device ownership). Without
 # them every boot logs "Unknown group" and the nodes fall back to the
@@ -79,8 +90,13 @@ proxyto	group	19	-	-	-	-
 # by published repo packages (hostapd, breathgslb, qmail - the repo
 # gate gives published packages no reason to move, so the seed
 # vacates), 127-131 and 144-145 are systemd sysusers pins, and the
-# rest below 157 is repo-claimed. Verified against the live
-# reservations table before assigning; stay far below the human range.
+# rest below 157 is repo-claimed. Stay far below the human range.
+# plugdev sits outside the block at the first free ID above the
+# claimed range (177): 164 was taken by the published keystone
+# service identity (claimed 2026-10-18, before this seed row
+# existed), and the same vacate rule applies - udev rules reference
+# the GROUP NAME (libjaylink: GROUP="plugdev"), never the number,
+# so the move is free and J-Link membership keeps working.
 cdrom	group	157	-	-	-	-
 tape	group	158	-	-	-	-
 dialout	group	159	-	-	-	-
@@ -88,5 +104,104 @@ kvm	group	160	-	-	-	-
 render	group	161	-	-	-	-
 sgx	group	162	-	-	-	-
 clock	group	163	-	-	-	-
+plugdev	group	177	-	-	-	-
 nobody	user	65534	nobody	/var/empty	/sbin/nologin	-
 nobody	group	65534	-	-	-	-
+# Backfill 2026-10-27 (GO-2): every packaged identity published in
+# hatched or declared by a fragment, recorded verbatim. The 84 rows
+# above stay byte-identical. This file is the sole identity mint:
+# fragments declare requirements, makepkg refuses any declaration
+# that does not match a row here, and rows are only ever appended,
+# never modified or removed. init column: empty means both inits
+# (identical databases under OpenRC and systemd); 'systemd' marks
+# systemd-daemon identities. No other value exists.
+_lldpd	user	147	_lldpd	/var/run/lldpd	/sbin/nologin	-
+_lldpd	group	147	-	-	-	-
+alfred	user	107	alfred	/var/empty	/sbin/nologin	-
+alfred	group	107	-	-	-	-
+alias	user	133	nofiles	/var/qmail/alias	/sbin/nologin	-
+asterisk	user	154	asterisk	/var/lib/asterisk	/sbin/nologin	-
+asterisk	group	154	-	-	-	-
+avahi	user	70	avahi	/var/run/avahi-daemon	/sbin/nologin	-
+avahi	group	70	-	-	-	-
+breathgslb	user	126	breathgslb	/var/lib/breathgslb	/sbin/nologin	-
+breathgslb	group	126	-	-	-	-
+cinder	user	169	cinder	/var/lib/cinder	/sbin/nologin	-
+cinder	group	169	-	-	-	-
+coraza-spoa	user	143	coraza-spoa	/var/empty	/sbin/nologin	-
+coraza-spoa	group	143	-	-	-	-
+dashboard	user	178	dashboard	/var/lib/dashboard	/sbin/nologin	-
+dashboard	group	178	-	-	-	-
+frr	user	125	frr	/var/run/frr	/sbin/nologin	-
+frr	group	125	-	-	-	-
+glance	user	165	glance	/var/lib/glance	/sbin/nologin	-
+glance	group	165	-	-	-	-
+gpsd	user	176	gpsd	/var/run/gpsd	/sbin/nologin	dialout
+gpsd	group	176	-	-	-	-
+gredist	user	150	gredist	/var/empty	/sbin/nologin	-
+gredist	group	150	-	-	-	-
+horizon	user	170	horizon	/var/lib/horizon	/sbin/nologin	-
+horizon	group	170	-	-	-	-
+hostapd	user	124	hostapd	/var/empty	/sbin/nologin	-
+hostapd	group	124	-	-	-	-
+keystone	user	164	keystone	/var/lib/keystone	/sbin/nologin	-
+keystone	group	164	-	-	-	-
+ldap	user	146	ldap	/var/lib/openldap	/sbin/nologin	-
+ldap	group	146	-	-	-	-
+libvirt	group	174	-	-	-	-
+man	user	65	man	/var/cache/man	/sbin/nologin	-
+memcached	user	171	memcached	/var/lib/memcached	/sbin/nologin	-
+memcached	group	171	-	-	-	-
+messagebus	user	81	messagebus	/var/empty	/sbin/nologin	-
+messagebus	group	81	-	-	-	-
+minio	user	175	minio	/var/lib/minio	/sbin/nologin	-
+minio	group	175	-	-	-	-
+neutron	user	168	neutron	/var/lib/neutron	/sbin/nologin	-
+neutron	group	168	-	-	-	-
+nofiles	group	142	-	-	-	-
+nova	user	167	nova	/var/lib/nova	/sbin/nologin	libvirt
+nova	group	167	-	-	-	-
+placement	user	166	placement	/var/lib/placement	/sbin/nologin	-
+placement	group	166	-	-	-	-
+polkitd	user	156	polkitd	/var/empty	/sbin/nologin	-
+polkitd	group	156	-	-	-	-
+qemu	user	173	qemu	/var/empty	/sbin/nologin	-
+qemu	group	173	-	-	-	-
+qmail	group	132	-	-	-	-
+qmaild	user	134	nofiles	/var/qmail	/sbin/nologin	-
+qmaill	user	135	nofiles	/var/qmail	/sbin/nologin	-
+qmailp	user	136	nofiles	/var/qmail	/sbin/nologin	-
+qmailq	user	137	qmail	/var/qmail	/sbin/nologin	-
+qmailr	user	138	qmail	/var/qmail	/sbin/nologin	-
+qmails	user	139	qmail	/var/qmail	/sbin/nologin	-
+rabbitmq	user	172	rabbitmq	/var/lib/rabbitmq	/sbin/nologin	-
+rabbitmq	group	172	-	-	-	-
+saphira-bridge	user	149	saphira-bridge	/var/empty	/sbin/nologin	-
+saphira-bridge	group	149	-	-	-	-
+saphira-pbx-mcp	user	155	saphira-pbx-mcp	/var/empty	/sbin/nologin	-
+saphira-pbx-mcp	group	155	-	-	-	-
+saphira-router	user	151	saphira-router	/var/lib/saphira-router	/sbin/nologin	-
+saphira-router	group	151	-	-	-	-
+slurm	user	153	slurm	/var/lib/slurm	/sbin/nologin	-
+slurm	group	153	-	-	-	-
+snmp	user	148	snmp	/var/lib/snmp	/sbin/nologin	-
+snmp	group	148	-	-	-	-
+systemd-coredump	user	144	systemd-coredump	/var/empty	/sbin/nologin	-	systemd
+systemd-coredump	group	144	-	-	-	-	systemd
+systemd-imds	user	145	systemd-imds	/var/empty	/sbin/nologin	-	systemd
+systemd-imds	group	145	-	-	-	-	systemd
+systemd-journal	group	131	-	-	-	-	systemd
+systemd-network	user	127	systemd-network	/var/empty	/sbin/nologin	-	systemd
+systemd-network	group	127	-	-	-	-	systemd
+systemd-oom	user	130	systemd-oom	/var/empty	/sbin/nologin	-	systemd
+systemd-oom	group	130	-	-	-	-	systemd
+systemd-resolve	user	128	systemd-resolve	/var/empty	/sbin/nologin	-	systemd
+systemd-resolve	group	128	-	-	-	-	systemd
+systemd-timesync	user	129	systemd-timesync	/var/empty	/sbin/nologin	-	systemd
+systemd-timesync	group	129	-	-	-	-	systemd
+udpdist	user	152	udpdist	/var/empty	/sbin/nologin	-
+udpdist	group	152	-	-	-	-
+vchkpw	group	141	-	-	-	-
+vpopmail	user	140	vchkpw	/home/vpopmail	/sbin/nologin	-
+lp	user	179	lp	/var/empty	/sbin/nologin	-
+lpadmin	group	180	-	-	-	-

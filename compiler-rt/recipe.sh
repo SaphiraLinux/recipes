@@ -16,7 +16,7 @@ makedepends="
     binutils
     clang>=22.1.8-r1
     cmake
-    llvm>=22.1.8-r1
+    llvm-dev>=22.1.8-r4
     make
     ninja
     python3

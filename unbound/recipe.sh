@@ -1,7 +1,11 @@
 #!/bin/sh
 pkgname=unbound
 pkgver=1.25.2
-pkgrel=5
+pkgrel=6
+# r6: service identity 64 -> 108, convergent with the base seed
+# (live systems already run 108; the 64 was never published, so no
+# migration). Unblocks the seed-vs-fragment union gate. Payload
+# change (fragment).
 # r5: compiled pidfile default /run/unbound.pid -> /var/run/unbound.pid
 # (split-/run invariant). No fhs.d fragment by rule: no directory ever
 # existed (flat pidfile on tmpfs, reboot-cleared, unread post-move),

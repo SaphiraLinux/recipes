@@ -135,8 +135,14 @@ systemd) PROFILE=saphirad-systemd ;;
 esac
 
 # --- step 6: hostname ----------------------------------------------------
+# Default stem follows the product line like the image tool: SaphiraD
+# on systemd, Saphira on OpenRC.
+case $INIT in
+systemd) HOSTNAME_DEFAULT=saphirad-new ;;
+*) HOSTNAME_DEFAULT=saphira-new ;;
+esac
 while :; do
-	HOSTNAME=$(menu_input "Hostname" "Machine hostname (letters, digits, hyphens):" "saphira-new")
+	HOSTNAME=$(menu_input "Hostname" "Machine hostname (letters, digits, hyphens):" "$HOSTNAME_DEFAULT")
 	case $HOSTNAME in
 	''|*[!A-Za-z0-9-]*|-*|*-) menu_info "Invalid" "Hostname must be letters, digits and hyphens, not starting or ending with a hyphen." ;;
 	*) break ;;
@@ -168,9 +174,9 @@ dhcp)
 static)
 	SIFACE=$(menu_input "Interface" "Interface name for the static address:" "eth0")
 	test -d "/sys/class/net/$SIFACE" || die "no such interface: $SIFACE"
-	SCIDR=$(menu_input "Address" "Static address in CIDR form (e.g. 192.0.2.10/24):" "")
+	SCIDR=$(menu_input "Address" "Static address in CIDR form:" "")
 	SGW=$(menu_input "Gateway" "Default gateway address:" "")
-	SDNS=$(menu_input "DNS" "DNS servers, space separated:" "9.9.9.9 149.112.112.112")
+	SDNS=$(menu_input "DNS" "DNS servers, space separated:" "")
 	ip addr replace "$SCIDR" dev "$SIFACE" || die "cannot assign $SCIDR to $SIFACE"
 	ip link set dev "$SIFACE" up
 	ip route replace default via "$SGW" dev "$SIFACE" || die "cannot route via $SGW"

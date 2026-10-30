@@ -1,0 +1,477 @@
+#!/usr/bin/env python3
+"""saphira-build-dashboard: read-only IPv4 build-queue dashboard.
+
+TODAY (/) serves builds finished today (UTC) plus anything currently
+running. History (/history) serves every recorded build, newest first,
+except superseded failures: a FAILED row is hidden when the same
+package has a newer row showing it succeeding (awaiting signing or
+published). A failure that was later fixed is stale history, not
+current state, and the views must not read worse than reality.
+
+Read-only by construction, in three independent layers:
+
+  1. HTTP: only GET and HEAD are served. Every other method is 405.
+  2. SQLite: the queue database is opened with mode=ro. This process
+     never holds a write handle to it.
+  3. The process itself writes nothing: no state directory, no
+     subprocesses, no filesystem writes of any kind. Logs go to
+     stdout/stderr for the supervisor to capture.
+
+A refusal (queue attempt=refusal: the build never ran) renders
+hatched red and reads REFUSED, never FAIL. A refusal is the absence
+of a build, not a failed one, and the two must never read the same.
+
+Traffic-light semantics, stated once so the code cannot drift from
+the agreement: red = failures with no later success (a failure that a
+newer build fixed is hidden as superseded - the views show current
+state, not every scar); amber = queued, running, or built but
+awaiting signing; green = built, signed and published.
+Refusals are counted separately from failures, never folded in.
+Counts use distinct packages for red/green/refused and live rows
+for amber.
+
+Bind failures are fatal and loud: the listener never falls back to
+another address. A dashboard on the wrong address is worse than none.
+"""
+
+import argparse
+import functools
+import html
+import http.server
+import json
+import socket
+import sqlite3
+import sys
+from urllib.request import pathname2url
+
+DEFAULT_BIND = "172.16.7.5"
+DEFAULT_PORT = 8899
+DEFAULT_DB = "/var/lib/saphira-build/queue.db"
+HISTORY_LIMIT = 500
+
+# Column indexes used below: 3 state, 4 result_json, 10 finished_at,
+# 11 started_at, 12 published_at (published_at is written when the
+# package publishes; see classify).
+COLUMNS = (
+    "package, version, revision, state, result_json,"
+    " duration_s, cpu_s, peak_rss_mb, arch, builder_host, finished_at,"
+    " started_at, published_at"
+)
+
+TODAY_SQL = (
+    "SELECT " + COLUMNS + " FROM builds "
+    "WHERE finished_at IS NULL OR date(finished_at) = date('now') "
+    "ORDER BY finished_at IS NULL DESC, finished_at DESC"
+)
+
+HISTORY_SQL = (
+    "SELECT " + COLUMNS + " FROM builds "
+    "ORDER BY finished_at IS NULL DESC, finished_at DESC "
+    "LIMIT " + str(HISTORY_LIMIT)
+)
+
+CSS = (
+    "body{font-family:sans-serif;margin:1em 1.5em;max-width:80em;"
+    "font-size:85%}"
+    "h1{font-size:130%;margin:0.4em 0}"
+    "h2{font-size:115%;margin:0.8em 0 0.2em}"
+    "p{margin:0.3em 0}"
+    "nav a{margin-right:1.2em}"
+    ".counts{font-size:115%;font-weight:bold}"
+    ".dot{font-size:130%}"
+    ".red{color:#c00}.amber{color:#c80}.green{color:#090}"
+    "table{border-collapse:collapse;margin-top:0.6em}"
+    "th,td{border:1px solid #999;padding:2px 6px;text-align:left}"
+    "tr.failed td{background:#fdd}"
+    "tr.refused td{background:repeating-linear-gradient(45deg,"
+    "#fdd,#fdd 6px,#fee 6px,#fee 12px)}"
+    ".legend{color:#555}"
+)
+
+
+def open_db(path):
+    """Open the queue database strictly read-only."""
+    return sqlite3.connect(
+        "file:%s?mode=ro" % pathname2url(path), uri=True, timeout=5.0
+    )
+
+
+TRUNC = 140
+FAIL_STATUSES = ("fail", "failed", "failure", "error")
+
+
+def parse_result(result_json):
+    """result_json as a dict, or {} when absent, unparsable, or not an
+    object. Never raises: unknown shapes must not break the page."""
+    try:
+        obj = json.loads(result_json or "")
+    except (TypeError, ValueError):
+        return {}
+    return obj if isinstance(obj, dict) else {}
+
+
+def shorten(text):
+    """One-line detail budget: long details (tracebacks) would blow
+    the compact layout, so cap at TRUNC chars with an explicit mark."""
+    text = str(text)
+    return text if len(text) <= TRUNC else text[:TRUNC] + "…"
+
+
+def stage_detail(obj, wanted):
+    """Detail of the first stage in dict order whose status is wanted,
+    as 'STAGE: detail', or ''. Dict order is pipeline order, so this
+    names the earliest failed stage - never the build step when a
+    later stage is what actually failed."""
+    stages = obj.get("stages")
+    if not isinstance(stages, dict):
+        return ""
+    for name, entry in stages.items():
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("status", "")).lower() in wanted:
+            detail = entry.get("detail")
+            if detail:
+                return "%s: %s" % (name, shorten(detail))
+            return str(name)
+    return ""
+
+
+def build_detail(obj):
+    """BUILD stage detail, or '' (says why a refusal never ran)."""
+    stages = obj.get("stages")
+    if not isinstance(stages, dict):
+        return ""
+    build = stages.get("BUILD")
+    if isinstance(build, dict) and build.get("detail"):
+        return shorten(build["detail"])
+    return ""
+
+
+def fallback_detail(obj):
+    blockers = obj.get("blockers")
+    if isinstance(blockers, list) and blockers:
+        return shorten("blockers: " + ", ".join(str(b) for b in blockers))
+    attempt = obj.get("attempt")
+    return shorten(str(attempt)) if attempt else ""
+
+
+def cell(value):
+    if value is None:
+        return "-"
+    return html.escape(str(value))
+
+
+def classify(row):
+    """(css class, state text, detail) for one build row.
+
+    Row layout follows COLUMNS: 3 state, 4 result_json, 10 finished_at,
+    11 started_at, 12 published_at. Unfinished rows derive QUEUED vs
+    RUNNING from timestamps alone, so unknown state strings can never
+    break the page; unknown terminal states read FAILED with whatever
+    detail the result carries.
+    """
+    state, result_json = row[3], row[4]
+    finished, started, published = row[10], row[11], row[12]
+    if finished is None:
+        return ("amber", "QUEUED" if started is None else "RUNNING", "")
+    obj = parse_result(result_json)
+    if obj.get("attempt") == "refusal":
+        why = build_detail(obj)
+        return ("refused", "REFUSED",
+                "never built" + (": " + why if why else ""))
+    if state == "PASS":
+        # published_at is written when the package publishes. A PASS
+        # without one is built but awaiting signing (amber by
+        # agreement). If the column were ever left unpopulated, every
+        # PASS would read amber: visibly wrong, reported, one-line fix
+        # - never silent.
+        if published:
+            return ("ok", "PUBLISHED", "")
+        return ("amber", "AWAITING SIGNING", "")
+    detail = stage_detail(obj, FAIL_STATUSES)
+    if not detail:
+        detail = fallback_detail(obj) or "failed (no detail recorded)"
+    return ("failed", "FAILED", detail)
+
+
+DOT = '<span class="dot %s">●</span>'
+
+
+def hide_superseded_failures(rows):
+    """Drop FAILED rows a newer success for the same package supersedes.
+
+    Returns (kept_rows, hidden_count). A row counts as success when
+    classify() reads it PUBLISHED or AWAITING SIGNING (the build
+    passed; signing is a separate human step). Queued, running and
+    refused rows never hide anything: pending work is not success,
+    and a refusal is the absence of a build. A FAILED row newer than
+    the package's latest success (a regression) is always kept.
+    finished_at compares lexicographically: every timestamp the
+    builder writes shares one ISO UTC shape, and both sides are
+    guarded against None.
+    """
+    newest_success = {}
+    for row in rows:
+        cls, state_text, _ = classify(row)
+        finished = row[10]
+        if finished is None:
+            continue
+        if cls == "ok" or state_text == "AWAITING SIGNING":
+            prev = newest_success.get(row[0])
+            if prev is None or finished > prev:
+                newest_success[row[0]] = finished
+    kept, hidden = [], 0
+    for row in rows:
+        cls, _, _ = classify(row)
+        finished = row[10]
+        if (cls == "failed" and finished is not None
+                and row[0] in newest_success
+                and finished < newest_success[row[0]]):
+            hidden += 1
+            continue
+        kept.append(row)
+    return kept, hidden
+
+
+def render_table(rows):
+    out = [
+        "<table><tr><th></th><th>package</th><th>nvr</th><th>state</th>"
+        "<th>detail</th><th>wall</th><th>cpu</th><th>rss MB</th>"
+        "<th>arch</th><th>builder</th><th>finished (UTC)</th></tr>"
+    ]
+    for row in rows:
+        package, version, revision = row[0], row[1], row[2]
+        wall, cpu, rss, arch, host = row[5], row[6], row[7], row[8], row[9]
+        finished = row[10]
+        cls, state_text, detail = classify(row)
+        if cls == "ok":
+            dot_cls = "green"
+        elif cls == "amber":
+            dot_cls = "amber"
+        else:
+            dot_cls = "red"
+        finished_text = "running" if finished is None else cell(finished)
+        out.append(
+            "<tr class=\"%s\"><td>%s</td><td>%s</td><td>%s-r%s</td>"
+            "<td>%s</td><td>%s</td>"
+            "<td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td>"
+            "<td>%s</td></tr>"
+            % (cls, DOT % dot_cls, cell(package), cell(version),
+               cell(revision), cell(state_text), cell(detail),
+               cell(wall), cell(cpu), cell(rss), cell(arch), cell(host),
+               finished_text)
+        )
+    out.append("</table>")
+    return "".join(out)
+
+
+def render_sbu(conn):
+    """Active SBU baselines, or an explicit note when there are none."""
+    tables = conn.execute(
+        "SELECT name FROM sqlite_master"
+        " WHERE type='table' AND name='sbu_baseline'"
+    ).fetchall()
+    if not tables:
+        return ("<p>No sbu_baseline table in this database: "
+                "no calibration has been recorded.</p>")
+    try:
+        cur = conn.execute(
+            "SELECT package, version, revision, arch, builder_host,"
+            " cache_policy, wall_s, cpu_s, calibrated_at"
+            " FROM sbu_baseline WHERE active=1"
+            " ORDER BY package, arch, builder_host"
+        )
+        rows = cur.fetchall()
+    except sqlite3.Error as exc:
+        return "<p>Could not read sbu_baseline: %s</p>" % cell(exc)
+    if not rows:
+        return ("<p>sbu_baseline exists but holds no active row: "
+                "no calibration has been recorded.</p>")
+    out = ["<table><tr><th>package</th><th>nvr</th><th>arch</th>"
+           "<th>builder</th><th>cache</th><th>wall</th><th>cpu</th>"
+           "<th>calibrated (UTC)</th></tr>"]
+    for (package, version, revision, arch, host,
+         policy, wall, cpu, calibrated) in rows:
+        out.append(
+            "<tr><td>%s</td><td>%s-r%s</td><td>%s</td><td>%s</td>"
+            "<td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>"
+            % (cell(package), cell(version), cell(revision), cell(arch),
+               cell(host), cell(policy), cell(wall), cell(cpu),
+               cell(calibrated))
+        )
+    out.append("</table>")
+    return "".join(out)
+
+
+def summarize(rows):
+    """(red, amber, green, refused) for one view. Red/green/refused
+    count distinct packages over the rows the view shows (superseded
+    failures are already hidden upstream, so red reads current state);
+    amber counts live rows (queued, running, awaiting signing are
+    current states, not history)."""
+    red, green, refused = set(), set(), set()
+    amber = 0
+    for row in rows:
+        cls, _, _ = classify(row)
+        if cls == "failed":
+            red.add(row[0])
+        elif cls == "refused":
+            refused.add(row[0])
+        elif cls == "amber":
+            amber += 1
+        else:
+            green.add(row[0])
+    return len(red), amber, len(green), len(refused)
+
+
+def render_counts(red, amber, green, refused, scope):
+    return (
+        '<p class="counts">'
+        '<span class="dot red">●</span> %d failed %s · '
+        '<span class="dot amber">●</span> %d pending / running / '
+        "awaiting signing · "
+        '<span class="dot green">●</span> %d published · '
+        "%d refused (never built)</p>"
+        % (red, scope, amber, green, refused)
+    )
+
+
+def render_view(db_path, today):
+    conn = open_db(db_path)
+    try:
+        if today:
+            rows = conn.execute(TODAY_SQL).fetchall()
+            rows, hidden = hide_superseded_failures(rows)
+            counts = render_counts(*summarize(rows), "today")
+            head = "<h1>TODAY</h1>" + counts
+            nav = ('<nav><strong>TODAY</strong>'
+                   '<a href="/history">History</a></nav>')
+            body = head + nav + render_table(rows)
+        else:
+            total = conn.execute("SELECT COUNT(*) FROM builds").fetchone()[0]
+            rows = conn.execute(HISTORY_SQL).fetchall()
+            rows, hidden = hide_superseded_failures(rows)
+            counts = render_counts(*summarize(rows), "shown")
+            head = ("<h1>History</h1><p>Newest %d of %d recorded "
+                    "builds" % (len(rows), total))
+            if hidden:
+                head += " (%d superseded %s hidden)" % (
+                    hidden, "failure" if hidden == 1 else "failures")
+            head += ".</p>" + counts
+            nav = ('<nav><a href="/">TODAY</a>'
+                   '<strong>History</strong></nav>')
+            body = (head + nav + render_table(rows) +
+                    "<h2>SBU baselines</h2>" + render_sbu(conn))
+        legend = (
+            '<p class="legend">Red rows FAILED: the build ran and '
+            "failed and no newer build has succeeded since; the failed "
+            "stage is named in detail. Failures a later build fixed are "
+            "hidden as superseded (counted in the header above). Hatched "
+            "rows REFUSED: never built - refused before building, reason "
+            "shown. Amber: queued, running, or built but awaiting "
+            "signing. Green: built, signed and published. A refusal is "
+            "the absence of a build, never a failure.</p>"
+        )
+        return body + legend
+    finally:
+        conn.close()
+
+
+class IPv4Server(http.server.ThreadingHTTPServer):
+    # IPv4 by agreement: pin the family so this listener can never
+    # silently become a dual-stack socket.
+    address_family = socket.AF_INET
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    server_version = "saphira-build-dashboard"
+    sys_version = ""
+
+    def __init__(self, *args, db_path=None, **kwargs):
+        self.db_path = db_path
+        super().__init__(*args, **kwargs)
+
+    def log_message(self, fmt, *args):
+        sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
+
+    def _send_page(self, title, body, status=200, head_only=False):
+        page = ("<!DOCTYPE html><html><head><meta charset=\"utf-8\">"
+                "<title>%s</title><style>%s</style></head>"
+                "<body>%s</body></html>"
+                % (html.escape(title), CSS, body))
+        data = page.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        if not head_only:
+            self.wfile.write(data)
+
+    def _serve(self, head_only):
+        path = self.path.split("?", 1)[0]
+        try:
+            if path == "/":
+                self._send_page("TODAY - build dashboard",
+                                render_view(self.db_path, today=True),
+                                head_only=head_only)
+            elif path == "/history":
+                self._send_page("History - build dashboard",
+                                render_view(self.db_path, today=False),
+                                head_only=head_only)
+            else:
+                self._send_page("Not found", "<h1>404</h1>"
+                                "<p>No such view. <a href=\"/\">TODAY</a> "
+                                "<a href=\"/history\">History</a></p>",
+                                status=404, head_only=head_only)
+        except sqlite3.Error as exc:
+            self._send_page("Database error",
+                            "<h1>500</h1><p>Could not read the queue "
+                            "database: %s</p>" % cell(exc),
+                            status=500, head_only=head_only)
+
+    def do_GET(self):
+        self._serve(head_only=False)
+
+    def do_HEAD(self):
+        self._serve(head_only=True)
+
+    def _refuse(self):
+        self.send_response(405)
+        self.send_header("Allow", "GET, HEAD")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    # Read-only surface: anything that is not a read is refused.
+    do_POST = _refuse
+    do_PUT = _refuse
+    do_DELETE = _refuse
+    do_PATCH = _refuse
+    do_OPTIONS = _refuse
+    do_TRACE = _refuse
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Read-only build-queue dashboard (TODAY/History).")
+    parser.add_argument("--bind", default=DEFAULT_BIND,
+                        help="IPv4 address to bind (default %(default)s)")
+    parser.add_argument("--port", type=int, default=DEFAULT_PORT,
+                        help="port to listen on (default %(default)s)")
+    parser.add_argument("--db", default=DEFAULT_DB,
+                        help="queue database path (default %(default)s)")
+    args = parser.parse_args(argv)
+    if not 1 <= args.port <= 65535:
+        parser.error("port must be 1-65535")
+    handler = functools.partial(Handler, db_path=args.db)
+    # A bind failure raises here and exits non-zero: loud, and never a
+    # silent fallback to another address.
+    server = IPv4Server((args.bind, args.port), handler)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

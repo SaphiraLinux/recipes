@@ -2,7 +2,7 @@
 
 pkgname=syslog-ng
 pkgver=4.12.0
-pkgrel=1
+pkgrel=2
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="Enhanced system logging daemon"
 license="GPL-2.0-or-later"
@@ -59,11 +59,15 @@ makedepends="
 # Modules blocked on absent dependencies are explicitly disabled:
 # mongodb, amqp, smtp, grpc, redis, riemann, sql, kafka, mqtt, afsnmp,
 # ebpf, java.  systemd stays off: Saphira uses openrc.
+# layout: syslog-ng's compiled default config is ${sysconfdir}/syslog-ng.conf,
+# with companion patterndb.d/python beneath sysconfdir. /etc/syslog-ng keeps
+# the packaged config and upstream companion data under /etc (never usr/etc);
+# --localstatedir=/var keeps PID/control state out of forbidden usr/var.
 recipe_build()
 {
 	mkdir -p "$BUILDDIR" && cd "$BUILDDIR"
 	"$SRC/configure" --prefix=/usr \
-		--sysconfdir=/etc \
+		--sysconfdir=/etc/syslog-ng \
 		--localstatedir=/var \
 		--with-ivykis=internal --with-jsonc=yes --enable-json \
 		--enable-http --enable-geoip2 --enable-linux-caps \
@@ -86,5 +90,12 @@ recipe_install()
 		"$PKGDEST/etc/init.d/syslog-ng"
 	install -D -m 0644 "$RECIPE_DIR/files/syslog-ng.service" \
 		"$PKGDEST/usr/lib/systemd/system/syslog-ng.service"
+	install -D -m 0644 "$RECIPE_DIR/files/syslog-ng.tmpfiles" \
+		"$PKGDEST/usr/lib/tmpfiles.d/syslog-ng.conf"
+	install -d -m 0755 "$PKGDEST/var/lib/syslog-ng"
 	install -d -m 0755 "$PKGDEST/var/log"
+	if [ -e "$PKGDEST/usr/var" ] || [ -e "$PKGDEST/usr/etc" ]; then
+		echo "syslog-ng: unexpected usr/var or usr/etc in payload" >&2
+		exit 1
+	fi
 }

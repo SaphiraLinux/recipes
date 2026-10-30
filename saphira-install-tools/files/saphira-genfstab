@@ -65,8 +65,21 @@ while IFS= read -r mountpoint; do
 	else
 		mount_path=/${mountpoint#"$target"/}
 	fi
+	# Pass and options are fstype-aware, not copied blindly:
+	# FAT is never fsck'd at boot (pass 0) and a non-root mount
+	# that fails must never fail local-fs.target into emergency,
+	# so vfat carries nofail with a bounded device wait. / keeps
+	# pass 1 and its hard requirement: root failure must fail fast.
 	pass=2
-	test "$mount_path" != / || pass=1
+	if test "$mount_path" = /; then
+		pass=1
+	elif test "$fstype" = vfat; then
+		pass=0
+		case $options in
+		*nofail*) ;;
+		*) options="$options,nofail,x-systemd.device-timeout=5s" ;;
+		esac
+	fi
 	printf '%s\t%s\t%s\t%s\t0\t%s\n' \
 		"$identifier" "$mount_path" "$fstype" "$options" "$pass"
 done < "$mounts"

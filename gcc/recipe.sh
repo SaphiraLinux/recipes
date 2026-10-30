@@ -2,9 +2,44 @@
 
 pkgname=gcc
 pkgver=${SAPHIRA_GCC_VERSION:-16.2.0}
-pkgrel=9
+pkgrel=10
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="GNU Compiler Collection ${pkgver} (C, C++, Fortran, ObjC/ObjC++, Modula-2, LTO; AKADATA branch-cost policy)"
+# Architecture plumbing. pkgarch comes from SAPHIRA_ARCH, so everything the
+# build is told to target is derived from that SAME value: a package can no
+# longer be built for one architecture and labelled as another. An
+# unrecognised architecture fails closed rather than defaulting, because a
+# silent default is exactly how a mislabelled package reaches a signed
+# repository.
+case "$pkgarch" in
+x86_64)
+	ARCH_TRIPLET=x86_64-akadata-linux-musl
+	GCC_ARCH=x86-64-v3
+	;;
+aarch64)
+	ARCH_TRIPLET=aarch64-akadata-linux-musl
+	GCC_ARCH=armv8-a
+	;;
+riscv64)
+	ARCH_TRIPLET=riscv64-akadata-linux-musl
+	GCC_ARCH=rv64gc
+	;;
+*)
+	echo "ERROR: unsupported SAPHIRA_ARCH '$pkgarch' for gcc" >&2
+	return 1
+	;;
+esac
+
+# Branded so --version states whether the AKADATA branch-cost policy is in
+# force for THIS build, rather than claiming it unconditionally. The
+# backport edits gcc/config/i386, which no other backend compiles, and
+# its "+3" would be hardware-wrong on aarch64 (shallower pipelines,
+# lower documented mispredict cost): x86-only, explicitly not applicable
+# elsewhere. Recorded as an explicit reviewed N/A, never a silent drop.
+case "$pkgarch" in
+x86_64) BRANCH_COST_NOTE=akadata-branch-cost ;;
+*)      BRANCH_COST_NOTE=no-branch-cost-x86-policy-N-A ;;
+esac
 license='GPL-3.0-or-later WITH GCC Runtime Library Exception'
 origin=gcc
 repo=saphira
@@ -99,8 +134,14 @@ recipe_build()
 		GCCBALL=$SOURCE_ARCHIVE
 	fi
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$GCCBALL"
-	patch -d "$SRC" -Np1 \
-		-i "$RECIPE_DIR/files/0001-x86-increase-generic-tune-branch-misprediction-cost.patch"
+	# The AKADATA branch-cost backport is an x86 policy, applied only
+	# where it means something (see the BRANCH_COST_NOTE derivation
+	# above). Unconditional on every arch would carry dead weight at
+	# best and a hardware-wrong claim at worst.
+	if [ "$pkgarch" = x86_64 ]; then
+		patch -d "$SRC" -Np1 \
+			-i "$RECIPE_DIR/files/0001-x86-increase-generic-tune-branch-misprediction-cost.patch"
+	fi
 	patch -d "$SRC" -Np1 \
 		-i "$RECIPE_DIR/files/0002-m64-multilib-osdir-lib-not-lib64.patch"
 	mkdir -p "$BUILDDIR"
@@ -108,23 +149,23 @@ recipe_build()
 	# Same-version --disable-bootstrap build: our published gcc 16.1.0
 	# compiles this tree directly (no 3-stage dance, no foreign toolchain).
 	../source/configure \
-		--build=x86_64-akadata-linux-musl \
-		--host=x86_64-akadata-linux-musl \
-		--target=x86_64-akadata-linux-musl \
+		--build="$ARCH_TRIPLET" \
+		--host="$ARCH_TRIPLET" \
+		--target="$ARCH_TRIPLET" \
 		--prefix=/usr \
 		--sysconfdir=/etc \
 		--localstatedir=/var \
 		--with-sysroot=/ \
 		--with-toolexeclibdir=/usr/lib \
 		--with-native-system-header-dir=/usr/include \
-		--with-arch=x86-64-v3 \
+		--with-arch="$GCC_ARCH" \
 		--with-tune=generic \
 		--with-gmp=/usr \
 		--with-mpfr=/usr \
 		--with-mpc=/usr \
 		--with-isl=/usr \
 		--with-system-zlib \
-		--with-pkgversion="Saphira ${pkgver} (akadata-branch-cost, lib-only layout)" \
+		--with-pkgversion="Saphira ${pkgver} (${BRANCH_COST_NOTE}, lib-only layout)" \
 		--enable-languages=c,c++,fortran,objc,obj-c++,m2,lto \
 		--enable-threads=posix \
 		--enable-shared \

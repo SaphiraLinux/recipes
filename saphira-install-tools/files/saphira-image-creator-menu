@@ -1,0 +1,354 @@
+#!/bin/sh
+# saphira-image-creator-menu: console menu for a creator appliance. The
+# appliance's sole purpose is writing Saphira/SaphiraD destination systems
+# (BIOS or UEFI; ext4 or ZFS root) to real disks.
+#
+# This menu never sets destination credentials, networking, or DNS. It
+# writes a locked-root destination; ordinary saphira-firstboot owns the
+# root password, user creation, networking, and DNS on the destination's
+# first boot. Hostname is the only destination identity chosen here.
+#
+# Honest limitations, stated not hidden:
+#   - network-dependent creator: a write is refused unless
+#     packages.saphira.vm2.uk answers ping; use Setup Network first;
+#   - DNS is not copied into the destination;
+#   - ZFS targets use the planner's /boot-ext4 + pool layout.
+
+set -eu
+
+# dialog is TERM-driven and the boot runlevel sets no TERM: without
+# this every dialog call fails instantly and the service dies silent.
+export TERM=${TERM:-linux}
+
+DIALOG=${SAPHIRA_CREATOR_DIALOG:-dialog}
+TTY=${SAPHIRA_CREATOR_TTY:-/dev/tty1}
+REPOSITORY=${SAPHIRA_REPOSITORY:-https://packages.saphira.vm2.uk/hatched}
+BLOCKDEV=${SAPHIRA_CREATOR_BLOCKDEV:-/sbin/blockdev}
+LSBLK=${SAPHIRA_CREATOR_LSBLK:-/bin/lsblk}
+IP=${SAPHIRA_CREATOR_IP:-/sbin/ip}
+PING=${SAPHIRA_CREATOR_PING:-/usr/bin/ping}
+SYSTEMCTL=${SAPHIRA_CREATOR_SYSTEMCTL:-/usr/bin/systemctl}
+RESOLVECTL=${SAPHIRA_CREATOR_RESOLVECTL:-/usr/bin/resolvectl}
+test -c "$TTY" || TTY=/dev/console
+# Test/operator overrides (mirroring saphira-install-menu):
+#   SAPHIRA_CREATOR_DISK=/dev/xxx  skip device enumeration, use PATH
+#   SAPHIRA_CREATOR_NOEXEC=1       print the engine command, do not run it
+STATE_DIR=/var/lib/saphira-image-creator
+CARRYOVER=$STATE_DIR/carryover
+
+die()
+{
+	printf 'saphira-image-creator-menu: %s\n' "$*" >&2
+	exit 1
+}
+
+command -v "$DIALOG" >/dev/null 2>&1 || die "menu backend missing: $DIALOG"
+command -v saphira-image >/dev/null 2>&1 || die "image engine missing: saphira-image"
+command -v saphira-install-plan >/dev/null 2>&1 || die "planner missing"
+[ -x "$BLOCKDEV" ] || die "disk tool missing: $BLOCKDEV"
+[ -x "$LSBLK" ] || die "disk safety missing: $LSBLK"
+[ -x "$PING" ] || die "network check missing: $PING"
+
+backtitle="Saphira image creator appliance"
+
+menu_pick()
+{
+	title=$1 text=$2
+	shift 2
+	"$DIALOG" --backtitle "$backtitle" --title "$title" \
+		--menu "$text" 0 0 0 "$@" 2>&1 >"$TTY" <"$TTY" || die "cancelled at $title (nothing was written)"
+}
+
+menu_info()
+{
+	"$DIALOG" --backtitle "$backtitle" --title "$1" --msgbox "$2" 0 0 <"$TTY" >"$TTY" || die "cancelled (nothing was written)"
+}
+
+menu_yesno()
+{
+	"$DIALOG" --backtitle "$backtitle" --title "$1" --yesno "$2" 0 0 <"$TTY" >"$TTY"
+}
+
+menu_input()
+{
+	"$DIALOG" --backtitle "$backtitle" --title "$1" --inputbox "$2" 0 0 "$3" 2>&1 >"$TTY" <"$TTY" || die "cancelled at $1 (nothing was written)"
+}
+
+# --- carryover: hostname is read from the live appliance config at -----
+# menu time (not cached), so a renamed appliance carries the new value
+# automatically. Network and DNS are intentionally not carried: the
+# destination's ordinary firstboot owns them.
+carry_hostname()
+{
+	cat /etc/hostname 2>/dev/null || printf 'saphira'
+}
+
+carry_dns()
+{
+	awk '/^nameserver/ { printf "%s ", $2 }' /etc/resolv.conf 2>/dev/null || true
+}
+
+# --- repository reachability --------------------------------------------
+# Writing a destination needs packages from the network repository, so a
+# write is refused unless the repository host answers ping. Each family is
+# tried with a 3-second reply timeout (A and AAAA alike); a local
+# repository path needs no network and skips the check.
+repo_host()
+{
+	host=${REPOSITORY#*://}
+	printf '%s' "${host%%/*}"
+}
+
+repo_reachable()
+{
+	case $REPOSITORY in
+	*://*) ;;
+	*) return 0 ;;
+	esac
+	host=$(repo_host)
+	[ -n "$host" ] || return 1
+	"$PING" -4 -c1 -W3 "$host" >/dev/null 2>&1 && return 0
+	"$PING" -6 -c1 -W3 "$host" >/dev/null 2>&1 && return 0
+	return 1
+}
+
+# --- step: destination product -----------------------------------------
+# This is a disk writer, not an image-builder UI. The four destination
+# products are the only choices. The engine's build-target matrix is
+# deliberately not read or enumerated here: installer media and minimal
+# rescue/test targets are not destination products.
+target_label()
+{
+	case $1 in
+	bios-saphira) printf 'BIOS Saphira' ;;
+	uefi-saphira) printf 'UEFI Saphira' ;;
+	bios-saphirad) printf 'BIOS SaphiraD' ;;
+	uefi-saphirad) printf 'UEFI SaphiraD' ;;
+	*) printf '%s' "$1" ;;
+	esac
+}
+
+pick_target()
+{
+	menu_pick "Destination system" "Which Saphira should be written to the disk?" \
+		bios-saphira "BIOS Saphira" \
+		uefi-saphira "UEFI Saphira" \
+		bios-saphirad "BIOS SaphiraD" \
+		uefi-saphirad "UEFI SaphiraD"
+}
+
+# --- step: destination --------------------------------------------------
+# by-id identifiers are stable across reboots and human-meaningful;
+# the engine resolves them to kernel nodes before touching anything.
+disk_in_use()
+{
+	# $1 kernel node. A whole disk with any mounted child is refused,
+	# so the running appliance medium cannot be offered as a target.
+	mounts=$("$LSBLK" -nrno MOUNTPOINT "$1" 2>/dev/null) ||
+		die "cannot inspect $1 (refusing to guess)"
+	printf '%s' "$mounts" | grep -q '[^[:space:]]'
+}
+
+pick_device()
+{
+	if [ -n "${SAPHIRA_CREATOR_DISK:-}" ]; then
+		printf '%s' "$SAPHIRA_CREATOR_DISK"
+		return 0
+	fi
+	entries=$(ls /dev/disk/by-id/ 2>/dev/null | grep -v -- '-part[0-9]*$' | grep -v '^wwn-') ||
+		die "no /dev/disk/by-id entries (is udev running?)"
+	set --
+	for id in $entries; do
+		node=$(readlink -f "/dev/disk/by-id/$id")
+		case $node in /dev/sd*|/dev/vd*|/dev/nvme*|/dev/mmcblk*) ;;
+		*) continue ;;
+		esac
+		disk_in_use "$node" && continue
+		size=$("$BLOCKDEV" --getsize64 "$node" 2>/dev/null || echo 0)
+		mib=$((size / 1048576))
+		set -- "$@" "$id" "$node ${mib}MiB"
+	done
+	[ "$#" -gt 0 ] || die "no writable whole disks found under /dev/disk/by-id"
+	id=$(menu_pick 'Destination disk' 'Write to which disk? ALL DATA ON IT WILL BE DESTROYED.' "$@")
+	printf '/dev/disk/by-id/%s' "$id"
+}
+
+# --- step: filesystem ---------------------------------------------------
+pick_rootfs()
+{
+	while :; do
+		ROOTFS=$(menu_pick "Root filesystem" "Filesystem for / on the created image." \
+			ext4 "ext4 (supported)" \
+			zfs "ZFS pool with ext4 /boot (supported)" \
+			xfs "XFS (later: engine path pending)")
+		case $ROOTFS in
+		ext4|zfs) printf '%s' "$ROOTFS"; return 0 ;;
+		*) menu_info "Not yet" "XFS is validated by the planner but the engine cannot create it yet." ;;
+		esac
+	done
+}
+
+# --- step: create ---------------------------------------------------------
+run_engine()
+{
+	zfs_role=
+	if [ "$FSTYPE" = zfs ]; then
+		# Stock flavors carry no ZFS kmod: the shipped role layer
+		# provides it, or the engine refuses the unbootable target.
+		zfs_role="--role role-zfs"
+	fi
+	if [ "${SAPHIRA_CREATOR_NOEXEC:-0}" = 1 ]; then
+		printf 'NOEXEC saphira-image install-to-disk --target %s --device %s --hostname %s --repository %s --rootfs %s %s %s\n' \
+			"$TARGET" "$DEVICE" "$HOSTNAME" "$REPOSITORY" "$FSTYPE" "$zfs_role" "$*" >&2
+		return 0
+	fi
+	# shellcheck disable=SC2086
+	# No destination password is passed: the engine leaves root locked,
+	# so the destination boots into ordinary saphira-firstboot.
+	saphira-image install-to-disk \
+		--target "$TARGET" --device "$DEVICE" \
+		--hostname "$HOSTNAME" --repository "$REPOSITORY" --rootfs "$FSTYPE" $zfs_role "$@" <"$TTY" >"$TTY" 2>&1 ||
+		die "engine failed (see above)"
+}
+
+create_image()
+{
+	# Network-dependent creator: without the repository host there are
+	# no packages to write, so refuse before anything is picked. Never
+	# configure networking here; that is the Setup Network menu's job.
+	repo_reachable || {
+		menu_info "Network required" "Cannot contact packages.saphira.vm2.uk. Please use Setup Network first."
+		return 0
+	}
+	TARGET=$(pick_target)
+	TARGET_LABEL=$(target_label "$TARGET")
+	DEVICE=$(pick_device)
+	FSTYPE=$(pick_rootfs)
+	# No size question: install-to-disk writes the whole device (the
+	# engine's --allocate exists for partial use, offered on demand,
+	# not as a menu default that could shrink a disk silently).
+	HOSTNAME=$(menu_input "Hostname" "Hostname for the created machine." "$(carry_hostname)")
+
+	plan="System: $TARGET_LABEL
+Device: $DEVICE (whole disk)
+Filesystem: $FSTYPE
+Hostname: $HOSTNAME
+Credentials/networking: ordinary firstboot on the destination"
+	menu_yesno "Confirm" "$plan
+
+Write it? (preview runs first)" || die "aborted (nothing was written)"
+
+	menu_info "Preview" "Dry run first. Read it, then confirm the real write."
+	run_engine --preview
+	menu_yesno "Destroy and write" "Last chance: ALL DATA on $DEVICE will be destroyed. Proceed?" ||
+		die "aborted (nothing was written)"
+	run_engine
+	menu_info "Done" "$TARGET_LABEL ($FSTYPE) written to $DEVICE. Boot it and complete ordinary firstboot there."
+}
+
+network_status()
+{
+	menu_info "Network" "$("$IP" -brief addr 2>&1; printf '\nDNS: %s\n' "$(carry_dns)")"
+}
+
+# --- setup network --------------------------------------------------------
+# Operator-initiated only: the menu never configures networking on its
+# own. DHCP is the default path (systemd-networkd already ships a wired
+# DHCP default); static IPv4/IPv6 with DNS mirrors what firstboot asks.
+setup_dhcp()
+{
+	"$SYSTEMCTL" restart systemd-networkd 2>&1 ||
+		{ menu_info "Setup network" "Could not restart systemd-networkd."; return 0; }
+	network_status
+}
+
+default_iface()
+{
+	for d in /sys/class/net/e*; do
+		[ -d "$d" ] || continue
+		case $d in *lo*) continue ;; esac
+		basename "$d"
+		return 0
+	done
+	printf 'eth0'
+}
+
+setup_static()
+{
+	# $1 address family: 4 or 6.
+	family=$1
+	SIFACE=$(menu_input "Interface" "Interface for the static address:" "$(default_iface)")
+	[ -d "/sys/class/net/$SIFACE" ] ||
+		{ menu_info "Setup network" "No such interface: $SIFACE."; return 0; }
+	SCIDR=$(menu_input "Address" "Static address in CIDR form:" "")
+	case $SCIDR in */*) ;; *) menu_info "Setup network" "Address must be in CIDR form."; return 0 ;; esac
+	SGW=$(menu_input "Gateway" "Default gateway address:" "")
+	[ -n "$SGW" ] || { menu_info "Setup network" "Gateway is required."; return 0; }
+	SDNS=$(menu_input "DNS" "DNS servers, space separated:" "")
+	[ -n "$SDNS" ] || { menu_info "Setup network" "At least one DNS server is required."; return 0; }
+	"$IP" "-$family" link set dev "$SIFACE" up 2>&1 ||
+		{ menu_info "Setup network" "Cannot bring $SIFACE up."; return 0; }
+	"$IP" "-$family" addr replace "$SCIDR" dev "$SIFACE" 2>&1 ||
+		{ menu_info "Setup network" "Cannot assign $SCIDR to $SIFACE."; return 0; }
+	"$IP" "-$family" route replace default via "$SGW" dev "$SIFACE" 2>&1 ||
+		{ menu_info "Setup network" "Cannot route via $SGW."; return 0; }
+	if [ -x "$RESOLVECTL" ]; then
+		# shellcheck disable=SC2086
+		"$RESOLVECTL" dns "$SIFACE" $SDNS 2>&1 ||
+			{ menu_info "Setup network" "Address and route applied, but DNS was not."; return 0; }
+	elif [ -f /etc/resolv.conf ] && [ ! -L /etc/resolv.conf ]; then
+		printf '%s\n' "$SDNS" | tr ' ' '\n' | while read -r ns; do
+			[ -n "$ns" ] && printf 'nameserver %s\n' "$ns"
+		done > /etc/resolv.conf ||
+			{ menu_info "Setup network" "Address and route applied, but DNS was not."; return 0; }
+	else
+		menu_info "Setup network" "Address and route applied. DNS not applied: systemd-resolved owns /etc/resolv.conf and resolvectl is missing; set DNS from the shell."
+		return 0
+	fi
+	network_status
+}
+
+setup_network()
+{
+	while :; do
+		CHOICE=$(menu_pick "Setup network" "Appliance networking. Image creation needs packages.saphira.vm2.uk." \
+			dhcp "DHCP on the wired interface" \
+			static4 "Static IPv4 address, gateway and DNS" \
+			static6 "Static IPv6 address, gateway and DNS" \
+			status "Show address, route and DNS" \
+			back "Back to main menu")
+		case $CHOICE in
+		dhcp) setup_dhcp ;;
+		static4) setup_static 4 ;;
+		static6) setup_static 6 ;;
+		status) network_status; continue ;;
+		back) return 0 ;;
+		esac
+		if repo_reachable; then
+			menu_info "Setup network" "packages.saphira.vm2.uk is reachable."
+		else
+			menu_info "Setup network" "packages.saphira.vm2.uk is still unreachable."
+		fi
+	done
+}
+
+while :; do
+	CHOICE=$(menu_pick "Saphira image creator" "Write Saphira/SaphiraD to real disks. Nothing here alters this appliance." \
+		setup "Setup network (DHCP or static)" \
+		create "Write an image to a disk" \
+		network "Show appliance network and DNS" \
+		shell "Drop to a root shell (menu resumes on exit)" \
+		reboot "Reboot the appliance" \
+		poweroff "Power off the appliance")
+	case $CHOICE in
+	setup) setup_network ;;
+	create) create_image ;;
+	network) network_status ;;
+	shell) sh <"$TTY" >"$TTY" 2>&1 || true ;;
+	reboot) reboot ;;
+	poweroff) poweroff ;;
+	esac
+	# Test hook only: run one menu choice, then leave. Production
+	# never sets this; the appliance menu owns the console forever.
+	[ "${SAPHIRA_CREATOR_ONESHOT:-0}" = 1 ] && exit 0
+done

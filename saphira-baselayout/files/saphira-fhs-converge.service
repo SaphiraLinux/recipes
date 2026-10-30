@@ -3,13 +3,22 @@ Description=Saphira FHS layout convergence (before ordinary services)
 # Early-boot structural migration only: the historical /var/run alias
 # swap must happen before daemons start, never in a live post-upgrade.
 # A failed run marks this unit failed (loud) without halting boot.
-# Ordered before the tmpfiles units (cycle-free: neither references
-# this unit): the alias must be replaced before anything populates
-# through it, otherwise population and replacement race and the first
-# boot fails intermittently while retries succeed.
+# Ordered after local filesystems (everything migrated lives on
+# mounted filesystems) and before the full tmpfiles-setup service,
+# which is the only population stage that writes through migrated
+# paths (it runs --exclude-prefix=/dev; the -dev stage is /dev-only).
+# Deliberately NOT ordered against systemd-tmpfiles-setup-dev.service:
+# upstream runs -dev before local-fs-pre.target, so an edge there is
+# an ordering cycle (local-fs-pre < local-fs < fhs < tmpfiles-dev <
+# local-fs-pre, broken only by systemd deleting a job), and worse it
+# drags tmpfiles-dev -- and through it systemd-udevd -- behind local
+# filesystem mounts, inverting device management (Minimer boot proof:
+# udevd starting ~123s in, settle stalling behind it). sysinit
+# completion still gates ordinary services, so the guarantee holds
+# without the cycle.
 DefaultDependencies=no
 After=local-fs.target
-Before=sysinit.target systemd-tmpfiles-setup-dev.service systemd-tmpfiles-setup.service
+Before=sysinit.target systemd-tmpfiles-setup.service
 ConditionPathExists=/usr/share/saphira/fhs.d/saphira-baselayout
 
 [Service]

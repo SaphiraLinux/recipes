@@ -1,6 +1,12 @@
 pkgname=grub
 pkgver=2.14
-pkgrel=2
+pkgrel=4
+# r4: split grub-tools (manual/rescue utilities) out of the monolith;
+# base keeps installer, probe, mkconfig and the module payload. Runtime
+# deps follow proven linkage only (fuse/intl out of base). Payload change.
+# r3: discover Saphira early-firmware images (earlyfw-<release>.img)
+# in 10_linux like initramfs ones (listed first, so the current name
+# wins over stale initramfs-<release>.img orphans). Payload change.
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='GRUB 2 boot loader (platform modules, tools and scripts)'
 license='GPL-3.0-or-later'
@@ -25,26 +31,27 @@ sha256=bc8d3c73535b8838d8c8e2654d73edc4e6ae8c8acdb45d5df5dc9a1547446d43
 # inside grub-mkconfig_lib, so gettext stays out.
 # Runtime libs for the enabled feature set (each --enable below names
 # its consumer): grub-mount needs fuse3, liblzma needs xz,
-# device-mapper needs lvm2, NLS needs gettext, grub-protect needs
-# libtasn1. No libzfs runtime: host-side libzfs stays disabled (see
+# device-mapper needs lvm2-libs (lib only - the lvm2 tools never enter
+# a grub closure), NLS tooling is build-time only (msgfmt compiles .mo
+# catalogs; no shipped binary links libintl), grub-protect needs
+# libtasn1. Base carries only what its resident binaries link; the
+# manual/rescue tools in grub-tools carry their own edges there.
+# No libzfs runtime: host-side libzfs stays disabled (see
 # below), so the bootloader never drags the CDDL userspace into
 # every install; native zfs.mod is the boot path.
 depends="
 	sed
 	grep
-	fuse3
 	xz
-	lvm2
-	gettext
-	libtasn1
+	lvm2-libs
 "
-makedepends="gcc make bison flex gawk pkgconf gettext gettext-dev fuse3-dev xz-dev lvm2 libtasn1-dev"
+makedepends="gcc make bison flex gawk pkgconf gettext gettext-dev fuse3-dev xz-dev lvm2-dev libtasn1-dev"
 # Transition from the historical Stage4 split packages: a machine carrying
 # grub-common/grub-bios/grub-efi must migrate to this monolith through
 # normal APK replacement semantics (no --force-overwrite, no manual dels).
 # apk evicts the named packages and lets this package take their files.
 replaces="grub-common grub-bios grub-efi"
-subpackages="$pkgname-doc"
+subpackages="$pkgname-doc grub-tools"
 
 # Saphira carries a monolithic grub (old-gen shipped grub-common +
 # grub-bios + grub-efi; the worker only splits -dev/-doc/-libs, and the
@@ -197,6 +204,11 @@ recipe_build() {
 	# path; zdb is absent from product images). Applied to the .in
 	# template so both platform builds generate it identically.
 	patch -p1 -d "$SRC" < "$RECIPE_DIR/files/10_linux-saphira-branding.patch"
+	# Saphira early-firmware discovery: firmware-only cpios named
+	# earlyfw-<release>.img must produce initrd lines exactly like
+	# the initramfs names stock 10_linux matches (verified applying
+	# cleanly pre-commit; keep the header counts exact, no fuzz).
+	patch -p1 -d "$SRC" < "$RECIPE_DIR/files/earlyfw-10-linux-discovery.patch"
 	: > "$BUILDDIR/merge-report.txt"
 	mkdir -p "$PKGDEST"
 	case "${SAPHIRA_ARCH:-x86_64}" in
@@ -331,6 +343,30 @@ recipe_build() {
 	printf 'grub: payload %s entries, merge report:\n' \
 		"$(wc -l < "$BUILDDIR/grub-manifest-${SAPHIRA_ARCH:-x86_64}.txt")"
 	cat "$BUILDDIR/merge-report.txt"
+	# Split-hygiene guard (see the depends comment): only grub-mount may
+	# link fuse, and nothing links intl (msgfmt is build-time). lvm2-libs,
+	# liblzma and libtasn1 edges live wherever linkage proves them, base
+	# or tools alike - so a re-added makedepend that relinks (autodetect)
+	# fails the build instead of resurrecting an install depend. readelf
+	# rides the gcc closure (proven by builds); no binutils line needed.
+	for bin in "$PKGDEST"/usr/bin/grub-* "$PKGDEST"/usr/sbin/grub-*; do
+		[ -f "$bin" ] || continue
+		case $(basename "$bin") in
+			grub-mount) ;;
+			*)
+				if readelf -d "$bin" | grep -q libfuse; then
+					printf 'grub: %s links libfuse (only grub-mount may)\n' \
+						"$bin" >&2
+					return 1
+				fi
+				;;
+		esac
+		if readelf -d "$bin" | grep -q libintl; then
+			printf 'grub: %s links libintl (msgfmt is build-time only)\n' \
+				"$bin" >&2
+			return 1
+		fi
+	done
 }
 
 recipe_install() {

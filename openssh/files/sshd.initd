@@ -9,7 +9,7 @@ required_files="/etc/ssh/sshd_config"
 
 depend()
 {
-	use net logger dns
+	use net
 }
 
 start_pre()
@@ -34,5 +34,9 @@ start_pre()
 	ebegin "Generating missing SSH host keys"
 	/usr/bin/ssh-keygen -A || return 1
 	ebegin "Checking sshd configuration"
-	/usr/sbin/sshd -t
+	# The check gates the start (SEV 2026-10-23: without `|| return 1`
+	# a failed validation merely logged while sshd started degraded --
+	# here without its mldsa44 host key, whose files had been corrupt
+	# since 2026-10-17 while the type was never served).
+	/usr/sbin/sshd -t || return 1
 }

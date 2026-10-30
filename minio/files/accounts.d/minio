@@ -1,0 +1,13 @@
+# minio runtime identity (canonical, fixed): user minio UID 175,
+# primary group minio GID 175. Verified free against the union of the
+# base seed (accounts.tsv, which reserves 118 for syslog - the r1
+# collision the publish gate caught) and every tree fragment, plus the
+# systemd sysusers pins (127-131, 144-145). Saphira rule: 0-99 root
+# services, 100-999 everything else. The publish gate stays
+# authoritative - a collision fails closed there regardless.
+# Required by the shipped service units (minio.service User=minio,
+# minio.initd command_user minio:minio). Home and default data
+# directory is /var/lib/minio, reconciled to 0750 on install.
+user minio 175 minio /var/lib/minio /sbin/nologin
+group minio 175
+dir /var/lib/minio 0750 minio minio

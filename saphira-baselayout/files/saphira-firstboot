@@ -275,8 +275,12 @@ set_password()
 # Steps that may still be incomplete once the root password is set.
 # Recorded as they happen and printed as an explicit statement at the
 # end, so the operator is told exactly what is not configured on a
-# machine that setup will never revisit.
-declare -a unfinished_steps
+# machine that setup will never revisit. The =() initializer matters:
+# a bare `declare -a` leaves the array unset for `set -u`, so the
+# all-success path (empty array) died at the final count with
+# "unfinished_steps: unbound variable" (proven in a VM boot: every
+# fully successful setup crashed after applying).
+declare -a unfinished_steps=()
 record_unfinished()
 {
 	unfinished_steps+=("$1: $2")
@@ -737,7 +741,13 @@ choose_dns()
 		printf '  4. Custom DNS servers\n\n'
 		printf 'Choice [1]: '
 		read_setup choice
-		case ${choice:-1} in
+		# Resolve the advertised default ONCE: ${choice:-1} in the
+		# case below only selects the branch, but "$choice" itself
+		# stays empty and reached dns-provider as "" (proven: empty
+		# choice failed with "unknown DNS provider: " although the
+		# prompt promises [1]).
+		choice=${choice:-1}
+		case $choice in
 			1|2|3)
 				provider_data=$("$network_apply" dns-provider "$choice")
 				IFS='|' read -r dns4 dns6 <<< "$provider_data"

@@ -22,8 +22,11 @@ import calendar
 import hashlib
 import json
 import os
+import platform
 import re
+import resource
 import shutil
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -134,9 +137,32 @@ def db():
     # existed. ALTER TABLE ADD COLUMN is a no-op-safe way to bring an
     # existing queue.db forward without touching its rows.
     have = {r["name"] for r in conn.execute("PRAGMA table_info(builds)")}
-    for column, decl in (("builder_pid", "INTEGER"), ("boot_id", "TEXT")):
+    for column, decl in (("builder_pid", "INTEGER"), ("boot_id", "TEXT"),
+                         ("duration_s", "REAL"), ("cpu_s", "REAL"),
+                         ("peak_rss_mb", "REAL"), ("timings_json", "TEXT"),
+                         ("arch", "TEXT"), ("builder_host", "TEXT")):
         if column not in have:
             conn.execute(f"ALTER TABLE builds ADD COLUMN {column} {decl}")
+    # Backfill wall durations for rows finished before the columns existed.
+    # CPU/RSS are unrecoverable historically and stay NULL; SBU ratios are
+    # a reporting layer added once the reference workload is defined.
+    conn.execute(
+        "UPDATE builds SET duration_s = "
+        "(strftime('%s', finished_at) - strftime('%s', started_at)) "
+        "WHERE finished_at IS NOT NULL AND started_at IS NOT NULL "
+        "AND duration_s IS NULL"
+    )
+    # SBU reference baselines: one active row per (package, arch,
+    # builder_host). History is retained; only the active row is read
+    # for ratios. Raw seconds in builds stay authoritative regardless.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS sbu_baseline("
+        "id INTEGER PRIMARY KEY, package TEXT NOT NULL,"
+        " version TEXT, revision TEXT, recipe_commit TEXT,"
+        " arch TEXT, builder_host TEXT, cache_policy TEXT NOT NULL,"
+        " wall_s REAL NOT NULL, cpu_s REAL,"
+        " active INTEGER NOT NULL DEFAULT 0, calibrated_at TEXT NOT NULL)"
+    )
     conn.commit()
     return conn
 
@@ -406,9 +432,16 @@ def reconcile_interrupted(conn):
             "started_at": row["started_at"],
             "log_dir": row["log_dir"],
         }
+        finished = now()
         conn.execute(
-            "UPDATE builds SET state='INTERRUPTED', finished_at=?, result_json=? WHERE id=?",
-            (now(), json.dumps(result), row["id"]),
+            "UPDATE builds SET state='INTERRUPTED', finished_at=?, result_json=?,"
+            " duration_s=CASE WHEN started_at IS NOT NULL"
+            " THEN (strftime('%s', ?) - strftime('%s', started_at)) END,"
+            " arch=?, builder_host=? WHERE id=?",
+            (finished, json.dumps(result), finished,
+             os.environ.get("SAPHIRA_ARCH", platform.machine()),
+             os.environ.get("SAPHIRA_BUILDER_NAME", socket.gethostname()),
+             row["id"]),
         )
         retired.append((row["package"], row["version"], reason))
     if retired:
@@ -820,117 +853,234 @@ def cmd_run(args):
         row, info = pick_next(conn)
         if row is None:
             break
-        pkg = row["package"]
-        ver_rel = "-".join(x for x in (info.get("version"), "r" + str(info.get("revision"))) if x and x != "r")
-        log_dir = STATE / "logs" / pkg / f"{ver_rel or 'unknown'}-{row['recipe_hash'][:8]}"
-        shutil.rmtree(log_dir, ignore_errors=True)
-        log_dir.mkdir(parents=True)
-        conn.execute(
-            "UPDATE builds SET state='BUILDING', started_at=?, log_dir=?,"
-            " builder_pid=?, boot_id=? WHERE id=?",
-            (now(), str(log_dir), os.getpid(), boot_id(), row["id"]),
-        )
-        conn.commit()
-        print(f"run: {pkg} {ver_rel or '(version unknown)'} building...")
-        rc = run(BUILDCMD + [pkg], log=log_dir / "build.log",
-                 env={"JOBS": os.environ.get("SAPHIRA_BUILD_JOBS", "8")})
-        result = {"stages": {"BUILD": {"status": "pass" if rc == 0 else "fail",
-                                       "detail": f"buildpkg rc={rc}"}}}
-        ready_dir = apk = None
-        if rc == 0:
-            cands = sorted(
-                (p for p in INCOMING.glob(f"{pkg}-*-ready") if p.is_dir()),
-                key=lambda p: p.stat().st_mtime,
-            )
-            if not cands or cands[-1].stat().st_mtime < row_start(conn, row["id"]):
-                result["stages"]["BUILD"] = {"status": "fail", "detail": "no new -ready transaction in incoming"}
-            else:
-                ready_dir = cands[-1]
-                apk = ready_apk(ready_dir, pkg, ver_rel)
-                if apk is None:
-                    result["stages"]["BUILD"] = {"status": "fail", "detail": f"no apk in {ready_dir.name}"}
-        if apk is not None:
-            result["stages"]["INSTALL"] = {"status": "pending"}
-            root = TEST_ROOT_PARENT / f"{pkg}-{row['recipe_hash'][:8]}"
-            shutil.rmtree(root, ignore_errors=True)
-            root.parent.mkdir(parents=True, exist_ok=True)
-            root.mkdir()
-            base_apk_args = [
-                APK, "--usermode", f"--root={root}", "--initdb", "--no-network",
-                "--allow-untrusted", "--force-non-repository",
-                f"--repository={REPO}/Packages.adb",
-            ]
-            # A Saphira root is seeded from the distribution's own base
-            # group, whose closure apk resolves from metadata: it brings
-            # bash, coreutils and saphira-baselayout (and therefore
-            # /usr/libexec/saphira/ensure-identity.sh) through the normal
-            # package relationship rather than a hand-picked list.
-            #
-            # The seed is installed --no-scripts, and that is not a shortcut:
-            # apk runs maintainer scripts chrooted in the root, every
-            # generated one starts with #!/bin/sh, and /bin/sh is owned by NO
-            # package, so a root assembled from scratch cannot run any script
-            # until the link exists. This is the documented recovery shape
-            # (RECIPE_RULES: `apk add --no-scripts`, initialise, `apk fix`) and
-            # is what saphira-bootstrap does for the same reason. The scripts
-            # this stage actually verifies - the package under test's - DO
-            # run, in the install immediately below.
-            run(base_apk_args + ["add", "--no-scripts", "saphira-base"],
-                log=log_dir / "install.log")
-            # Then the part no package can provide, exactly as buildpkg does
-            # in a clean build root and saphira-bootstrap in a target root.
-            initialise_install_root(root)
-            irc = run(
-                base_apk_args + ["add", apk],
-                log=log_dir / "install.log",
-            )
-            if irc != 0:
-                result["stages"]["INSTALL"] = {"status": "fail", "detail": f"apk add rc={irc}"}
-            else:
-                result["stages"]["INSTALL"] = {"status": "pass"}
-                pl = run_out([APK, f"--root={root}", "info", "-L", pkg])
-                payload = [
-                    ln.strip() for ln in pl.stdout.splitlines()
-                    if ln.strip() and not ln.endswith("contains:")
-                ]
-                result["stages"].update(
-                    evaluate_stages(root, payload, RECIPES / pkg, log_dir)
-                )
-                shutil.rmtree(root, ignore_errors=True)
-        stages = result["stages"]
-        overall = "PASS" if all(s["status"] != "fail" for s in stages.values()) else "FAIL"
-        if overall == "FAIL":
-            failed_deps = [
-                (dep, why) for dep in {
-                    norm_dep(d) for d in recipe_info(RECIPES / pkg)["deps"]
-                }
-                for ok, hard, why in (dep_state(conn, dep),)
-                if not ok and why
-            ]
-            result["blockers"] = [w for _, w in failed_deps]
-        conn.execute(
-            "UPDATE builds SET state=?, finished_at=?, result_json=?, version=?, revision=? WHERE id=?",
-            (overall, now(), json.dumps(result), info.get("version"), info.get("revision"), row["id"]),
-        )
-        conn.commit()
-        recompute_blocking(conn)
-        if ver_rel and ver_rel in published_versions(pkg) and ready_dir is not None:
-            discarded = INCOMING / ".validation-discarded"
-            discarded.mkdir(parents=True, exist_ok=True)
-            os.replace(ready_dir, discarded / ready_dir.name)
-            result["artifact"] = (
-                "discarded: recipe version already published; rebuild kept for "
-                "validation only (immutable-filename rule)"
-            )
-            conn.execute("UPDATE builds SET result_json=? WHERE id=?",
-                         (json.dumps(result), row["id"]))
-            conn.commit()
-        stage_summary = ", ".join(
-            k + ":" + v["status"] for k, v in stages.items()
-        )
-        print(f"run: {pkg} -> {overall} ({stage_summary})")
+        run_one(conn, row, info)
         done += 1
     print(f"run: {done} package(s) processed")
+
+
+def run_one(conn, row, info):
+    """Process a single queued build through every stage and finish its
+    row (state, timings, measurements, artifact handling). Shared by
+    cmd_run and cmd_calibrate so a calibration build measures the
+    identical pipeline an ordinary build runs. Returns overall."""
+    pkg = row["package"]
+    ver_rel = "-".join(x for x in (info.get("version"), "r" + str(info.get("revision"))) if x and x != "r")
+    log_dir = STATE / "logs" / pkg / f"{ver_rel or 'unknown'}-{row['recipe_hash'][:8]}"
+    shutil.rmtree(log_dir, ignore_errors=True)
+    log_dir.mkdir(parents=True)
+    conn.execute(
+        "UPDATE builds SET state='BUILDING', started_at=?, log_dir=?,"
+        " builder_pid=?, boot_id=? WHERE id=?",
+        (now(), str(log_dir), os.getpid(), boot_id(), row["id"]),
+    )
+    conn.commit()
+    # Provenance of what actually runs, not just what was queued: the
+    # worker bind-mounts the live recipe tree, so a commit landing
+    # between queue and run would otherwise build bytes the row's
+    # recipe_hash never names. Record-only: informational print plus
+    # result_json fields; never gates, never fails a build.
+    try:
+        built_hash = recipe_hash(RECIPES / pkg)
+    except OSError:
+        built_hash = ""
+    built_commit = commit_hash()
+    if built_hash and built_hash != row["recipe_hash"]:
+        print(f"run: {pkg} recipe tree moved since queue "
+              f"(queued {row['recipe_hash'][:8]}, building {built_hash[:8]})")
+    print(f"run: {pkg} {ver_rel or '(version unknown)'} building...")
+    rusage_before = resource.getrusage(resource.RUSAGE_CHILDREN)
+    rc = run(BUILDCMD + [pkg], log=log_dir / "build.log",
+             env={"JOBS": os.environ.get("SAPHIRA_BUILD_JOBS", "8"),
+                  "SAPHIRA_TIMINGS_DIR": str(log_dir)})
+    rusage_after = resource.getrusage(resource.RUSAGE_CHILDREN)
+    # buildpkg rc 2 is a pre-build refusal: nothing compiled, so the
+    # attempt is classified refusal (dashboards show it RED with the
+    # reason; timing/SBU math excludes it). Any other nonzero rc is
+    # a genuine build failure.
+    result = {"attempt": "refusal" if rc == 2 else "build",
+              "built_inputs": {"recipe_hash": built_hash,
+                               "tree_commit": built_commit,
+                               "queued_hash": row["recipe_hash"]},
+              "stages": {"BUILD": {"status": "pass" if rc == 0 else "fail",
+                                   "detail": f"buildpkg rc={rc}"}}}
+    ready_dir = apk = None
+    if rc == 0:
+        cands = sorted(
+            (p for p in INCOMING.glob(f"{pkg}-*-ready") if p.is_dir()),
+            key=lambda p: p.stat().st_mtime,
+        )
+        if not cands or cands[-1].stat().st_mtime < row_start(conn, row["id"]):
+            result["stages"]["BUILD"] = {"status": "fail", "detail": "no new -ready transaction in incoming"}
+        else:
+            ready_dir = cands[-1]
+            apk = ready_apk(ready_dir, pkg, ver_rel)
+            if apk is None:
+                result["stages"]["BUILD"] = {"status": "fail", "detail": f"no apk in {ready_dir.name}"}
+    if apk is not None:
+        result["stages"]["INSTALL"] = {"status": "pending"}
+        root = TEST_ROOT_PARENT / f"{pkg}-{row['recipe_hash'][:8]}"
+        shutil.rmtree(root, ignore_errors=True)
+        root.parent.mkdir(parents=True, exist_ok=True)
+        root.mkdir()
+        base_apk_args = [
+            APK, "--usermode", f"--root={root}", "--initdb", "--no-network",
+            "--allow-untrusted", "--force-non-repository",
+            f"--repository={REPO}/Packages.adb",
+        ]
+        # A Saphira root is seeded from the distribution's own base
+        # group, whose closure apk resolves from metadata: it brings
+        # bash, coreutils and saphira-baselayout (and therefore
+        # /usr/libexec/saphira/ensure-identity.sh) through the normal
+        # package relationship rather than a hand-picked list.
+        #
+        # The seed is installed --no-scripts, and that is not a shortcut:
+        # apk runs maintainer scripts chrooted in the root, every
+        # generated one starts with #!/bin/sh, and /bin/sh is owned by NO
+        # package, so a root assembled from scratch cannot run any script
+        # until the link exists. This is the documented recovery shape
+        # (RECIPE_RULES: `apk add --no-scripts`, initialise, `apk fix`) and
+        # is what saphira-bootstrap does for the same reason. The scripts
+        # this stage actually verifies - the package under test's - DO
+        # run, in the install immediately below.
+        run(base_apk_args + ["add", "--no-scripts", "saphira-base"],
+            log=log_dir / "install.log")
+        # Then the part no package can provide, exactly as buildpkg does
+        # in a clean build root and saphira-bootstrap in a target root.
+        initialise_install_root(root)
+        irc = run(
+            base_apk_args + ["add", apk],
+            log=log_dir / "install.log",
+        )
+        if irc != 0:
+            result["stages"]["INSTALL"] = {"status": "fail", "detail": f"apk add rc={irc}"}
+        else:
+            result["stages"]["INSTALL"] = {"status": "pass"}
+            pl = run_out([APK, f"--root={root}", "info", "-L", pkg])
+            payload = [
+                ln.strip() for ln in pl.stdout.splitlines()
+                if ln.strip() and not ln.endswith("contains:")
+            ]
+            result["stages"].update(
+                evaluate_stages(root, payload, RECIPES / pkg, log_dir)
+            )
+            shutil.rmtree(root, ignore_errors=True)
+    stages = result["stages"]
+    overall = "PASS" if all(s["status"] != "fail" for s in stages.values()) else "FAIL"
+    if overall == "FAIL":
+        failed_deps = [
+            (dep, why) for dep in {
+                norm_dep(d) for d in recipe_info(RECIPES / pkg)["deps"]
+            }
+            for ok, hard, why in (dep_state(conn, dep),)
+            if not ok and why
+        ]
+        result["blockers"] = [w for _, w in failed_deps]
+    finished = now()
+    start_epoch = row_start(conn, row["id"])
+    timings_path = log_dir / "timings.json"
+    try:
+        timings_text = timings_path.read_text(encoding="utf-8") if timings_path.is_file() else None
+    except OSError:
+        timings_text = None
+    if timings_text is not None:
+        try:
+            json.loads(timings_text)
+        except ValueError:
+            timings_text = None
+    conn.execute(
+        "UPDATE builds SET state=?, finished_at=?, result_json=?, version=?, revision=?,"
+        " duration_s=?, cpu_s=?, peak_rss_mb=?, timings_json=?, arch=?, builder_host=? WHERE id=?",
+        (overall, finished, json.dumps(result), info.get("version"), info.get("revision"),
+         round(calendar.timegm(time.strptime(finished, "%Y-%m-%dT%H:%M:%SZ")) - start_epoch, 3)
+         if start_epoch else None,
+         round((rusage_after.ru_utime - rusage_before.ru_utime)
+               + (rusage_after.ru_stime - rusage_before.ru_stime), 3),
+         round(rusage_after.ru_maxrss / 1024, 1),
+         timings_text,
+         os.environ.get("SAPHIRA_ARCH", platform.machine()),
+         os.environ.get("SAPHIRA_BUILDER_NAME", socket.gethostname()),
+         row["id"]),
+    )
+    conn.commit()
+    recompute_blocking(conn)
+    if ver_rel and ver_rel in published_versions(pkg) and ready_dir is not None:
+        discarded = INCOMING / ".validation-discarded"
+        discarded.mkdir(parents=True, exist_ok=True)
+        os.replace(ready_dir, discarded / ready_dir.name)
+        result["artifact"] = (
+            "discarded: recipe version already published; rebuild kept for "
+            "validation only (immutable-filename rule)"
+        )
+        conn.execute("UPDATE builds SET result_json=? WHERE id=?",
+                     (json.dumps(result), row["id"]))
+        conn.commit()
+    stage_summary = ", ".join(
+        k + ":" + v["status"] for k, v in stages.items()
+    )
+    print(f"run: {pkg} -> {overall} ({stage_summary})")
+    return overall
+
+
+def cmd_calibrate(args):
+    """Pin an SBU baseline: queue the reference package at its current
+    tree revision, build it once through the identical run_one pipeline
+    with a guaranteed-cold compiler cache, and record its wall time.
+    Raw seconds in builds stay authoritative; ratios are computed at
+    report time by `times --sbu`. Only PASS builds calibrate: a failed
+    baseline would bless broken measurements. BBU is explicitly
+    unimplemented (no agreed workload) - this command does not cover it.
+    Usage: calibrate [PKG] (default: musl)."""
+    pkg = args[0] if args else "musl"
+    if not (RECIPES / pkg / "recipe.sh").is_file():
+        die(f"calibrate: no recipe for {pkg}")
+    info = recipe_info(RECIPES / pkg)
+    if info.get("disabled"):
+        die(f"calibrate: {pkg} is disabled ({info.get('reason', 'no reason')})")
+    conn = db()
+    h = recipe_hash(RECIPES / pkg)
+    ch = commit_hash()
+    cur = conn.execute(
+        "INSERT INTO builds(package,version,revision,recipe_hash,state,"
+        " commit_hash,queued_at,result_json)"
+        " VALUES(?,?,?,?,?,?,?,?)",
+        (info["name"], info.get("version"), info.get("revision"), h,
+         "QUEUED", ch, now(),
+         json.dumps({"stages": {}, "calibration": True})),
+    )
+    rid = cur.lastrowid
+    conn.commit()
+    ccdir = tempfile.mkdtemp(prefix="sbu-ccache-")
+    previous_ccache = os.environ.get("SAPHIRA_CCACHE_DIR")
+    os.environ["SAPHIRA_CCACHE_DIR"] = ccdir
+    try:
+        row = conn.execute("SELECT * FROM builds WHERE id=?", (rid,)).fetchone()
+        overall = run_one(conn, row, info)
+    finally:
+        if previous_ccache is None:
+            os.environ.pop("SAPHIRA_CCACHE_DIR", None)
+        else:
+            os.environ["SAPHIRA_CCACHE_DIR"] = previous_ccache
+        shutil.rmtree(ccdir, ignore_errors=True)
+    if overall != "PASS":
+        die(f"calibrate: {pkg} did not pass ({overall}); no baseline recorded")
+    row = conn.execute("SELECT * FROM builds WHERE id=?", (rid,)).fetchone()
+    arch = row["arch"] or os.environ.get("SAPHIRA_ARCH", platform.machine())
+    builder = row["builder_host"] or os.environ.get("SAPHIRA_BUILDER_NAME", socket.gethostname())
+    conn.execute(
+        "UPDATE sbu_baseline SET active=0 WHERE package=? AND arch=? AND builder_host=?",
+        (info["name"], arch, builder),
+    )
+    conn.execute(
+        "INSERT INTO sbu_baseline(package,version,revision,recipe_commit,arch,builder_host,"
+        " cache_policy,wall_s,cpu_s,active,calibrated_at)"
+        " VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+        (info["name"], info.get("version"), info.get("revision"), ch,
+         arch, builder, "cold (fresh SAPHIRA_CCACHE_DIR)",
+         row["duration_s"], row["cpu_s"], 1, now()),
+    )
+    conn.commit()
+    print(f"calibrate: {info['name']} {row['version'] or '?'} baseline {row['duration_s']}s "
+          f"wall ({arch}/{builder}, cold cache, recipe {ch or 'uncommitted'})")
 
 
 def row_start(conn, rid):
@@ -978,6 +1128,83 @@ def cmd_status(args):
         if rv and pv and rv not in pv and rv > max(pv):
             skew = f"recipe {rv} ahead of repo"
         print(f"{r['package']:<28} {rv or (r['version'] or '?'):<18} {r['state']:<9} {s:<34} {pub:<4} {skew}")
+
+
+def cmd_times(args):
+    """Report last finished attempt per package: wall/CPU durations and
+    peak RSS, with revision, arch and builder provenance. Raw seconds;
+    --sbu[=REF] appends ratios against the active baseline (default
+    reference: musl), matched per row on arch and builder host so
+    cross-hardware ratios never print silently. Rows pre-dating
+    measurement carry NULL CPU/RSS (wall backfilled from timestamps
+    where possible). Refusals (attempt=refusal) are listed with their
+    durations but are excluded from SBU math by definition: nothing
+    compiled."""
+    conn = db()
+    sbu_ref = None
+    wanted = set()
+    for a in args:
+        if a == "--sbu":
+            sbu_ref = "musl"
+        elif a.startswith("--sbu="):
+            sbfx = a.split("=", 1)[1]
+            sbu_ref = sbfx if sbfx else "musl"
+        else:
+            wanted.add(a)
+    rows = conn.execute(
+        """SELECT * FROM builds b WHERE finished_at IS NOT NULL AND id IN (
+               SELECT max(id) FROM builds WHERE finished_at IS NOT NULL GROUP BY package)
+           ORDER BY package"""
+    ).fetchall()
+    if wanted:
+        rows = [r for r in rows if r["package"] in wanted]
+    if not rows:
+        print("times: no finished builds" + (f" matching {','.join(sorted(wanted))}" if wanted else ""))
+        return
+    baselines = {}
+    if sbu_ref is not None:
+        for b in conn.execute(
+                "SELECT * FROM sbu_baseline WHERE package=? AND active=1", (sbu_ref,)).fetchall():
+            if b["wall_s"]:
+                baselines[(b["arch"], b["builder_host"])] = b["wall_s"]
+
+    def fmt(seconds):
+        if seconds is None:
+            return "-"
+        total = int(round(seconds))
+        if total < 120:
+            return f"{total}s"
+        return f"{total // 60}m{total % 60:02d}s"
+
+    def sbu_of(row):
+        if sbu_ref is None:
+            return None
+        try:
+            refused = json.loads(row["result_json"] or "{}").get("attempt") == "refusal"
+        except ValueError:
+            refused = True
+        if refused:
+            return "-"
+        base = baselines.get((row["arch"], row["builder_host"]))
+        if not base or not row["duration_s"]:
+            return "-"
+        return f"{row['duration_s'] / base:.2f}"
+
+    header = f"{'PACKAGE':<28} {'VERSION':<12} {'STATE':<9} {'WALL':>8} {'CPU':>8} {'RSS_MB':>8}  FINISHED"
+    if sbu_ref is not None:
+        if not baselines:
+            print(f"times: no active {sbu_ref} baseline (run calibrate first)")
+            return
+        header += f"  {'SBU':>8}"
+    print(header)
+    for r in rows:
+        ver = "-".join(x for x in (r["version"], "r" + str(r["revision"]) if r["revision"] else "") if x) or "?"
+        rss = f"{r['peak_rss_mb']:.1f}" if r["peak_rss_mb"] is not None else "-"
+        line = (f"{r['package']:<28} {ver:<12} {r['state']:<9} {fmt(r['duration_s']):>8} "
+                f"{fmt(r['cpu_s']):>8} {rss:>8}  {r['finished_at'] or '-'}")
+        if sbu_ref is not None:
+            line += f"  {sbu_of(r):>8}"
+        print(line)
 
 
 def cmd_retry(args):
@@ -1225,6 +1452,7 @@ def main():
         pass
     cmds = {
         "scan": cmd_scan, "run": cmd_run, "status": cmd_status,
+        "times": cmd_times, "calibrate": cmd_calibrate,
         "retry": cmd_retry, "log": cmd_log, "queue": cmd_queue,
         "evaluate": cmd_evaluate, "publish": cmd_publish,
         "daemon": cmd_daemon, "reconcile": cmd_reconcile,
@@ -1234,7 +1462,8 @@ def main():
     if len(sys.argv) < 2 or sys.argv[1] not in cmds:
         print(
             "usage: saphira-build "
-            "scan | run [--limit=N|--all] | queue | status | reconcile | "
+            "scan | run [--limit=N|--all] | queue | status | times [--sbu[=REF]] [PKG...] | "
+            "calibrate [PKG] | reconcile | "
             "retry PACKAGE | "
             "log PACKAGE | publish [--sync] [PKG...] | evaluate ROOT PKG [RECIPE_DIR] | "
             "daemon [--interval=S] [--limit=N] [--once] | "

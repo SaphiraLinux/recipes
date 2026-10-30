@@ -1,6 +1,11 @@
 pkgname=libvirt
 pkgver=12.6.0
-pkgrel=20
+pkgrel=21
+# r21: main depends on qemu-virgl (2026-10-23): the qemu GL split
+# (virgl/egl-headless/SPICE-display modules) stays inside the libvirt
+# offering - a libvirt install without it loses SPICE display (the
+# module_dep chain needs ui-opengl), so the edge is hard, like lxc.
+# Depends-metadata change only; payload identical to r20.
 # r20: main depends on the libvirt-lxc split (LXC is core to this
 # programme, not optional): ordinary upgrades can then never silently
 # lose virtlxcd the way r13->r18 did. Umbrella tolerance reverted:
@@ -80,7 +85,13 @@ subpackages="libvirt-lxc"
 # saphira-zfs-userspace — all published; iscsiadm is not, see r13 note).
 # libvirt-lxc: the LXC driver split is a hard dependency, not an
 # option (see r20 note): upgrades must carry it automatically.
-depends="glib libnl libxml2 readline zlib curl openssl libtirpc gnutls json-c libbsd libxcrypt acl attr udev dnsmasq qemu dmidecode nettle libtasn1 libunistring libpciaccess iproute2 nftables libapparmor libselinux libssh libssh2 numactl fuse3 libiscsi parted libpcap gettext lvm2 saphira-zfs-userspace libcap-ng libvirt-lxc"
+# qemu-virgl (2026-10-23): the GL split stays inside the libvirt
+# offering - a libvirt host is a GPU-capable virtualisation host, so
+# virgl/egl-headless travel with it while plain qemu stays lean. No
+# payload change (depends only). Sequencing note: qemu-virgl must be
+# published before libvirt's next rebuild, or resolve refuses (same
+# rule as the firmware meta) - qemu r10 is already queued ahead.
+depends="glib libnl libxml2 readline zlib curl openssl libtirpc gnutls json-c libbsd libxcrypt acl attr udev dnsmasq qemu qemu-virgl dmidecode nettle libtasn1 libunistring libpciaccess iproute2 nftables libapparmor libselinux libssh libssh2 numactl fuse3 libiscsi parted libpcap gettext lvm2 saphira-zfs-userspace libcap-ng libvirt-lxc"
 makedepends="
 	acl-dev
 	attr-dev

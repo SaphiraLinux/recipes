@@ -2,7 +2,10 @@
 # primary group valkey GID 116. Required by the shipped service units
 # (valkey.service User=valkey, valkey.initd command_user valkey:valkey).
 # UID 116 sits in the preferred 0..199 packaged range - never reuse it
-# for another identity. Data-directory mode 0750 mirrors recipe staging.
+# for another identity. Data-directory mode 0700: it holds private
+# runtime state, so the home is never relaxed to the 0755
+# home default (the reconciler converges ownership only on existing
+# homes; /var/log/valkey stays 0750 per the recipe).
 user valkey 116 valkey /var/lib/valkey /sbin/nologin
 group valkey 116
 dir /var/lib/valkey 0700 valkey valkey

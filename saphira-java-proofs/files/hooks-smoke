@@ -1,0 +1,16 @@
+#!/bin/sh
+# Runtime proof: the installed JRE runs the shipped JAR. Offline,
+# deterministic, fast (<2s proven): threads, SHA-256 provider and
+# jar-resource loading, ending in PROOF-OK. Runs in the daemon test
+# root AND on live hosts (same script, both install paths), so a
+# broken runtime fails the install loudly instead of shipping dead
+# bytes. Absolute paths only: hooks run under apk with minimal PATH.
+out=$(/usr/bin/java -jar /usr/share/java-proofs/app.jar 2>&1) || {
+	echo "ERROR: saphira-java-proofs runtime smoke failed:" >&2
+	echo "$out" >&2
+	return 1
+}
+case $out in
+*PROOF-OK*) ;;
+*) echo "ERROR: PROOF-OK missing from runtime smoke:" >&2; echo "$out" >&2; return 1 ;;
+esac

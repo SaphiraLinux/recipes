@@ -16,16 +16,17 @@ vendor=https://pkg.linbit.com/downloads/drbd/9/drbd-9.3.3.tar.gz
 sha256=a7bfb016070c31df1c738569ca8cc5e5fc337dd449147f7bf62e746d87d38f21
 
 # Per-kernel co-installable output. Build logic lives in
-# saphira-kernel/files/kmod-drbd.sh; the kernel tree comes from staged
-# /input (build-kmod-set.sh), the headers pin only provides host UAPI.
+# saphira-kernel/files/kmod-drbd.sh; the kernel tree is prepared
+# inside the worker (published config + sibling sources, no staging),
+# the headers pin only provides host UAPI.
 # New kernels: copy the nearest variant, set KVER_SHORT + headers pin
 # (see new-kmod-variant.sh).
 # Kernel identity is the line (KVER_SHORT), not the packaging revision:
-# the package name carries the kver, the build tree is the staged
-# /usr/src/linux-<kver> tree, and modules land under that KREL's extra/.
+# the package name carries the kver, the build tree is prepared inside
+# the worker, and modules land under that KREL's extra/.
 # -rN is packaging metadata and stays out of the ABI dependency policy;
 # rebuilds follow source/config/KREL changes (release process), and the
-# build-time staged-tree config gate enforces exact-tree builds.
+# build-time config gate enforces exact-tree builds.
 depends="kmod saphira-kernel-7.1.5"
 
 # Build secret contract: module signing is mandatory, never optional.
@@ -33,19 +34,27 @@ depends="kmod saphira-kernel-7.1.5"
 # not expose a readable /keys/module-signing.pem.
 saphira_sign_key_required=yes
 # saphira-linux-uapi-headers supplies host UAPI (single active line;
-# the build tree comes from staged /input). -rN never enters kmod deps.
+# the build tree is prepared inside the worker). -rN never enters kmod deps.
 # elfutils is a build-root input: the staged tree's prebuilt host tools
 # (objtool) link libelf.so.1, and the tree arrives built, not built here.
+# In-worker kernel prepare closure (unpack + modules_prepare):
+# the build no longer consumes staged /input.
 makedepends="
     bash
+    bc
     binutils
+    bison
     diffutils
+    elfutils
+    elfutils-dev
+    flex
     gawk
     gcc
+    m4
     make
+    openssl-dev
     patch
     perl
-    elfutils
     saphira-linux-uapi-headers
 "
 

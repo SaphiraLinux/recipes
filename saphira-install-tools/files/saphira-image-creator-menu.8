@@ -1,0 +1,59 @@
+.TH SAPHIRA-IMAGE-CREATOR-MENU 8 "October 2026" "Saphira Linux" "System Manager's Manual"
+.SH NAME
+saphira-image-creator-menu \- console menu for the USB image-creator appliance
+.SH SYNOPSIS
+.B saphira-image-creator-menu
+.SH DESCRIPTION
+The creator appliance boots into this menu instead of a login
+prompt. Its sole purpose is writing Saphira/SaphiraD destination systems
+to real disks (BIOS or UEFI; ext4 or ZFS root).
+.PP
+This menu never sets destination credentials, networking, or DNS. It
+writes a locked-root destination; ordinary
+.BR saphira-firstboot (8)
+owns the root password, user creation, networking, and DNS on the
+destination's first boot. Destination disks are chosen by stable
+.I /dev/disk/by-id/
+identifiers; mounted disks are refused.
+.PP
+The menu offers exactly four destination products:
+.BR "BIOS Saphira" ,
+.BR "UEFI Saphira" ,
+.BR "BIOS SaphiraD" ,
+and
+.BR "UEFI SaphiraD" .
+The engine's internal build-target matrix is not shown here; installer
+media and minimal rescue/test targets cannot be selected for a disk
+write.
+.PP
+This is a network-dependent creator: writing is refused unless
+.I packages.saphira.vm2.uk
+answers ping (IPv4 then IPv6, 3-second reply timeout each). Use
+.B Setup network
+(DHCP or static IPv4/IPv6 with DNS) first; a failed check returns to
+the main menu without touching any disk.
+.PP
+If the menu process fails repeatedly, systemd starts the local
+.B saphira-image-creator-recovery.service
+console on the same tty instead of leaving a dead screen. The recovery
+console is a local root shell; it does not enable SSH and does not set
+destination credentials. The ordinary installer menu stays masked on
+this appliance.
+.SH ENVIRONMENT
+.TP
+.B SAPHIRA_REPOSITORY
+Package repository used for destination installs (default:
+.IR https://packages.saphira.vm2.uk/hatched ).
+.TP
+.B SAPHIRA_CREATOR_DISK
+Skip device enumeration and use this path (test/operator override).
+.TP
+.B SAPHIRA_CREATOR_DIALOG
+Menu backend (default: dialog).
+.TP
+.B SAPHIRA_CREATOR_TTY
+Console device (default: /dev/tty1, falling back to /dev/console).
+.SH SEE ALSO
+.BR saphira-image (8),
+.BR saphira-install-menu (8),
+.BR saphira-firstboot (8)

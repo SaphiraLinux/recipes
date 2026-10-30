@@ -24,8 +24,17 @@ bad() { printf 'FAIL     %s\n' "$*" >&2; failures=$((failures + 1)); }
 
 printf '%s\n' '# ZFS is not in any clean-image profile'
 
+# Exempt by design: the image-creator appliance exists to create ZFS
+# systems, so its profile and the role-zfs layer carry the kmod and
+# userspace deliberately. The installer appliance is the same story
+# (dedicated installer, ZFS creation target). Every other profile
+# stays ZFS-free.
+zfs_exempt="image-creator-appliance image-installer-appliance role-zfs"
 for profile in "$profiles"/*; do
 	name=${profile##*/}
+	case " $zfs_exempt " in
+	*" $name "*) ok "$name carries ZFS deliberately (creator tooling)" ;;
+	*)
 	# Every line of a profile is either a comment or a package intention.
 	if /usr/bin/grep -q '^saphira-zfs' "$profile"; then
 		bad "$name seeds a ZFS package"
@@ -34,6 +43,8 @@ for profile in "$profiles"/*; do
 	else
 		ok "$name is ZFS-free"
 	fi
+		;;
+	esac
 done
 
 printf '%s\n' '# firstboot is not a boot-time special'
@@ -96,10 +107,16 @@ else
 	else
 		ok 'the firstboot unit keeps systemd default dependencies'
 	fi
+	# Transaction separation (2026-10-23): fhs-converge completes
+	# before sysinit.target while firstboot starts after basic.target,
+	# so transaction order already separates them by a full boot phase.
+	# A direct edge from this multi-user-gated unit back into a sysinit
+	# unit adds no ordering and is the shape that turns healthy
+	# orderings into reported transaction cycles: it must stay out.
 	if /usr/bin/grep -q 'saphira-fhs-converge' "$unit"; then
-		ok 'the firstboot unit is ordered after the layout migration'
+		bad 'the firstboot unit names saphira-fhs-converge (cross-transaction edge)'
 	else
-		bad 'the firstboot unit does not order after saphira-fhs-converge'
+		ok 'the firstboot unit leaves the layout migration to transaction order'
 	fi
 fi
 

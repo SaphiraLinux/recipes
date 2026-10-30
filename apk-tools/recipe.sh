@@ -8,7 +8,9 @@ pkgver=3.0.5
 # zstd-dev was already a makedepend, so every build linked it while
 # no closure ever installed it - proven by a 0.2.1 guest whose apk
 # died at exec with libzstd.so.1 missing).
-pkgrel=5
+pkgrel=6
+# r6: Saphira display patch for the .apk-new diagnostic (absolute
+# target-root path in the message; install/config behavior untouched).
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='Alpine/saphira package manager (apk-tools 3) - Genesis base'
 license='GPL-2.0-or-later'
@@ -36,6 +38,11 @@ recipe_build() {
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$RECIPE_DIR/files/apk-tools-3.0.5.tar.gz"
 	cd "$SRC"
 	echo "$apk_tools_sha256  $RECIPE_DIR/files/apk-tools-3.0.5.tar.gz" | sha256sum -c -
+	# Saphira display policy: the .apk-new diagnostic names the
+	# installation destination as an absolute path (target-root
+	# relative; the leading slash describes the path inside the
+	# target root). Display only: install/config behavior untouched.
+	patch -p1 < "$RECIPE_DIR/files/saphira-apknew-display-path.patch"
 	meson setup build . \
 		--prefix=/usr \
 		-Dlibdir=lib \

@@ -127,7 +127,28 @@ run_pkg()
 			if [ -f "$ROOT/$pkg/files/$base" ]; then
 				printf 'present %s %s\n' "$pkg" "$base"
 			else
-				printf 'MISSING %s %s %s\n' "$pkg" "$base" "$url"
+				# Converted-recipe idiom: the URL basename is not a
+				# usable filename (e.g. SourceForge .../download), so
+				# the recipe reads $RECIPE_DIR/files/<realname>
+				# directly with a sha256 check. Accept any files/
+				# archive that verifies against THIS pair's sha: same
+				# bytes guarantee, no weakening (the default path is
+				# untouched; a same-sha match is strictly stronger
+				# than the presence-only check above).
+				ref=""
+				for f in "$ROOT/$pkg/files"/*; do
+					[ -f "$f" ] && [ ! -L "$f" ] || continue
+					case $f in *.sha256) continue ;; esac
+					if printf '%s  %s\n' "$sha" "$f" | sha256sum -c - >/dev/null 2>&1; then
+						ref=${f##*/}
+						break
+					fi
+				done
+				if [ -n "$ref" ]; then
+					printf 'present %s %s (vendored as %s)\n' "$pkg" "$base" "$ref"
+				else
+					printf 'MISSING %s %s %s\n' "$pkg" "$base" "$url"
+				fi
 			fi
 		else
 			fetch_one "$pkg" "$url" "$sha" || printf 'FAILED %s\n' "$pkg" >> "$ROOT/.fetch-failed.$$"

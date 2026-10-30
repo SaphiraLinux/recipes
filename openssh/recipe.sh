@@ -2,7 +2,13 @@
 
 pkgname=openssh
 pkgver=10.6_p1
-pkgrel=5
+pkgrel=7
+# r6: sshd -t gates the start (2026-10-23: a corrupt mldsa44 host-key
+# pair, broken since 2026-10-17 while the type was never served, failed
+# validation while sshd started degraded -- the check logged but did not
+# gate. start_pre now returns 1 on -t failure; proven by the corrupt-key
+# case in tests/sshd-hostkeys.sh. Existing keys are never regenerated,
+# only missing types (ssh-keygen -A unchanged). Payload change.
 # r5: login accounting via libc headers, not configure overrides
 # (2026-10-23, proven by r4: CONF_WTMP/CONF_UTMP/CONF_LASTLOG defines
 # are DEAD whenever libc headers define the macros -- openssh defines.h
@@ -127,13 +133,19 @@ recipe_install()
 	# neutering. This asserts the linked result in the payload, not a
 	# config.h intermediate that the headers can silently override --
 	# an assert in recipe_build runs before install stages anything.
+	# NOTE: never `strings ... | grep -Fq` over a large binary here:
+	# grep -q quits at the first match, strings then dies on SIGPIPE,
+	# and under set -o pipefail the pipeline reports failure despite
+	# the match (proven 2026-10-23: grep -c said 1 while -q missed on
+	# the same file). grep -c consumes the whole stream, so no writer
+	# is ever cut off and the result is deterministic.
 	for needle in /var/log/wtmp /var/log/lastlog; do
-		strings -a "$PKGDEST/usr/lib/ssh/sshd-session" | grep -Fq "$needle" || {
+		[ "$(strings -a "$PKGDEST/usr/lib/ssh/sshd-session" | grep -F -c "$needle")" -gt 0 ] || {
 			echo "ERROR: sshd-session omits $needle (libc accounting headers?)" >&2
 			return 1
 		}
 	done
-	if strings -a "$PKGDEST/usr/lib/ssh/sshd-session" | grep -Fq '/dev/null/wtmp'; then
+	if [ "$(strings -a "$PKGDEST/usr/lib/ssh/sshd-session" | grep -F -c '/dev/null/wtmp')" -gt 0 ]; then
 		echo "ERROR: sshd-session references /dev/null/wtmp" >&2
 		return 1
 	fi

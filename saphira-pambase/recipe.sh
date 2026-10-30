@@ -2,7 +2,14 @@
 
 pkgname=saphira-pambase
 pkgver=1.0
-pkgrel=3
+pkgrel=4
+# r4: nproc ceiling 2048 -> 8192. The old comment claimed build
+# workers were unaffected by the cap; wrong - NPROC accounts per
+# uid system-wide regardless of namespaces, and the builder daemon
+# runs as smalley, so parallel builds starved interactive shells
+# sharing the uid (operator fork failures, 2026-10-26). The guard
+# intent (fork-bomb cap) is preserved, sized for a many-vCPU build
+# controller. Payload change.
 # r3: /etc/security/namespace.conf (empty default is MANDATORY:
 # pam_namespace fails closed when its config is missing, and
 # systemd-user/run0 call it as required - every logind session

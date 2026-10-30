@@ -534,6 +534,15 @@ class Planner:
         node.required_outputs.add(output)
         self.output_producers[output] = recipe.producer
         self.repository_choices.pop(output, None)
+        if consumer == recipe.producer:
+            # Self-hosting through a fresh split output (e.g. lvm2 on
+            # lvm2-libs with no published copy): the current build
+            # produces it, so there is no recursion and no ordering
+            # edge. required_outputs above still records the split, and
+            # the version check above still ran. Generalizes the
+            # trusted-repository self-hosting case in _require, which
+            # only fires when a published copy exists to grab.
+            return recipe.producer
         if consumer and consumer != recipe.producer:
             self.builds[consumer].build_dependencies.add(recipe.producer)
         state = self.state.get(recipe.producer)

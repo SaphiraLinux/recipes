@@ -1,0 +1,34 @@
+#!/sbin/openrc-run
+
+description="Read-only build queue dashboard (default 172.16.7.5:8899; override in /etc/conf.d/saphira-build-dashboard)"
+
+# The dashboard binds the unprivileged port 8899 and only reads the
+# world-readable queue database, so it starts directly as its own
+# identity: no root phase, nothing to drop.
+#
+# Bind/port/db are machine configuration, not package content: OpenRC
+# sources /etc/conf.d/saphira-build-dashboard when the admin creates
+# it (the package deliberately does NOT ship one, so a fresh install
+# never papers over the admin's choice and updates never fight it).
+# Defaults preserve the packaged Egg behavior byte for byte.
+command="/usr/sbin/saphira-build-dashboard"
+command_args="--bind ${SAPHIRA_BUILD_DASHBOARD_BIND:-172.16.7.5} --port ${SAPHIRA_BUILD_DASHBOARD_PORT:-8899} --db ${SAPHIRA_BUILD_DASHBOARD_DB:-/var/lib/saphira-build/queue.db}"
+command_user="dashboard:dashboard"
+supervisor="supervise-daemon"
+pidfile="/run/saphira-build-dashboard.pid"
+
+depend()
+{
+	need localmount
+	use net
+	after firewall
+}
+
+start_pre()
+{
+	# Fail with a clear cause instead of serving 500s: without the
+	# queue database there is nothing to observe. (Runs as root, so
+	# this guards absence, not the service user's read access; the
+	# database ships world-readable.)
+	test -r /var/lib/saphira-build/queue.db || return 1
+}

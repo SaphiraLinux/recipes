@@ -591,6 +591,20 @@ class Transaction:
         self.holder_pid: int | None = None
         self.last_stdout = ""
         self.last_stderr = ""
+        # Build timings (additive observability only - never affects the
+        # outcome): monotonic clock from Transaction creation, flushed to
+        # timings.json by succeed() (before the workspace is removed) and
+        # by fail() (while it is retained). The saphira-build daemon reads
+        # the copy mirrored to $SAPHIRA_TIMINGS_DIR into queue.db; manual
+        # runs keep the workspace copy alone.
+        self.t_start = time.monotonic()
+        self.timings: dict[str, object] = {
+            "schema": "saphira-build-timings/v1",
+            "target": target,
+            "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "phases": {},
+            "builds": {},
+        }
         # Set once this run has created (or recreated) its workspace in
         # prepare(): fail() must never bless a pre-existing unmarked
         # workspace it did not create (e.g. a prepare-time collision).
@@ -694,6 +708,20 @@ class Transaction:
             build_log = self.workspace / "logs" / "buildpkg.log"
             if build_log.is_file():
                 where = f"; full output: {build_log}"
+            # Surface the underlying diagnostic the way the resolver
+            # refusal below does: a bare rc forces the operator to open
+            # the log to learn even which guard fired (proven: an
+            # identity refusal hid behind "package stage failed (rc=1)"
+            # and sent the operator hunting). Last stderr line first
+            # (conventional error channel), stdout fallback, truncated
+            # for terminal sanity; empty output keeps the old message.
+            detail = ""
+            for chunk in (exc.stderr, exc.stdout):
+                if chunk and chunk.strip():
+                    detail = chunk.strip().splitlines()[-1][:500]
+                    break
+            if detail:
+                die(f"{self.target}: {stage} stage failed (rc={exc.returncode}): {detail}{where}")
             die(f"{self.target}: {stage} stage failed (rc={exc.returncode}){where}")
         self.last_stdout = result.stdout or ""
         self.last_stderr = result.stderr or ""
@@ -870,10 +898,74 @@ class Transaction:
         builds = plan.get("builds")
         if not isinstance(builds, list) or not builds or builds[-1].get("target") is not True:
             die("resolver plan does not build the requested producer last")
+        self.check_plan_identities(plan)
         with self.plan_path.open("x", encoding="utf-8") as stream:
             json.dump(plan, stream, sort_keys=True, separators=(",", ":"))
             stream.write("\n")
         return plan
+
+    def check_plan_identities(self, plan: dict[str, object]) -> None:
+        """Plan-phase identity gate: every accounts.d user/group identity
+        declared anywhere in the build closure must be registered in
+        accounts.tsv with the same ID. Base producer names only: plan
+        nodes carry versions alongside, but no NVR ever enters an
+        identity comparison (r1/r2/r999 reference one allocation).
+        Unregistered or divergent declarations fail the plan before any
+        build starts; makepkg re-enforces the identical rule at build
+        time, and the signer at publish time (defense in depth, one
+        rule). The TSV loader mirrors makepkg's canonical version."""
+        root = Path(self.config.get("SAPHIRA_RECIPE_ROOT", "/recipes"))
+        tsv_path = root / "saphira-baselayout/files/accounts.tsv"
+        try:
+            text = tsv_path.read_text(encoding="utf-8")
+        except OSError:
+            die(f"cannot read identity registry for plan check: {tsv_path}")
+            raise AssertionError("unreachable")
+        registry: dict[tuple[str, str], str] = {}
+        for lineno, raw in enumerate(text.splitlines(), 1):
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split("\t")
+            if len(parts) < 7 or parts[1] not in ("user", "group"):
+                die(f"identity registry {tsv_path}:{lineno}: malformed row")
+            registry[(parts[1], parts[0])] = parts[2]
+        for node in plan.get("builds", []):
+            if not isinstance(node, dict):
+                continue
+            producer = node.get("producer", "?")
+            recipe_path = Path(str(node.get("recipe", "")))
+            if not recipe_path.is_absolute():
+                recipe_path = root / recipe_path
+            fragdir = recipe_path.parent / "files/accounts.d"
+            if not fragdir.is_dir():
+                continue
+            for frag in sorted(fragdir.iterdir()):
+                if not frag.is_file() or frag.name.endswith(".legacy"):
+                    continue
+                try:
+                    frag_text = frag.read_text(encoding="utf-8")
+                except OSError:
+                    die(f"cannot read account fragment for plan check: {frag}")
+                    raise AssertionError("unreachable")
+                for frag_lineno, frag_raw in enumerate(frag_text.splitlines(), 1):
+                    frag_line = frag_raw.strip()
+                    if not frag_line or frag_line.startswith("#"):
+                        continue
+                    parts = frag_line.split()
+                    kind = parts[0]
+                    if kind == "user" and len(parts) >= 4:
+                        key, ident = ("user", parts[1]), parts[2]
+                    elif kind == "group" and len(parts) >= 3:
+                        key, ident = ("group", parts[1]), parts[2]
+                    else:
+                        continue
+                    if key not in registry:
+                        die(f"plan refused: {producer} declares unregistered identity "
+                            f"{key[0]} '{key[1]}' (no accounts.tsv row; register the allocation first)")
+                    if registry[key] != ident:
+                        die(f"plan refused: {producer} declares {key[0]} '{key[1]}' as {ident} "
+                            f"but accounts.tsv assigns {registry[key]} (assignments are immutable)")
 
     def _module_key_options(self) -> list[str]:
         # Canonical module signing key, exposed read-only at a fixed
@@ -1318,6 +1410,16 @@ class Transaction:
                 # masquerade bin dir hides it from its own PATH search.
                 "--setenv", "CCACHE_PATH", "/usr/bin",
                 "--setenv", "CCACHE_COMPILERCHECK", "content",
+                # Kernel/kmod builds recompile thousands of files in fresh
+                # workspaces: absolute paths in preprocessed output would
+                # defeat the cache on every retry. Rewrite the in-namespace
+                # build root to relative and ignore macro/mtime noise that
+                # cannot change the object (headers are still hashed by
+                # content; /build is the only rewritten base, so system
+                # paths stay exact).
+                "--setenv", "CCACHE_BASEDIR", "/build",
+                "--setenv", "CCACHE_SLOPPINESS",
+                "file_macro,include_file_ctime,include_file_mtime,time_macros",
             ]
         # Verified-source cache: host-persistent, content-addressed by
         # sha256. Bound read-write at a top-level namespace path (same
@@ -1488,8 +1590,10 @@ class Transaction:
                 for done in completed_nodes:
                     self.install_local_outputs(done)
             self.log(f"BUILD {producer} {node['version']}")
+            t_node = time.monotonic()
             self.run_worker(producer, top_target=bool(node["target"]))
             receipt = self.package(producer)
+            self.timings["builds"][producer] = round(time.monotonic() - t_node, 3)
             receipts.append(receipt)
             completed_nodes.append(node)
             if not node["target"]:
@@ -1867,6 +1971,32 @@ class Transaction:
         if self.workspace.is_dir() or self.workspace.is_symlink():
             _remove_workspace_tree(self.build_root, self.workspace)
 
+    def write_timings(self) -> None:
+        """Persist per-phase timings.json beside plan.json, plus a copy to
+        $SAPHIRA_TIMINGS_DIR when the caller names one (the saphira-build
+        daemon passes its per-build log dir; the finish path ingests the
+        copy into queue.db). Best-effort I/O only: a timings write must
+        never fail a build. Phases/builds entries are filled by main()
+        and build(); absent entries simply mean that phase never ran."""
+        self.timings["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        self.timings["total_s"] = round(time.monotonic() - self.t_start, 3)
+        try:
+            text = json.dumps(self.timings, indent=2, sort_keys=True) + "\n"
+        except (TypeError, ValueError):
+            return
+        try:
+            if self.workspace.is_dir():
+                (self.workspace / "timings.json").write_text(text, encoding="utf-8")
+        except OSError:
+            pass
+        timings_dir = os.environ.get("SAPHIRA_TIMINGS_DIR", "")
+        if timings_dir:
+            try:
+                Path(timings_dir).mkdir(parents=True, exist_ok=True)
+                (Path(timings_dir) / "timings.json").write_text(text, encoding="utf-8")
+            except OSError:
+                pass
+
     def fail(self, message: str) -> None:
         # Release the overlay holder first: the workspace (logs, plan,
         # upper/work, holder record, recovery notes) is retained for
@@ -1893,8 +2023,10 @@ class Transaction:
             # Cap stale history at the newest ONE sibling: the live FAILED
             # workspace stays the newest diagnostic per package.
             self._purge_stale_siblings(keep_newest=1)
+        self.write_timings()
 
     def succeed(self) -> None:
+        self.write_timings()
         self.stop_overlay()
         if self.log_stream and not self.log_stream.closed:
             self.log_stream.close()
@@ -2186,7 +2318,9 @@ def main() -> int:
         transaction.prepare()
         transaction.start_overlay()
         try:
+            t_resolve = time.monotonic()
             plan = transaction.resolve()
+            transaction.timings["phases"]["resolve_s"] = round(time.monotonic() - t_resolve, 3)
         except (BuildError, OSError, ValueError, json.JSONDecodeError) as exc:
             # Resolve/plan-validation refusal before any build step began:
             # not a failed build, so leave no diagnostic workspace behind.
@@ -2196,10 +2330,18 @@ def main() -> int:
             print(f"buildpkg: {exc}", file=sys.stderr)
             print("buildpkg: pre-build refusal; workspace removed, no diagnostic retained",
                   file=sys.stderr)
-            return 1
+            # Distinct exit code: a refusal never built anything, so it
+            # must never read as a failed build downstream (queue
+            # attempt class, dashboards, SBU math). Message text above
+            # is unchanged; only the code distinguishes.
+            return 2
+        t_phase = time.monotonic()
         transaction.install_repository_requirements(plan)
+        transaction.timings["phases"]["install_requirements_s"] = round(time.monotonic() - t_phase, 3)
         receipts = transaction.build(plan)
+        t_phase = time.monotonic()
         ready_paths = transaction.promote(receipts, plan)
+        transaction.timings["phases"]["promote_s"] = round(time.monotonic() - t_phase, 3)
         transaction.succeed()
         for ready in ready_paths:
             print(f"buildpkg: unsigned artifacts ready at {ready}")

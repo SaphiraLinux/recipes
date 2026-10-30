@@ -1,0 +1,20 @@
+# cupsd service identity (canonical, fixed): user lp, UID 179;
+# primary group lp, GID 8 (seed-owned classic printer group: the
+# declaration is identical to accounts.tsv and converges).
+# UID 179 is the first free ID above 178 dashboard: accounts.tsv
+# carries nothing at 179-199 and no tree fragment claims one -
+# verified before assigning; never reuse it for another identity.
+# lpadmin (GID 180) is the cupsd SystemGroup (--with-system-groups):
+# print administrators, empty by default, operator-managed.
+# cupsd starts as root (binds 631, owns /etc/cups) and drops to lp
+# itself, so no supplementary groups and no root-phase helpers.
+# Home is /var/empty (locked-daemon convention); all spool, cache,
+# log and run state is declared below and created at install time.
+user lp 179 lp /var/empty /sbin/nologin
+group lp 8
+group lpadmin 180
+dir /var/spool/cups 0755 lp lp
+dir /var/spool/cups/tmp 0755 lp lp
+dir /var/cache/cups 0755 lp lp
+dir /var/log/cups 0755 lp lp
+dir /var/run/cups 0755 lp lp

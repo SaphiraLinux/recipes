@@ -1524,9 +1524,20 @@ def check_union(tsv_users: dict[str, int], tsv_groups: dict[str, int],
                 errors.append(f"group {name}: {owner} declares reserved foundation identity")
             elif gid > max_id:
                 errors.append(f"group {name}: {owner} GID {gid} is outside the packaged range 0..{max_id}")
+            elif owner.startswith("staged:") and name not in tsv_groups:
+                errors.append(f"group {name}: {owner} has no registry row in the effective accounts.tsv "
+                              f"(host base plus staged saphira-baselayout if any): register the allocation "
+                              f"via saphira-baselayout first, or upgrade the signer host base and re-run")
             elif name in tsv_groups:
                 if tsv_groups[name] != gid:
                     errors.append(f"group {name}: {owner} GID {gid} conflicts with base seed GID {tsv_groups[name]}")
+                elif name in groups and groups[name][0] != owner:
+                    errors.append(f"group {name}: claimed by {groups[name][0]} and {owner}")
+                elif gid in gids and gids[gid] != (owner, name):
+                    errors.append(f"GID {gid}: {owner} group {name} collides with {gids[gid][0]} group {gids[gid][1]}")
+                else:
+                    groups[name] = (owner, gid)
+                    gids[gid] = (owner, name)
             elif name in groups:
                 errors.append(f"group {name}: claimed by {groups[name][0]} and {owner}")
             elif gid in tsv_groups.values():
@@ -1548,11 +1559,22 @@ def check_union(tsv_users: dict[str, int], tsv_groups: dict[str, int],
                 errors.append(f"user {name}: {owner} primary group {primary} is a reserved foundation group")
             elif uid > max_id:
                 errors.append(f"user {name}: {owner} UID {uid} is outside the packaged range 0..{max_id}")
+            elif owner.startswith("staged:") and name not in tsv_users:
+                errors.append(f"user {name}: {owner} has no registry row in the effective accounts.tsv "
+                              f"(host base plus staged saphira-baselayout if any): register the allocation "
+                              f"via saphira-baselayout first, or upgrade the signer host base and re-run")
             elif name in tsv_users:
                 if tsv_users[name] != uid:
                     errors.append(f"user {name}: {owner} UID {uid} conflicts with base seed UID {tsv_users[name]}")
                 elif primary not in tsv_groups and primary not in own_groups:
                     errors.append(f"user {name}: {owner} primary group {primary} is neither base-seeded nor declared in the same fragment")
+                elif name in users and users[name][0] != owner:
+                    errors.append(f"user {name}: claimed by {users[name][0]} and {owner}")
+                elif uid in uids and uids[uid] != (owner, name):
+                    errors.append(f"UID {uid}: {owner} user {name} collides with {uids[uid][0]} user {uids[uid][1]}")
+                else:
+                    users[name] = (owner, uid)
+                    uids[uid] = (owner, name)
             elif name in users:
                 errors.append(f"user {name}: claimed by {users[name][0]} and {owner}")
             elif uid in tsv_users.values():
@@ -2200,6 +2222,13 @@ def gate_staged(conn: sqlite3.Connection, apk_bin: str, staged_accounts_path: st
         notices.append(f"no TSV reservations and no declarations; account gate skipped ({tsv_path} absent)")
     else:
         tsv_users, tsv_groups = tsv_parsed
+        # No staged-baselayout overlay by design: APK v3 payloads are ADB
+        # object containers, not extractable tars, and the two-step
+        # minting process already orders base-before-package (base
+        # publishes first, the signer host upgrades, then the dependent
+        # wave signs). A staged name absent below therefore means the
+        # host base is older than the staged build base: the refusal
+        # message says exactly that, with the remedy.
         # A staged successor supersedes its repo-newest declaration in the
         # union check (mirrors the file gate's newer-or-novel merge):
         # without this, the first upgrade of any identity-declaring

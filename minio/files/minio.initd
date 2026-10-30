@@ -1,0 +1,31 @@
+#!/sbin/openrc-run
+
+description="MinIO S3-compatible object storage (isolated instances)"
+
+command="/usr/sbin/minio"
+# Defaults serve a single-drive standalone instance for testing.
+# MINIO_ROOT_USER and MINIO_ROOT_PASSWORD have NO defaults: set them
+# in /etc/conf.d/minio (see /usr/share/doc/minio/minio.confd.example)
+# or the service refuses to start. Never ship credentials in the unit.
+: ${MINIO_VOLUMES:=/var/lib/minio}
+: ${MINIO_ADDRESS:=:9000}
+: ${MINIO_CONSOLE_ADDRESS:=:9001}
+: ${MINIO_CALLHOME:=off}
+command_args="server $MINIO_VOLUMES --address $MINIO_ADDRESS --console-address $MINIO_CONSOLE_ADDRESS $MINIO_OPTS"
+command_user="minio:minio"
+supervisor="supervise-daemon"
+
+depend()
+{
+	use net logger
+	after firewall
+}
+
+start_pre()
+{
+	checkpath -d -m 0750 -o minio:minio /var/lib/minio
+	if [ -z "$MINIO_ROOT_USER" ] || [ -z "$MINIO_ROOT_PASSWORD" ]; then
+		eerror "MINIO_ROOT_USER/MINIO_ROOT_PASSWORD unset (see /usr/share/doc/minio/minio.confd.example)"
+		return 1
+	fi
+}

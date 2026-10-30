@@ -14,7 +14,59 @@
 # only package intentions, per saphira-profiles(5)) and is optional.
 pkgname=saphira-image-creator
 pkgver=0.1
-pkgrel=26
+pkgrel=39
+# r39: layout options (--boot-size honored on ext4 with a separate
+# /boot, --swap-size with swap-last partitioning and fstab, --earlyfw
+# strict opt-in with a persistent marker), computed partition
+# numbering (no hardcoded positions), mkswap prerequisite. Payload
+# change (tool).
+# r38: installer-appliance network default as tool data (not a second
+# owner of saphira-network's /usr/lib path): the appliance profile
+# excludes saphira-network, so the image writes this copy to
+# /etc/systemd/network for that profile only. Payload change (data).
+# r37: ESP fstab nofail pass 0, settle mask on the appliance.
+# Payload change (tool).
+# r36: ESP fstab append, disk ESP fix, empty root + SSH guard for the
+# creator appliance, systemd installer appliance (unit enablement,
+# firstboot exemptions, marker swap). Payload change (tool).
+# r35: boot_device_for covers hybrid (p1 bios-boot): hybrid image
+# r34: usb-installer-appliance hybrid/openrc target (appliance-only
+# hybrid exception), installer-appliance init branch, firstboot
+# exemption for that profile. Payload change (matrix, tool).
+# r33: usb-creator appliance target (BIOS/openrc menu appliance) plus
+# r32: early-firmware generation in image/disk finalize (2026-10-23):
+# shared generate_earlyfw helper runs before grub-mkconfig on both
+# paths (hooks never fire under --no-scripts assembly). Payload
+# change (tool).
+# r31: product-specific default hostname (2026-10-23): unnamed
+# systemd installs identify as saphirad, OpenRC as saphira, via
+# default_hostname(). Payload change (tool + man page).
+# r30: hoist shared helpers to top level (2026-10-23, SEV boot
+# defect): fix_kernel_cmdline, prepare_installer,
+# build_installer_initramfs and finalize_bootloader were defined
+# inside cmd_build, so they registered only when the image path ran
+# and every disk install died with "command not found" at the first
+# shared call while image builds worked. Locked by the register-on-
+# parse check in saphira-packager/tests/image-creator.sh. Payload
+# change (tool).
+# r29: wipe old signatures before partitioning on the disk path
+# (2026-10-23): sfdisk rewrites the table but stale superblocks/RAID
+# metadata survive to confuse probing or stall for confirmation.
+# wipefs -a runs after the typed confirmation, whole confirmed device
+# only; wipefs joins the pre-flight tool checks. Payload change.
+# r28: install-to-disk repairs (2026-10-23, proven against /dev/sda):
+# util-linux blockdev takes `command device' with no `--' separator
+# (validate_device probed sizes wrong on every disk -- constrain the
+# spelling to /dev/* instead); the disk path never set PLAN_BUFFER so
+# previews printed empty plans, and the piped preview swallowed plan
+# failures. Payload change (tool).
+# r27: configurable ESP/root sizing (2026-10-23): --esp-size from the
+# 64/128/256/512/768/1024 MiB ladder (default 64, FAT32 always),
+# --root-size for an exact root, --allocate on the install-to-disk
+# path. Refusals (not silent resizes) for over-budget combinations,
+# hoisted out of the piped plan emitter where die was swallowed
+# (proven: an 80M plan printed "too small" and exited 0). Payload
+# change (tool + man page).
 # r26: hybrid usb-installer target (bios-boot + ESP + installer root,
 # both GRUB loaders, ram-mode initramfs, menu service on, firstboot
 # off). One medium boots both firmwares into the installer menu; the
@@ -209,6 +261,11 @@ recipe_build()
 		echo "ERROR: saphira-image does not parse" >&2
 		return 1
 	}
+	cmp -s "$SAPHIRA_RECIPE_ROOT/saphira-network/files/systemd-network/80-saphira-wired-dhcp.network" \
+		"$RECIPE_DIR/files/systemd-network/80-saphira-wired-dhcp.network" || {
+		echo "ERROR: appliance network default drifted from saphira-network" >&2
+		return 1
+	}
 }
 
 recipe_install()
@@ -217,6 +274,12 @@ recipe_install()
 		"$PKGDEST/usr/bin/saphira-image"
 	install -D -m 0644 "$RECIPE_DIR/files/targets" \
 		"$PKGDEST/usr/share/saphira/image/targets"
+	# Appliance-local wired DHCP default. This is TOOL DATA, not a
+	# second package owner of saphira-network's /usr/lib path: the
+	# image installs it to /etc/systemd/network for the appliance
+	# profile only. Content must match saphira-network's default.
+	install -D -m 0644 "$RECIPE_DIR/files/systemd-network/80-saphira-wired-dhcp.network" \
+		"$PKGDEST/usr/share/saphira/image/systemd-network/80-saphira-wired-dhcp.network"
 	# Package -> init services mapping. OPTIONAL data: absent means every
 	# service is named after its package, which is the normal case. It
 	# exists because that assumption is not universal - saphira-packager

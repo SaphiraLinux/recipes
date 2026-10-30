@@ -1,0 +1,10 @@
+#!/bin/sh
+# Regenerate the boot configuration after this package changes /boot.
+# Same contract as the kernel's hook: GRUB absent is a legitimate
+# no-op, GRUB present but failing is loud (the package still commits).
+# Installing intel-ucode alone does NOT activate microcode: activation
+# is the initrd line this regeneration writes plus a reboot. Absolute
+# paths only: hooks run under apk with a minimal PATH.
+if [ -x /usr/sbin/grub-mkconfig ]; then
+	/usr/sbin/grub-mkconfig -o /boot/grub/grub.cfg
+fi

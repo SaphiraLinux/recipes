@@ -1,0 +1,26 @@
+[Unit]
+Description=Saphira image creator appliance menu (text UI on tty1)
+Documentation=man:saphira-image-creator-menu(8)
+After=local-fs.target systemd-udevd.service systemd-networkd.service systemd-resolved.service systemd-user-sessions.service
+Wants=systemd-networkd.service systemd-resolved.service
+Conflicts=getty@tty1.service
+Before=getty.target
+StartLimitIntervalSec=60
+StartLimitBurst=3
+OnFailure=saphira-image-creator-recovery.service
+
+[Service]
+Type=simple
+Environment=TERM=linux
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+StandardInput=tty
+StandardOutput=tty
+StandardError=journal
+ExecStart=/usr/bin/saphira-image-creator-menu
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

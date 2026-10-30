@@ -106,4 +106,25 @@ after=$(cd "$work/ssh" && sha256sum ssh_host_* | sort)
 [ "$before" = "$after" ] || fail 'second start changed host keys'
 ok 'second start leaves key hashes unchanged'
 
+# 5. a corrupt host key fails start_pre (SEV 2026-10-23: sshd -t must
+# gate the start, never merely log while sshd starts degraded).
+mkdir -p "$work/ssh-bad" || fail 'cannot create bad-key scratch'
+cp -a "$work"/ssh/ssh_host_* "$work/ssh-bad/" || fail 'cannot copy keys'
+printf 'corrupt\n' > "$work/ssh-bad/$(cd "$work/ssh-bad" && ls *_key.pub | head -1)" ||
+	fail 'cannot corrupt scratch key'
+cat > "$work/bad-runner.sh" <<EOF
+#!/bin/sh
+mount --bind "$work/ssh-bad" /etc/ssh || exit 1
+mount -t tmpfs tmpfs /run || exit 1
+mount --bind "$work/empty" /var/empty || exit 1
+. "$functions"
+. "$initd"
+start_pre
+EOF
+chmod 0755 "$work/bad-runner.sh"
+if unshare -rm "$work/bad-runner.sh" >/dev/null 2>&1; then
+	fail 'start_pre succeeded with a corrupt host key (sshd -t must gate the start)'
+fi
+ok 'corrupt host key fails start_pre'
+
 printf 'sshd-hostkeys: OK (%s checks)\n' "$checks"

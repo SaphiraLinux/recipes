@@ -19,9 +19,14 @@ depends="
     python3
 "
 
+# setuptools is load-bearing: pip runs with --no-build-isolation, so it
+# imports setuptools.build_meta from the build root itself. Without it
+# the install dies with BackendUnavailable (proven by the gpsd-closure
+# scons build failure, which never published scons).
 makedepends="
     python3
     python3-pip
+    setuptools
 "
 
 recipe_build()

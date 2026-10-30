@@ -56,13 +56,49 @@ build options:
                       cover about 12.8G. Omitted, the partitions occupy
                       the whole capacity, which is the historical
                       behaviour.
+  --esp-size MIB      ESP capacity in MiB: one of 64, 128, 256, 512,
+                      768, 1024 (default 64). Below 64 is refused: FAT32
+                      needs at least 65,525 data clusters, so a smaller
+                      ESP cannot be valid FAT32. Larger sizes suit
+                      Windows coexistence and UKIs.
+  --root-size SIZE    exact root partition capacity (MiB/GiB/TiB, 1MiB
+                      aligned, at least 32MiB). Omitted, root fills the
+                      allocation. With --allocate, root plus the fixed
+                      partitions must fit inside it; nothing is resized
+                      silently, over-budget combinations are refused.
+                      Under --rootfs zfs this sizes the pool partition;
+                      /boot is sized by --boot-size.
+  --rootfs FS         root filesystem: ext4 (default) or zfs. A zfs
+                      root is a pool with a separate ext4 /boot (GRUB
+                      reads files, never pool features); the target
+                      must carry the ZFS kmod and userspace (add
+                      --role role-zfs or an equivalent profile).
+                      Hybrid boot with zfs is refused.
+  --pool NAME         ZFS pool name (default tank). Refused when a pool
+                      of that name already exists on the building host.
+  --boot-size MIB     ext4 /boot capacity for zfs roots in MiB: one of
+                      128, 256 (default), 512, 1024. For ext4 roots a
+                      separately partitioned /boot is created only when
+                      this flag is given explicitly; omitted, /boot
+                      stays a directory on the root filesystem.
+  --swap-size SIZE    swap partition capacity (MiB/GiB/TiB, 1MiB
+                      aligned, at least 32MiB), placed last. Omitted,
+                      no swap partition is created. Formatted at build
+                      time; activated by the installed fstab, never
+                      here.
+  --earlyfw           build early-firmware boot images
+                      (earlyfw-<release>.img) into /boot. Opt-in only:
+                      omitted, no firmware images are generated even
+                      when saphira-earlyfw is installed, and later
+                      kernel/firmware upgrades do not regenerate them.
   --arch ARCH         target architecture: x86_64 (default) or aarch64.
                       Selects the repository's architecture, the packages
                       installed into the image, and the bootloader target
                       platform. Refused for combinations the platform does
                       not have, such as BIOS on aarch64.
   --repository PATH   repository index/Packages.adb to install from
-  --hostname NAME     hostname written into the image (default saphira)
+  --hostname NAME     hostname written into the image (default saphira
+                      on OpenRC targets, saphirad on systemd targets)
   --root-password PW  set the root password in the image
   --netconf LIST    comma-separated IFACE:MODE (dhcp|off) written as
                     /etc/saphira-network.d/10-image-IFACE.conf; empty
@@ -77,14 +113,33 @@ build options:
   --keep-work         retain the scratch workspace for diagnosis
 
 install-to-disk options:
-  --target NAME       one of the eight matrix targets
+  --target NAME       one of the matrix targets (see list-targets)
   --device DEV        whole-disk block device to install onto
                       (for example /dev/vdb on Hatchling; loop and nbd
                       devices are accepted for disposable test disks).
                       The disk is partitioned, formatted and written.
+  --allocate SIZE     partition only this much of the device (absolute
+                      or percentage, as in build); the remainder stays
+                      unallocated. Omitted, the whole device is used.
+  --esp-size MIB      ESP capacity in MiB: one of 64, 128, 256, 512,
+                      768, 1024 (default 64).
+  --root-size SIZE    exact root partition capacity (MiB/GiB/TiB);
+                      remainder stays unallocated. Omitted, root fills
+                      the allocation. Under --rootfs zfs this sizes the
+                      pool partition.
+  --rootfs FS         root filesystem: ext4 (default) or zfs, as above.
+  --pool NAME         ZFS pool name (default tank).
+  --boot-size MIB     ext4 /boot for zfs roots: 128, 256 (default),
+                      512, 1024. For ext4 roots a separately partitioned
+                      /boot is created only when explicitly requested.
+  --swap-size SIZE    swap partition capacity, placed last; omitted,
+                      no swap partition is created.
+  --earlyfw           build early-firmware boot images into /boot.
+                      Opt-in only; omitted, nothing is generated.
   --preview           print the complete installation plan and stop
                       without touching the device
-  --hostname NAME     hostname written into the system (default saphira)
+  --hostname NAME     hostname written into the system (default saphira
+                      on OpenRC targets, saphirad on systemd targets)
   --root-password PW  set the root password in the system
   --netconf LIST      comma-separated IFACE:MODE (dhcp|off), as in build
   --role NAME         add a role layer; repeatable
@@ -163,6 +218,7 @@ shared_profiles=${SAPHIRA_IMAGE_SHARED_PROFILES:-/usr/share/saphira/profiles}
 if [ -f "$bindir/targets" ]; then
 	targets_dir=${SAPHIRA_IMAGE_TARGETS:-$bindir/targets}
 	services_dir=${SAPHIRA_IMAGE_SERVICES:-$bindir/services.d}
+	network_data_dir=${SAPHIRA_IMAGE_NETWORK_DATA:-$bindir/systemd-network}
 # $bindir is <recipe>/files both in a checkout and (via $0) for the
 # tool itself, so the shared tree is two levels up and across:
 # <root>/saphira-install-tools/files/profiles. No `..` guessing is
@@ -171,6 +227,7 @@ if [ -f "$bindir/targets" ]; then
 else
 	targets_dir=${SAPHIRA_IMAGE_TARGETS:-$datadir/targets}
 	services_dir=${SAPHIRA_IMAGE_SERVICES:-$datadir/services.d}
+	network_data_dir=${SAPHIRA_IMAGE_NETWORK_DATA:-$datadir/systemd-network}
 	profiles_dir=${SAPHIRA_IMAGE_PROFILES:-$shared_profiles}
 fi
 # services.d is OPTIONAL data. Absence is the normal case and means every
@@ -254,19 +311,25 @@ resolve_target()
 #         partition is meaningless to UEFI firmware and a missing ESP
 #         means the firmware finds no bootloader at all.
 #
-# Sizes: ESP is 64 MiB. That is generous for what actually lives on
+# Sizes: ESP defaults to 64 MiB (--esp-size selects 64, 128, 256,
+# 512, 768 or 1024). That is generous for what actually lives on
 # it: the reference UEFI machine carries 1.5 MiB of EFI binaries
 # (GRUB only - the kernel and initramfs stay in /boot on the root
 # filesystem, where GRUB loads them from), so 64 MiB holds forty times
 # the deployed payload with room for filesystem metadata, updates and
-# a second bootloader entry. It is deliberately not 32 MiB: FAT32
-# needs at least 65,525 data clusters by definition, and 32 MiB holds
-# at most ~64,496 after the reserved area and the allocation tables,
-# so a 32 MiB FAT32 is below the architectural minimum - mkfs refuses
-# it or firmware may. 64 MiB sits at roughly twice the minimum, eight
-# times smaller than the previous 256 MiB default. Root takes the rest,
-# minus a 1 MiB alignment slack so the first partition starts on a 1 MiB
-# boundary as both BIOS and UEFI firmware prefer.
+# a second bootloader entry. The ladder exists for cohabitation, not
+# for Saphira itself: 512 MiB suits Windows coexistence and UKIs, up
+# to 1024 MiB for demanding boot configurations. The floor is
+# architectural, not aesthetic: FAT32 needs at least 65,525 data
+# clusters by definition, and 32 MiB holds at most ~64,496 after the
+# reserved area and the allocation tables, so anything below 64 MiB
+# is refused outright (mkfs would refuse it or firmware may) and the
+# formatter stays -F 32 unconditionally -- no FAT-type branching can
+# ever sneak in. Root takes the rest, minus a 1 MiB alignment slack
+# so the first partition starts on a 1 MiB boundary as both BIOS and
+# UEFI firmware prefer. --root-size names an exact root instead, and
+# --allocate caps the total budget; both leave the remainder
+# unallocated, never silently resized.
 
 size_bytes()
 {
@@ -352,10 +415,158 @@ allocate_bytes()
 	esac
 }
 
+# Validate the ESP/root sizing options shared by every command that
+# emits a partition plan (plan, build, install-to-disk). Runs before
+# any sizing arithmetic so impossible combinations die here, never at
+# a disk. Uses globals ESP_SIZE (MiB number, empty means default) and
+# ROOT_SIZE (size string, empty means root fills the budget); sets
+# ESP_SECTORS always and ROOT_SECTORS when requested.
+# Product identity down to the default hostname (2026-10-23): the
+# systemd line installs SaphiraD, the OpenRC line installs Saphira,
+# so an unnamed machine identifies its product correctly.
+default_hostname()
+{
+	if [ "${INIT:-openrc}" = systemd ]; then
+		printf 'saphirad\n'
+	else
+		printf 'saphira\n'
+	fi
+}
+
+validate_partition_options()
+{
+	# Root filesystem: ext4 (historical) or zfs (pool with a separate
+	# ext4 /boot, per the planner's validated layout). Anything else
+	# is refused here, where die is fatal, never in a plan subshell.
+	ROOTFS=${ROOTFS:-ext4}
+	case $ROOTFS in
+	ext4|zfs) ;;
+	*) die "--rootfs must be ext4 or zfs; got '$ROOTFS'" ;;
+	esac
+	if [ "$ROOTFS" = zfs ] && [ "$BOOT" = hybrid ]; then
+		die "--rootfs zfs with hybrid boot is refused: hybrid is the installer-only layout (ext4 root)"
+	fi
+	# ZFS pool name: planner convention is tank. Charset kept tight:
+	# the name becomes a kernel command-line value and dataset paths.
+	POOL=${POOL:-tank}
+	case $POOL in
+	''|*[!A-Za-z0-9._-]*) die "--pool names alphanumerics, dot, underscore and hyphen only; got '$POOL'" ;;
+	esac
+	if zpool list -H -o name "$POOL" 2>/dev/null | grep -qx "$POOL"; then
+		die "pool $POOL already exists on this machine (import or destroy it first; refusing to guess)"
+	fi
+	# /boot capacity for ZFS roots (ext4, holds kernel+grub+earlyfw).
+	# Ladder mirrors the ESP one: 256 default, roomy upwards.
+	BOOT_SIZE=${BOOT_SIZE:-256}
+	case $BOOT_SIZE in
+	128|256|512|1024) ;;
+	*) die "--boot-size must be one of 128, 256, 512, 1024 (MiB); got '$BOOT_SIZE'" ;;
+	esac
+	BOOT_SECTORS=$((BOOT_SIZE * 2048))
+	# A separate ext4 /boot exists for ZFS roots always (GRUB reads
+	# files, never pool features) and for ext4 roots only when
+	# --boot-size was explicitly requested (BOOT_SIZE_GIVEN); an
+	# omitted flag keeps the historical single-filesystem layout.
+	# HAVE_BOOT_PART is consumed by the plan emitter and the device
+	# mapping below; it is decided here, never inferred downstream.
+	if [ "$ROOTFS" = zfs ]; then
+		HAVE_BOOT_PART=1
+	elif [ "${BOOT_SIZE_GIVEN:-0}" = 1 ]; then
+		HAVE_BOOT_PART=1
+	else
+		HAVE_BOOT_PART=0
+	fi
+	# Swap partition capacity. Empty means historical behaviour (no
+	# swap partition at all); otherwise an exact size in MiB/GiB/TiB
+	# with the same whole-sector, 1MiB-aligned, at-least-32MiB rules
+	# as --root-size. Swap is always the LAST partition so root
+	# sizing arithmetic above is untouched by its absence.
+	if [ -n "${SWAP_SIZE:-}" ]; then
+		swap_bytes=$(size_bytes "$SWAP_SIZE")
+		[ $((swap_bytes % 512)) -eq 0 ] ||
+			die "--swap-size $SWAP_SIZE is not a whole number of sectors"
+		SWAP_SECTORS=$((swap_bytes / 512))
+		[ $((SWAP_SECTORS % 2048)) -eq 0 ] ||
+			die "--swap-size $SWAP_SIZE is not 1MiB-aligned (use MiB/GiB/TiB)"
+		[ "$SWAP_SECTORS" -ge 65536 ] ||
+			die "--swap-size $SWAP_SIZE is too small: swap needs at least 32MiB"
+	else
+		SWAP_SECTORS=
+	fi
+	# ESP capacity in MiB, restricted set. The floor is architectural,
+	# not aesthetic: FAT32 needs at least 65,525 data clusters, so
+	# anything below ~34 MiB cannot be a valid FAT32 ESP and mkfs
+	# would refuse it (or firmware would). Every permitted size
+	# satisfies the floor, so the formatter stays -F 32 unconditionally
+	# and no FAT-type branching can ever sneak in. Ladder: 64 default,
+	# 128 comfortable, 256 roomy, 512 Windows coexistence / UKIs,
+	# 768 / 1024 demanding boot configurations.
+	ESP_SIZE=${ESP_SIZE:-64}
+	case $ESP_SIZE in
+	64|128|256|512|768|1024) ;;
+	*) die "--esp-size must be one of 64, 128, 256, 512, 768, 1024 (MiB); got '$ESP_SIZE'" ;;
+	esac
+	ESP_SECTORS=$((ESP_SIZE * 2048))
+	# Root capacity. Empty means historical behaviour (root fills the
+	# budget). Otherwise an exact size in MiB/GiB/TiB: whole sectors,
+	# 1 MiB-aligned, at least 32 MiB like every other root here.
+	if [ -n "${ROOT_SIZE:-}" ]; then
+		root_bytes=$(size_bytes "$ROOT_SIZE")
+		[ $((root_bytes % 512)) -eq 0 ] ||
+			die "--root-size $ROOT_SIZE is not a whole number of sectors"
+		ROOT_SECTORS=$((root_bytes / 512))
+		[ $((ROOT_SECTORS % 2048)) -eq 0 ] ||
+			die "--root-size $ROOT_SIZE is not 1MiB-aligned (use MiB/GiB/TiB)"
+		[ "$ROOT_SECTORS" -ge 65536 ] ||
+			die "--root-size $ROOT_SIZE is too small: root needs at least 32MiB"
+	else
+		ROOT_SECTORS=
+	fi
+	set_partition_numbers
+}
+
+# Partition numbers follow the emitted plan order: fixed head
+# (bios-boot and/or ESP, always first and never moved by what
+# follows), optional separate /boot, root (or the ZFS pool
+# partition), optional swap last. Runs at the end of
+# validate_partition_options (main shell, never a pipeline
+# subshell), so every device mapping below and both commands'
+# positional logic derive from ROOT_N/BOOT_N/SWAP_N instead of
+# hardcoded positions.
+set_partition_numbers()
+{
+	# bios-boot (bios, hybrid) and ESP (uefi, hybrid) keep their
+	# historical fixed positions, so only BOOT_N/ROOT_N/SWAP_N move.
+	if [ "$HAVE_BOOT_PART" = 1 ]; then
+		case $BOOT in
+		bios|uefi) BOOT_N=2 ;;
+		hybrid) BOOT_N=3 ;;
+		*) die "internal: unknown boot method $BOOT" ;;
+		esac
+		ROOT_N=$((BOOT_N + 1))
+	else
+		BOOT_N=
+		case $BOOT in
+		bios|uefi) ROOT_N=2 ;;
+		hybrid) ROOT_N=3 ;;
+		*) die "internal: unknown boot method $BOOT" ;;
+		esac
+	fi
+	if [ -n "${SWAP_SECTORS:-}" ]; then
+		SWAP_N=$((ROOT_N + 1))
+	else
+		SWAP_N=
+	fi
+}
+
 partition_plan()
 {
-	# Emits an sfdisk script on stdout. Partition numbering is fixed:
-	# p1 is the boot partition for the chosen boot method, p2 is root.
+	# Emits an sfdisk script on stdout. Order is fixed: fixed head
+	# (bios-boot and/or ESP), optional separate /boot, root (or ZFS
+	# pool), optional swap last. Numbers follow automatically;
+	# set_partition_numbers (via validate_partition_options above)
+	# is what every device mapping derives from.
+	validate_partition_options
 	total=$(size_bytes "$SIZE")
 	total_sectors=$((total / 512))
 	# The first partition starts at sector 2048 (1 MiB), not 0, so the
@@ -410,13 +621,87 @@ partition_plan()
 	[ "$available" -ge 65536 ] ||
 		die "size $SIZE is too small: a bootable image needs at least 32M after the 1M alignment gap and 1M GPT tail reserve"
 
+	# Root exactness is decided HERE, in the function body -- never
+	# inside the case below. The case emits into `assert_plan_fits`
+	# through a pipeline, so every branch runs in a subshell where a
+	# die would kill only the subshell: the message would print, the
+	# plan would truncate, and the exit status would stay zero (proven
+	# 2026-10-23: an 80M UEFI plan printed "too small" and exited 0
+	# with no partitions). Refusals live here, where die is fatal.
+	case $BOOT in
+	bios) fixed_head=2048; fixed_desc="1MiB bios-boot" ;;
+	uefi) fixed_head=$ESP_SECTORS; fixed_desc="${ESP_SIZE}MiB ESP" ;;
+	hybrid) fixed_head=$((2048 + ESP_SECTORS)); fixed_desc="1MiB bios-boot plus ${ESP_SIZE}MiB ESP" ;;
+	*) die "internal: unknown boot method $BOOT" ;;
+	esac
+	# A separate ext4 /boot (GRUB reads files, never pool features
+	# under ZFS; an explicitly requested standalone /boot under
+	# ext4): its sectors join the fixed head, and root (or the ZFS
+	# pool partition) takes the remainder. --root-size then sizes
+	# root/pool, not /boot (which --boot-size owns).
+	if [ "$HAVE_BOOT_PART" = 1 ]; then
+		fixed_head=$((fixed_head + BOOT_SECTORS))
+		fixed_desc="$fixed_desc plus ${BOOT_SIZE}MiB /boot"
+	fi
+	# Swap is always last: reserve it from the budget before root is
+	# sized, so root keeps its fill/exact semantics over the rest.
+	swap_sectors=${SWAP_SECTORS:-0}
+	if [ -n "${SWAP_SECTORS:-}" ]; then
+		fixed_desc="$fixed_desc plus $((SWAP_SECTORS / 2048))MiB swap"
+	fi
+	if [ -n "${ROOT_SECTORS:-}" ]; then
+		[ $((fixed_head + swap_sectors + ROOT_SECTORS)) -le "$available" ] ||
+			die "--root-size $ROOT_SIZE does not fit: $fixed_desc plus root needs $(( (fixed_head + swap_sectors + ROOT_SECTORS) * 512 )) bytes, budget is $((available * 512))"
+		root_sectors=$ROOT_SECTORS
+	else
+		root_sectors=$((available - fixed_head - swap_sectors))
+		[ "$root_sectors" -ge 65536 ] ||
+			die "size $SIZE is too small: $fixed_desc leaves no usable root"
+	fi
+	# Partition numbers follow the emitted plan order and are the
+	# single source every device mapping derives from: fixed head
+	# first, optional separate /boot, root (or pool), optional swap
+	# last. bios-boot and ESP positions never move (always first),
+	# so only root shifts and boot/swap are new.
+	set_partition_numbers
+
+	# Optional swap is always last in every layout below: one shared
+	# tail line instead of six copies. Its start is root's start plus
+	# root's sectors, which is exactly first_sector + fixed_head +
+	# root_sectors: fixed_head already contains /boot sectors
+	# whenever HAVE_BOOT_PART is set (added above, ZFS and ext4
+	# alike), so no branch adds them twice. Branch arithmetic below
+	# must stay consistent with this single formula.
+	swap_start=$((first_sector + fixed_head + root_sectors))
+	if [ -n "${SWAP_SECTORS:-}" ]; then
+		swap_line="start=$swap_start, size=$SWAP_SECTORS, type=0657FD6D-A4AB-43AF-A651-DD3D514A0FB, name=\"swap\""
+	else
+		swap_line=
+	fi
 	case $BOOT in
 	bios)
-		# 1 MiB bios-boot for core.img, then the rest as root.
+		# 1 MiB bios-boot for core.img, optional separate /boot,
+		# then root (fill or exact), optional swap last.
 		bios_boot=2048
-		root_sectors=$(( available - bios_boot ))
-		[ "$root_sectors" -ge 65536 ] ||
-			die "size $SIZE is too small for a bios-boot partition and a usable root"
+		if [ "${ROOTFS:-ext4}" = zfs ]; then
+			cat <<PLAN
+label: gpt
+# BIOS+ZFS: bios-boot, then ext4 /boot (GRUB reads files, never pool
+# features), then the pool partition (Solaris root type).
+start=$first_sector, size=$bios_boot, type=21686148-6449-6E6F-744E-656564454649, name="bios-boot"
+start=$((first_sector + bios_boot)), size=$BOOT_SECTORS, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name="boot"
+start=$((first_sector + bios_boot + BOOT_SECTORS)), size=$root_sectors, type=6A898CC3-1DD2-11B2-99A6-080020736631, name="zfs"
+PLAN
+		elif [ "$HAVE_BOOT_PART" = 1 ]; then
+			cat <<PLAN
+label: gpt
+# BIOS+boot: bios-boot for core.img, separate ext4 /boot (explicit
+# --boot-size), then root.
+start=$first_sector, size=$bios_boot, type=21686148-6449-6E6F-744E-656564454649, name="bios-boot"
+start=$((first_sector + bios_boot)), size=$BOOT_SECTORS, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name="boot"
+start=$((first_sector + bios_boot + BOOT_SECTORS)), size=$root_sectors, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name="root"
+PLAN
+		else
 		cat <<PLAN
 label: gpt
 # BIOS: GRUB core.img lives in a dedicated bios-boot partition, not in the
@@ -426,13 +711,29 @@ label: gpt
 start=$first_sector, size=$bios_boot, type=21686148-6449-6E6F-744E-656564454649, name="bios-boot"
 start=$((first_sector + bios_boot)), size=$root_sectors, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name="root"
 PLAN
+		fi
 		;;
 	uefi)
-		esp=131072   # 64 MiB in 512-byte sectors
-		root_sectors=$(( available - esp ))
-		[ "$root_sectors" -ge 65536 ] ||
-			die "size $SIZE is too small: a 64M ESP leaves no usable root"
+		esp=$ESP_SECTORS
+		if [ "${ROOTFS:-ext4}" = zfs ]; then
 			cat <<PLAN
+label: gpt
+# UEFI+ZFS: ESP the firmware reads, ext4 /boot GRUB reads, then pool.
+start=$first_sector, size=$esp, type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B, name="esp"
+start=$((first_sector + esp)), size=$BOOT_SECTORS, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name="boot"
+start=$((first_sector + esp + BOOT_SECTORS)), size=$root_sectors, type=6A898CC3-1DD2-11B2-99A6-080020736631, name="zfs"
+PLAN
+		elif [ "$HAVE_BOOT_PART" = 1 ]; then
+			cat <<PLAN
+label: gpt
+# UEFI+boot: ESP the firmware reads, separate ext4 /boot (explicit
+# --boot-size), then root.
+start=$first_sector, size=$esp, type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B, name="esp"
+start=$((first_sector + esp)), size=$BOOT_SECTORS, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name="boot"
+start=$((first_sector + esp + BOOT_SECTORS)), size=$root_sectors, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name="root"
+PLAN
+		else
+		cat <<PLAN
 label: gpt
 # UEFI: a FAT EFI System Partition the firmware can actually read. BIOS
 # rules are deliberately NOT reused here -- a bios-boot partition means
@@ -441,17 +742,26 @@ label: gpt
 start=$first_sector, size=$esp, type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B, name="esp"
 start=$((first_sector + esp)), size=$root_sectors, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name="root"
 PLAN
+		fi
 		;;
 	hybrid)
-		# USB installer: one medium boots both firmwares. p1 bios-boot
-		# for GRUB core.img (BIOS), p2 ESP (UEFI), p3 the installer
-		# root. Numbering is fixed by construction; root_device_for
-		# and esp_device_for below must match this plan.
-		esp=131072   # 64 MiB in 512-byte sectors
+		# USB installer: one medium boots both firmwares. bios-boot
+		# (BIOS) + ESP (UEFI) first, optional separate /boot, then
+		# the installer root, optional swap last.
+		esp=$ESP_SECTORS
 		bios_boot=2048
-		root_sectors=$(( available - bios_boot - esp ))
-		[ "$root_sectors" -ge 65536 ] ||
-			die "size $SIZE is too small: bios-boot plus a 64M ESP leaves no usable root"
+		if [ "$HAVE_BOOT_PART" = 1 ]; then
+			cat <<PLAN
+label: gpt
+# Hybrid+boot: bios-boot (BIOS) + ESP (UEFI) + separate ext4 /boot,
+# then the installer root. Either firmware finds its bootloader; the
+# installer payload is the same.
+start=$first_sector, size=$bios_boot, type=21686148-6449-6E6F-744E-656564454649, name="bios-boot"
+start=$((first_sector + bios_boot)), size=$esp, type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B, name="esp"
+start=$((first_sector + bios_boot + esp)), size=$BOOT_SECTORS, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name="boot"
+start=$((first_sector + bios_boot + esp + BOOT_SECTORS)), size=$root_sectors, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name="root"
+PLAN
+		else
 		cat <<PLAN
 label: gpt
 # Hybrid: bios-boot (BIOS) + ESP (UEFI) + installer root. Either
@@ -460,8 +770,15 @@ start=$first_sector, size=$bios_boot, type=21686148-6449-6E6F-744E-656564454649,
 start=$((first_sector + bios_boot)), size=$esp, type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B, name="esp"
 start=$((first_sector + bios_boot + esp)), size=$root_sectors, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name="root"
 PLAN
+		fi
 		;;
-	esac | assert_plan_fits "$total_sectors" "$first_sector"
+	esac | {
+		cat
+		# Swap is always last, in every layout: the start is derived
+		# from root's start plus root's sectors, so no branch
+		# recomputes it and numbering cannot drift from the plan.
+		[ -n "$swap_line" ] && printf '%s\n' "$swap_line"
+	} | assert_plan_fits "$total_sectors" "$first_sector"
 }
 
 # Refuse to emit a plan that does not fit the requested image. The first
@@ -534,13 +851,13 @@ assert_plan_fits()
 
 root_device_for()
 {
-	# $1 loop device. p2 is root under both classic plans; the
-	# hybrid plan carries bios-boot+ESP first, so root is p3 there.
-	case $BOOT in
-	bios) printf '%sp2' "$1" ;;
-	uefi) printf '%sp2' "$1" ;;
-	hybrid) printf '%sp3' "$1" ;;
-	esac
+	# $1 loop device. Numbering comes from set_partition_numbers
+	# (ROOT_N follows the emitted plan: fixed head, optional
+	# separate /boot, root or pool, optional swap last). Under ZFS
+	# the number addresses the pool partition.
+	[ -n "${ROOT_N:-}" ] ||
+		die "internal: partition numbers not computed (set_partition_numbers?)"
+	printf '%sp%s' "$1" "$ROOT_N"
 }
 
 esp_device_for()
@@ -555,10 +872,120 @@ esp_device_for()
 
 boot_device_for()
 {
+	# $1 loop device. The separate /boot partition when the plan has
+	# one (ZFS always, ext4 only with explicit --boot-size); otherwise
+	# the first fixed partition (bios-boot or ESP), which is what the
+	# historical existence check at the call sites always meant.
+	if [ -n "${BOOT_N:-}" ]; then
+		printf '%sp%s' "$1" "$BOOT_N"
+		return 0
+	fi
 	case $BOOT in
-	bios) printf '%sp1' "$1" ;;
-	uefi) printf '%sp1' "$1" ;;
+	bios|uefi|hybrid) printf '%sp1' "$1" ;;
 	esac
+}
+
+swap_device_for()
+{
+	# $1 loop device. Empty (and fatal to use) unless --swap-size
+	# requested a swap partition, which is always last.
+	[ -n "${SWAP_N:-}" ] ||
+		die "internal: no swap partition in this plan (--swap-size?)"
+	printf '%sp%s' "$1" "$SWAP_N"
+}
+
+dataset_name_for()
+{
+	# Root dataset follows the planner convention: tank/ROOTS/<name>
+	# with the name from the init flavor. The POOL itself is $POOL.
+	case $INIT in
+	openrc) printf 'saphira' ;;
+	systemd) printf 'saphirad' ;;
+	*) die "internal: unknown init $INIT for dataset naming" ;;
+	esac
+}
+
+append_esp_fstab()
+{
+	# $1 mountpoint, $2 ESP device. The generator runs inside
+	# saphira-install while the ESP is deliberately unmounted, so
+	# the /boot/efi line is appended here, once the ESP is mounted
+	# for grub-install. nofail: an ESP that fails to mount or fsck
+	# must never fail local-fs.target into emergency (proven on a
+	# systemd appliance with a bare defaults line). pass 0: FAT is
+	# never fsck'd at boot. UUID-preferred like the generator,
+	# skipped when already present (saphira-install dedups the same
+	# way).
+	mnt=$1 esp=$2
+	uuid=$(blkid -s UUID -o value -- "$esp" 2>/dev/null || true)
+	if [ -n "$uuid" ]; then
+		line="UUID=$uuid /boot/efi vfat defaults,nofail,x-systemd.device-timeout=5s 0 0"
+	else
+		line="$esp /boot/efi vfat defaults,nofail,x-systemd.device-timeout=5s 0 0"
+	fi
+	[ -f "$mnt/etc/fstab" ] || install -m 0644 /dev/null "$mnt/etc/fstab"
+	grep -qxF "$line" "$mnt/etc/fstab" 2>/dev/null || printf '%s\n' "$line" >> "$mnt/etc/fstab"
+}
+
+append_swap_fstab()
+{
+	# $1 mountpoint, $2 swap partition device. Swap is never mounted
+	# during assembly (activation belongs to the booted system), so
+	# the generator cannot see it; the entry is written here from
+	# the freshly stamped UUID, PARTUUID fallback, device path last
+	# resort - the same identifier preference as the generator.
+	# Skipped when already present, same dedup idiom as above.
+	mnt=$1 swap=$2
+	uuid=$(blkid -s UUID -o value -- "$swap" 2>/dev/null || true)
+	if [ -n "$uuid" ]; then
+		line="UUID=$uuid none swap sw 0 0"
+	else
+		partuuid=$(blkid -s PARTUUID -o value -- "$swap" 2>/dev/null || true)
+		if [ -n "$partuuid" ]; then
+			line="PARTUUID=$partuuid none swap sw 0 0"
+		else
+			line="$swap none swap sw 0 0"
+		fi
+	fi
+	[ -f "$mnt/etc/fstab" ] || install -m 0644 /dev/null "$mnt/etc/fstab"
+	grep -qxF "$line" "$mnt/etc/fstab" 2>/dev/null || printf '%s\n' "$line" >> "$mnt/etc/fstab"
+}
+
+require_zfs_target()
+{
+	# $1 composed profile. A ZFS root whose target carries no kmod
+	# and no userspace cannot import its pool: unbootable by
+	# construction. Fail here with the fix, not at first boot.
+	# (--role role-zfs is the shipped layer for the pinned kernels.)
+	grep -q '^saphira-zfs-' "$1" ||
+		die "zfs root but the target carries no saphira-zfs kmod (add --role role-zfs or an equivalent profile)"
+	grep -q '^saphira-zfs-userspace' "$1" ||
+		die "zfs root but the target carries no saphira-zfs-userspace (add --role role-zfs or an equivalent profile)"
+}
+
+format_zfs_root()
+{
+	# $1 pool partition, $2 /boot partition, $3 mountpoint.
+	# Provisions ext4 /boot plus pool and root dataset. The pool is
+	# created mountpoint-less (mountpoint=legacy) and the dataset is
+	# mounted explicitly: no auto-mount can surprise the installer,
+	# and export on teardown is deterministic.
+	zfsdev=$1 bootpart=$2 target=$3
+	ds=$(dataset_name_for)
+	modprobe zfs 2>/dev/null || die 'cannot load the zfs module (is the kmod installed in this environment?)'
+	mkfs.ext4 -q -L saphira-boot "$bootpart" || die 'cannot format the /boot partition'
+	zpool create -o ashift=12 -O compression=lz4 -O atime=off \
+		-O mountpoint=legacy -m none "$POOL" "$zfsdev" ||
+		die "cannot create pool $POOL on $zfsdev"
+	pool_created=$POOL
+	zfs create -o mountpoint=legacy "$POOL/ROOTS" ||
+		die "cannot create $POOL/ROOTS"
+	zfs create -o mountpoint=legacy "$POOL/ROOTS/$ds" ||
+		die "cannot create $POOL/ROOTS/$ds"
+	mount -t zfs "$POOL/ROOTS/$ds" "$target" || die 'cannot mount the root dataset'
+	mkdir -p "$target/boot" || die 'cannot create /boot in the dataset'
+	mount -o noatime "$bootpart" "$target/boot" || die 'cannot mount /boot'
+	boot_mounted=1
 }
 
 # --- physical disk naming, safety, preview --------------------------------
@@ -664,7 +1091,16 @@ validate_device()
 	if [ -e "/sys/class/block/$disk/partition" ]; then
 		die "not a whole disk: $device is a partition (pass its disk)"
 	fi
-	if ! dev_bytes=$(blockdev --getsize64 -- "$device" 2>/dev/null); then
+	# util-linux blockdev takes `command device' with no `--' separator
+	# (it reports `Unknown command: --'), so the device spelling is
+	# constrained up front instead: everything installable lives under
+	# /dev (sd/vd/nvme/loop/nbd alike), and a dash-leading path can
+	# never be a device here.
+	case $device in
+	/dev/*) ;;
+	*) die "not a device path: $device (pass a /dev/... whole disk)" ;;
+	esac
+	if ! dev_bytes=$(blockdev --getsize64 "$device" 2>/dev/null); then
 		die "cannot read the size of $device"
 	fi
 	case $dev_bytes in ''|*[!0-9]*|0) die "device $device reports no usable size" ;; esac
@@ -696,6 +1132,13 @@ require_host_tools()
        host that builds the image. On Saphira they come from util-linux
        (sfdisk/losetup), e2fsprogs (mkfs.ext4), dosfstools (mkfs.vfat) and
        grub (grub-install)."
+	# mkswap only when a swap partition was requested: util-linux
+	# provides it alongside sfdisk, so its absence means a broken
+	# util-linux, not a missing package.
+	if [ -n "${SWAP_SIZE:-}" ]; then
+		command -v mkswap >/dev/null 2>&1 ||
+			die "host tool missing: mkswap (swap requested via --swap-size)"
+	fi
 	case $BOOT in
 	uefi|hybrid)
 		command -v mkfs.vfat >/dev/null 2>&1 ||
@@ -704,6 +1147,14 @@ require_host_tools()
        requires a FAT EFI System Partition."
 		;;
 	esac
+	if [ "${ROOTFS:-ext4}" = zfs ]; then
+		for tool in zpool zfs modprobe; do
+			command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"
+		done
+		[ -z "$missing" ] || die "host tool(s) missing:$missing
+       A zfs root cannot be built without saphira-zfs-userspace (zpool/zfs)
+       and kmod (modprobe) in the building environment."
+	fi
 	if command -v qemu-img >/dev/null 2>&1; then have_qemu_img=1; else have_qemu_img=0; fi
 }
 
@@ -715,14 +1166,18 @@ require_disk_tools()
 	# device); blockdev sizes it and partprobe is not needed because
 	# sfdisk re-reads the table itself.
 	missing=
-	for tool in sfdisk mkfs.ext4 grub-install blockdev blkid; do
+	for tool in sfdisk mkfs.ext4 grub-install blockdev blkid wipefs; do
 		command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"
 	done
 	[ -z "$missing" ] || die "host tool(s) missing:$missing
        saphira-image needs the partitioning and formatting tools on the
        host that installs the disk. On Saphira they come from util-linux
-       (sfdisk, blockdev, blkid), e2fsprogs (mkfs.ext4), dosfstools
+       (sfdisk, blockdev, blkid, wipefs), e2fsprogs (mkfs.ext4), dosfstools
        (mkfs.vfat) and grub (grub-install)."
+	if [ -n "${SWAP_SIZE:-}" ]; then
+		command -v mkswap >/dev/null 2>&1 ||
+			die "host tool missing: mkswap (swap requested via --swap-size)"
+	fi
 	case $BOOT in
 	uefi)
 		command -v mkfs.vfat >/dev/null 2>&1 ||
@@ -731,6 +1186,14 @@ require_disk_tools()
        requires a FAT EFI System Partition."
 		;;
 	esac
+	if [ "${ROOTFS:-ext4}" = zfs ]; then
+		for tool in zpool zfs modprobe; do
+			command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"
+		done
+		[ -z "$missing" ] || die "host tool(s) missing:$missing
+       A zfs root cannot be installed without saphira-zfs-userspace (zpool/zfs)
+       and kmod (modprobe) in the installing environment."
+	fi
 }
 
 # --- init preparation --------------------------------------------------
@@ -773,6 +1236,35 @@ EOF
 		chmod 0644 "$mnt/etc/saphira-network.d/10-image-$iface.conf"
 	done
 	IFS=$oldifs
+}
+
+finalize_appliance_repository()
+{
+	# $1 mountpoint. The finished appliance must point at the public
+	# repository, never at the builder's local /out path.
+	[ -n "${1:-}" ] || die "internal: finalize_appliance_repository needs a mountpoint"
+	printf '%s\n' 'https://packages.saphira.vm2.uk/hatched' > "$1/etc/apk/repositories" ||
+		die "cannot write the appliance repository"
+	grep -qxF 'https://packages.saphira.vm2.uk/hatched' "$1/etc/apk/repositories" ||
+		die "appliance repository is wrong"
+	case $(cat "$1/etc/apk/repositories" 2>/dev/null || true) in
+	*/out/stage4/*) die "appliance repository still names /out/stage4" ;;
+	esac
+}
+
+install_appliance_network()
+{
+	# $1 mountpoint. Appliance-local /etc override for the removed
+	# saphira-network package. /etc is image-owned configuration, so
+	# this cannot collide with any package payload.
+	[ -n "${1:-}" ] || die "internal: install_appliance_network needs a mountpoint"
+	[ -f "$network_data_dir/80-saphira-wired-dhcp.network" ] ||
+		die "appliance network default is missing: $network_data_dir/80-saphira-wired-dhcp.network"
+	install -D -m 0644 "$network_data_dir/80-saphira-wired-dhcp.network" \
+		"$1/etc/systemd/network/80-saphira-wired-dhcp.network" ||
+		die "cannot install the appliance network default"
+	install -d -m 0755 "$1/etc/saphira-network.d" ||
+		die "cannot create /etc/saphira-network.d"
 }
 
 prepare_init()
@@ -840,8 +1332,8 @@ INITTAB
 		# halfway through boot" experience: sysinit is devfs, sysfs,
 		# dmesg and cgroups, so the wizard appeared while ordinary
 		# boot messages were still pending behind it, and it raced
-		# device discovery for its interface list. The interleaved
-		# prompts that motivated the move were caused by services in a
+		# device discovery for its own interface list. The interleaved
+		# prompts that motivated that move were caused by services in a
 		# runlevel starting concurrently, which the unit's `after`
 		# dependencies prevent; the runlevel itself was never the
 		# problem.
@@ -850,10 +1342,81 @@ INITTAB
 		# runlevels are strictly ordered, so the default runlevel -
 		# gettys, sshd, firewall, the network service - starts only
 		# after setup completes.
-		if [ -f "$mnt/etc/init.d/saphira-firstboot" ]; then
+		#
+		# The image-installer appliance is exempt: ordinary
+		# firstboot NEVER runs there (the dedicated wizard owns
+		# setup and configures the destination only), so its link
+		# is not created for that profile even though the binary
+		# ships in every image.
+		if [ -f "$mnt/etc/init.d/saphira-firstboot" ] && [ "$PROFILE" != image-installer-appliance ]; then
 			mkdir -p "$mnt/etc/runlevels/boot"
 			ln -sfn /etc/init.d/saphira-firstboot \
 				"$mnt/etc/runlevels/boot/saphira-firstboot"
+		fi
+		# Image-creator appliance: the menu owns the console
+		# permanently once firstboot's one-time setup has spent its
+		# marker. The appliance profile is openrc-only by v0
+		# decision; anything else is a recipe error, not a runtime
+		# choice. Firstboot ships WITH its marker here (setup runs
+		# once: root password commit point, sshd, network/DNS), then
+		# the menu runs after it in the same boot runlevel.
+		if [ "$PROFILE" = image-creator-appliance ]; then
+			[ -f "$mnt/etc/init.d/saphira-image-creator-menu" ] ||
+				die "appliance profile without the creator menu service"
+			mkdir -p "$mnt/etc/runlevels/boot"
+			ln -sfn /etc/init.d/saphira-image-creator-menu \
+				"$mnt/etc/runlevels/boot/saphira-image-creator-menu"
+			# The menu uses /dev/tty1: the inittab getty on tty1
+			# would fight it for the console. Comment it out,
+			# keep tty2-6 for rescue shells.
+			if grep -q '^tty1:' "$mnt/etc/inittab" 2>/dev/null; then
+				sed -i 's/^tty1:/# tty1: appliance menu owns this console; disabled: /' \
+					"$mnt/etc/inittab" ||
+					die "cannot free tty1 for the appliance menu"
+			fi
+			# sshd enabled with root password login (v0 decision):
+			# a headless appliance with no remote access is not
+			# manageable. Edit the shipped line in place and verify:
+			# sshd takes the FIRST value, so appending would lie.
+			if [ -f "$mnt/etc/init.d/sshd" ]; then
+				mkdir -p "$mnt/etc/runlevels/default"
+				ln -sfn /etc/init.d/sshd \
+					"$mnt/etc/runlevels/default/sshd"
+			fi
+			if grep -q '^PermitRootLogin prohibit-password' \
+					"$mnt/etc/ssh/sshd_config" 2>/dev/null; then
+				sed -i 's/^PermitRootLogin prohibit-password/PermitRootLogin yes/' \
+					"$mnt/etc/ssh/sshd_config" ||
+					die "cannot permit appliance root login"
+			else
+				die "appliance sshd_config lacks the expected PermitRootLogin line (refusing to guess)"
+			fi
+			# No credential needed to use this appliance: root ships
+			# with an empty password field (PAM nullok permits
+			# console login; sshd keeps refusing empty passwords by
+			# its own default) and firstboot setup is skipped
+			# entirely by removing its marker — the menu is the
+			# interface. Scoped to this profile only: every other
+			# image keeps locked-root-firstboot semantics.
+			grep -q '^root:' "$mnt/etc/shadow" 2>/dev/null ||
+				die "appliance has no root shadow entry (refusing to guess)"
+			sed -i 's/^root:[^:]*/root:/' "$mnt/etc/shadow" ||
+				die "cannot empty the appliance root password"
+			rm -f "$mnt/etc/saphira-firstboot-required"
+			# Console-only exception, stated explicitly: empty root
+			# login is permitted on the local console and nowhere
+			# else. sshd must refuse empty passwords even though
+			# root login itself is permitted on this appliance.
+			if grep -q '^PermitEmptyPasswords' \
+					"$mnt/etc/ssh/sshd_config" 2>/dev/null; then
+				sed -i 's/^PermitEmptyPasswords.*/PermitEmptyPasswords no/' \
+					"$mnt/etc/ssh/sshd_config" ||
+					die "cannot refuse empty SSH passwords"
+			else
+				printf '%s\n' 'PermitEmptyPasswords no' \
+					>> "$mnt/etc/ssh/sshd_config" ||
+					die "cannot refuse empty SSH passwords"
+			fi
 		fi
 		# Device manager in sysinit (not default): /dev/disk/* must
 		# exist before the boot runlevel's fsck, localmount and
@@ -912,8 +1475,10 @@ INITTAB
 			units="$units saphira-utmp-boot.service"
 		# Firstboot configures INSTALLED machines; the installer
 		# environment gets the menu instead (prepare_installer
-		# below), so its service is never enabled here.
-		if [ "$PROFILE" != usb-installer ]; then
+		# below), so its service is never enabled here. The
+		# dedicated installer appliance is likewise exempt: its
+		# wizard owns setup and ordinary firstboot never runs.
+		if [ "$PROFILE" != usb-installer ] && [ "$PROFILE" != image-installer-appliance ]; then
 			[ -f "$mnt/usr/lib/systemd/system/saphira-firstboot.service" ] &&
 				units="$units saphira-firstboot.service"
 		fi
@@ -961,6 +1526,18 @@ INITTAB
 						die "systemctl --root mask failed: $unit"
 				fi
 			done
+			# systemd-udev-settle carries upstream TimeoutSec=180
+			# and stalls appliance boots to the full three minutes
+			# on firmware/slow-device queues (proven). Nothing in
+			# tree pulls it, and nothing needs it: by-id needs
+			# trigger plus the daemon, both already enabled. Mask
+			# it on the installer appliance so a stray Wants cannot
+			# wedge a boot; other targets keep upstream behavior
+			# until separately reviewed.
+			if [ "$PROFILE" = image-installer-appliance ] && [ -f "$mnt/usr/lib/systemd/system/systemd-udev-settle.service" ]; then
+				"$chroot_command" "$mnt" /usr/bin/systemctl --root=/ mask systemd-udev-settle.service ||
+					die "systemctl --root mask failed: systemd-udev-settle.service"
+			fi
 		fi
 		# Firstboot boot gate (normal-boot dependency structure, never a
 		# boot mode): while the assembly-written marker exists, the
@@ -989,10 +1566,14 @@ INITTAB
 		# essential boot and platform setup. Gating basic.target would
 		# reverse that: it would pull the wizard forward, ahead of the
 		# platform work, which is precisely the "wizard halfway through
-		# boot" behaviour this placement exists to avoid. The
-		# firstboot-after-fhs-converge ordering is in the shipped unit
-		# itself, where it belongs, so no drop-in is needed for it.
-		if [ -f "$mnt/usr/lib/systemd/system/saphira-firstboot.service" ] && [ "$PROFILE" != usb-installer ]; then
+		# boot" behaviour this placement exists to avoid. No drop-in
+		# orders firstboot against fhs-converge: converge completes
+		# before sysinit.target while firstboot starts after
+		# basic.target, so transaction order separates them by a full
+		# boot phase. A direct edge there was removed 2026-10-23: it
+		# added no ordering and is the shape that turns healthy
+		# orderings into reported transaction cycles.
+		if [ -f "$mnt/usr/lib/systemd/system/saphira-firstboot.service" ] && [ "$PROFILE" != usb-installer ] && [ "$PROFILE" != image-installer-appliance ]; then
 			mkdir -p "$mnt/etc/systemd/system/multi-user.target.d" \
 				"$mnt/etc/systemd/system/nftables.service.d"
 			printf '[Unit]\nWants=saphira-firstboot.service\nAfter=saphira-firstboot.service\n' \
@@ -1000,8 +1581,44 @@ INITTAB
 			printf '[Unit]\nAfter=saphira-firstboot.service\n' \
 				> "$mnt/etc/systemd/system/nftables.service.d/10-firstboot-order.conf"
 		fi
+		# Dedicated installer appliance: the creator menu owns tty1.
+		# No firstboot wizard runs here and no password exists here:
+		# ordinary firstboot is masked, the installer wizard is masked,
+		# and both markers are removed. Destinations still boot
+		# locked-root into ordinary firstboot; that is owned by the
+		# destination profile, never by this menu.
+		if [ "$PROFILE" = image-installer-appliance ]; then
+			[ -f "$mnt/usr/lib/systemd/system/saphira-image-creator-menu.service" ] ||
+				die "installer appliance profile without the creator menu unit"
+			mask_units=
+			for unit in saphira-firstboot-image.service saphira-firstboot.service saphira-install-menu.service getty@tty1.service; do
+				if [ -f "$mnt/usr/lib/systemd/system/$unit" ] || [ -e "$mnt/etc/systemd/system/$unit" ] || [ "$unit" = getty@tty1.service ]; then
+					mask_units="$mask_units $unit"
+				fi
+			done
+			if [ -n "$mask_units" ]; then
+				# shellcheck disable=SC2086
+				"$chroot_command" "$mnt" /usr/bin/systemctl --root=/ mask $mask_units ||
+					die "systemctl --root mask failed:$mask_units"
+			fi
+			"$chroot_command" "$mnt" /usr/bin/systemctl --root=/ enable saphira-image-creator-menu.service ||
+				die "cannot enable the creator menu"
+			# No credential needed to use this appliance: root ships
+			# with an empty password field for console use. There is
+			# no SSH on this profile, so no remote empty-password
+			# path exists. Scoped to this profile only: every other
+			# image keeps locked-root-firstboot semantics.
+			grep -q '^root:' "$mnt/etc/shadow" 2>/dev/null ||
+				die "appliance has no root shadow entry (refusing to guess)"
+			sed -i 's/^root:[^:]*/root:/' "$mnt/etc/shadow" ||
+				die "cannot empty the appliance root password"
+			rm -f "$mnt/etc/saphira-firstboot-required" \
+				"$mnt/etc/saphira-image-firstboot-required"
+			install_appliance_network "$mnt"
+			finalize_appliance_repository "$mnt"
+		fi
 		;;
-	esac
+esac
 }
 
 # The init services a package provides, one base name per line.
@@ -1247,7 +1864,8 @@ file_bytes()
 
 cmd_plan()
 {
-	TARGET= SIZE= arch= ALLOCATE=
+	TARGET= SIZE= arch= ALLOCATE= ESP_SIZE= ROOT_SIZE= ROOTFS= POOL= BOOT_SIZE= SWAP_SIZE=
+	BOOT_SIZE_GIVEN=0
 	while test $# -gt 0; do
 		case $1 in
 			--target) TARGET=${2:?missing TARGET}; shift 2 ;;
@@ -1258,6 +1876,18 @@ cmd_plan()
 			--arch=*) arch=${1#*=}; shift ;;
 			--allocate) ALLOCATE=${2:?missing ALLOCATE}; shift 2 ;;
 			--allocate=*) ALLOCATE=${1#*=}; shift ;;
+			--esp-size) ESP_SIZE=${2:?missing ESP_SIZE}; shift 2 ;;
+			--esp-size=*) ESP_SIZE=${1#*=}; shift ;;
+			--root-size) ROOT_SIZE=${2:?missing ROOT_SIZE}; shift 2 ;;
+			--root-size=*) ROOT_SIZE=${1#*=}; shift ;;
+			--rootfs) ROOTFS=${2:?missing ROOTFS}; shift 2 ;;
+			--rootfs=*) ROOTFS=${1#*=}; shift ;;
+			--pool) POOL=${2:?missing POOL}; shift 2 ;;
+			--pool=*) POOL=${1#*=}; shift ;;
+			--boot-size) BOOT_SIZE=${2:?missing BOOT_SIZE}; BOOT_SIZE_GIVEN=1; shift 2 ;;
+			--boot-size=*) BOOT_SIZE=${1#*=}; BOOT_SIZE_GIVEN=1; shift ;;
+			--swap-size) SWAP_SIZE=${2:?missing SWAP_SIZE}; shift 2 ;;
+			--swap-size=*) SWAP_SIZE=${1#*=}; shift ;;
 			*) usage ;;
 		esac
 	done
@@ -1267,8 +1897,8 @@ cmd_plan()
 	# A plan for an architecture this platform cannot boot is not a
 	# plan, so the same validation the build runs is run here.
 	validate_arch
-	printf '# saphira-image plan: target=%s arch=%s boot=%s init=%s profile=%s size=%s allocate=%s\n' \
-		"$TARGET" "$ARCH" "$BOOT" "$INIT" "$PROFILE" "$SIZE" "${ALLOCATE:-all}"
+	printf '# saphira-image plan: target=%s arch=%s boot=%s init=%s profile=%s size=%s allocate=%s esp=%sMiB root=%s\n' \
+		"$TARGET" "$ARCH" "$BOOT" "$INIT" "$PROFILE" "$SIZE" "${ALLOCATE:-all}" "${ESP_SIZE:-64}" "${ROOT_SIZE:-fill}"
 	PLAN_BUFFER=$(mktemp "${SAPHIRA_TMPDIR:-/build/tmp}/saphira-plan.XXXXXX") ||
 		die 'cannot create a scratch file for the partition plan'
 	trap 'rm -f -- "$PLAN_BUFFER"' EXIT HUP INT TERM
@@ -1328,8 +1958,8 @@ cmd_report()
 
 cmd_build()
 {
-	TARGET= output= size= repository= hostname= root_password= kernel_args= arch= ALLOCATE=
-	roles= role_files= enable=1 keep_work=0
+	TARGET= output= size= repository= hostname= root_password= kernel_args= arch= ALLOCATE= ESP_SIZE= ROOT_SIZE= ROOTFS= POOL= BOOT_SIZE= SWAP_SIZE=
+	roles= role_files= enable=1 keep_work=0 EARLYFW=0 BOOT_SIZE_GIVEN=0
 	while test $# -gt 0; do
 		case $1 in
 			--target) TARGET=${2:?missing TARGET}; shift 2 ;;
@@ -1340,6 +1970,21 @@ cmd_build()
 			--kernel-arg=*) kernel_args="$kernel_args ${1#*=}"; shift ;;
 			--size) size=${2:?missing SIZE}; shift 2 ;;
 			--size=*) size=${1#*=}; shift ;;
+			--allocate) ALLOCATE=${2:?missing ALLOCATE}; shift 2 ;;
+			--allocate=*) ALLOCATE=${1#*=}; shift ;;
+			--esp-size) ESP_SIZE=${2:?missing ESP_SIZE}; shift 2 ;;
+			--esp-size=*) ESP_SIZE=${1#*=}; shift ;;
+			--root-size) ROOT_SIZE=${2:?missing ROOT_SIZE}; shift 2 ;;
+			--root-size=*) ROOT_SIZE=${1#*=}; shift ;;
+			--rootfs) ROOTFS=${2:?missing ROOTFS}; shift 2 ;;
+			--rootfs=*) ROOTFS=${1#*=}; shift ;;
+			--pool) POOL=${2:?missing POOL}; shift 2 ;;
+			--pool=*) POOL=${1#*=}; shift ;;
+			--boot-size) BOOT_SIZE=${2:?missing BOOT_SIZE}; BOOT_SIZE_GIVEN=1; shift 2 ;;
+			--boot-size=*) BOOT_SIZE=${1#*=}; BOOT_SIZE_GIVEN=1; shift ;;
+			--swap-size) SWAP_SIZE=${2:?missing SWAP_SIZE}; shift 2 ;;
+			--swap-size=*) SWAP_SIZE=${1#*=}; shift ;;
+			--earlyfw) EARLYFW=1; shift ;;
 			--arch) arch=${2:?missing ARCH}; shift 2 ;;
 			--arch=*) arch=${1#*=}; shift ;;
 			--repository) repository=${2:?missing REPOSITORY}; shift 2 ;;
@@ -1398,6 +2043,8 @@ cmd_build()
 	loop=
 	mounted=
 	esp_mounted=
+	boot_mounted=
+	pool_created=
 
 	cleanup()
 	{
@@ -1405,9 +2052,15 @@ cmd_build()
 		set +e
 		# Unmount deepest-first. An ESP mount under the root is the
 		# thing most likely to be left behind, and leaving it mounted
-		# would wedge the next run's losetup.
+		# would wedge the next run's losetup. A ZFS /boot mount sits
+		# at the same depth and goes with it; the pool exports only
+		# after every mount through it is gone.
 		[ -n "$esp_mounted" ] && umount -R -- "$mnt/boot/efi" >/dev/null 2>&1
+		[ -n "$boot_mounted" ] && umount -- "$mnt/boot" >/dev/null 2>&1
 		[ -n "$mounted" ] && umount -R -- "$mnt" >/dev/null 2>&1 || umount -l -- "$mnt" >/dev/null 2>&1
+		if [ -n "${pool_created:-}" ]; then
+			zpool export "$pool_created" >/dev/null 2>&1 || true
+		fi
 		if [ -n "$loop" ]; then
 			# No `--` separator: this losetup parses it as the device
 			# name (yields detach of literal /dev/--). Device paths
@@ -1466,9 +2119,38 @@ cmd_build()
 	else
 		rootlabel=saphira-root
 	fi
-	mkfs.ext4 -q -L "$rootlabel" "$rootdev" || die 'cannot format root partition'
-	mount -o noatime "$rootdev" "$mnt" || die 'cannot mount root'
-	mounted=1
+	if [ "${ROOTFS:-ext4}" = zfs ]; then
+		format_zfs_root "$rootdev" "$bootdev" "$mnt" || die 'cannot provision the ZFS root'
+		mounted=1
+	else
+		mkfs.ext4 -q -L "$rootlabel" "$rootdev" || die 'cannot format root partition'
+		mount -o noatime "$rootdev" "$mnt" || die 'cannot mount root'
+		mounted=1
+		# A separately partitioned /boot (explicit --boot-size)
+		# is formatted and mounted here, before the install lands
+		# the kernel there; genfstab below then records it like
+		# any mounted filesystem. boot_mounted joins the cleanup
+		# set handled with the other mounts on the way out.
+		if [ "$HAVE_BOOT_PART" = 1 ]; then
+			# $bootdev is the /boot partition whenever one exists
+			# (ZFS always, ext4 with explicit --boot-size).
+			mkfs.ext4 -q -L saphira-boot "$bootdev" ||
+				die 'cannot format the /boot partition'
+			mkdir -p "$mnt/boot" || die 'cannot create /boot mountpoint'
+			mount -o noatime "$bootdev" "$mnt/boot" ||
+				die 'cannot mount /boot'
+			boot_mounted=1
+		fi
+	fi
+	# Swap is formatted but never activated here: activation belongs
+	# to the booted system via its fstab entry (appended next to the
+	# ESP entry below). mkswap stamps the UUID that entry names.
+	if [ -n "${SWAP_N:-}" ]; then
+		swappart=$(swap_device_for "$loop") ||
+			die 'cannot locate the swap partition'
+		mkswap -L saphira-swap "$swappart" ||
+			die 'cannot format the swap partition'
+	fi
 
 	# NOTE: the ESP is formatted here but mounted only AFTER the
 	# install below: saphira-install refuses a non-empty target,
@@ -1495,6 +2177,9 @@ cmd_build()
 		[ -f "$f" ] || die "no such role file: $f"
 		cat "$f" >> "$composed"
 	done
+	if [ "${ROOTFS:-ext4}" = zfs ]; then
+		require_zfs_target "$composed"
+	fi
 	# The profile is named by BASENAME only, and saphira-install resolves it
 	# under ITS OWN profile root (SAPHIRA_PROFILE_ROOT, default
 	# /usr/share/saphira/profiles) - the same single tree this tool read
@@ -1538,90 +2223,11 @@ cmd_build()
 	SAPHIRA_ARCH="$ARCH" \
 		SAPHIRA_REPOSITORY="$repository" \
 		SAPHIRA_PROFILE_ROOT="$profile_root" \
-		SAPHIRA_HOSTNAME="${hostname:-saphira}" \
+		SAPHIRA_HOSTNAME="${hostname:-$(default_hostname)}" \
 		SAPHIRA_ROOT_PASSWORD="$root_password" \
 		"$install_command" --target "$mnt" --profile "$profile_name" ||
 		die 'installation into image failed'
 
-# Kernel command line repair, AFTER assembly, BEFORE grub-mkconfig.
-# Two build-host contaminations must not ship:
-#   root=<build loop>  grub-mkconfig probes the mounted root, which at
-#     build time is a loop device (root=/dev/loop0p2). The deployed
-#     image boots as vda/sda/nvme — the kernel panics on the loop
-#     name (proven: guest idle-halted, no root). The GPT PARTUUID is
-#     stable across all of those, needs no initramfs, and is known
-#     here via blkid. grub-mkconfig emits GRUB_CMDLINE_LINUX after
-#     its own probed root=, and the kernel takes the LAST root=, so
-#     appending the PARTUUID form wins without fighting the probe.
-#   init=<one init>    baselayout defaults at r21..r54 named the systemd
-#     binary (SEV1 2026-10-22: removed from the packaged default after it
-#     reached a live grub.cfg and panicked Egg; the strip stays as
-#     defense-in-depth). Both payloads ship a real /sbin/init, which is
-#     the kernel's own default. Strip every init= token for both.
-#   getty autospawn  systemd's getty-generator spawns a serial getty
-#     for every kernel console= (proven: it HUP-killed the firstboot
-#     wizard fighting it for /dev/console). No serial getty may exist
-#     at all (Saphira ships none), so systemd targets disable the
-#     generator here.
-fix_kernel_cmdline()
-{
-	# $1 mountpoint, $2 root partition device
-	mnt=$1
-	rootdev=$2
-	partuuid=$(blkid -s PARTUUID -o value -- "$rootdev") ||
-		die "cannot read PARTUUID of $rootdev"
-	[ -n "$partuuid" ] || die "empty PARTUUID for $rootdev"
-	getty_opt=
-	# Systemd-only kernel arguments, added here rather than shipped in the
-	# packaged default, so an OpenRC target never carries them:
-	#   systemd.getty_auto=0  no getty generator autospawn (the wizard and
-	#                         the explicit agetty services own the console)
-	#   systemd.imds=no       Saphira is not a cloud image; in auto mode
-	#                         the IMDS generator still opens the hardware
-	#                         database every boot and logs a failed lookup.
-	# Both are meaningless without systemd, and a systemd argument on an
-	# OpenRC cmdline is target leakage that reads as a defect in
-	# /proc/cmdline.
-	[ "$INIT" = systemd ] && getty_opt=" systemd.getty_auto=0 systemd.imds=no"
-	# Requested by --kernel-arg. set -u is in force, so it is always
-	# defined even when the option was never used.
-	KERNEL_ARGS=${KERNEL_ARGS:-}
-	defgrub=$mnt/etc/default/grub
-	[ -f "$defgrub" ] || die "internal: no /etc/default/grub in the image"
-	# Strip any root=/init= the packaged default carries, then append
-	# the deployment-stable root=. Portable sed, single backup-free
-	# edit of the image copy (the package conffile stays untouched).
-	python3 - "$defgrub" "$partuuid" "$getty_opt" "$KERNEL_ARGS" <<'PY' || die 'cannot repair GRUB_CMDLINE_LINUX'
-import re
-import sys
-path, partuuid, getty_opt = sys.argv[1], sys.argv[2], sys.argv[3]
-extra = sys.argv[4].split()
-text = open(path, encoding="utf-8").read()
-lines = text.splitlines(keepends=True)
-found = False
-for i, line in enumerate(lines):
-    if re.match(r'\s*GRUB_CMDLINE_LINUX=', line):
-        m = re.search(r'"(.*)"', line)
-        if not m:
-            raise SystemExit(f"unparseable GRUB_CMDLINE_LINUX: {line!r}")
-        tokens = [t for t in m.group(1).split()
-                  if not t.startswith("root=") and not t.startswith("init=")]
-        tokens.append(f"root=PARTUUID={partuuid}")
-        if getty_opt:
-            tokens.append(getty_opt.strip())
-        # Operator-requested arguments go last so they can override
-        # anything the default set. Duplicates are dropped: a repeated
-        # token in a kernel command line is legal but is a typo here.
-        for arg in extra:
-            if arg not in tokens:
-                tokens.append(arg)
-        lines[i] = f'GRUB_CMDLINE_LINUX="{" ".join(tokens)}"\n'
-        found = True
-if not found:
-    raise SystemExit("GRUB_CMDLINE_LINUX not present in /etc/default/grub")
-open(path, "w", encoding="utf-8").write("".join(lines))
-PY
-}
 
 	# Init preparation, AFTER assembly so the packages are present.
 	prepare_init "$mnt"
@@ -1631,110 +2237,8 @@ PY
 	fix_kernel_cmdline "$mnt" "$rootdev"
 	build_installer_initramfs "$mnt"
 
-# prepare_installer: turn an assembled usb-installer root into an
-# install ENVIRONMENT (not an installed machine). No-op for every
-# other profile. The menu owns tty1 (getty masked so nothing fights
-# it); firstboot must never run here (its marker is removed and its
-# gate is never written: identity belongs to installed machines, and
-# prepare_init skips both when it sees this profile); the ram-mode
-# initramfs is built from the installed kernel and the shipped
-# composition, so grub-mkconfig below picks up its initrd line.
-prepare_installer()
-{
-	mnt=$1
-	[ "$PROFILE" = usb-installer ] || return 0
-	[ -x "$mnt/usr/bin/systemctl" ] ||
-		die "installer target but no systemctl in the image"
-	"$chroot_command" "$mnt" /usr/bin/systemctl --root=/ enable saphira-install-menu.service ||
-		die "cannot enable the installer menu"
-	"$chroot_command" "$mnt" /usr/bin/systemctl --root=/ mask getty@tty1.service ||
-		die "cannot mask getty@tty1 (it would fight the menu for the console)"
-	rm -f "$mnt/etc/saphira-firstboot-required"
-}
 
-# build_installer_initramfs: ram-mode initramfs for the usb-installer
-# root, written into its /boot next to the kernel. No-op for every
-# other profile. The kernel release is read from the installed
-# vmlinuz name, never guessed; the composition is the shipped
-# installer-initramfs.conf naming the label-mounting entrypoint.
-build_installer_initramfs()
-{
-	mnt=$1
-	[ "$PROFILE" = usb-installer ] || return 0
-	command -v saphira-mkinitramfs >/dev/null 2>&1 || die "installer target needs saphira-mkinitramfs on the build host (install saphira-initramfs-tools, or use a non-installer target)"
-	kernel=$(ls "$mnt"/boot/vmlinuz-* 2>/dev/null | head -1)
-	[ -n "$kernel" ] || die "installer target has no kernel in /boot (the usb-installer profile must carry one)"
-	krel=${kernel##*/vmlinuz-}
-	[ -n "$krel" ] || die "cannot derive the kernel release from $kernel"
-	saphira-mkinitramfs build --kernel "$krel" --root "$mnt" \
-		--config /usr/share/saphira/installer-initramfs.conf \
-		--output "$mnt/boot/initramfs-installer" ||
-		die "installer initramfs build failed"
-}
 
-	# Bootloader finalization, AFTER grub-mkconfig, on the generated file.
-# One thing grub-mkconfig cannot do on its own:
-#   root=<build loop>  grub-mkconfig probes the mounted build root, so
-#     every linux line carries the build-host loop device
-#     (root=/dev/loopNp2, N varying with host state). The kernel takes
-#     the LAST root=, and fix_kernel_cmdline's appended PARTUUID wins
-#     - but the stale token still ships, shows up in /proc/cmdline,
-#     and reads as a release defect. Strip every root= token from
-#     every linux line and leave exactly one deployment-stable
-#     root=PARTUUID (the image's own GPT GUID, via blkid).
-# Nothing else is rewritten: there is ONE normal Saphira boot path.
-# Firstboot is an init-level concern (the running system detects its
-# own marker), never a bootloader selection - no second menuentry,
-# no marker-conditional default, no special kernel command line.
-finalize_bootloader()
-{
-	# $1 mountpoint, $2 root partition device
-	mnt=$1
-	rootdev=$2
-	partuuid=$(blkid -s PARTUUID -o value -- "$rootdev") ||
-		die "cannot read PARTUUID of $rootdev"
-	[ -n "$partuuid" ] || die "empty PARTUUID for $rootdev"
-	python3 - "$mnt/boot/grub/grub.cfg" "$partuuid" <<'PY' || die 'cannot finalize grub.cfg'
-import re
-import sys
-path, partuuid = sys.argv[1], sys.argv[2]
-lines = open(path, encoding="utf-8").read().splitlines(keepends=True)
-
-def rewrite_linux(line):
-    m = re.match(r'(\s*linux\s+\S+)(.*)$', line.rstrip("\n"))
-    if not m:
-        return line
-    head, args = m.group(1), m.group(2)
-    tokens = [t for t in args.split() if not t.startswith("root=")]
-    tokens.append(f"root=PARTUUID={partuuid}")
-    return f"{head} {' '.join(tokens)}\n"
-
-for i, line in enumerate(lines):
-    if re.match(r"\s*linux\s", line):
-        lines[i] = rewrite_linux(line)
-
-open(path, "w", encoding="utf-8").write("".join(lines))
-PY
-	# The generated file must carry exactly one root= per linux line
-	# (the PARTUUID form) and no build-loop leakage. There is exactly
-	# one boot path: a firstboot menuentry, a marker-conditional
-	# default, or a firstboot unit selection on any kernel command
-	# line is refused (firstboot is init-level, never a boot mode).
-	fb_count=$("$chroot_command" "$mnt" /bin/sh -c "
-		grep -cE 'first-boot setup|saphira-firstboot.target' /boot/grub/grub.cfg || true")
-	[ "$fb_count" = 0 ] || die "grub.cfg carries firstboot boot-mode artefacts ($fb_count matches)"
-	loop_count=$("$chroot_command" "$mnt" /bin/sh -c "
-		grep -E '^\s*linux\s' /boot/grub/grub.cfg |
-		tr ' ' '\n' | grep -c '^root=/dev/loop' || true")
-	[ "$loop_count" = 0 ] || die "build loop device leaked into grub.cfg ($loop_count root=/dev/loop tokens)"
-	part_count=$("$chroot_command" "$mnt" /bin/sh -c "
-		grep -E '^\s*linux\s' /boot/grub/grub.cfg |
-		tr ' ' '\n' | grep -c '^root=PARTUUID=' || true")
-	linux_count=$("$chroot_command" "$mnt" /bin/sh -c "
-		grep -cE '^\s*linux\s' /boot/grub/grub.cfg || true")
-	[ "$part_count" = "$linux_count" ] ||
-		die "grub.cfg linux lines lack exactly one root=PARTUUID each ($part_count PARTUUID over $linux_count linux lines)"
-}
 	# platform payload all come from the same grub package, so a host and
 	# target version mismatch is impossible. The ESP is mounted here,
 	# after the install (which refuses a non-empty target) and only
@@ -1743,6 +2247,15 @@ PY
 		mkdir -p "$mnt/boot/efi"
 		mount "$espdev" "$mnt/boot/efi" || die 'cannot mount the ESP'
 		esp_mounted=1
+		append_esp_fstab "$mnt" "$espdev"
+	fi
+	# Swap fstab entry, next to the ESP one: swap is formatted but
+	# never mounted during assembly, so the generator cannot record
+	# it. The loop device spelling is used: swappart() below resolves
+	# the same partition number the plan emitted.
+	if [ -n "${SWAP_N:-}" ]; then
+		append_swap_fstab "$mnt" "$(swap_device_for "$loop")" ||
+			die 'cannot record the swap partition in fstab'
 	fi
 	# The bootloader platform follows BOTH the boot method and the
 	# architecture. i386-pc is x86 firmware; the EFI platform is named
@@ -1772,6 +2285,7 @@ PY
 	fi
 	"$chroot_command" "$mnt" /usr/sbin/grub-mkconfig -o /boot/grub/grub.cfg ||
 		die 'grub-mkconfig failed'
+	generate_earlyfw "$mnt"
 	test -s "$mnt/boot/grub/grub.cfg" || die 'grub.cfg is empty'
 	grep -q 'vmlinuz' "$mnt/boot/grub/grub.cfg" ||
 		die 'grub.cfg has no kernel entry: the image would not boot'
@@ -1781,6 +2295,10 @@ PY
 
 	umount -R -- "$mnt" || die 'cannot unmount the image'
 	mounted= esp_mounted=
+	if [ -n "${pool_created:-}" ]; then
+		zpool export "$pool_created" || die "cannot export pool $pool_created (the image would not import elsewhere)"
+		pool_created=
+	fi
 	losetup -d "$loop" || die 'cannot detach loop device'
 	loop=
 
@@ -1803,6 +2321,244 @@ PY
 # explicit preview plus a typed confirmation, and preview mode never
 # writes anything at all.
 
+# Shared install helpers (top level by requirement, 2026-10-23):
+# fix_kernel_cmdline, prepare_installer, build_installer_initramfs and
+# finalize_bootloader are called from BOTH the image path (cmd_build)
+# and the disk path (cmd_install_to_disk). Defined nested inside
+# cmd_build they registered only when that path ran, so every disk
+# install died with "command not found" at the first shared call
+# while image builds worked -- the defect hid behind the path that
+# ran. Never nest a shared helper again.
+# Kernel command line repair, AFTER assembly, BEFORE grub-mkconfig.
+# Two build-host contaminations must not ship:
+#   root=<build loop>  grub-mkconfig probes the mounted root, which at
+#     build time is a loop device (root=/dev/loop0p2). The deployed
+#     image boots as vda/sda/nvme — the kernel panics on the loop
+#     name (proven: guest idle-halted, no root). The GPT PARTUUID is
+#     stable across all of those, needs no initramfs, and is known
+#     here via blkid. grub-mkconfig emits GRUB_CMDLINE_LINUX after
+#     its own probed root=, and the kernel takes the LAST root=, so
+#     appending the PARTUUID form wins without fighting the probe.
+#   init=<one init>    baselayout defaults at r21..r54 named the systemd
+#     binary (SEV1 2026-10-22: removed from the packaged default after it
+#     reached a live grub.cfg and panicked Egg; the strip stays as
+#     defense-in-depth). Both payloads ship a real /sbin/init, which is
+#     the kernel's own default. Strip every init= token for both.
+#   getty autospawn  systemd's getty-generator spawns a serial getty
+#     for every kernel console= (proven: it HUP-killed the firstboot
+#     wizard fighting it for /dev/console). No serial getty may exist
+#     at all (Saphira ships none), so systemd targets disable the
+#     generator here.
+fix_kernel_cmdline()
+{
+	# $1 mountpoint, $2 root partition device
+	mnt=$1
+	rootdev=$2
+	if [ "${ROOTFS:-ext4}" = zfs ]; then
+		# ZFS roots name the dataset, not a partition: the
+		# 20-zfs-import hook reads root=ZFS=pool/dataset (a PARTUUID
+		# would name the pool partition, which the kernel cannot
+		# mount without the import the hook performs).
+		roottoken="root=ZFS=$POOL/$(dataset_name_for)"
+	else
+		partuuid=$(blkid -s PARTUUID -o value -- "$rootdev") ||
+			die "cannot read PARTUUID of $rootdev"
+		[ -n "$partuuid" ] || die "empty PARTUUID for $rootdev"
+		roottoken="root=PARTUUID=$partuuid"
+	fi
+	getty_opt=
+	# Systemd-only kernel arguments, added here rather than shipped in the
+	# packaged default, so an OpenRC target never carries them:
+	#   systemd.getty_auto=0  no getty generator autospawn (the wizard and
+	#                         the explicit agetty services own the console)
+	#   systemd.imds=no       Saphira is not a cloud image; in auto mode
+	#                         the IMDS generator still opens the hardware
+	#                         database every boot and logs a failed lookup.
+	# Both are meaningless without systemd, and a systemd argument on an
+	# OpenRC cmdline is target leakage that reads as a defect in
+	# /proc/cmdline.
+	[ "$INIT" = systemd ] && getty_opt=" systemd.getty_auto=0 systemd.imds=no"
+	# Requested by --kernel-arg. set -u is in force, so it is always
+	# defined even when the option was never used.
+	KERNEL_ARGS=${KERNEL_ARGS:-}
+	defgrub=$mnt/etc/default/grub
+	[ -f "$defgrub" ] || die "internal: no /etc/default/grub in the image"
+	# Strip any root=/init= the packaged default carries, then append
+	# the deployment-stable root=. Portable sed, single backup-free
+	# edit of the image copy (the package conffile stays untouched).
+	python3 - "$defgrub" "$roottoken" "$getty_opt" "$KERNEL_ARGS" <<'PY' || die 'cannot repair GRUB_CMDLINE_LINUX'
+import re
+import sys
+path, roottoken, getty_opt = sys.argv[1], sys.argv[2], sys.argv[3]
+extra = sys.argv[4].split()
+text = open(path, encoding="utf-8").read()
+lines = text.splitlines(keepends=True)
+found = False
+for i, line in enumerate(lines):
+    if re.match(r'\s*GRUB_CMDLINE_LINUX=', line):
+        m = re.search(r'"(.*)"', line)
+        if not m:
+            raise SystemExit(f"unparseable GRUB_CMDLINE_LINUX: {line!r}")
+        tokens = [t for t in m.group(1).split()
+                  if not t.startswith("root=") and not t.startswith("init=")]
+        tokens.append(roottoken)
+        if getty_opt:
+            tokens.append(getty_opt.strip())
+        # Operator-requested arguments go last so they can override
+        # anything the default set. Duplicates are dropped: a repeated
+        # token in a kernel command line is legal but is a typo here.
+        for arg in extra:
+            if arg not in tokens:
+                tokens.append(arg)
+        lines[i] = f'GRUB_CMDLINE_LINUX="{" ".join(tokens)}"\n'
+        found = True
+if not found:
+    raise SystemExit("GRUB_CMDLINE_LINUX not present in /etc/default/grub")
+open(path, "w", encoding="utf-8").write("".join(lines))
+PY
+}
+# prepare_installer: turn an assembled usb-installer root into an
+# install ENVIRONMENT (not an installed machine). No-op for every
+# other profile. The menu owns tty1 (getty masked so nothing fights
+# it); firstboot must never run here (its marker is removed and its
+# gate is never written: identity belongs to installed machines, and
+# prepare_init skips both when it sees this profile); the ram-mode
+# initramfs is built from the installed kernel and the shipped
+# composition, so grub-mkconfig below picks up its initrd line.
+prepare_installer()
+{
+	mnt=$1
+	[ "$PROFILE" = usb-installer ] || return 0
+	[ -x "$mnt/usr/bin/systemctl" ] ||
+		die "installer target but no systemctl in the image"
+	"$chroot_command" "$mnt" /usr/bin/systemctl --root=/ enable saphira-install-menu.service ||
+		die "cannot enable the installer menu"
+	"$chroot_command" "$mnt" /usr/bin/systemctl --root=/ mask getty@tty1.service ||
+		die "cannot mask getty@tty1 (it would fight the menu for the console)"
+	rm -f "$mnt/etc/saphira-firstboot-required"
+}
+# build_installer_initramfs: ram-mode initramfs for the usb-installer
+# root, written into its /boot next to the kernel. No-op for every
+# other profile. The kernel release is read from the installed
+# vmlinuz name, never guessed; the composition is the shipped
+# installer-initramfs.conf naming the label-mounting entrypoint.
+build_installer_initramfs()
+{
+	mnt=$1
+	[ "$PROFILE" = usb-installer ] || return 0
+	command -v saphira-mkinitramfs >/dev/null 2>&1 || die "installer target needs saphira-mkinitramfs on the build host (install saphira-initramfs-tools, or use a non-installer target)"
+	kernel=$(ls "$mnt"/boot/vmlinuz-* 2>/dev/null | head -1)
+	[ -n "$kernel" ] || die "installer target has no kernel in /boot (the usb-installer profile must carry one)"
+	krel=${kernel##*/vmlinuz-}
+	[ -n "$krel" ] || die "cannot derive the kernel release from $kernel"
+	saphira-mkinitramfs build --kernel "$krel" --root "$mnt" \
+		--config /usr/share/saphira/installer-initramfs.conf \
+		--output "$mnt/boot/initramfs-installer" ||
+		die "installer initramfs build failed"
+}
+# Early-firmware boot images, AFTER the first grub-mkconfig in each
+# path (which establishes the baseline config); the generator itself
+# re-regenerates grub.cfg at the end, discovering the new images by
+# stock filename patterns.
+# /boot/initramfs-<release>.img and /boot/intel-ucode.img by stock
+# filename patterns whenever it runs). Assembly installs with
+# --no-scripts, so package hooks never fire here: generate explicitly
+# for both the image and the disk path (shared helper by requirement).
+# /sys inside the target is the host's (established by saphira-chroot),
+# so PCI selection is precise for install-to-disk on real hardware and
+# falls back to the shipped baseline for generic images; regenerate on
+# the machine itself after any hardware change.
+generate_earlyfw()
+{
+	# Early firmware is strictly opt-in (--earlyfw): without the
+	# flag nothing is generated even when saphira-earlyfw is
+	# installed, and later kernel/firmware upgrades regenerate only
+	# on machines carrying the marker below (see hooks-earlyfw).
+	# Opting in records the marker so refreshes keep working.
+	mnt=$1
+	if [ "${EARLYFW:-0}" != 1 ]; then
+		printf '%s: early firmware not requested (--earlyfw), skipping\n' "$PROG" >&2
+		return 0
+	fi
+	if [ -x "$mnt/usr/sbin/saphira-earlyfw" ]; then
+		install -m 0644 /dev/null "$mnt/etc/saphira/earlyfw-enabled" ||
+			die 'cannot write the earlyfw opt-in marker'
+		"$chroot_command" "$mnt" /usr/sbin/saphira-earlyfw --all ||
+			die 'early-firmware generation failed'
+	else
+		die 'earlyfw requested but saphira-earlyfw is not in the target (add a role carrying saphira-initramfs-tools?)'
+	fi
+}
+	# Bootloader finalization, AFTER grub-mkconfig, on the generated file.
+# One thing grub-mkconfig cannot do on its own:
+#   root=<build loop>  grub-mkconfig probes the mounted build root, so
+#     every linux line carries the build-host loop device
+#     (root=/dev/loopNp2, N varying with host state). The kernel takes
+#     the LAST root=, and fix_kernel_cmdline's appended PARTUUID wins
+#     - but the stale token still ships, shows up in /proc/cmdline,
+#     and reads as a release defect. Strip every root= token from
+#     every linux line and leave exactly one deployment-stable
+#     root=PARTUUID (the image's own GPT GUID, via blkid).
+# Nothing else is rewritten: there is ONE normal Saphira boot path.
+# Firstboot is an init-level concern (the running system detects its
+# own marker), never a bootloader selection - no second menuentry,
+# no marker-conditional default, no special kernel command line.
+finalize_bootloader()
+{
+	# $1 mountpoint, $2 root partition device
+	mnt=$1
+	rootdev=$2
+	if [ "${ROOTFS:-ext4}" = zfs ]; then
+		roottoken="root=ZFS=$POOL/$(dataset_name_for)"
+	else
+		partuuid=$(blkid -s PARTUUID -o value -- "$rootdev") ||
+			die "cannot read PARTUUID of $rootdev"
+		[ -n "$partuuid" ] || die "empty PARTUUID for $rootdev"
+		roottoken="root=PARTUUID=$partuuid"
+	fi
+	python3 - "$mnt/boot/grub/grub.cfg" "$roottoken" <<'PY' || die 'cannot finalize grub.cfg'
+import re
+import sys
+path, roottoken = sys.argv[1], sys.argv[2]
+lines = open(path, encoding="utf-8").read().splitlines(keepends=True)
+
+def rewrite_linux(line):
+    m = re.match(r'(\s*linux\s+\S+)(.*)$', line.rstrip("\n"))
+    if not m:
+        return line
+    head, args = m.group(1), m.group(2)
+    tokens = [t for t in args.split() if not t.startswith("root=")]
+    tokens.append(roottoken)
+    return f"{head} {' '.join(tokens)}\n"
+
+for i, line in enumerate(lines):
+    if re.match(r"\s*linux\s", line):
+        lines[i] = rewrite_linux(line)
+
+open(path, "w", encoding="utf-8").write("".join(lines))
+PY
+	# The generated file must carry exactly one root= per linux line
+	# (the PARTUUID form, or root=ZFS=pool/dataset for ZFS roots) and
+	# no build-loop leakage. There is exactly
+	# one boot path: a firstboot menuentry, a marker-conditional
+	# default, or a firstboot unit selection on any kernel command
+	# line is refused (firstboot is init-level, never a boot mode).
+	fb_count=$("$chroot_command" "$mnt" /bin/sh -c "
+		grep -cE 'first-boot setup|saphira-firstboot.target' /boot/grub/grub.cfg || true")
+	[ "$fb_count" = 0 ] || die "grub.cfg carries firstboot boot-mode artefacts ($fb_count matches)"
+	loop_count=$("$chroot_command" "$mnt" /bin/sh -c "
+		grep -E '^\s*linux\s' /boot/grub/grub.cfg |
+		tr ' ' '\n' | grep -c '^root=/dev/loop' || true")
+	[ "$loop_count" = 0 ] || die "build loop device leaked into grub.cfg ($loop_count root=/dev/loop tokens)"
+	part_count=$("$chroot_command" "$mnt" /bin/sh -c "
+		grep -E '^\s*linux\s' /boot/grub/grub.cfg |
+		tr ' ' '\n' | grep -c '^root=' || true")
+	linux_count=$("$chroot_command" "$mnt" /bin/sh -c "
+		grep -cE '^\s*linux\s' /boot/grub/grub.cfg || true")
+	[ "$part_count" = "$linux_count" ] ||
+		die "grub.cfg linux lines lack exactly one root= each ($part_count root= over $linux_count linux lines)"
+}
+
 print_install_plan()
 {
 	# $1 device path. Prints the complete installation plan: what will
@@ -1819,19 +2575,33 @@ print_install_plan()
 	printf 'target:            %s (boot=%s init=%s)\n' \
 		"$TARGET" "$BOOT" "$INIT"
 	printf 'profile:           %s\n' "$PROFILE"
+	if [ -n "${ALLOCATE:-}" ]; then
+		printf 'allocation:        %s of the device (remainder left unallocated)\n' "$ALLOCATE"
+	fi
+	if [ -n "${ROOT_SIZE:-}" ]; then
+		printf 'root:              %s exact (remainder left unallocated)\n' "$ROOT_SIZE"
+	fi
 	for r in $roles $role_files; do
 		printf 'role layer:        %s\n' "$r"
 	done
-	printf 'hostname:          %s\n' "${hostname:-saphira}"
+	printf 'hostname:          %s\n' "${hostname:-$(default_hostname)}"
 	printf 'partition table:   GPT (whole disk is rewritten)\n'
+	printf 'signatures:        wiped (wipefs -a) before partitioning\n'
 	printf 'partition plan:\n'
-	SIZE=$DEV_BYTES partition_plan | sed 's/^/  /'
+	# Direct redirect, never a pipe: a piped plan swallows refusals
+	# (subshell exit status lost) and would print a truncated plan.
+	SIZE=$DEV_BYTES partition_plan >"$PLAN_BUFFER" || die 'cannot generate the partition plan'
+	sed 's/^/  /' "$PLAN_BUFFER"
 	if [ "$BOOT" = uefi ]; then
-		printf 'firmware:          UEFI, 64 MiB FAT ESP, GRUB %s-efi --removable\n' "$ARCH"
+		printf 'firmware:          UEFI, %s MiB FAT32 ESP, GRUB %s-efi --removable\n' "${ESP_SIZE:-64}" "$ARCH"
 	else
 		printf 'firmware:          BIOS, 1 MiB bios-boot, GRUB i386-pc\n'
 	fi
-	printf 'filesystem:        ext4 root (label saphira-root)\n'
+	if [ "${ROOTFS:-ext4}" = zfs ]; then
+		printf 'filesystem:        ZFS root (pool %s, dataset %s/ROOTS/%s, ext4 /boot label saphira-boot)\n' "${POOL:-tank}" "${POOL:-tank}" "$(dataset_name_for)"
+	else
+		printf 'filesystem:        ext4 root (label saphira-root)\n'
+	fi
 	printf 'bootloader:        grub-install to %s (the disk, never a partition)\n' "$1"
 	printf 'fstab:             generated from the installed mounts\n'
 }
@@ -1851,8 +2621,8 @@ confirm_device_destroy()
 
 cmd_install_to_disk()
 {
-	TARGET= device= repository= hostname= root_password= kernel_args= arch=
-	roles= role_files= enable=1 keep_work=0 preview=0 netconf=
+	TARGET= device= repository= hostname= root_password= kernel_args= arch= ALLOCATE= ESP_SIZE= ROOT_SIZE= ROOTFS= POOL= BOOT_SIZE= SWAP_SIZE=
+	roles= role_files= enable=1 keep_work=0 preview=0 netconf= EARLYFW=0 BOOT_SIZE_GIVEN=0
 	while test $# -gt 0; do
 		case $1 in
 			--target) TARGET=${2:?missing TARGET}; shift 2 ;;
@@ -1860,6 +2630,21 @@ cmd_install_to_disk()
 			--device) device=${2:?missing DEVICE}; shift 2 ;;
 			--device=*) device=${1#*=}; shift ;;
 			--preview) preview=1; shift ;;
+			--allocate) ALLOCATE=${2:?missing ALLOCATE}; shift 2 ;;
+			--allocate=*) ALLOCATE=${1#*=}; shift ;;
+			--esp-size) ESP_SIZE=${2:?missing ESP_SIZE}; shift 2 ;;
+			--esp-size=*) ESP_SIZE=${1#*=}; shift ;;
+			--root-size) ROOT_SIZE=${2:?missing ROOT_SIZE}; shift 2 ;;
+			--root-size=*) ROOT_SIZE=${1#*=}; shift ;;
+			--rootfs) ROOTFS=${2:?missing ROOTFS}; shift 2 ;;
+			--rootfs=*) ROOTFS=${1#*=}; shift ;;
+			--pool) POOL=${2:?missing POOL}; shift 2 ;;
+			--pool=*) POOL=${1#*=}; shift ;;
+			--boot-size) BOOT_SIZE=${2:?missing BOOT_SIZE}; BOOT_SIZE_GIVEN=1; shift 2 ;;
+			--boot-size=*) BOOT_SIZE=${1#*=}; BOOT_SIZE_GIVEN=1; shift ;;
+			--swap-size) SWAP_SIZE=${2:?missing SWAP_SIZE}; shift 2 ;;
+			--swap-size=*) SWAP_SIZE=${1#*=}; shift ;;
+			--earlyfw) EARLYFW=1; shift ;;
 			--kernel-arg) kernel_args="$kernel_args ${2:?missing ARG}"; shift 2 ;;
 			--kernel-arg=*) kernel_args="$kernel_args ${1#*=}"; shift ;;
 			--arch) arch=${2:?missing ARCH}; shift 2 ;;
@@ -1901,6 +2686,12 @@ cmd_install_to_disk()
 	# needs no installer, no host tools and no privileges beyond
 	# reading the device size, so it stops here.
 	validate_device "$device"
+	# The plan validator needs a scratch buffer (it re-emits the
+	# validated plan from it); without one it truncates to nothing
+	# inside a subshell and the preview prints an empty plan.
+	PLAN_BUFFER=$(mktemp "${SAPHIRA_TMPDIR:-/build/tmp}/saphira-plan.XXXXXX") ||
+		die 'cannot create a scratch file for the partition plan'
+	trap 'rm -f -- "$PLAN_BUFFER"' EXIT HUP INT TERM
 	print_install_plan "$device"
 	if [ "$preview" -eq 1 ]; then
 		printf '%s: preview only; the device was not touched\n' "$PROG"
@@ -1912,6 +2703,14 @@ cmd_install_to_disk()
 
 	test "$($(command -v id) -u)" -eq 0 || die 'root privileges are required (partitioning, filesystems, mounts)'
 
+	# Wipe every existing signature first (partition tables, filesystem
+	# superblocks, RAID/LVM metadata). The operator confirmed destruction
+	# above and the tool owns the whole table it is about to write; a
+	# stale signature left behind confuses probing (blkid, GRUB) or makes
+	# sfdisk stop for confirmation it will never receive. wipefs -a on
+	# the whole disk is exactly the confirmed operation, nothing more.
+	wipefs -a -- "$device" || die "cannot wipe old signatures from $device"
+
 	tmpbase=$(saphira_tmpdir)
 	mkdir -p "$tmpbase" || die "cannot create scratch under $tmpbase"
 	work=$(mktemp -d "$tmpbase/saphira-image.XXXXXX") ||
@@ -1920,6 +2719,8 @@ cmd_install_to_disk()
 	mkdir -p "$mnt" || die 'cannot create mountpoint'
 	mounted=
 	esp_mounted=
+	boot_mounted=
+	pool_created=
 
 	cleanup_disk()
 	{
@@ -1930,8 +2731,13 @@ cmd_install_to_disk()
 		# and any installed content stay for diagnosis, but nothing
 		# stays mounted.
 		[ -n "$esp_mounted" ] && umount -R -- "$mnt/boot/efi" >/dev/null 2>&1
+		[ -n "$boot_mounted" ] && umount -- "$mnt/boot" >/dev/null 2>&1
 		[ -n "$mounted" ] && umount -R -- "$mnt" >/dev/null 2>&1 || umount -l -- "$mnt" >/dev/null 2>&1
-		mounted= esp_mounted=
+		if [ -n "${pool_created:-}" ]; then
+			zpool export "$pool_created" >/dev/null 2>&1 || true
+		fi
+		mounted= esp_mounted= boot_mounted= pool_created=
+		[ -n "${PLAN_BUFFER:-}" ] && rm -f -- "$PLAN_BUFFER"
 		if [ "$keep_work" -eq 1 ] || [ "$status" -ne 0 ]; then
 			printf '%s: workspace retained for diagnosis: %s\n' "$PROG" "$work" >&2
 			printf '%s: disk %s left as-is (unmounted); inspect before retrying\n' "$PROG" "$device" >&2
@@ -1955,19 +2761,53 @@ cmd_install_to_disk()
 	partition_plan > "$plan" || die 'cannot generate the partition plan'
 	sfdisk --label gpt -- "$device" < "$plan" || die 'partitioning failed'
 	# The kernel may need a moment to publish the partition nodes.
+	# Numbers come from set_partition_numbers (plan order: fixed
+	# head, optional separate /boot, root or pool, optional swap
+	# last), never from hardcoded positions.
+	rootpart_n=$ROOT_N
+	# Existence check only: the first fixed partition (bios-boot
+	# or ESP) is always p1 in every layout.
+	bootpart_n=1
 	for _ in 1 2 3 4 5 6 7 8 9 10; do
-		rootdev=$(part_device_for "$device" 2)
+		rootdev=$(part_device_for "$device" $rootpart_n)
 		[ -b "$rootdev" ] && break
 		sleep 0.2
 	done
-	rootdev=$(part_device_for "$device" 2)
-	bootdev=$(part_device_for "$device" 1)
+	rootdev=$(part_device_for "$device" $rootpart_n)
+	bootdev=$(part_device_for "$device" $bootpart_n)
 	[ -b "$rootdev" ] || die "root partition device did not appear: $rootdev"
 	[ -b "$bootdev" ] || die "boot partition device did not appear: $bootdev"
 
-	mkfs.ext4 -q -L saphira-root "$rootdev" || die 'cannot format root partition'
-	mount -o noatime "$rootdev" "$mnt" || die 'cannot mount root'
-	mounted=1
+	if [ "${ROOTFS:-ext4}" = zfs ]; then
+		format_zfs_root "$rootdev" "$bootdev" "$mnt" || die 'cannot provision the ZFS root'
+		mounted=1
+	else
+		mkfs.ext4 -q -L saphira-root "$rootdev" || die 'cannot format root partition'
+		mount -o noatime "$rootdev" "$mnt" || die 'cannot mount root'
+		mounted=1
+		# A separately partitioned /boot (explicit --boot-size):
+		# BOOT_N addresses it (bootdev above is only the p1
+		# existence check on this path).
+		if [ "$HAVE_BOOT_PART" = 1 ]; then
+			bootpart=$(part_device_for "$device" "$BOOT_N") ||
+				die 'cannot locate the /boot partition'
+			[ -b "$bootpart" ] || die "boot partition device did not appear: $bootpart"
+			mkfs.ext4 -q -L saphira-boot "$bootpart" ||
+				die 'cannot format the /boot partition'
+			mkdir -p "$mnt/boot" || die 'cannot create /boot mountpoint'
+			mount -o noatime "$bootpart" "$mnt/boot" ||
+				die 'cannot mount /boot'
+			boot_mounted=1
+		fi
+	fi
+	# Swap is formatted but never activated here (see cmd_build).
+	if [ -n "${SWAP_N:-}" ]; then
+		swappart=$(part_device_for "$device" "$SWAP_N") ||
+			die 'cannot locate the swap partition'
+		[ -b "$swappart" ] || die "swap partition device did not appear: $swappart"
+		mkswap -L saphira-swap "$swappart" ||
+			die 'cannot format the swap partition'
+	fi
 
 	# NOTE: the ESP is formatted here but mounted only AFTER the
 	# install below: saphira-install refuses a non-empty target,
@@ -1975,7 +2815,11 @@ cmd_install_to_disk()
 	# grub-install - which genuinely needs the ESP mounted - runs
 	# after the install step.
 	if [ "$BOOT" = uefi ]; then
-		mkfs.vfat -F 32 -n SaphiraESP "$bootdev" ||
+		# The ESP is always p1 under uefi plans, ext4 or ZFS roots
+		# alike (/boot moved to p2 for ZFS, so $bootdev is NOT the
+		# ESP there).
+		espdev=$(part_device_for "$device" 1)
+		mkfs.vfat -F 32 -n SaphiraESP "$espdev" ||
 			die 'cannot format the EFI System Partition'
 	fi
 
@@ -1993,6 +2837,9 @@ cmd_install_to_disk()
 		[ -f "$f" ] || die "no such role file: $f"
 		cat "$f" >> "$composed"
 	done
+	if [ "${ROOTFS:-ext4}" = zfs ]; then
+		require_zfs_target "$composed"
+	fi
 	profile_name=$(basename "$composed")
 	profile_root=$work/profiles
 	mkdir -p "$profile_root" || die 'cannot create the scratch profile root'
@@ -2014,7 +2861,7 @@ cmd_install_to_disk()
 	SAPHIRA_ARCH="$ARCH" \
 		SAPHIRA_REPOSITORY="$repository" \
 		SAPHIRA_PROFILE_ROOT="$profile_root" \
-		SAPHIRA_HOSTNAME="${hostname:-saphira}" \
+		SAPHIRA_HOSTNAME="${hostname:-$(default_hostname)}" \
 		SAPHIRA_ROOT_PASSWORD="$root_password" \
 		"$install_command" --target "$mnt" --profile "$profile_name" ||
 		die 'installation onto disk failed'
@@ -2025,9 +2872,22 @@ cmd_install_to_disk()
 	fix_kernel_cmdline "$mnt" "$rootdev"
 
 	if [ "$BOOT" = uefi ]; then
+		# The ESP is always p1 under uefi plans ($bootdev is /boot
+		# under ZFS, never the ESP).
+		espdev=$(part_device_for "$device" 1)
 		mkdir -p "$mnt/boot/efi"
-		mount "$bootdev" "$mnt/boot/efi" || die 'cannot mount the ESP'
+		mount "$espdev" "$mnt/boot/efi" || die 'cannot mount the ESP'
 		esp_mounted=1
+		append_esp_fstab "$mnt" "$espdev"
+	fi
+	# Swap fstab entry, next to the ESP one (swap is formatted but
+	# never mounted during assembly, so the generator cannot see it).
+	if [ -n "${SWAP_N:-}" ]; then
+		swappart=$(part_device_for "$device" "$SWAP_N") ||
+			die 'cannot locate the swap partition'
+		[ -b "$swappart" ] || die "swap partition device did not appear: $swappart"
+		append_swap_fstab "$mnt" "$swappart" ||
+			die 'cannot record the swap partition in fstab'
 	fi
 	# The bootloader platform follows BOTH the boot method and the
 	# architecture. grub-install targets the WHOLE DISK here, never a
@@ -2045,6 +2905,7 @@ cmd_install_to_disk()
 		die "grub-install failed ($BOOT)"
 	"$chroot_command" "$mnt" /usr/sbin/grub-mkconfig -o /boot/grub/grub.cfg ||
 		die 'grub-mkconfig failed'
+	generate_earlyfw "$mnt"
 	test -s "$mnt/boot/grub/grub.cfg" || die 'grub.cfg is empty'
 	grep -q 'vmlinuz' "$mnt/boot/grub/grub.cfg" ||
 		die 'grub.cfg has no kernel entry: the disk would not boot'
@@ -2054,6 +2915,10 @@ cmd_install_to_disk()
 
 	umount -R -- "$mnt" || die 'cannot unmount the disk'
 	mounted= esp_mounted=
+	if [ -n "${pool_created:-}" ]; then
+		zpool export "$pool_created" || die "cannot export pool $pool_created (the disk would not import on the target)"
+		pool_created=
+	fi
 	printf '%s: %s installed (target=%s)\n' "$PROG" "$device" "$TARGET"
 	cleanup_disk 0
 }

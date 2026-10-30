@@ -425,7 +425,12 @@ def cmd_reconcile(rdb: object, config: dict, repo: str, from_history: bool) -> i
             else:
                 # Current-view reconcile: verify the eternal ledger, advance
                 # legitimate drops to tombstones, never invent history.
-                live: list[tuple[str, dict]] = []
+                # (owner-nvr, package-name, declaration), matching
+                # advance_reservations' list[tuple[str, str, dict]]
+                # contract (repo_db.py). A 2-tuple here crashes the
+                # reconcile; check_union above is a different function
+                # with its own 2-tuple contract and is untouched.
+                live: list[tuple[str, str, dict]] = []
                 newest: dict[str, str] = {}
                 for filename, info in census_data.items():
                     name, version = info["name"], info["version"]
@@ -435,14 +440,18 @@ def cmd_reconcile(rdb: object, config: dict, repo: str, from_history: bool) -> i
                     decl = declarations.get(f"{name}-{version}.apk",
                                             {"users": [], "groups": [], "dirs": []})
                     if decl.get("users") or decl.get("groups"):
-                        live.append((f"{name}-{version}", decl))
+                        live.append((f"{name}-{version}", name, decl))
                 try:
                     rdb.advance_reservations(conn, live, False, notices)
                 except rdb.RepoDbError as exc:
                     conn.rollback()
                     print(f"saphira-repo-migrate: reservation verification failed: {exc}",
                           file=sys.stderr)
-                return 1
+                    # Inside the except: only failure returns here. At the
+                    # outer indent the return fired on success too, skipping
+                    # COMMIT, the audit stamp and the final report --
+                    # reconcile could never succeed.
+                    return 1
         except BaseException:
             conn.execute("ROLLBACK")
             raise

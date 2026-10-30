@@ -169,8 +169,9 @@ The firmware reads a FAT EFI System Partition. BIOS partitioning rules
 are deliberately not reused: a
 .B bios\-boot
 partition means nothing to UEFI firmware, and without a real ESP the
-firmware finds no bootloader at all. The ESP is 64 MiB, formatted
-FAT32, mounted at
+firmware finds no bootloader at all. The ESP defaults to 64 MiB
+.RB ( \-\-esp\-size )
+and is always formatted FAT32, mounted at
 .IR /boot/efi ,
 and
 .B grub\-install
@@ -221,15 +222,68 @@ Minimum image size, accepting
 .BR T .
 Defaults to 2G.
 .TP
+.BI \-\-allocate " SIZE"
+How much of the capacity the initial partition layout occupies: an
+absolute size or a percentage of
+.BR \-\-size .
+The remainder stays unallocated for later growth. Omitted, the
+partitions occupy the whole capacity.
+.TP
+.BI \-\-esp\-size " MIB"
+ESP capacity in MiB: one of 64, 128, 256, 512, 768, 1024.
+Defaults to 64. Below 64 is refused: FAT32 needs at least 65,525
+data clusters, so a smaller ESP cannot be valid FAT32. Larger sizes
+suit Windows coexistence and UKIs; the formatter stays FAT32 at
+every permitted size.
+.TP
+.BI \-\-root\-size " SIZE"
+Exact root partition capacity, accepting
+.BR M ,
+.BR G ,
+.BR T
+(1MiB-aligned, at least 32MiB). Omitted, root fills the allocation.
+With
+.BR \-\-allocate ,
+root plus the fixed partitions must fit inside it; over-budget
+combinations are refused, nothing is resized silently, and the
+remainder stays unallocated. Under
+.BR \-\-rootfs " zfs"
+this sizes the pool partition; /boot is sized by
+.BR \-\-boot\-size .
+.TP
+.BI \-\-rootfs " FS"
+Root filesystem: ext4 (default) or zfs. A zfs root is a pool with a
+separate ext4 /boot (GRUB reads files, never pool features); the
+target must carry the ZFS kmod and userspace (add
+.BR \-\-role " role-zfs"
+or an equivalent profile). Hybrid boot with zfs is refused.
+.TP
+.BI \-\-pool " NAME"
+ZFS pool name (default tank). Refused when a pool of that name
+already exists on the building host.
+.TP
+.BI \-\-boot\-size " MIB"
+ext4 /boot capacity for zfs roots in MiB: one of 128, 256 (default),
+512, 1024. Ignored for ext4 roots.
+.TP
 .BI \-\-repository " PATH"
 Repository index to install from. Defaults to the host repository.
+The installer appliance finalizes its own
+.I /etc/apk/repositories
+to the public repository.
 .TP
 .BI \-\-hostname " NAME"
 Hostname written into the image. Defaults to
-.BR saphira .
+.BR saphira
+on OpenRC targets and
+.BR saphirad
+on systemd targets: product identity runs down to the default
+hostname.
 .TP
 .BI \-\-root\-password " PW"
-Root password set inside the image.
+Root password set inside the image. If omitted, root is locked and
+ordinary firstboot owns account setup; a supplied password is for
+automated boot-test images only.
 .TP
 .BI \-\-role " NAME"
 Add a role layer. Repeatable.
@@ -249,6 +303,9 @@ Retain the scratch workspace when a build fails, for diagnosis.
 .I DEV
 Install onto a physical disk. Accepts
 .BR \-\-preview ,
+.BR \-\-allocate ,
+.BR \-\-esp\-size ,
+.BR \-\-root\-size ,
 .BR \-\-hostname ,
 .BR \-\-root\-password ,
 .BR \-\-kernel\-arg ,
@@ -260,11 +317,17 @@ Install onto a physical disk. Accepts
 .BR \-\-no\-enable ,
 .BR \-\-keep\-work .
 There is no
-.B \-\-output ,
-.B \-\-size
+.B \-\-output
 or
-.B \-\-allocate :
+.B \-\-size :
 the disk's own capacity is the size.
+.PP
+Before partitioning, every existing signature on the disk (partition
+tables, filesystem superblocks, RAID and LVM metadata) is wiped with
+.B wipefs \-a .
+The confirmed operation is whole-disk destruction, and a stale
+signature left behind would confuse probing or stall partitioning
+waiting for a confirmation it will never receive.
 .SH EXIT STATUS
 Zero on success. Non\-zero on any refusal. A failed build removes the
 partial image it created; a pre\-existing output path is never touched.

@@ -2,7 +2,10 @@
 
 pkgname=saphira-zfs-7.2.3
 pkgver=2.4.4
-pkgrel=3
+pkgrel=4
+# r4: self-staging kernel tree (kmod-zfs.sh prepares it in-worker from
+# the vendored tarball + published kernel .config): plain
+# `buildpkg saphira-zfs-7.2.3`, no /input, no /usr/src.
 # r3: kver-only depends saphira-kernel-7.2.3 (line identity, no -rN).
 # Same 2.4.4 modules, corrected install-time coupling; supersedes the
 # published r2 normally (r2 stays in the repo).
@@ -16,23 +19,25 @@ source=https://github.com/openzfs/zfs/releases/download/zfs-2.4.4/zfs-2.4.4.tar.
 sha256=2a3c70d55a37cc71618a95a60e81ad66530201eb118d37741dc92efcf848c8b1
 
 # Per-kernel co-installable output. Build logic lives in
-# saphira-kernel/files/kmod-zfs.sh; the kernel tree comes from staged
-# /input (build-kmod-set.sh), the headers pin only provides host UAPI.
+# saphira-kernel/files/kmod-zfs.sh; the kernel tree is prepared
+# in-worker from vendored inputs (kernel tarball + published kernel's
+# own built .config), never staged from /usr/src, never mounted in.
+# `buildpkg saphira-zfs-7.2.3` works with no staging step; an
+# explicitly staged tree is still honoured after its config is proven.
 # New kernels: copy the nearest variant, set KVER_SHORT + headers pin
 # (see new-kmod-variant.sh).
 # Kernel identity is the line (KVER_SHORT), not the packaging revision:
-# the package name carries the kver, the build tree is the staged
-# /usr/src/linux-<kver> tree, and modules land under that KREL's extra/.
-# -rN is packaging metadata and stays out of the ABI dependency policy;
-# rebuilds follow source/config/KREL changes (release process), and the
-# build-time staged-tree config gate enforces exact-tree builds.
+# the package name carries the kver, and modules land under that KREL's
+# extra/. -rN is packaging metadata and stays out of the ABI dependency
+# policy; rebuilds follow source/config/KREL changes (release process).
 depends="kmod saphira-zfs-userspace saphira-kernel-7.2.3"
 # Build secret contract: module signing is mandatory, never optional.
 # The worker refuses before spending anything when the builder did
 # not expose a readable /keys/module-signing.pem.
 saphira_sign_key_required=yes
-# saphira-linux-uapi-headers supplies host UAPI (single active line;
-# the build tree comes from staged /input). -rN never enters kmod deps.
+# saphira-linux-uapi-headers supplies host UAPI (single active line).
+# The build tree is prepared in-worker by kmod-zfs.sh. -rN never enters
+# kmod deps.
 makedepends="
 	binutils
 	gcc
@@ -48,6 +53,11 @@ makedepends="
 	make
 	pkgconf
 	python3
+	bc
+	bison
+	flex
+	perl
+	pahole
 "
 # Handover from the retired monolithic saphira-zfs (owned these module
 # paths): the file gate exempts retired names listed here, so the split

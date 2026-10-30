@@ -26,7 +26,7 @@ makedepends="
     gcc
     libclang>=22.1.8-r1
     libunwind-dev
-    llvm>=22.1.8-r1
+    llvm-dev>=22.1.8-r4
     openssl-dev
     python3
     rustc>=1.97.1-r1

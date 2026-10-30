@@ -62,7 +62,7 @@ recipe_install()
 	install -D -m 0644 "$RECIPE_DIR/files/apparmor.service" \
 		"$PKGDEST/usr/lib/systemd/system/apparmor.service"
 	# The parser and the query tools are the declared capability.
-	for tool in sbin/apparmor_parser usr/sbin/aa-status usr/sbin/aa-enabled; do
+	for tool in sbin/apparmor_parser usr/sbin/aa-status usr/bin/aa-enabled; do
 		[ -x "$PKGDEST/$tool" ] || {
 			echo "ERROR: apparmor-parser payload is missing /$tool" >&2
 			return 1

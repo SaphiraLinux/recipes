@@ -1,0 +1,20 @@
+[Unit]
+Description=Saphira dedicated installer (console)
+Documentation=man:saphira-firstboot-image(8)
+After=systemd-udevd.service
+Wants=systemd-udevd.service
+ConditionPathExists=/etc/saphira-image-firstboot-required
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+TimeoutStartSec=infinity
+ExecStart=/sbin/saphira-firstboot-image
+StandardInput=tty-force
+StandardOutput=tty
+StandardError=tty
+TTYPath=/dev/console
+TTYReset=yes
+
+[Install]
+WantedBy=multi-user.target

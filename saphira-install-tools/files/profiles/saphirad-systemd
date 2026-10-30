@@ -53,6 +53,24 @@
 #                       administrable; proposed explicitly, kept deliberately.
 #   tzdata              a server with no timezone cannot reason about
 #                       logs, certificates or scheduling.
+#   intel-ucode         early CPU microcode (physical Intel hosts apply
+#                       it before kernel init via /boot/intel-ucode.img;
+#                       without it the CPU runs factory microcode).
+#   linux-firmware-i915 Intel GPU blobs (GuC/HuC/DMC). Built-in i915
+#                       initializes before the root mount; without these
+#                       in the early boot image it wedges (proven on
+#                       Alder Lake). ~30MB.
+#   linux-firmware-intel
+#                       Intel Wi-Fi/Bluetooth blobs.
+#   linux-firmware-network
+#                       NIC blobs (incl. common physical NICs). ~600MB:
+#                       the price of unknown target hardware; trim for
+#                       known NICs.
+#   saphira-initramfs-tools
+#                       the early-firmware generator (saphira-earlyfw).
+#                       REQUIRED in-target: kernel/firmware hooks run
+#                       chrooted here, so without this package no boot
+#                       image is ever generated or refreshed.
 #
 # Deliberately absent, each a decision rather than an oversight:
 #   - chrony (time sync is a service/role, not a base prerequisite);
@@ -78,5 +96,11 @@ dhcpcd
 nftables
 acpid
 vim
+sudo
 iputils
 tzdata
+intel-ucode
+linux-firmware-i915
+linux-firmware-intel
+linux-firmware-network
+saphira-initramfs-tools

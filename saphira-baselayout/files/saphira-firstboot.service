@@ -16,9 +16,14 @@ ConditionPathExists=/etc/saphira-firstboot-required
 # the wizard was racing device discovery for its interface list.
 #
 # After= names the platform work it consumes: udevd for device
-# discovery, networkd so the wizard's own address/DHCP apply works live
-# (via SIGHUP reload, no D-Bus: no message bus runs this early by
-# design), and the layout migration this package owns. Without= is not
+# discovery and networkd so the wizard's own address/DHCP apply works
+# live (via SIGHUP reload, no D-Bus: no message bus runs this early by
+# design). fhs-converge is deliberately NOT named here (2026-10-23):
+# it completes before sysinit.target while this unit starts after
+# basic.target, so transaction order already separates them by a full
+# boot phase; a direct edge from this multi-user-gated unit back into
+# a sysinit unit adds no ordering and is exactly the shape that turns
+# healthy orderings into reported transaction cycles. Without= is not
 # claimed: their failure must never block setup - the marker is kept
 # and setup retries on the next boot either way.
 #
@@ -26,17 +31,21 @@ ConditionPathExists=/etc/saphira-firstboot-required
 # setup completes is NOT here; it is normal-boot dependency structure
 # applied by the image (multi-user.target, which is the default target),
 # designed from the real unit graph - never a second boot mode.
-After=systemd-udevd.service systemd-networkd.service saphira-fhs-converge.service
+After=systemd-udevd.service systemd-networkd.service
 Wants=systemd-udevd.service systemd-networkd.service
 # At-boot handover signal for the wizard: set only when launched by
 # this unit (manual runs leave it unset, so a manual setup never
 # reboots a live machine). The wizard consumes the marker and reboots
 # into the ordinary boot only when it runs at boot.
-Environment=SAPHIRA_FIRSTBOOT_AT_BOOT=1
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+# Environment belongs here, in [Service], not in [Unit] (2026-10-23:
+# it sat in [Unit] where systemd ignores unknown keys, so the wizard
+# never saw SAPHIRA_FIRSTBOOT_AT_BOOT at boot and could not tell a
+# boot launch from a manual run).
+Environment=SAPHIRA_FIRSTBOOT_AT_BOOT=1
 # The wizard is interactive: a human answers on the console, which
 # takes minutes, not seconds. The default start timeout would kill it
 # mid-flow, so oneshot simply has no timeout to hit.

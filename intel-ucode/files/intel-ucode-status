@@ -1,0 +1,46 @@
+#!/bin/sh
+# intel-ucode-status - report Intel microcode state for verification.
+#
+# Read-only: prints the CPU signature(s), the currently loaded
+# microcode revision(s), the early-loader dmesg evidence, and whether
+# the early image this package ships is on disk. Exit 0 always (this
+# is a reporting tool, not a gate); a human compares the revision
+# against Intel's release notes for the CPU signature.
+set -eu
+
+echo "== CPU signature(s) (family-model-stepping):"
+if [ -r /proc/cpuinfo ]; then
+	awk '/^cpu family/{fam=$4} /^model/{mod=$3} /^stepping/{stp=$3} /^microcode/{mc=$3; printf "family %s model %s stepping %s loaded-rev %s\n", fam, mod, stp, mc}' \
+		/proc/cpuinfo | sort -u
+else
+	echo "no /proc/cpuinfo"
+fi
+
+echo "== loaded microcode revision(s):"
+found=0
+for f in /sys/devices/system/cpu/cpu*/microcode/version; do
+	[ -r "$f" ] || continue
+	echo "$f: $(cat "$f")"
+	found=1
+done
+[ "$found" -eq 1 ] || echo "no per-CPU microcode version files"
+
+echo "== early-loader evidence (dmesg):"
+if command -v dmesg >/dev/null 2>&1; then
+	dmesg 2>/dev/null | grep -i -m5 'microcode' || echo "no microcode lines in dmesg"
+else
+	echo "no dmesg available"
+fi
+
+echo "== early image on disk:"
+if [ -f /boot/intel-ucode.img ]; then
+	ls -l /boot/intel-ucode.img
+else
+	echo "MISSING /boot/intel-ucode.img (package not installed or /boot not mounted)"
+fi
+echo "== bundle:"
+if [ -d /lib/firmware/intel-ucode ]; then
+	echo "$(ls /lib/firmware/intel-ucode | wc -l) blobs in /lib/firmware/intel-ucode"
+else
+	echo "MISSING /lib/firmware/intel-ucode"
+fi

@@ -2,7 +2,19 @@
 
 pkgname=llvm
 pkgver=22.1.8
-pkgrel=3
+pkgrel=4
+# r4: three-way split (2026-10-23, ELF-audit proven): main keeps ONLY the
+# runtime shared libraries (libLLVM/libLTO/libRemarks .so.*); the 97
+# toolchain binaries + opt-viewer move to named split llvm-tools
+# (files/split-llvm-tools.list, enumerated from the r3 manifest);
+# headers/cmake/bare-.so-links/static-archives move to llvm-dev via the
+# fixed -dev rule; docs to llvm-doc. The runtime hypervisor (qemu/
+# virglrenderer/mesa) needs libLLVM.so.22.1 alone: libgallium and
+# lavapipe DT_NEEDED it, nothing DT_NEEDEDs the tools. llvm-dev pins
+# llvm-tools through depends_dev so consumer builds (clang tablegen,
+# mesa/bindgen llvm-config) keep working.
+subpackages="$pkgname-dev $pkgname-doc llvm-tools"
+depends_dev="llvm-tools=$pkgver-r$pkgrel"
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="Low Level Virtual Machine: compiler infrastructure (LLVM core)"
 license="Apache-2.0 WITH LLVM-exception"
@@ -15,10 +27,14 @@ sha256=922f1817a0df7b1489272d18134ee0087a8b068828f87ac63b9861b1a9965888
 # Runtime deps: libLLVM-22.so links system libxml2/libffi/zlib directly;
 # r1 shipped without this block (staged-builder era derived it), which
 # broke clean-root consumers (rustc/ripgrep: undefined libxml2 refs).
+# r4 adds gcc-libs: the runtime .so files DT_NEEDED libstdc++.so.6 +
+# libgcc_s.so.1 (RUNTIME gate proven 2026-10-23 - the monolith never
+# tripped it because... it never ran this gate clean; the split did).
 depends="
     libffi
     libxml2
     zlib
+    gcc-libs
 "
 
 makedepends="

@@ -181,7 +181,7 @@ load_fragment()
 				valid_name "$2" || die "$FRAGMENT line $lineno: invalid group name"
 				decl_groups="$decl_groups$2:$3 "
 				;;
-			dir|file) continue ;;
+			dir|file|dir-children) continue ;;
 			*) die "$FRAGMENT line $lineno: unknown stanza: $1" ;;
 		esac
 	done < "$FRAGMENT"

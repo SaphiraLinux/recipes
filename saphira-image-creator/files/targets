@@ -26,3 +26,11 @@ uefi-saphirad   uefi  systemd  saphirad-systemd
 # systemd-only by v0 decision; the installed machine's init is chosen
 # in the menu, never here.
 usb-installer   hybrid  systemd  usb-installer
+# Dedicated installer appliance: one hybrid medium (bios-boot + ESP +
+# installer root) booting both firmwares into the wizard. systemd; the
+# installed system chooses its own init in the wizard.
+usb-installer-appliance hybrid systemd image-installer-appliance
+# USB creator appliance: BIOS-booting Saphira whose sole purpose is
+# creating working images (any flavor, ext4 or ZFS) onto real disks.
+# openrc by v0 decision; the flavors it writes choose their own init.
+usb-creator     bios    openrc   image-creator-appliance

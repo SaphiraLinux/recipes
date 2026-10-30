@@ -181,6 +181,67 @@ if [ -n "$dup_ids" ]; then
 fi
 printf '%s\n' 'ok       no duplicate service identity uids'
 
+# Base-seed identities participate in the same union: a seed row and a
+# packaged fragment must never disagree, or publication refuses every
+# transaction (proven 2026-10-26: the seed added plugdev GID 164 eight
+# days after the published keystone identity claimed it, and no
+# in-tree gate looked at seed-vs-fragment IDs at all - the duplicate
+# check above covers fragments-vs-fragments user lines only). Same
+# name must carry the same ID (identical redeclaration converges);
+# no ID may be claimed under two names. User and group namespaces
+# are checked separately (a UID and a GID may coincide; keystone is
+# both 164). Fragment primary-group references are not declarations
+# and are ignored here; only user/group declaration lines and seed
+# rows participate.
+seed_clash=$(cd "$source_root" && {
+	awk -F'\t' '$2 == "user" { print "u", $1, $3 } $2 == "group" { print "g", $1, $3 }' \
+		saphira-baselayout/files/accounts.tsv 2>/dev/null
+	for frag in */files/accounts.d/*; do
+		case $frag in *.legacy) continue;; esac
+		[ -f "$frag" ] || continue
+		awk '/^user [^ ]+ [0-9]+ / { print "u", $2, $3 } /^group [^ ]+ [0-9]+/ { print "g", $2, $3 }' "$frag"
+	done
+} 2>/dev/null | sort | awk '
+	{
+		namekey = $1 SUBSEP $2
+		if (namekey in seen) {
+			if (seen[namekey] != $3)
+				bad = bad " " $1":"$2" ids differ ("seen[namekey]" vs "$3")"
+		} else seen[namekey] = $3
+		idkey = $1 SUBSEP $3
+		if (idkey in owners) {
+			if (owners[idkey] != $2)
+				bad = bad " " $1":"$3" claimed by "owners[idkey]" and "$2
+		} else owners[idkey] = $2
+	}
+	END { print bad }')
+if [ -n "$seed_clash" ]; then
+	printf 'FAIL: base-seed identity disagrees with a packaged fragment: %s\n' "$seed_clash" >&2
+	exit 1
+fi
+printf '%s\n' 'ok       base-seed and fragment identities agree'
+
+# Fragment identities must be registered: every user/group declaration
+# needs a same-kind accounts.tsv row (the TSV is the sole mint; base
+# names only, versions never enter). Unregistered names fail here so
+# makepkg never has to stage them at build time.
+unregistered=$(cd "$source_root" && {
+	awk -F'\t' '$1 !~ /^#/ && $2 == "user" { print "t u", $1 } $1 !~ /^#/ && $2 == "group" { print "t g", $1 }' \
+		saphira-baselayout/files/accounts.tsv 2>/dev/null
+	for frag in */files/accounts.d/*; do
+		case $frag in *.legacy) continue;; esac
+		[ -f "$frag" ] || continue
+		awk '/^user [^ ]+ [0-9]+ / { print "f u", $2 } /^group [^ ]+ [0-9]+/ { print "f g", $2 }' "$frag"
+	done
+} 2>/dev/null | sort | awk '
+	{ if ($1 == "t") t[$2 SUBSEP $3] = 1; else f[$2 SUBSEP $3] = 1 }
+	END { for (k in f) if (!(k in t)) bad = bad " " k; print bad }')
+if [ -n "$unregistered" ]; then
+	printf 'FAIL: fragment identities with no accounts.tsv row:%s\n' "$unregistered" >&2
+	exit 1
+fi
+printf '%s\n' 'ok       all fragment identities are registered'
+
 # Historical identity claims must not collide with another package's
 # current claims. The repository gate refuses a published union in
 # which one id is claimed twice (e.g. a legacy sidecar asserting a

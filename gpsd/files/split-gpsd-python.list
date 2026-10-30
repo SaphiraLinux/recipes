@@ -1,0 +1,20 @@
+# gpsd-python named split (builder named-splits mechanism): the
+# Python bindings and Python-based tools, partitioned out of the single
+# canonical SCons build. The module dir is pinned by
+# python_libdir=/usr/lib/python3.14/site-packages in recipe.sh (bump
+# both together with python); the egg-info name carries the package
+# version (gps-3.27.5.egg-info - bump with pkgver). The ten python_progs
+# are unconditional when xgps=false (xgps/xgpsspeed stay out: no
+# graphical stack). Explicit lists fail closed on missing paths.
+usr/lib/python3.14/site-packages/gps
+usr/lib/python3.14/site-packages/gps-3.27.5.egg-info
+usr/bin/gegps
+usr/bin/gpscat
+usr/bin/gpscsv
+usr/bin/gpslogntp
+usr/bin/gpsplot
+usr/bin/gpsprof
+usr/bin/gpssubframe
+usr/bin/ubxtool
+usr/bin/zerk
+usr/bin/gpsfake

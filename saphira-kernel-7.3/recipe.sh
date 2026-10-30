@@ -17,7 +17,9 @@ pkgname=saphira-kernel-7.3
 # (T7), never an automatic replacement.
 kernel_version=7.3
 pkgver=1
-pkgrel=4
+pkgrel=6
+# r6: earlyfw refresh hook honors the opt-in marker (generation only
+# on opted machines; grub regen stays unconditional). Payload change.
 # r4: framebuffer console capability completion (2026-10-23):
 # FRAMEBUFFER_CONSOLE_DETECT_PRIMARY=y (the only requested symbol the
 # line lacked; verified present in 7.1.5..7.3 Kconfig), gate requires
@@ -45,7 +47,8 @@ pkgrel=4
 # XEN_PVHVM line omitted: symbol removed upstream in 7.3).
 # Verified per line with olddefconfig. Payload change.
 # r3: build in DRM_BOCHS + DRM_QXL (QEMU std VGA and SPICE consoles
-# need builtin drivers; no initramfs to load them). Payload change.
+# need builtin drivers; no general initramfs to load them (early
+# firmware/microcode images excepted, 2026-10-23). Payload change.
 # r2: build in DRM_I915 + DRM_SIMPLEDRM (no early boot logs: i915 as a
 # module binds after the console handoff; fbcon/FBDEV already =y).
 # Payload change.
@@ -180,7 +183,9 @@ recipe_build()
 	. "$RECIPE_DIR/files/check-regdb-freedom.sh"
 	check_regdb_freedom "$SRC/linux-${kernel_version}/.config" \
 		"$SRC/linux-${kernel_version}/net/wireless/Kconfig"
-	# No-initramfs builtin policy: Saphira ships without an initramfs, so
+	# No-initramfs builtin policy: drivers stay built in (early
+# firmware/microcode images carry bytes only, no drivers - see
+# Boot path policy exception 2026-10-23), so
 	# every root/console/network driver must be =y, not =m. olddefconfig
 	# silently resolves new and changed symbols to defaults, which is how
 	# a required builtin would be lost without anyone touching the config.
@@ -255,5 +260,17 @@ recipe_install()
 	install -m 0755 "$RECIPE_DIR/files/hooks-grub-mkconfig" \
 		"$PKGDEST/usr/share/saphira/hooks.d/$pkgname/post-upgrade"
 	install -m 0755 "$RECIPE_DIR/files/hooks-grub-mkconfig" \
+		"$PKGDEST/usr/share/saphira/hooks.d/$pkgname/post-deinstall"
+	# Early-firmware images for the same three moments (2026-10-23):
+	# built-in drivers need their blobs before the root mount, so every
+	# kernel arrival/departure regenerates initramfs-<release>.img for
+	# all installed kernels (plus pruning) via saphira-earlyfw, which
+	# also regenerates grub.cfg. Same hooks.d mechanism, same contract
+	# (absent generator/grub are legitimate no-ops, failures are loud).
+	install -m 0755 "$RECIPE_DIR/files/hooks-earlyfw" \
+		"$PKGDEST/usr/share/saphira/hooks.d/$pkgname/post-install"
+	install -m 0755 "$RECIPE_DIR/files/hooks-earlyfw" \
+		"$PKGDEST/usr/share/saphira/hooks.d/$pkgname/post-upgrade"
+	install -m 0755 "$RECIPE_DIR/files/hooks-earlyfw" \
 		"$PKGDEST/usr/share/saphira/hooks.d/$pkgname/post-deinstall"
 }

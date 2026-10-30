@@ -1,0 +1,21 @@
+[Unit]
+Description=Saphira image creator recovery console (tty1 fallback)
+Documentation=man:saphira-image-creator-menu(8)
+# Started only by OnFailure of saphira-image-creator-menu.service.
+# It is never enabled by the image engine and never part of normal boot.
+Conflicts=saphira-image-creator-menu.service getty@tty1.service
+Before=getty.target
+
+[Service]
+Type=simple
+Environment=TERM=linux
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+StandardInput=tty
+StandardOutput=tty
+StandardError=journal
+ExecStartPre=-/usr/bin/printf '\nSaphira image creator menu failed; recovery console on tty1.\n'
+ExecStart=/bin/sh
+Restart=always
+RestartSec=1

@@ -1,0 +1,13 @@
+# Headless Java runtime: everything needed to RUN Java (servers,
+# Gradle workers, Android build tools) without the compiler toolchain.
+# Paths are PKGDEST-relative: the kit lives under
+# usr/lib/jvm/java-17-openjdk, with usr/bin entry points. The main
+# openjdk17 package keeps the rest (javac, jar, jlink, headers,
+# jmods, release, legal). Unlisted payload stays in main by splitter
+# design; man pages ride the automatic -doc split.
+usr/lib/jvm/java-17-openjdk/bin/java
+usr/lib/jvm/java-17-openjdk/bin/keytool
+usr/lib/jvm/java-17-openjdk/conf
+usr/lib/jvm/java-17-openjdk/lib
+usr/bin/java
+usr/bin/keytool

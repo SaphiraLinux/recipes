@@ -2,7 +2,8 @@
 
 pkgname=nvidia-open-7.2.2
 pkgver=610.57.04
-pkgrel=1
+pkgrel=2
+# r2: blacklist nouveau on install (driver handover). Payload change.
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='NVIDIA open kernel modules 610.57.04 for kernel 7.2.2 (kmods only; firmware is nvidia-open-firmware)'
 license='MIT OR GPL-2.0'
@@ -13,20 +14,31 @@ source=https://github.com/NVIDIA/open-gpu-kernel-modules/archive/refs/tags/610.5
 sha256=619d7b5ce1f79c3211afdbf87d02b2174d268b10d005c5b8f994be22299be681
 
 # Per-kernel co-installable output. Build logic lives in
-# saphira-kernel/files/kmod-nvidia.sh; the kernel tree comes from staged
-# /input (build-kmod-set.sh). New kernels: copy the nearest variant and
+# saphira-kernel/files/kmod-nvidia.sh; the kernel tree is prepared
+# inside the worker (published config + sibling sources, no staging).
+# New kernels: copy the nearest variant and
 # set KVER_SHORT (see new-kmod-variant.sh).
 depends="kmod nvidia-open-firmware"
 # Build secret contract: module signing is mandatory, never optional.
 # The worker refuses before spending anything when the builder did
 # not expose a readable /keys/module-signing.pem.
 saphira_sign_key_required=yes
+# In-worker kernel prepare closure (unpack + modules_prepare):
+# the build no longer consumes staged /input.
 makedepends="
+	bc
 	binutils
+	bison
 	elfutils
+	elfutils-dev
+	flex
 	gawk
 	gcc
+	m4
 	make
+	openssl-dev
+	patch
+	perl
 "
 # Handover from the retired monolithic nvidia-open (owned these module
 # paths plus firmware/doc): the file gate exempts retired names listed

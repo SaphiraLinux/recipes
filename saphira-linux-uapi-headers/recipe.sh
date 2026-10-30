@@ -1,8 +1,27 @@
 pkgname=saphira-linux-uapi-headers
 pkgver=7.1.5
-pkgrel=1
+pkgrel=2
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='Saphira Linux userspace UAPI headers (/usr/include; single active version per build environment)'
+# Architecture plumbing (same contract as gcc/binutils): everything the
+# build is told to target derives from the SAME pkgarch value the package
+# is labelled with, and an unrecognised arch fails closed. x86_64 keeps
+# resolving to the previous literal ARCH=x86_64.
+case "$pkgarch" in
+x86_64)
+	KARCH=x86
+	;;
+aarch64)
+	KARCH=arm64
+	;;
+riscv64)
+	KARCH=riscv
+	;;
+*)
+	echo "ERROR: unsupported SAPHIRA_ARCH '$pkgarch' for saphira-linux-uapi-headers" >&2
+	return 1
+	;;
+esac
 license=GPL-2.0-only
 origin="$pkgname"
 # Path-takeover handover from the retired generic name: the repo
@@ -68,14 +87,14 @@ recipe_build()
 	}
 	patch -d "$TREE" -Np1 \
 		-i "$RECIPE_DIR/files/0003-libc-compat-musl-netinet-in-coordination.patch"
-	make -C "$TREE" ARCH=x86_64 mrproper headers
+	make -C "$TREE" ARCH=$KARCH mrproper headers
 }
 
 recipe_install()
 {
 	KVER=7.1.5
 	TREE="$BUILDDIR/tree/linux-$KVER"
-	make -C "$TREE" ARCH=x86_64 INSTALL_HDR_PATH="$PKGDEST/usr" headers_install
+	make -C "$TREE" ARCH=$KARCH INSTALL_HDR_PATH="$PKGDEST/usr" headers_install
 	rm -f "$PKGDEST/usr/include/Makefile"
 	rm -rf "$PKGDEST/usr/include/drm"
 }

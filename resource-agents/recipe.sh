@@ -2,7 +2,11 @@
 
 pkgname=resource-agents
 pkgver=4.18.0
-pkgrel=1
+pkgrel=2
+# r2: republish revision: payload changes since published r1 (real
+# OpenRC initd replacing the unusable LSB script, hardened systemd
+# unit with absolute config path, ldirectord.cf.example) never got a
+# revision bump, leaving the published r1 stale. No source changes.
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='ClusterLabs resource agents: OCF agents and ldirectord (Layer 4 load balancer director with IPv6 support)'
 license='GPL-2.0-or-later AND LGPL-2.1-or-later'

@@ -24,7 +24,8 @@ recipe_build()
 {
 	./configure \
 		--prefix=/usr \
-		--sysconfdir=/etc
+		--sysconfdir=/etc \
+		--localstatedir=/var
 	make -j${JOBS:-$(nproc)}
 }
 

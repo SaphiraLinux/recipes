@@ -1,0 +1,19 @@
+# linux-firmware-full: install every firmware family.
+#
+# The linux-firmware package itself ships licence evidence only
+# (WHENCE + LICENSES). The blobs live in seven family splits:
+#
+#   linux-firmware-intel    iwlwifi/BT (377M)
+#   linux-firmware-i915     Intel integrated + xe discrete GPU (33M)
+#   linux-firmware-amd      amdgpu/radeon/microcode (121M)
+#   linux-firmware-nvidia   NVIDIA GPU/networking (152M)
+#   linux-firmware-qcom     Qualcomm SoC/adreno/modem (524M)
+#   linux-firmware-network  all NICs/WLAN (mellanox, netronome, mrvl,
+#                           mediatek, ath*, brcm, realtek, ... ~600M)
+#   linux-firmware-misc     audio/video/USB-serial/SoC leftovers
+#
+# Minimal hosts install only the families their hardware needs;
+# installer images (unknown hardware) install this meta package.
+# Snapshot gap (pre-existing, upstream): no intel-ucode ships in the
+# 20260910 snapshot, so Intel microcode updates are absent from every
+# split. amd-ucode rides in linux-firmware-amd.

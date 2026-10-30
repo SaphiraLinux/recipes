@@ -2,7 +2,14 @@
 
 pkgname=portainer-ce
 pkgver=2.45.2
-pkgrel=1
+pkgrel=2
+# r2: ship the upstream CE licence notice (2026-10-23). license=
+# stays BUSL-1.1 for Saphira's own unit files (Saphira-owned-service
+# policy, same wrapper reasoning as firmware-tools r2): it never
+# covered Portainer's software, and the referenced CE image is
+# zlib-licensed upstream (LICENCE text vendored as
+# files/LICENSE.Portainer-CE). No silent relicense in either
+# direction; Portainer BE is a different product, not referenced.
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='Portainer Community Edition service units (pinned image, loopback only)'
 license='BUSL-1.1'
@@ -48,4 +55,6 @@ recipe_install()
 		"$PKGDEST/etc/init.d/portainer-ce"
 	install -D -m 0644 "$RECIPE_DIR/files/portainer-ce.service" \
 		"$PKGDEST/usr/lib/systemd/system/portainer-ce.service"
+	install -D -m 0644 "$RECIPE_DIR/files/LICENSE.Portainer-CE" \
+		"$PKGDEST/usr/share/licenses/portainer-ce/LICENSE.Portainer-CE"
 }

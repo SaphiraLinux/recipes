@@ -1,0 +1,8 @@
+# ZFS role layer: adds the ZFS kernel module and userspace to any
+# flavor whose root lives on a pool. The module line is pinned to the
+# kernels the product flavors pin (7.2.3): a pool created for a target
+# whose kernel lacks its kmod is unbootable, so the engine requires
+# this role (or an equivalent profile) for every ZFS root rather than
+# guessing.
+saphira-zfs-7.2.3
+saphira-zfs-userspace

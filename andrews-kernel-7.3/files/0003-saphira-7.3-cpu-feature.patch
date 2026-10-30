@@ -1,0 +1,82 @@
+Subject: [Saphira] Linux 7.3: cpu_feature_enabled() over static_cpu_has() (2.4.4 port)
+
+Saphira-Port-By: Muse Spark 1.3 Contributor for AKADATA LIMITED
+(Andrew Smalley, Director)
+Note: The API moved; the data must not. Re-derived hunk by hunk
+for 2.4.4 and proven by boot, not by inspection.
+
+Ports robn/zfs@844c3a4eb6c1 onto OpenZFS 2.4.4 (HAVE_XSAVES guards here; static_cpu_has_bug probe untouched; 7.3-only recipe so no fallback).
+
+--- a/include/os/linux/kernel/linux/simd_x86.h
++++ b/include/os/linux/kernel/linux/simd_x86.h
+@@ -315,24 +315,24 @@
+ 	 */
+ 	uint8_t *state = zfs_kfpu_fpregs[smp_processor_id()];
+ #if defined(HAVE_XSAVES)
+-	if (static_cpu_has(X86_FEATURE_XSAVES)) {
++	if (cpu_feature_enabled(X86_FEATURE_XSAVES)) {
+ 		kfpu_do_xsave("xsaves", state, ~XFEATURE_MASK_XTILE);
+ 		return;
+ 	}
+ #endif
+ #if defined(HAVE_XSAVEOPT)
+-	if (static_cpu_has(X86_FEATURE_XSAVEOPT)) {
++	if (cpu_feature_enabled(X86_FEATURE_XSAVEOPT)) {
+ 		kfpu_do_xsave("xsaveopt", state, ~XFEATURE_MASK_XTILE);
+ 		return;
+ 	}
+ #endif
+ #if defined(HAVE_XSAVE)
+-	if (static_cpu_has(X86_FEATURE_XSAVE)) {
++	if (cpu_feature_enabled(X86_FEATURE_XSAVE)) {
+ 		kfpu_do_xsave("xsave", state, ~XFEATURE_MASK_XTILE);
+ 		return;
+ 	}
+ #endif
+-	if (static_cpu_has(X86_FEATURE_FXSR)) {
++	if (cpu_feature_enabled(X86_FEATURE_FXSR)) {
+ 		kfpu_save_fxsr(state);
+ 	} else {
+ 		kfpu_save_fsave(state);
+@@ -380,18 +380,18 @@
+ {
+ 	uint8_t  *state = zfs_kfpu_fpregs[smp_processor_id()];
+ #if defined(HAVE_XSAVES)
+-	if (static_cpu_has(X86_FEATURE_XSAVES)) {
++	if (cpu_feature_enabled(X86_FEATURE_XSAVES)) {
+ 		kfpu_do_xrstor("xrstors", state, ~XFEATURE_MASK_XTILE);
+ 		goto out;
+ 	}
+ #endif
+ #if defined(HAVE_XSAVE)
+-	if (static_cpu_has(X86_FEATURE_XSAVE)) {
++	if (cpu_feature_enabled(X86_FEATURE_XSAVE)) {
+ 		kfpu_do_xrstor("xrstor", state, ~XFEATURE_MASK_XTILE);
+ 		goto out;
+ 	}
+ #endif
+-	if (static_cpu_has(X86_FEATURE_FXSR)) {
++	if (cpu_feature_enabled(X86_FEATURE_FXSR)) {
+ 		kfpu_restore_fxsr(state);
+ 	} else {
+ 		kfpu_restore_fsave(state);
+--- a/module/zcommon/simd_stat.c
++++ b/module/zcommon/simd_stat.c
+@@ -126,13 +126,13 @@
+ 		off += SIMD_STAT_PRINT(simd_stat_kstat_payload,
+ 		    "osxsave", boot_cpu_has(X86_FEATURE_OSXSAVE));
+ 		off += SIMD_STAT_PRINT(simd_stat_kstat_payload,
+-		    "xsaves", static_cpu_has(X86_FEATURE_XSAVES));
++		    "xsaves", cpu_feature_enabled(X86_FEATURE_XSAVES));
+ 		off += SIMD_STAT_PRINT(simd_stat_kstat_payload,
+-		    "xsaveopt", static_cpu_has(X86_FEATURE_XSAVEOPT));
++		    "xsaveopt", cpu_feature_enabled(X86_FEATURE_XSAVEOPT));
+ 		off += SIMD_STAT_PRINT(simd_stat_kstat_payload,
+-		    "xsave", static_cpu_has(X86_FEATURE_XSAVE));
++		    "xsave", cpu_feature_enabled(X86_FEATURE_XSAVE));
+ 		off += SIMD_STAT_PRINT(simd_stat_kstat_payload,
+-		    "fxsr", static_cpu_has(X86_FEATURE_FXSR));
++		    "fxsr", cpu_feature_enabled(X86_FEATURE_FXSR));
+ #endif /* __x86__ */
+ #if defined(__arm__) || defined(__aarch64__)
+ 		off += SIMD_STAT_PRINT(simd_stat_kstat_payload,

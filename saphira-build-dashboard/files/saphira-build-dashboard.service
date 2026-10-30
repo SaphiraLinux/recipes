@@ -1,0 +1,28 @@
+[Unit]
+Description=Read-only build queue dashboard (TODAY/History on 172.16.7.5:8899)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Mirrors files/saphira-build-dashboard.initd.
+#
+# Read-only by construction: GET/HEAD only (anything else is 405),
+# SQLite opened mode=ro, no writes, no subprocesses, no state. The
+# pre-start readability check keeps a missing database a clean failed
+# state instead of a restart loop.
+Type=simple
+User=dashboard
+Group=dashboard
+ExecStartPre=/bin/test -r /var/lib/saphira-build/queue.db
+ExecStart=/usr/sbin/saphira-build-dashboard --bind 172.16.7.5 --port 8899 --db /var/lib/saphira-build/queue.db
+Restart=on-failure
+RestartSec=2
+# The only address families a bound IPv4 socket plus a local SQLite
+# file can need. AF_INET6 is deliberately absent: this listener is
+# IPv4, and the server pins AF_INET so it can never dual-stack.
+NoNewPrivileges=yes
+ProtectHome=yes
+RestrictAddressFamilies=AF_UNIX AF_INET
+
+[Install]
+WantedBy=multi-user.target

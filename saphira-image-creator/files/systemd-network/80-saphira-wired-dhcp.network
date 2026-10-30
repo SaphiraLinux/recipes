@@ -1,0 +1,17 @@
+# Saphira default wired DHCP via systemd-networkd.
+#
+# This file is active only where systemd-networkd runs (SaphiraD
+# targets); elsewhere it is inert payload. It deliberately matches
+# wired Ethernet names generically (en*/eth*) instead of baking one
+# PCI-derived predictable name: the same image boots with its NIC in
+# any slot (enp0s2, enp1s0, ...) and DHCP still comes up with no
+# firstboot intervention. Wi-Fi (wl*) is excluded on purpose:
+# wireless needs credentials and stays an explicit configuration.
+# The saphira-network framework service is not enabled on
+# systemd-networkd targets, so the two managers never contend.
+[Match]
+Name=en* eth*
+Type=ether
+
+[Network]
+DHCP=yes

@@ -32,8 +32,11 @@ test ! -e "$ROOTFS/var/lib/saphira-firstboot/completed" || {
 }
 
 declare -A gids=() users=() group_members=()
+# The TSV init column (empty or systemd) is composition metadata only:
+# the seed creates every row under both inits, identically. It is
+# read here so it never leaks into the supplementary field.
 declare -A user_names=() group_names=() preserved_users=()
-while IFS=$'\t' read -r name type id primary home shell supplementary; do
+while IFS=$'\t' read -r name type id primary home shell supplementary init; do
 	case $name in
 		''|'#'*) continue ;;
 	esac
@@ -76,7 +79,7 @@ firstboot_required=0
 : > "$group_new"
 : > "$shadow_new"
 
-while IFS=$'\t' read -r name type id primary home shell supplementary; do
+while IFS=$'\t' read -r name type id primary home shell supplementary init; do
 	case $name in
 		''|'#'*) continue ;;
 	esac
@@ -100,7 +103,16 @@ while IFS=$'\t' read -r name type id primary home shell supplementary; do
 		test -n "$old_hash" || old_hash='!'
 		if test "$name" = root; then
 			case $old_hash in
-				'!'|'!*'|'*') old_hash=; firstboot_required=1 ;;
+				# Locked, missing (defaulted to '!'), or EMPTY: all three
+				# are unprovisioned. The empty case is the apk skeleton
+				# default on fresh roots (proven: 0.2.2 images shipped a
+				# locked root with no marker because '' fell through
+				# here and the later unconditional lock left no wizard
+				# path). Appliance profiles empty the password
+				# deliberately afterwards and remove the marker
+				# themselves; supplied-password images do the same in
+				# the chpasswd branch of assembly.
+				''|'!'|'!*'|'*') old_hash=; firstboot_required=1 ;;
 			esac
 		fi
 		if test "$name" = root && test "$firstboot_required" = 1; then
@@ -132,7 +144,7 @@ while IFS=: read -r name password uid gid gecos home shell; do
 	fi
 done < "$old_passwd"
 
-while IFS=$'\t' read -r name type id primary home shell supplementary; do
+while IFS=$'\t' read -r name type id primary home shell supplementary init; do
 	case $name in
 		''|'#'*) continue ;;
 	esac

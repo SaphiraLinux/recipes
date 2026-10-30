@@ -1,7 +1,7 @@
 #!/bin/sh
 pkgname=libffi
 pkgver=3.5.2
-pkgrel=3
+pkgrel=4
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='Foreign function interface library'
 license='MIT'
@@ -16,7 +16,15 @@ recipe_build() {
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$RECIPE_DIR/files/libffi-3.5.2.tar.gz"
 	cd "$SRC"
 	echo "$libffi_sha256  $RECIPE_DIR/files/libffi-3.5.2.tar.gz" | sha256sum -c -
-	./configure --prefix=/usr --sysconfdir=/etc --libdir=/usr/lib --localstatedir=/var
+	# Saphira is a /lib-only layout: no lib64 anywhere. libffi's
+	# configure appends gcc --print-multi-os-directory (../lib64 on
+	# aarch64) to libdir unless told not to, silently defeating
+	# --libdir. --disable-multi-os-directory is the upstream-supported
+	# opt-out; without it makepkg correctly refuses the payload
+	# (usr/lib64). Neutral on x86_64 (multi-os directory is empty
+	# there), load-bearing on aarch64.
+	./configure --prefix=/usr --sysconfdir=/etc --libdir=/usr/lib --localstatedir=/var \
+		--disable-multi-os-directory
 	# No --disable-static: the static archive ships in -dev (automatic
 	# split) for qemu-user-static's fully static link (transitive via
 	# static glib). Shared-only main payload unchanged - dynamic

@@ -1,0 +1,16 @@
+diff -u -r a/util/grub.d/10_linux.in b/util/grub.d/10_linux.in
+--- a/util/grub.d/10_linux.in	2025-08-14 22:27:02.000000000 +0000
++++ b/util/grub.d/10_linux.in	2026-10-26 00:00:00.000000000 +0000
+@@ -225,5 +225,11 @@
+   initrd_real=
+-  for i in "initrd.img-${version}" "initrd-${version}.img" \
++  # Saphira early-firmware images: firmware-only cpios built by
++  # saphira-earlyfw (no /init, no modules, no early userspace - not
++  # the initramfs the no-initrd boot policy forbids). Listed first so
++  # the current name wins when a stale initramfs-<release>.img from
++  # before the rename still lingers next to it.
++  for i in "earlyfw-${version}.img" "earlyfw-${alt_version}.img" \
++	   "initrd.img-${version}" "initrd-${version}.img" \
+ 	   "initrd-${alt_version}.img.old" "initrd-${version}.gz" \
+ 	   "initrd-${alt_version}.gz.old" "initrd-${version}" \
+ 	   "initramfs-${version}.img" "initramfs-${alt_version}.img.old" \

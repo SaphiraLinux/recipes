@@ -1,0 +1,77 @@
+Subject: [Saphira] Linux 7.3: treat 7.3 as mnt_idmap-era (2.4.4 port)
+
+Saphira-Port-By: Muse Spark 1.3 Contributor for AKADATA LIMITED
+(Andrew Smalley, Director)
+Note: The API moved; the data must not. Re-derived hunk by hunk
+for 2.4.4 and proven by boot, not by inspection.
+
+On 7.3 none of the old HAVE_IOPS_CREATE_* macros are defined (the 4-arg
+signatures are gone), so zidmap_t fell back to struct user_namespace
+while VFS now demands struct mnt_idmap: every idmap call site failed
+with incompatible-pointer-type. With HAVE_IOPS_CREATE_NO_FLAG_ARG the
+tree is mnt_idmap-based exactly like the IDMAP era, so the era checks
+cover it: zidmap_t typedef, zfs_get_init_idmap, and the four cred.h
+fast paths. HAVE_IDMAP_NO_USERNS (struct layout probe) resolves the
+inner flavor on its own. No upstream commit to credit: robn's branch
+targets master, whose refactor already removed this fallback chain.
+
+--- a/include/os/linux/spl/sys/types.h
++++ b/include/os/linux/spl/sys/types.h
+@@ -58,7 +58,7 @@
+ typedef int			minor_t;
+ 
+ struct user_namespace;
+-#ifdef HAVE_IOPS_CREATE_IDMAP
++#if defined(HAVE_IOPS_CREATE_IDMAP) || defined(HAVE_IOPS_CREATE_NO_FLAG_ARG)
+ #include <linux/refcount.h>
+ #ifdef HAVE_IDMAP_NO_USERNS
+ #include <linux/user_namespace.h>
+--- a/module/os/linux/spl/spl-cred.c
++++ b/module/os/linux/spl/spl-cred.c
+@@ -133,7 +133,7 @@
+ zidmap_t *
+ zfs_get_init_idmap(void)
+ {
+-#ifdef HAVE_IOPS_CREATE_IDMAP
++#if defined(HAVE_IOPS_CREATE_IDMAP) || defined(HAVE_IOPS_CREATE_NO_FLAG_ARG)
+ 	return ((zidmap_t *)&nop_mnt_idmap);
+ #else
+ 	return ((zidmap_t *)&init_user_ns);
+--- a/include/os/linux/spl/sys/cred.h
++++ b/include/os/linux/spl/sys/cred.h
+@@ -78,7 +78,7 @@
+     struct user_namespace *fs_userns, uid_t uid)
+ {
+ 	struct user_namespace *owner;
+-#ifdef HAVE_IOPS_CREATE_IDMAP
++#if defined(HAVE_IOPS_CREATE_IDMAP) || defined(HAVE_IOPS_CREATE_NO_FLAG_ARG)
+ 	if (mnt_userns == zfs_init_idmap)
+ 		return (uid);
+ #endif
+@@ -102,7 +102,7 @@
+     struct user_namespace *fs_userns, gid_t gid)
+ {
+ 	struct user_namespace *owner;
+-#ifdef HAVE_IOPS_CREATE_IDMAP
++#if defined(HAVE_IOPS_CREATE_IDMAP) || defined(HAVE_IOPS_CREATE_NO_FLAG_ARG)
+ 	if (mnt_userns == zfs_init_idmap)
+ 		return (gid);
+ #endif
+@@ -126,7 +126,7 @@
+     struct user_namespace *fs_userns, uid_t uid)
+ {
+ 	struct user_namespace *owner;
+-#ifdef HAVE_IOPS_CREATE_IDMAP
++#if defined(HAVE_IOPS_CREATE_IDMAP) || defined(HAVE_IOPS_CREATE_NO_FLAG_ARG)
+ 	if (mnt_userns == zfs_init_idmap)
+ 		return (uid);
+ #endif
+@@ -151,7 +151,7 @@
+     struct user_namespace *fs_userns, gid_t gid)
+ {
+ 	struct user_namespace *owner;
+-#ifdef HAVE_IOPS_CREATE_IDMAP
++#if defined(HAVE_IOPS_CREATE_IDMAP) || defined(HAVE_IOPS_CREATE_NO_FLAG_ARG)
+ 	if (mnt_userns == zfs_init_idmap)
+ 		return (gid);
+ #endif

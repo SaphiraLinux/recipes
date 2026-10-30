@@ -80,5 +80,6 @@ dhcpcd
 nftables
 acpid
 vim
+sudo
 iputils
 tzdata

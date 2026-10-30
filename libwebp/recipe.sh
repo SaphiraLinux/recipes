@@ -2,7 +2,10 @@
 
 pkgname=libwebp
 pkgver=1.5.0
-pkgrel=1
+pkgrel=2
+# r2: ship the CLI animation tools (gif2webp, webpmux, anim_diff).
+# VWEBP stays off (needs X11); EXTRAS stays off (developer extras).
+# Payload change (new binaries).
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="WebP image format library and conversion utilities"
 license="BSD-3-Clause"
@@ -39,7 +42,7 @@ recipe_build()
 		-DBUILD_SHARED_LIBS=ON \
 		-DWEBP_BUILD_CWEBP=ON -DWEBP_BUILD_DWEBP=ON \
 		-DWEBP_BUILD_IMG2WEBP=ON -DWEBP_BUILD_WEBPINFO=ON \
-		-DWEBP_BUILD_ANIM_UTILS=OFF -DWEBP_BUILD_EXTRAS=OFF \
+		-DWEBP_BUILD_ANIM_UTILS=ON -DWEBP_BUILD_EXTRAS=OFF \
 		-DWEBP_BUILD_VWEBP=OFF
 	ninja -C "$BUILDDIR"
 }
@@ -47,4 +50,16 @@ recipe_build()
 recipe_install()
 {
 	DESTDIR="$PKGDEST" ninja -C "$BUILDDIR" install
+	test -f "$SRC/COPYING" || {
+		echo "ERROR: upstream licence file missing from source tree" >&2
+		return 1
+	}
+	install -D -m 0644 "$SRC/COPYING" \
+		"$PKGDEST/usr/share/licenses/libwebp/COPYING"
+	test -f "$SRC/PATENTS" || {
+		echo "ERROR: upstream patent grant missing from source tree" >&2
+		return 1
+	}
+	install -D -m 0644 "$SRC/PATENTS" \
+		"$PKGDEST/usr/share/licenses/libwebp/PATENTS"
 }

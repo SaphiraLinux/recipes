@@ -1,0 +1,27 @@
+#!/sbin/openrc-run
+
+description="OpenPrinting CUPS printing system (scheduler and spooler)"
+
+# cupsd starts as root (binds IPP 631, owns /etc/cups) and drops to
+# the lp identity itself via User/Group in cups-files.conf, so there
+# is deliberately no command_user here: starting already-dropped
+# could not bind the port or write the spool. -f keeps it in the
+# foreground under supervise-daemon; never enabled or started on
+# install (profile decision, not an omission).
+command="/usr/sbin/cupsd"
+command_args="-f"
+supervisor="supervise-daemon"
+pidfile="/var/run/cups/cupsd.pid"
+
+depend()
+{
+	need localmount net
+	after firewall
+}
+
+start_pre()
+{
+	# Fail with a clear cause instead of serving defaults: without
+	# its config there is nothing sane to print with.
+	test -r /etc/cups/cupsd.conf || return 1
+}

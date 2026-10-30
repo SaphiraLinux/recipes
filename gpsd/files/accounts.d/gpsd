@@ -1,0 +1,19 @@
+# gpsd service identity (canonical, fixed): user and group gpsd,
+# UID/GID 176. The daemon opens its devices as root and setuid/setgid-
+# drops to the compiled gpsd_user/gpsd_group itself, so the identity
+# must exist from first install. UID 176 is the first free ID above the
+# highest claimed identity (175 minio), clear of the systemd block
+# (127-131, 144, 145) and the seed device groups (157-164) - verified
+# against the tree-wide reservation table before assigning; never reuse
+# it for another identity.
+#
+# Saphira owns this identity via accounts.d: Alpine ships no gpsd
+# account, but that is their packaging choice, not ours, and nothing on
+# Route changes for it. dialout (seed group 159) stays for device
+# access as a supplementary membership - serial/PPS nodes are dialout-
+# grouped - never as the service identity itself.
+# Home/dir is /var/run/gpsd (compiled rundir; the control socket
+# gpsd.sock lives there for gpsdctl/hotplug clients).
+user gpsd 176 gpsd /var/run/gpsd /sbin/nologin dialout
+group gpsd 176
+dir /var/run/gpsd 0755 gpsd gpsd

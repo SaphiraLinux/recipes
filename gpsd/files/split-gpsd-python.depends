@@ -1,0 +1,3 @@
+# gpsd-python runtime: the interpreter the modules import under.
+# The base pin (gpsd=version) is added automatically by the splitter.
+python3

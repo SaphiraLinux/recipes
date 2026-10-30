@@ -1,0 +1,39 @@
+# intel-ucode: Intel processor microcode for early loading
+
+## What this package is
+
+The official Intel microcode bundle (release microcode-20260925),
+shipped two ways:
+
+- `/lib/firmware/intel-ucode/*` - the per-signature blobs, verbatim
+  and unmodified, for the late loader
+  (`echo 1 > /sys/devices/system/cpu/microcode/reload`) and for
+  inspection. `intel-ucode-with-caveats/` from upstream is NOT
+  shipped (those MCUs need kernel late-loader patches Saphira does
+  not carry - see Intel's README).
+- `/boot/intel-ucode.img` - the early-loading image: one
+  UNCOMPRESSED cpio holding the concatenated bundle as
+  `kernel/x86/microcode/GenuineIntel.bin`. The kernel scans it
+  before normal initialisation and applies the entry matching the
+  running CPU. GRUB's stock early-initrd list already names
+  `intel-ucode.img`, so no bootloader configuration is needed
+  beyond the grub.cfg regeneration this package's hooks trigger.
+
+Microcode is volatile: it resets on power loss, so it must load on
+EVERY boot. Installing this package alone does NOT activate
+anything - activation is the initrd line in grub.cfg plus a reboot.
+
+## Verification (physical cold boot)
+
+1. `intel-ucode-status` - CPU signature, loaded revision, dmesg
+   early-loader lines, image and bundle presence.
+2. `dmesg | grep -i microcode` must show an early update line and a
+   revision at/after Intel's published revision for the signature.
+3. `cat /proc/cpuinfo | grep microcode | sort | uniq` agrees.
+
+## Licence
+
+Intel redistribution licence (binary form, unmodified), shipped
+verbatim as `/usr/share/licenses/intel-ucode/license`. The cpio
+wrapping and bundle concatenation are the kernel-documented early
+container, not a modification of the blobs.

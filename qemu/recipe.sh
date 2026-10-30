@@ -1,6 +1,15 @@
 pkgname=qemu
 pkgver=11.1.1
-pkgrel=8
+pkgrel=10
+# r10: qemu-virgl split (payload change): the 5 GL modules move to a
+# named split carrying virglrenderer+mesa+libepoxy (split-*.depends);
+# base drops mesa/libepoxy/virglrenderer from depends (main binary
+# NEEDED-proven clean 2026-10-23). VNC compiled in, SPICE modules and
+# plain virtio-gpu stay base. libvirt keeps full GL via its own dep.
+# r9: --enable-modules (GL-split pass 1): UI/audio/block/GL backends move
+# out of the main binary into usr/lib/qemu/*.so; same devices, same
+# flags otherwise. Pass 2 adds the qemu-virgl split once the module
+# set is read from this build's staging.
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 	pkgdesc='QEMU full system emulators (KVM/TCG, FDT, VNC+SPICE remote display, USB redirection, slirp, OpenGL/virgl headless GPU)'
 license='GPL-2.0-or-later'
@@ -10,7 +19,7 @@ url=https://www.qemu.org/
 # Vendored: https://download.qemu.org/qemu-11.1.1.tar.xz
 qemu_sha256=079ffbff8a7111bbc89022107cbabf3bbfd614d5fc9d7cc675991196aca12482
 
-depends="glib libslirp zlib pixman spice-server usbredir libusb libaio dtc libssh bzip2 libjpeg-turbo lzo snappy zstd libpng numactl libseccomp udev curl fuse3 attr gnutls libbpf keyutils mesa libepoxy virglrenderer"
+depends="glib libslirp zlib pixman spice-server usbredir libusb libaio dtc libssh bzip2 libjpeg-turbo lzo snappy zstd libpng numactl libseccomp udev curl fuse3 attr gnutls libbpf keyutils"
 # pcre2-dev/libffi-dev are direct build inputs, not just runtime
 # transitive deps: glib-2.0.pc Requires libpcre2-8 and gobject-2.0.pc
 # Requires libffi, so the meson pkg-config probes fail without them
@@ -26,10 +35,15 @@ depends="glib libslirp zlib pixman spice-server usbredir libusb libaio dtc libss
 # python3-pip/setuptools/wheel satisfy mkvenv's tooling group from
 # system packages so no PyPI download is needed (with
 # --disable-download below, PyPI is never contacted).
-# mesa/mesa-dev + libepoxy/libepoxy-dev + virglrenderer/
-# virglrenderer-dev are the headless GPU stack: EGL surfaceless + GBM
-# from the in-tree mesa, GL dispatch from libepoxy, guest virtio-gpu
-# rendering from virglrenderer. No X11/Wayland/GTK/SDL anywhere.
+# mesa/mesa-dev + libglvnd/libglvnd-dev + libepoxy/libepoxy-dev +
+# virglrenderer/virglrenderer-dev are the headless GPU stack: EGL
+# dispatch from libglvnd, surfaceless + GBM from the in-tree mesa, GL
+# dispatch from libepoxy, guest virtio-gpu rendering from virglrenderer. No X11/Wayland/GTK/SDL anywhere.
+# libdrm/libdrm-dev are direct build deps (2026-10-23): epoxy.pc
+# Requires egl.pc which Requires libdrm - without libdrm-dev in the
+# clean root the epoxy probe fails (r9 proven). Previously satisfied
+# by accident of root composition; declared now. (Comments live here,
+# outside the quoted list: the resolver rejects '#' inside.)
 makedepends="
 	binutils
 	bison
@@ -94,13 +108,16 @@ makedepends="
 	python-sphinx-rtd-theme
 	mesa
 	mesa-dev
+	libglvnd-dev
+	libdrm
+	libdrm-dev
 	libepoxy
 	libepoxy-dev
 	virglrenderer
 	virglrenderer-dev
 "
 
-subpackages="$pkgname-doc"
+subpackages="$pkgname-doc $pkgname-virgl"
 
 # Server build: VNC remote display, no GTK/SDL/OpenGL. All upstream
 # system emulators (no --target-list restriction). Networking via slirp
@@ -153,6 +170,12 @@ recipe_build()
 	# on every Saphira host - the flag only hardens the gate).
 	# QEMU has no selinux/apparmor options: confinement is libvirt's
 	# sVirt side, not the emulator's.
+	# Modules pass 1 (2026-10-23): --enable-modules moves UI/audio/
+	# block/GL backends out of the main binary into usr/lib/qemu/*.so
+	# so the GL stack (virglrenderer+mesa+libepoxy+llvm-runtime) can
+	# ship in a qemu-virgl split while base keeps VNC/SPICE. The
+	# module set is discovered from THIS build's staging; the split
+	# list lands in pass 2. Same flags otherwise - no capability cut.
 	./configure --prefix=/usr \
 		--sysconfdir=/etc \
 		--localstatedir=/var \
@@ -163,6 +186,7 @@ recipe_build()
 		-Dfdt=system \
 		--disable-gtk --disable-sdl --disable-opengl --enable-vnc \
 		--enable-opengl \
+		--enable-modules \
 		--enable-virglrenderer --disable-rutabaga-gfx \
 		--disable-sdl-image --disable-vte --disable-dbus-display \
 		--enable-spice --enable-usb-redir --enable-linux-aio --enable-tpm \

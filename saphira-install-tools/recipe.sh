@@ -2,7 +2,47 @@
 
 pkgname=saphira-install-tools
 pkgver=0.1
-pkgrel=27
+pkgrel=39
+# r39: minimal profiles gain vim, saphira-network and dhcpcd (both
+# inits); supplied --root-password spends the firstboot marker again.
+# Payload change (profiles + tool).
+# r38: installed-package manifest - assemble-rootfs merges every
+# installed package into target /etc/apk/world (intentions only
+# left everything prunable, proven by a del that removed the package
+# manager itself). Payload change (tool).
+# r37: creator menu Setup Network first, HTTPS repository gate, fixed
+# four-product destination catalog (BIOS/UEFI x Saphira/SaphiraD),
+# ping-gated writes (3s per family), ordered tty1 unit with TERM. The
+# engine target matrix is not exposed; the appliance boots straight to
+# the menu and networking is operator-chosen. A repeatedly failing menu
+# falls back to a local tty1 recovery console; the ordinary installer
+# menu stays masked on this appliance.
+# Payload change.
+# r36: installer appliance becomes a passwordless creator menu.
+# Destination installs stay locked-root for ordinary firstboot; the
+# menu no longer asks for, passes, or copies passwords, network, or
+# DNS. Adds the creator-menu systemd unit. Payload change.
+# r35: fstype-aware genfstab (vfat nofail pass 0, root unchanged).
+# Payload change.
+# r34: udev in both appliance profiles (by-id needs the daemon).
+# Payload change.
+# r33: default TERM=linux in the creator menu (dialog dies silent
+# without TERM in the boot runlevel). Payload change.
+# r32: image-installer-appliance profile (dedicated installer with
+# network backend). Payload change.
+# r31: image-creator appliance tooling: creator menu + openrc service +
+# man page, image-creator-appliance and role-zfs profiles, man entries.
+# Payload change.
+# r30: early-boot firmware set (2026-10-23): saphirad-systemd gains
+# intel-ucode + i915/intel/network firmware + the earlyfw generator;
+# usb-installer gains intel-ucode + generator. Payload change.
+# r29: usb-installer profile takes linux-firmware-full (2026-10-23):
+# bare linux-firmware is licence evidence only since the family
+# split; unknown target hardware needs every family.
+# r28: product-specific installer defaults (2026-10-23): menu hostname
+# defaults to saphirad-new on systemd targets, saphira-new on OpenRC;
+# both product profiles ship sudo (wheel NOPASSWD needs it). Payload
+# change (menu + profiles).
 # r27: menu console selection honours saphira.install_tty= on the
 # kernel cmdline (serial installs), with INSTALL_TTY env first and
 # /dev/console last. Serial operation is required, not a debug path.
@@ -88,10 +128,16 @@ recipe_build()
 		{ echo "ERROR: planner syntax check failed" >&2; return 1; }
 	sh -n "$RECIPE_DIR/files/saphira-install-menu" ||
 		{ echo "ERROR: menu syntax check failed" >&2; return 1; }
+	sh -n "$RECIPE_DIR/files/saphira-image-creator-menu" ||
+		{ echo "ERROR: creator menu syntax check failed" >&2; return 1; }
 	sh "$RECIPE_DIR/tests/install-plan.sh" ||
 		{ echo "ERROR: install-plan suite failed" >&2; return 1; }
 	sh "$RECIPE_DIR/tests/install-menu.sh" ||
 		{ echo "ERROR: install-menu suite failed" >&2; return 1; }
+	sh "$RECIPE_DIR/tests/image-creator-appliance.sh" ||
+		{ echo "ERROR: image-creator-appliance suite failed" >&2; return 1; }
+	sh "$RECIPE_DIR/tests/genfstab.sh" ||
+		{ echo "ERROR: genfstab suite failed" >&2; return 1; }
 	for f in "$RECIPE_DIR"/files/saphira-* "$RECIPE_DIR"/files/profiles/*; do
 		grep -q 'akadata-base-abi' "$f" && {
 			echo "ERROR: unmigrated akadata-base-abi reference in $f" >&2
@@ -102,10 +148,28 @@ recipe_build()
 	(cd "$RECIPE_DIR/files" && sha256sum -c files.sha256) || return 1
 	# Profiles are DATA, and a data file that names a package which
 	# does not exist produces an image that simply fails to install.
-	# Every bare intention must be a real recipe, and every @-include
-	# must resolve to a profile in this tree (with the historical
+	# Every bare intention must be a real recipe, a -dev/-doc split
+	# of one, a named split it declares, or a @-include resolving to
+	# a profile in this tree (with the historical
 	# @saphira-stage4-/@akadata-stage4- alias spelling).
 	local pkg entry target base
+	# Named splits (qemu-virgl, linux-firmware-i915, ...) have no
+	# recipe directory of their own; resolve them through the
+	# subpackages= declaration of their producer recipe.
+	split_producers=$(for rd in $(grep -rl '^subpackages=' "$SAPHIRA_RECIPE_ROOT"/*/recipe.sh 2>/dev/null); do
+		rp=${rd%/recipe.sh}; rp=${rp##*/}
+		# Value may span lines; the opening line itself can also
+		# close it (subpackages="..."). Strip the opener first so
+		# the closing-quote test cannot fire on the same line.
+		subs=$(awk 'BEGIN{flag=0} /^subpackages=/{sub(/^subpackages="/,""); flag=1} flag{buf=buf $0 "\n"; if (/"$/) exit} END{printf "%s", buf}' "$rd" | tr '\n' ' ' | sed -e 's/"//g')
+		for s in $subs; do
+			case $s in
+			'$pkgname'*) s=$rp${s#'$pkgname'} ;;
+			esac
+			[ -n "$s" ] || continue
+			printf '%s:%s\n' "$s" "$rp"
+		done
+	done)
 	for f in "$RECIPE_DIR"/files/profiles/*; do
 		case $f in *.services) continue ;; esac
 		awk '
@@ -134,10 +198,16 @@ recipe_build()
 				*-dev) base=${base%-dev} ;;
 				*-doc) base=${base%-doc} ;;
 				esac
-				[ -f "$SAPHIRA_RECIPE_ROOT/$base/recipe.sh" ] || {
+				if [ -f "$SAPHIRA_RECIPE_ROOT/$base/recipe.sh" ]; then
+					:
+				elif printf '%s\n' "$split_producers" | grep -qF "$pkg:"; then
+					# Named split (qemu-virgl, linux-firmware-i915):
+					# proven by its producer recipe's subpackages=.
+					:
+				else
 					echo "ERROR: ${f##*/} names $pkg, which has no recipe" >&2
 					exit 1
-				} ;;
+				fi ;;
 			esac
 		done || return 1
 	done
@@ -185,6 +255,16 @@ recipe_install()
 		"$PKGDEST/usr/share/man/man8/saphira-install-menu.8"
 	install -D -m 0644 "$RECIPE_DIR/files/saphira-install-menu.service" \
 		"$PKGDEST/usr/lib/systemd/system/saphira-install-menu.service"
+	install -D -m 0755 "$RECIPE_DIR/files/saphira-image-creator-menu" \
+		"$PKGDEST/usr/bin/saphira-image-creator-menu"
+	install -D -m 0644 "$RECIPE_DIR/files/saphira-image-creator-menu.service" \
+		"$PKGDEST/usr/lib/systemd/system/saphira-image-creator-menu.service"
+	install -D -m 0644 "$RECIPE_DIR/files/saphira-image-creator-recovery.service" \
+		"$PKGDEST/usr/lib/systemd/system/saphira-image-creator-recovery.service"
+	install -D -m 0755 "$RECIPE_DIR/files/saphira-image-creator-menu.initd" \
+		"$PKGDEST/etc/init.d/saphira-image-creator-menu"
+	install -D -m 0644 "$RECIPE_DIR/files/saphira-image-creator-menu.8" \
+		"$PKGDEST/usr/share/man/man8/saphira-image-creator-menu.8"
 	install -D -m 0644 "$RECIPE_DIR/files/install-manifest.example" \
 		"$PKGDEST/usr/share/saphira/install-manifest.example"
 	install -D -m 0644 "$RECIPE_DIR/files/installer-initramfs.conf" \

@@ -1,7 +1,15 @@
 #!/bin/sh
 pkgname=mesa
 pkgver=26.2.5
-pkgrel=3
+pkgrel=4
+# r4: -Dglvnd=enabled (2026-10-23, payload change): mesa's libs become
+# libEGL_mesa-style glvnd vendors instead of the dispatch names, ending
+# the file collision with libglvnd-dev (EGL/GLES headers + libEGL/
+# libGLES dispatch previously shipped by BOTH -dev packages). Runtime
+# gains libglvnd (libEGL_mesa DT_NEEDEDs libGLdispatch); -dev gains
+# libglvnd-dev via depends_dev (mesa headers include glvnd EGL headers).
+# Swrast/llvmpipe/lavapipe unchanged: software rendering is what makes
+# virgl work without a GPU, and libLLVM.so stays for exactly that.
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='Mesa 3D (headless EGL surfaceless + GBM, desktop OpenGL, no X11/Wayland)'
 license='MIT'
@@ -46,7 +54,8 @@ sha256=794b3d1729075dae7ebd47c7283b7ca0cdb5dec668f7f11cc0a5d82f6138a0a5
 # limitation, not convenience (same reason libdrm/virglrenderer/
 # libepoxy tests stay off; python modules carry import smoke tests
 # where the builder permits).
-depends="libdrm expat zlib zstd llvm libunwind udev elfutils libarchive libxml2"
+depends="libdrm expat zlib zstd llvm libunwind udev elfutils libarchive libxml2 libglvnd"
+depends_dev="libglvnd-dev"
 makedepends="
 	binutils
 	bison
@@ -80,7 +89,8 @@ makedepends="
 	libxml2-dev
 	libdrm
 	libdrm-dev
-	llvm
+	llvm-dev
+	libglvnd-dev
 	zlib
 	zlib-dev
 	zstd
@@ -145,7 +155,7 @@ recipe_build()
 		-Dgallium-drivers=softpipe,llvmpipe,r300,i915,r600,nouveau,iris,crocus,freedreno,etnaviv,lima,panfrost,tegra,v3d,vc4 \
 		-Dvulkan-drivers=swrast,intel,intel_hasvk,broadcom,freedreno,panfrost,imagination,nouveau \
 		-Dopengl=true -Dgles1=enabled -Dgles2=enabled \
-		-Degl=enabled -Dgbm=enabled -Dglx=disabled -Dglvnd=disabled \
+		-Degl=enabled -Dgbm=enabled -Dglx=disabled -Dglvnd=enabled \
 		-Dllvm=enabled -Dshared-llvm=enabled \
 		-Dcpp_rtti=false \
 		-Ddraw-use-llvm=true -Damd-use-llvm=false \

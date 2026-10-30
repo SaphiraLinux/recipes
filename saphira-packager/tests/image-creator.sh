@@ -68,18 +68,18 @@ refused()
 # --- 1. the target matrix ----------------------------------------------
 
 printf '%s\n' "image-creator: target matrix"
-for t in bios-openrc bios-systemd bios-saphira bios-saphirad uefi-openrc uefi-systemd uefi-saphira uefi-saphirad usb-installer; do
+for t in bios-openrc bios-systemd bios-saphira bios-saphirad uefi-openrc uefi-systemd uefi-saphira uefi-saphirad usb-installer usb-creator usb-installer-appliance; do
 	out=$(sh "$tool" list-targets)
 	printf '%s\n' "$out" | grep -q "^$t " ||
 		fail "list-targets does not offer $t"
 done
-ok "all nine targets are offered (bios/uefi x openrc/systemd x minimal/product, plus the hybrid USB installer)"
+ok "all eleven targets are offered (bios/uefi x openrc/systemd x minimal/product, plus the hybrid USB installer, the BIOS creator appliance and the hybrid installer appliance)"
 
-# The matrix must contain exactly those nine, and nothing else.
+# The matrix must contain exactly those eleven, and nothing else.
 matrix_count=$(awk '{ l = $0; sub(/#.*$/, "", l); gsub(/^[ \t]+|[ \t]+$/, "", l) } l != "" { n++ } END { print n + 0 }' "$targets")
-[ "$matrix_count" -eq 9 ] ||
-	fail "target matrix has $matrix_count rows, expected exactly 9"
-ok "the matrix is exactly nine rows: adding a target is a line, not a tool"
+[ "$matrix_count" -eq 11 ] ||
+	fail "target matrix has $matrix_count rows, expected exactly 11"
+ok "the matrix is exactly eleven rows: adding a target is a line, not a tool"
 
 # Every row must be a supported pair and name a profile that exists.
 while read -r name boot init profile; do
@@ -355,6 +355,15 @@ refused "install-to-disk preview without a device" \
 	sh "$tool" install-to-disk --target bios-openrc --preview
 ok "physical-disk refusals all fire before anything destructive"
 
+# Signatures are wiped before partitioning: a disk with a previous
+# life carries partition tables and filesystem superblocks that would
+# confuse probing (blkid, GRUB) or stall sfdisk waiting for a
+# confirmation it will never receive. The wipe runs after the typed
+# confirmation, on the whole confirmed device only.
+grep -q 'wipefs -a' "$tool" ||
+	fail "the tool never wipes old signatures before partitioning"
+ok "old signatures are wiped before partitioning"
+
 # --- 5. missing tool detection ----------------------------------------
 
 printf '%s\n' "image-creator: host tool detection"
@@ -382,6 +391,21 @@ ok "host tools are checked before the image is allocated"
 # --- 6. profiles -------------------------------------------------------
 
 printf '%s\n' "image-creator: profiles"
+# Named splits (qemu-virgl, linux-firmware-i915, ...) have no recipe
+# directory of their own; resolve them through the subpackages=
+# declaration of their producer recipe, mirroring the authority in
+# saphira-install-tools/recipe.sh.
+split_producers=$(for rd in $(grep -rl '^subpackages=' "$root"/*/recipe.sh 2>/dev/null); do
+	rp=${rd%/recipe.sh}; rp=${rp##*/}
+	subs=$(awk 'BEGIN{flag=0} /^subpackages=/{sub(/^subpackages="/,""); flag=1} flag{buf=buf $0 "\n"; if (/"$/) exit} END{printf "%s", buf}' "$rd" | tr '\n' ' ' | sed -e 's/"//g')
+	for s in $subs; do
+		case $s in
+		'$pkgname'*) s=$rp${s#'$pkgname'} ;;
+		esac
+		[ -n "$s" ] || continue
+		printf '%s:%s\n' "$s" "$rp"
+	done
+done)
 missing=0
 for f in "$profiles"/*; do
 	# .services sidecars name services, not packages (resolved through
@@ -403,6 +427,9 @@ for f in "$profiles"/*; do
 		*-doc) base=${base%-doc} ;;
 		esac
 		[ -f "$root/$base/recipe.sh" ] || {
+			if printf '%s\n' "$split_producers" | grep -qF "$pkg:"; then
+				continue
+			fi
 			printf 'image-creator: %s names %s, which has no recipe\n' "${f##*/}" "$pkg" >&2
 			exit 1
 		}
@@ -499,6 +526,23 @@ for bad in '/usr/bin/sh' '/usr/bin/env bash' '/usr/lib/systemd/systemd' ; do
 	}
 done
 ok "the tool assumes no usrmerge"
+# Shared helpers must register on a full parse without running any
+# path. A helper defined inside another function's body registers
+# only when that path runs: the disk installer died with "command not
+# found" on helpers nested in cmd_build while image builds worked
+# (SEV 2026-10-23). Parse the tool with its dispatch removed and ask
+# the shell itself what registered; column-zero grep cannot see
+# nesting (the nested definitions were at column zero too).
+probe=$work/tool-probe.sh
+marker=$(grep -n '^# --- dispatch ---' "$tool" | tail -1 | cut -d: -f1)
+[ -n "$marker" ] || fail "cannot locate the tool dispatch"
+head -n $((marker - 1)) "$tool" > "$probe" || fail "cannot stage the tool probe"
+for helper in fix_kernel_cmdline prepare_installer build_installer_initramfs finalize_bootloader; do
+	printf 'type "%s" >/dev/null 2>&1 || echo "MISSING %s"\n' "$helper" "$helper" >> "$probe"
+done
+missing=$(sh "$probe" 2>&1 || true)
+[ -z "$missing" ] || fail "shared helpers do not register on a full parse: $missing"
+ok "shared helpers register without running any path"
 # systemd is patched for the non-merged layout, so the unit directory is
 # the systemd-owned one and must be used verbatim.
 grep -q '/usr/lib/systemd/system' "$tool" ||

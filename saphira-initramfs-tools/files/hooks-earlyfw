@@ -1,0 +1,17 @@
+#!/bin/sh
+# Regenerate early-firmware boot images after firmware/kernel payload
+# changes, then regenerate the boot configuration. Same contract as
+# the grub hook: absent generator or absent GRUB are legitimate
+# no-ops (a machine with no earlyfw images has nothing to refresh);
+# real failures are loud. Absolute paths only (minimal PATH under apk).
+# Opt-in gate: generation runs only on machines that opted in at
+# image/install time (/etc/saphira/earlyfw-enabled, written by
+# saphira-image --earlyfw). Mere presence of the generator never
+# triggers generation. The grub.cfg regeneration below stays
+# unconditional: new kernels need entries with or without earlyfw.
+if [ -f /etc/saphira/earlyfw-enabled ] && [ -x /usr/sbin/saphira-earlyfw ]; then
+	/usr/sbin/saphira-earlyfw --all
+fi
+if [ -x /usr/sbin/grub-mkconfig ]; then
+	/usr/sbin/grub-mkconfig -o /boot/grub/grub.cfg
+fi

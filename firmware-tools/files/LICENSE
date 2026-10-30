@@ -3,6 +3,39 @@ Copyright (C) 2026 Andrew Smalley for and on behalf of AKADATA LIMITED.
 Business Source License 1.1 — Saphira Linux terms for firmware-tools 0.1-r1
 
 Licensed Work: firmware-tools 0.1-r1 (Saphira Linux)
+
+Scope of Licensed Work (read this first): this package is a
+Saphira-authored grouping definition (its dependency list) plus the
+README.group notice. The Licensed Work above means exactly that
+Saphira-authored compilation and nothing else. It does NOT cover,
+relicense, or restrict the member software installed alongside it:
+every member below keeps its own upstream licence in full, and this
+licence grants nothing over member software and takes nothing from
+the rights their licences already give you. A compliance tool
+reading BUSL-1.1 on this package must not attribute BUSL terms to
+any member.
+
+Member software licences (each as declared by its own Saphira recipe,
+authoritative in that package's own metadata and shipped notices):
+
+  dmidecode      GPL-2.0-or-later
+  efibootmgr     GPL-2.0-or-later
+  efivar         LGPL-2.1-or-later AND GPL-2.0-or-later
+  flashrom       GPL-2.0-only
+  coreboot-tools GPL-2.0-only
+  i2c-tools      GPL-2.0-or-later AND LGPL-2.1-or-later
+  libconfuse     ISC
+  libftdi1       LGPL-2.0-only AND GPL-2.0-only
+  libgpiod       LGPL-2.1-or-later
+  libjaylink     LGPL-2.1-or-later
+  me-analyzer    BSD-2-Clause-Patent
+  me-cleaner     GPL-3.0-or-later
+  mei-amt-check  GPL-2.0-only
+  metee          Apache-2.0
+  msr-tools      GPL-2.0-or-later
+  pciutils       GPL-2.0-or-later
+  uefi-tools     BSD-2-Clause
+  usbutils       GPL-2.0-or-later
 Licensor: AKADATA LIMITED
 Change Date: 2030-09-06
 Change License: GPL-2.0-or-later

@@ -4,7 +4,8 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/sbin/syslog-ng --foreground
+ExecStartPre=/bin/mkdir -p /var/run/syslog-ng /var/lib/syslog-ng
+ExecStart=/usr/sbin/syslog-ng --foreground --cfgfile=/etc/syslog-ng/syslog-ng.conf --persist-file=/var/lib/syslog-ng/syslog-ng.persist --control=/var/run/syslog-ng/syslog-ng.ctl --pidfile=/var/run/syslog-ng/syslog-ng.pid
 Restart=on-failure
 
 [Install]

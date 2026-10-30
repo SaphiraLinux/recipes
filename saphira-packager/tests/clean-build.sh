@@ -19,6 +19,11 @@ recipes=$test_root/recipes
 build_root=$test_root/build
 incoming=$test_root/incoming
 mkdir -p "$recipes" "$build_root" "$incoming"
+# Plan-phase identity gate reads the registry from the recipe root:
+# the synthetic tree carries an empty one (no fixture declares
+# identities; any fragment here would refuse before building).
+mkdir -p "$recipes/saphira-baselayout/files"
+printf '%s\n' '# name	type	id	primary-group	home	shell	supplementary-groups	init' > "$recipes/saphira-baselayout/files/accounts.tsv"
 
 run_buildpkg()
 {

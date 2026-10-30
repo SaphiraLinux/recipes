@@ -3,7 +3,9 @@
 description="System logging daemon"
 
 command="/usr/sbin/syslog-ng"
-command_args="--foreground"
+# Persist state defaults to ${prefix}/var upstream, so it must be overridden;
+# PID/control follow --localstatedir explicitly.
+command_args="--foreground --cfgfile=/etc/syslog-ng/syslog-ng.conf --persist-file=/var/lib/syslog-ng/syslog-ng.persist --control=/var/run/syslog-ng/syslog-ng.ctl --pidfile=/var/run/syslog-ng/syslog-ng.pid"
 supervisor="supervise-daemon"
 
 depend()
@@ -15,5 +17,5 @@ depend()
 
 start_pre()
 {
-	checkpath -d -m 0755 /var/log
+	checkpath -d -m 0755 /var/log /var/run/syslog-ng /var/lib/syslog-ng
 }

@@ -1,0 +1,78 @@
+--- a/meson.build
++++ b/meson.build
+@@ -39,7 +39,9 @@
+ dep_m = cc.find_library('m', required : false)
+ dep_winmm = cc.find_library('winmm', required : false)
+ 
+-dep_gl = dependency('gl')
++# Saphira: desktop GL is optional (headless builds have no libGL:
++# mesa builds glx+glvnd disabled). Consumers are gated below.
++dep_gl = dependency('gl', required : false)
+ 
+ dep_epoll = dependency('epoll-shim', required : false)
+ dep_gles1 = dependency('glesv1_cm', required : get_option('gles1'))
+--- a/src/util/meson.build
++++ b/src/util/meson.build
+@@ -22,13 +22,24 @@
+ 
+ files_libutil = files(
+   'glinfo_common.c',
+-  'readtex.c',
+-  'showbuffer.c',
+   'trackball.c',
+   'matrix.c',
+ )
+ 
+-_deps = [dep_glu, dep_m]
++# Saphira: readtex.c needs GLU (gluBuild2DMipmaps) and showbuffer.c
++# needs GL headers (gl_wrap.h); neither exists headless. eglinfo (the
++# sole headless consumer) uses glinfo_common/trackball/matrix only,
++# so the GL-bound sources join the library only with a GL provider.
++# The link follows the same condition (eglinfo's objects reference no
++# glu symbols - verified 2026-10-23).
++_deps = [dep_m]
++if dep_gl.found() and dep_glu.found()
++  files_libutil += files(
++    'readtex.c',
++    'showbuffer.c',
++  )
++  _deps += dep_glu
++endif
+ if dep_glut.found()
+   files_libutil += files('shaderutil.c')
+   _deps += dep_glut
+--- a/src/egl/opengl/meson.build
++++ b/src/egl/opengl/meson.build
+@@ -20,6 +20,9 @@
+ 
+ _deps = [dep_gl, dep_m, idep_util]
+ 
++# Saphira: desktop-GL targets build only when a GL provider exists.
++# eglinfo (below) is EGL-only and always builds.
++if dep_gl.found()
+ executable(
+   'eglgears_x11', files('eglgears.c'),
+   dependencies: [_deps, dep_glu, idep_eglut_x11],
+@@ -59,15 +62,17 @@
+ )
+ 
+ executable(
+-  'eglinfo', 'eglinfo.c',
+-  dependencies: [dep_egl, idep_glad, idep_util],
+-  include_directories: [inc_glad],
++  'peglgears', 'peglgears.c',
++  dependencies: [dep_gl, dep_glu, dep_egl, dep_m, idep_util],
+   install: true
+ )
+ 
++endif
++
+ executable(
+-  'peglgears', 'peglgears.c',
+-  dependencies: [dep_gl, dep_glu, dep_egl, dep_m, idep_util],
++  'eglinfo', 'eglinfo.c',
++  dependencies: [dep_egl, idep_glad, idep_util],
++  include_directories: [inc_glad],
+   install: true
+ )
+ 

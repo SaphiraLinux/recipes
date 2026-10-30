@@ -17,7 +17,7 @@ sha256=065bc56e89e6f631f96101cd62eba0748e48eb888b434edc86e89d05395e76f3
 # renderers stay at upstream default (experimental). video stays off
 # (needs libva, not packaged - filed as follow-up, not silently cut:
 # the default is off upstream too).
-depends="libdrm libepoxy mesa"
+depends="libdrm libepoxy mesa libglvnd"
 # Build-time python3-yaml is required, not optional:
 # src/gallium/meson.build fails closed ("python3 is missing modules:
 # yaml") without it. Proven by retained-workspace build failure, not
@@ -36,6 +36,7 @@ makedepends="
 	libepoxy-dev
 	mesa
 	mesa-dev
+	libglvnd-dev
 "
 
 subpackages="$pkgname-dev"

@@ -30,6 +30,8 @@ recipe_build()
 	echo "$sha256  $RECIPE_DIR/files/fio-$pkgver.tar.gz" | sha256sum -c -
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$RECIPE_DIR/files/fio-$pkgver.tar.gz"
 	cd "$SRC"
+	# layout-exception: custom configure dialect rejects unknown
+	# GNU dir flags; install paths are already explicit below.
 	./configure --prefix=/usr --disable-rdma --disable-rbd
 	make -j"$(nproc)"
 	# Proof: version renders, and the libaio engine (the ZFS-test

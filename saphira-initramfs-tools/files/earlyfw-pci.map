@@ -1,0 +1,18 @@
+# saphira-earlyfw hardware map: PCI ID -> early-firmware directories.
+#
+# Format per line: <vendor> <class-prefix> <require|optional> <dir>... <package>
+#   vendor/class match /sys/bus/pci/devices/*/vendor+class by shell prefix.
+#   require: absent firmware is FATAL (present hardware would wedge).
+#   optional: absent firmware is a notice (no driver ships it yet).
+#   dirs are relative to /lib/firmware; the last word names the split
+#   that provides them (used in the fatal message, not installed).
+#
+# Only drivers that MUST have firmware before the root mount belong
+# here. NIC/storage drivers load theirs late and work without it;
+# i915 (built-in, GuC/HuC/DMC at ~1s) wedges without it.
+
+# Intel display controllers -> i915/ (GuC, HuC, DMC families).
+0x8086 0x03 require i915 linux-firmware-i915
+# AMD display controllers -> amdgpu/ if a driver ever ships it
+# (CONFIG_DRM_AMDGPU is unset in Saphira kernels today).
+0x1002 0x03 optional amdgpu linux-firmware-amd

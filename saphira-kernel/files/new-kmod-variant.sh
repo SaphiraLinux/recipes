@@ -112,6 +112,8 @@ sh -n "$new/recipe.sh" || die "syntax check failed"
 variant_staged=0
 printf 'new-kmod-variant: wrote %s/recipe.sh\n' "$new"
 printf 'new-kmod-variant: unlock checklist for %s:\n' "$kver"
-printf '  1. kernel tree built on Egg: /usr/src/linux-%s + `make scripts` (else staging skips it)\n' "$kver"
+printf '  1. no staging needed: the kmod build prepares its own tree in-worker\n'
+printf '     (needs the sibling saphira-kernel-%s inputs + published config present,\n' "$kver"
+printf '     else it fails loudly naming what is missing)\n'
 printf '  2. saphira-linux-uapi-headers published (else resolvepkg fails closed)\n'
-printf '  3. stage + build: build-kmod-set.sh %s-%s\n' "$base" "$kver"
+printf '  3. build: build-kmod-set.sh %s-%s\n' "$base" "$kver"

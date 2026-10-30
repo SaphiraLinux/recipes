@@ -1,0 +1,29 @@
+# Image-creator appliance menu: OpenRC creator images run this
+# foreground console menu after firstboot's one-time setup. The systemd
+# installer appliance uses saphira-image-creator-menu.service instead;
+# both forms ship in the package and only the selected image's init
+# runs one.
+
+description="Saphira image-creator appliance menu"
+
+command="/usr/bin/saphira-image-creator-menu"
+
+depend() {
+	after modules procfs sysctl root localmount fsck seedrng
+	after keymaps termencoding save-termencoding
+	after bootmisc mtab hostname hwclock loopback swap binfmt
+	after saphira-fhs-converge saphira-firstboot
+	keyword -timeout
+}
+
+start() {
+	ebegin "Saphira image creator (console)"
+	"$command" < /dev/console > /dev/console 2>&1
+	eend $?
+}
+
+stop() {
+	# Nothing to stop: the menu is a foreground loop. An explicit
+	# no-op keeps ordinary shutdowns free of a stop line.
+	return 0
+}

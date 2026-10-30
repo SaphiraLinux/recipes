@@ -29,7 +29,21 @@ pkgver=1.0
 # identity-less fragments) plus the legacy-gate namespace fix: a
 # legacy user's primary GID is a reference, not a group-namespace
 # history claim, so paired user+group sidecars publish.
-pkgrel=84
+pkgrel=94
+# r90: identity authority chain (GO-2; builder-infra change with
+# explicit author approval): TSV-enforced packaging (makepkg/buildpkg/
+# signer) plus surfaced stage diagnostics.
+# r89: worker ccache env gains CCACHE_BASEDIR=/build plus sloppiness
+# (file_macro,include_file_ctime,include_file_mtime,time_macros), with
+# explicit author approval for this builder-infrastructure change:
+# fresh workspaces embed different absolute /build paths, defeating
+# kernel/kmod cache hits without the rewrite. Headers stay
+# content-hashed; only /build is rewritten.
+# r88: RESTORATION - removes the r85-r87 advisory CVE review (builder
+# daemon hook, signer checkpoint, controller defaults) added without
+# the required explicit author approval for builder-infrastructure
+# work (RECIPE_RULES immutability rule). No builder behavior may be
+# reintroduced here without that approval. Payload: pre-CVE tree.
 # r84: builder passes the mounted repo in directory form (the r83
 # file-form index path resolved noarch payloads flat beside the index
 # and still failed: strace proves file-form apk ignores package arch,

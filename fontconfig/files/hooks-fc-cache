@@ -1,0 +1,18 @@
+#!/bin/sh
+# Rebuild the system font cache after this package changes libraries
+# or configuration.
+#
+# Without this, installing or upgrading fontconfig left
+# /var/cache/fontconfig describing the PREVIOUS library/config, and
+# every font lookup paid a cold rescan or missed new faces.
+#
+# apk runs this AFTER the payload is in its final state, so the new
+# libraries, configuration and fc-cache binary are on disk when the
+# cache is rebuilt. A failure propagates (generated callers run under
+# set -eu): apk reports the error while the package still commits,
+# loud instead of silently stale.
+#
+# -s restricts the rebuild to system directories (deterministic under
+# apk, never touches per-user caches). Absolute paths only: hooks run
+# under apk with a minimal PATH.
+/usr/bin/fc-cache -s

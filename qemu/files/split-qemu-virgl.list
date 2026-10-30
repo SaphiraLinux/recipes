@@ -1,0 +1,19 @@
+# qemu-virgl payload: the GL-bearing QEMU modules. Read off the r9
+# --enable-modules staging (2026-10-23), assigned by proven ELF linkage:
+# - hw-display-virtio-gpu-gl.so DT_NEEDEDs libvirglrenderer.so.1
+# - ui-opengl.so DT_NEEDEDs libgbm.so.1 + libepoxy.so.0
+# - hw-display-virtio-gpu-pci-gl.so, hw-display-virtio-vga-gl.so and
+#   ui-egl-headless.so carry no NEEDEDs (pure plugins resolving GL
+#   symbols from the two above / dlopened EGL at runtime).
+# Everything else stays in base: VNC is compiled into the main binary,
+# SPICE rides in base modules (ui-spice-core/app, chardev-spice,
+# audio-spice, hw-display-qxl), plain virtio-gpu/vga stay base.
+# usr/libexec/vhost-user-gpu (RUNTIME-gate proven 2026-10-23: it
+# DT_NEEDEDs libgbm + libvirglrenderer + libepoxy) is the vhost-user
+# virtio-gpu backend - GL by linkage, so it rides here, not base.
+usr/lib/qemu/hw-display-virtio-gpu-gl.so
+usr/lib/qemu/hw-display-virtio-gpu-pci-gl.so
+usr/lib/qemu/hw-display-virtio-vga-gl.so
+usr/lib/qemu/ui-egl-headless.so
+usr/lib/qemu/ui-opengl.so
+usr/libexec/vhost-user-gpu

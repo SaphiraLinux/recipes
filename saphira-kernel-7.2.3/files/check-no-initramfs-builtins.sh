@@ -5,9 +5,11 @@
 # builder tests. Pure config-file logic over an explicit path argument (no
 # builder globals), so the policy is unit-testable without compiling a kernel.
 #
-# Policy: Saphira ships without an initramfs, therefore every hardware,
-# filesystem and console driver needed before the root mount -- and for
-# baseline local recovery -- must be built in (=y). A symbol that drifts to
+# Policy: drivers stay built in (early firmware/microcode images carry
+# bytes only, never drivers - Boot path policy exception 2026-10-23),
+# therefore every hardware, filesystem and console driver needed before
+# the root mount -- and for baseline local recovery -- must be built in
+# (=y). A symbol that drifts to
 # =m is exactly as fatal as one that vanishes: a module living on the root
 # filesystem cannot mount the root filesystem. Both fail this gate.
 #

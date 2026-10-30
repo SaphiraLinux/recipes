@@ -1,7 +1,7 @@
 #!/bin/sh
 pkgname=openssl
 pkgver=3.6.3
-pkgrel=3
+pkgrel=4
 # r3: /etc/ssl/private ships 0700 (homer recon carries 0700;
 # upstream install_ssldirs leaves 0755 on the private-key
 # directory). Payload change, revision bumps.
@@ -39,7 +39,19 @@ recipe_build() {
 	fi
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$OSSLBALL"
 	cd "$SRC"
-	./Configure linux-x86_64 \
+	# OpenSSL Configure takes an explicit target and does not reliably
+	# infer it here: a hardcoded linux-x86_64 emits x86-only -m64 on
+	# aarch64 and the build dies immediately. Select by package arch and
+	# fail closed otherwise (a silent default is how a mislabelled
+	# package reaches a signed repository). x86_64 resolves to the
+	# previous literal, so the x86_64 payload is unchanged.
+	case "$pkgarch" in
+		x86_64) OSSL_TARGET=linux-x86_64 ;;
+		aarch64) OSSL_TARGET=linux-aarch64 ;;
+		riscv64) OSSL_TARGET=linux-riscv64 ;;
+		*) echo "ERROR: no OpenSSL target for $pkgarch" >&2; return 1 ;;
+	esac
+	./Configure "$OSSL_TARGET" \
 		--prefix=/usr --libdir=lib --openssldir=/etc/ssl \
 		shared no-tests zlib
 	make -j${JOBS:-$(nproc)}

@@ -2,12 +2,14 @@
 
 description="GPS daemon (gpsd)"
 
-# gpsd opens its devices as root and then drops to nobody by itself, so
-# the service runs rootless in effect but starts privileged. Foreground
-# (-N) under supervise-daemon; $OPTIONS/$DEVICES come from
-# /etc/conf.d/gpsd (same names gpsd.hotplug honors). Default device is
-# the /dev/gps0 symlink installed by 25-gpsd.rules. Neither init wraps
-# the other; nothing is auto-enabled at install.
+# gpsd opens its devices as root and then drops to gpsd:gpsd by
+# itself (compiled gpsd_user/gpsd_group, declared in accounts.d/gpsd),
+# so the service runs rootless in effect but starts privileged.
+# Foreground (-N) under supervise-daemon; -n polls the receivers
+# immediately instead of waiting for the first client. $OPTIONS/$DEVICES
+# come from /etc/conf.d/gpsd (same names gpsd.hotplug honors). Default
+# device is the /dev/gps0 symlink installed by 25-gpsd.rules. Neither
+# init wraps the other; nothing is auto-enabled at install.
 command="/usr/sbin/gpsd"
 command_args="-N -n $OPTIONS $DEVICES"
 supervisor="supervise-daemon"
@@ -24,6 +26,6 @@ start_pre()
 	# /var/run is persistent by design. Stale socket from an unclean
 	# shutdown blocks bind; start_pre runs only when OpenRC is about
 	# to start the daemon.
-	checkpath -d -m 0755 /var/run/gpsd
+	checkpath -d -m 0755 -o gpsd:gpsd /var/run/gpsd
 	rm -f /var/run/gpsd/gpsd.sock
 }

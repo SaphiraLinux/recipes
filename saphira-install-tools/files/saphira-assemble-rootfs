@@ -55,6 +55,33 @@ else
 		die 'saphira-bootstrap failed'
 fi
 
+# 1b. Installed-package manifest. /etc/apk/world must reflect the
+# ACTUAL installed set, not merely the profile intentions the
+# bootstrap recorded: profiles name intentions only (never a resolved
+# closure), which left every base-closure member - including the
+# package manager itself - automatically installed and therefore
+# prunable by any later `apk del`. Merging every installed package
+# name into world makes image/install targets explicit: removal then
+# takes only what is named, and the foundation survives its group's
+# removal. Existing lines stay verbatim (pins, if any, are never
+# rewritten); only missing bare names are appended. Offline read of
+# the just-written apk database; no repository, no network.
+apk_command=${SAPHIRA_APK:-apk}
+command -v "$apk_command" >/dev/null 2>&1 ||
+	die 'apk not found for world manifest step'
+installed_list=$("$apk_command" --root "$target" --no-network info 2>/dev/null) ||
+	die 'cannot list target installed packages for world manifest'
+world_file=$target/etc/apk/world
+touch -- "$world_file" || die 'cannot touch target world file'
+while IFS= read -r installed_pkg; do
+	test -n "$installed_pkg" || continue
+	grep -qxF -- "$installed_pkg" "$world_file" 2>/dev/null ||
+		printf '%s\n' "$installed_pkg" >> "$world_file" ||
+		die 'cannot append to target world file'
+done <<EOF
+$installed_list
+EOF
+
 # 2. Machine identity. Hostname defaults to the profile name; /etc/hosts
 # carries the loopback entries so the name resolves without DNS.
 case $hostname in
@@ -170,11 +197,17 @@ test -f "$target/etc/ssl/certs/ca-certificates.crt" ||
 
 # 4. Root credential. Empty password locks root (firstboot owns
 # account setup); a supplied one is for automated boot-test images
-# only and must be rotated on first real use.
+# only and must be rotated on first real use. A supplied password
+# means provisioned: the firstboot marker armed by apply-accounts
+# (apk skeleton ships an empty root hash, which counts as
+# unprovisioned) is spent here, or boot-test images would wrongly
+# offer setup on a machine that already has a credential.
 if test -n "$root_password"; then
 	printf 'root:%s\n' "$root_password" |
 		"$chroot_command" "$target" /usr/sbin/chpasswd ||
 		die 'cannot set root password'
+	rm -f "$target/etc/saphira-firstboot-required" ||
+		die 'cannot spend the firstboot marker (password was supplied)'
 else
 	"$chroot_command" "$target" /usr/sbin/usermod -p '!' root ||
 		die 'cannot lock root password'

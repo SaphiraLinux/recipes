@@ -30,7 +30,7 @@ recipe_build()
 	echo "$sha256  $RECIPE_DIR/files/bonnie++_1.04.tgz" | sha256sum -c -
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$RECIPE_DIR/files/bonnie++_1.04.tgz"
 	cd "$SRC"
-	./configure --prefix=/usr
+	./configure --prefix=/usr --sysconfdir=/etc --localstatedir=/var
 	make -j"$(nproc)"
 	# Proof: the binaries exist and answer. bonnie++ -h prints
 	# usage without touching a disk.

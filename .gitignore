@@ -13,9 +13,16 @@ codex.history.md
 CALUDE.md
 *.md
 !PATCHES.md
+!nodejs/test-security/README.md
+!nodejs22/test-security/README.md
 
 *.x509
 !wireless-regdb/files/saphira-regdb.x509
 usb.ids
 
 .grit
+
+# Generated site snapshot (see ~/worktmp/gen-recipes-json.py): refreshed
+# on Egg after every publish wave for homer's sync-recipes.mjs. Never
+# committed; the site records the snapshot date it was built from.
+recipes.json

@@ -5,6 +5,11 @@
 # inherits whatever PATH the caller had, which silently varies between
 # console, ssh, cron and service contexts on a non-usrmerged system.
 Defaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+# visudo editor selection (no /usr/bin/vi compat symlink on Saphira,
+# ever): prefer vim, fall back to vi. The product profiles ship vim;
+# a system with neither installed fails loudly instead of silently
+# editing through a dangling link.
+Defaults editor="/usr/bin/vim:/usr/bin/vi"
 
 root ALL=(ALL:ALL) ALL
 %wheel ALL=(ALL:ALL) NOPASSWD:ALL

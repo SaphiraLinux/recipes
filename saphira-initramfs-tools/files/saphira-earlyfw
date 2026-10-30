@@ -1,0 +1,283 @@
+#!/bin/sh
+# saphira-earlyfw - build per-kernel early-firmware boot images.
+#
+# Problem: built-in drivers (notably i915, which must stay =y per the
+# no-initramfs builtin policy) initialize before the real root
+# filesystem is mounted, so /lib/firmware on the root is not there
+# yet. GuC/DMC loads fail with -ENOENT and the GPU wedges. The fix is
+# NOT built-in blobs (CONFIG_EXTRA_FIRMWARE stays empty - licensing
+# and bloat) and NOT a general initramfs (no /init takeover, no
+# modules, no early userspace): a firmware-ONLY cpio that the kernel's
+# firmware loader reads from the initramfs, after which boot proceeds
+# to the real root exactly as before.
+#
+# What gets built, per installed kernel release:
+#   /boot/earlyfw-<release>.img   firmware dirs only (cpio+zstd)
+# plus, release-independent:
+#   /boot/amd-ucode.img           early AMD microcode (uncompressed
+#                                 cpio; Intel's equivalent ships
+#                                 static in the intel-ucode package)
+# GRUB discovers earlyfw-<release>.img through the Saphira 10_linux
+# discovery patch (same initrd line mechanics as initramfs names, new
+# name listed first); the early list already names
+# intel-ucode.img/amd-ucode.img, so no other bootloader configuration
+# changes are needed - only files on disk plus the grub.cfg
+# regeneration at the end of --all.
+#
+# Selection is hardware-driven: PCI display controllers via sysfs
+# modalias against the map, plus a baseline list for generic images
+# (whose build host is not the target). Nothing is ever guessed from
+# uname -r: --all enumerates /lib/modules, and missing firmware for
+# PRESENT hardware fails LOUD (install the named split) while
+# driverless hardware is optional-by-map.
+#
+# Reproducible (sorted, owner 0:0, pinned epoch, fixed zstd level),
+# atomic (previous image survives every failure), self-pruning
+# (images without a kernel release are removed).
+
+set -eu
+
+PROG=saphira-earlyfw
+MAP=${SAPHIRA_EARLYFW_MAP:-/usr/share/saphira/earlyfw/pci.map}
+CONF=${SAPHIRA_EARLYFW_CONF:-/etc/saphira/earlyfw.conf}
+BOOT=
+SYSROOT=/
+INCLUDE=
+
+die() {
+	printf '%s: %s\n' "$PROG" "$*" >&2
+	exit 1
+}
+
+note() {
+	printf '%s: %s\n' "$PROG" "$*" >&2
+}
+
+usage() {
+	cat >&2 <<USAGE
+usage: $PROG --all [--root DIR] [--boot DIR] [--include DIR]...
+  --all          (re)build images for every installed kernel release,
+                 assemble amd-ucode.img when blobs are present, prune
+                 images whose kernel is gone, regenerate grub.cfg
+  --root DIR     target root (default /). PCI/firmware/modules resolve
+                 under it; grub.cfg regenerates only for the live root
+  --boot DIR     boot directory (default <root>/boot)
+  --include DIR  baseline firmware dir (repeatable; also read from
+                 $CONF as 'include <dir>' lines)
+USAGE
+	exit 2
+}
+
+epoch() {
+	printf '%s\n' "${SAPHIRA_SOURCE_DATE_EPOCH:-${SOURCE_DATE_EPOCH:-1753401600}}"
+}
+
+valid_release() {
+	case $1 in
+	''|*[!A-Za-z0-9._+-]*) return 1 ;;
+	esac
+	return 0
+}
+
+# --- hardware selection ----------------------------------------------
+
+# selected_dirs: baseline includes + PCI-mapped dirs present in root.
+# Required-but-missing firmware is FATAL (a present GPU with no blobs
+# wedges exactly like no image at all - silence would be the bug).
+# Optional-but-missing is a notice (driverless hardware needs nothing).
+selected_dirs() {
+	incs=$1
+	# Baseline from flags and configuration (generic images).
+	for d in $incs; do
+		[ -d "$SYSROOT/lib/firmware/$d" ] ||
+			die "baseline firmware missing: $d (install its split?)"
+		printf '%s\n' "$d"
+	done
+	[ -f "$CONF" ] || return 0
+	while IFS= read -r line || [ -n "$line" ]; do
+		case $line in ''|'#'*) continue ;; esac
+		set -- $line
+		[ "${1:-}" = include ] || die "bad earlyfw.conf line: $line"
+		d=${2:?include needs a directory}
+		[ -d "$SYSROOT/lib/firmware/$d" ] ||
+			die "baseline firmware missing: $d (install its split?)"
+		printf '%s\n' "$d"
+	done < "$CONF"
+	# PCI display controllers via sysfs (no lspci dependency).
+	[ -f "$MAP" ] || die "firmware map missing: $MAP"
+	for dev in "$SYSROOT"/sys/bus/pci/devices/*; do
+		[ -d "$dev" ] || continue
+		vendor=$(cat "$dev/vendor" 2>/dev/null || true)
+		class=$(cat "$dev/class" 2>/dev/null || true)
+		[ -n "$vendor" ] && [ -n "$class" ] || continue
+		while IFS= read -r line || [ -n "$line" ]; do
+			case $line in ''|'#'*) continue ;; esac
+			set -- $line
+			# vendor class-prefix require|optional dir... package
+			[ $# -ge 5 ] || die "bad firmware map line: $line"
+			mv=$1; mc=$2; mode=$3; shift 3
+			pkg=${*: -1}
+			case $vendor in $mv) ;; *) continue ;; esac
+			case $class in $mc*) ;; *) continue ;; esac
+			for d in "$@"; do
+				[ "$d" = "$pkg" ] && continue
+				if [ -d "$SYSROOT/lib/firmware/$d" ]; then
+					printf '%s\n' "$d"
+				elif [ "$mode" = require ]; then
+					die "hardware $vendor needs $d but it is absent (install $pkg?)"
+				else
+					note "optional $d absent (no driver ships it); skipping"
+				fi
+			done
+		done < "$MAP"
+	done
+}
+
+unique_lines() {
+	awk '!seen[$0]++'
+}
+
+# --- archive builders --------------------------------------------------
+
+# Staging root: this tool runs chrooted into install targets (which have
+# no /build tree) and live on running systems (same). Honor
+# SAPHIRA_TMPDIR only when it names a usable directory in THIS root;
+# otherwise fall back to the local /tmp (FHS, always present). A stale
+# host-path default here bricked image assembly at 95% with
+# "cannot create staging directory".
+stage_base() {
+	base=${SAPHIRA_TMPDIR:-/tmp}
+	[ -d "$base" ] || base=/tmp
+	printf '%s\n' "$base"
+}
+
+# Uncompressed newc cpio of the given root-relative dirs to stdout.
+# Reproducible: sorted NUL-separated list, owner 0:0, pinned epoch.
+pack_dirs() {
+	stage=$1; shift
+	( cd "$stage" && find . -mindepth 1 -print0 | LC_ALL=C sort -z |
+		cpio --null --create --format=newc --quiet \
+			--owner=0:0 --reproducible ) || die 'cpio failed'
+}
+
+build_one() {
+	rel=$1; dirs=$2
+	work=$(mktemp -d "$(stage_base)/earlyfw.XXXXXX") ||
+		die 'cannot create staging directory'
+	trap 'rm -rf -- "$work"' EXIT HUP INT TERM
+	stage=$work/stage
+	mkdir -p "$stage"
+	for d in $dirs; do
+		mkdir -p "$stage/lib/firmware"
+		cp -a -- "$SYSROOT/lib/firmware/$d" "$stage/lib/firmware/" ||
+			die "cannot stage firmware $d"
+	done
+	find "$stage" -print0 | xargs -0 touch -h -d "@$(epoch)" ||
+		die 'cannot normalise timestamps'
+	listing=$work/listing
+	pack_dirs "$stage" > "$work/fw.cpio" || die 'pack failed'
+	cpio -it --quiet < "$work/fw.cpio" > "$listing" 2>/dev/null ||
+		die 'generated cpio does not parse'
+	grep -q '^lib/firmware/' "$listing" ||
+		die 'generated cpio carries no firmware'
+	zstd -q -f -19 --no-check -T1 -o "$work/fw.cpio.zst" \
+		"$work/fw.cpio" || die 'zstd failed'
+	out=$BOOT/earlyfw-$rel.img
+	mkdir -p -- "$(dirname -- "$out")"
+	mv -f -- "$work/fw.cpio.zst" "$out" || die "cannot install $out"
+	trap - EXIT HUP INT TERM
+	rm -rf -- "$work"
+	note "wrote $out"
+}
+
+# --- amd microcode (audit conclusion: no new package; blobs already
+# ship in linux-firmware-amd, assembly is ten lines here) --------------
+build_amd_ucode() {
+	[ -d "$SYSROOT/lib/firmware/amd-ucode" ] || {
+		say_absent_amd
+		return 0
+	}
+	work=$(mktemp -d "$(stage_base)/earlyfw-amd.XXXXXX") ||
+		die 'cannot create staging directory'
+	trap 'rm -rf -- "$work"' EXIT HUP INT TERM
+	mkdir -p "$work/kernel/x86/microcode"
+	for b in "$SYSROOT"/lib/firmware/amd-ucode/microcode_amd*.bin; do
+		[ -f "$b" ] || continue
+		cat -- "$b"
+	done > "$work/kernel/x86/microcode/AuthenticAMD.bin"
+	if [ ! -s "$work/kernel/x86/microcode/AuthenticAMD.bin" ]; then
+		note "amd-ucode present but no microcode_amd blobs; skipping"
+		trap - EXIT HUP INT TERM
+		rm -rf -- "$work"
+		return 0
+	fi
+	( cd "$work" && find kernel -print0 | LC_ALL=C sort -z |
+		cpio --null --create --format=newc --quiet \
+			--owner=0:0 --reproducible ) \
+		> "$BOOT/amd-ucode.img" || die 'amd cpio failed'
+	trap - EXIT HUP INT TERM
+	rm -rf -- "$work"
+	note "wrote $BOOT/amd-ucode.img"
+}
+
+say_absent_amd() {
+	note "no amd-ucode blobs; skipping amd-ucode.img"
+}
+
+cmd_all() {
+	[ -d "$SYSROOT/lib/modules" ] ||
+		die "no kernel modules under $SYSROOT/lib/modules"
+	dirs=$(selected_dirs "$INCLUDE" | unique_lines)
+	[ -n "$dirs" ] || die 'empty firmware selection (no hardware matched and no baseline?)'
+	nrels=0
+	for moddir in "$SYSROOT"/lib/modules/*; do
+		[ -d "$moddir" ] || continue
+		rel=${moddir##*/}
+		valid_release "$rel" || die "invalid kernel release: $rel"
+		build_one "$rel" "$dirs"
+		nrels=$((nrels + 1))
+	done
+	[ "$nrels" -gt 0 ] || die 'no kernel releases installed'
+	build_amd_ucode
+	# Prune images whose kernel is gone (stale firmware must never
+	# outlive its kernel; grub.cfg is regenerated below regardless).
+	# Both name generations are pruned: earlyfw-*.img (current) and
+	# initramfs-*.img (pre-rename orphans, inert once unreferenced).
+	for img in "$BOOT"/earlyfw-*.img "$BOOT"/initramfs-*.img; do
+		[ -e "$img" ] || continue
+		base=${img##*/}
+		rel=${base#earlyfw-}; rel=${rel#initramfs-}; rel=${rel%.img}
+		if [ ! -d "$SYSROOT/lib/modules/$rel" ]; then
+			rm -f -- "$img" && note "pruned stale $img"
+		fi
+	done
+	# Grub configuration only for the live root: image builds run
+	# their own grub-mkconfig afterwards (it picks up these files),
+	# and a foreign root must never be reconfigured from outside.
+	if [ "$SYSROOT" = / ] && [ -x /usr/sbin/grub-mkconfig ]; then
+		/usr/sbin/grub-mkconfig -o /boot/grub/grub.cfg ||
+			die 'grub-mkconfig failed'
+	elif [ "$SYSROOT" = / ]; then
+		note 'no grub-mkconfig (no GRUB on this machine?)'
+	fi
+}
+
+while [ $# -gt 0 ]; do
+	case $1 in
+	--all) CMD=all; shift ;;
+	--root) SYSROOT=${2:?--root needs a directory}; shift 2 ;;
+	--root=*) SYSROOT=${1#*=}; shift ;;
+	--boot) BOOT=${2:?--boot needs a directory}; shift 2 ;;
+	--boot=*) BOOT=${1#*=}; shift ;;
+	--include) INCLUDE="$INCLUDE ${2:?--include needs a directory}"; shift 2 ;;
+	--include=*) INCLUDE="$INCLUDE ${1#*=}"; shift ;;
+	--) shift; break ;;
+	-*) usage ;;
+	*) usage ;;
+	esac
+done
+# --boot defaults under --root (explicit --boot wins for tests).
+[ -n "$BOOT" ] || BOOT=$SYSROOT/boot
+[ "${CMD:-}" = all ] || usage
+[ -d "$SYSROOT" ] || die "--root is not a directory: $SYSROOT"
+cmd_all

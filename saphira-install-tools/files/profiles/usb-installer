@@ -5,4 +5,12 @@
 # the installer, not its product.
 @saphira-installer
 saphira-kernel-7.2.3
-linux-firmware
+# Full firmware set (2026-10-23): target hardware is unknown, so the
+# installer carries every family via the -full meta. Bare
+# linux-firmware is licence evidence only since the family split.
+linux-firmware-full
+# Early-boot artifacts for the installer environment itself (unknown
+# hardware at install time): microcode image plus the generator the
+# installed machine's hooks need in-target from its first boot.
+intel-ucode
+saphira-initramfs-tools

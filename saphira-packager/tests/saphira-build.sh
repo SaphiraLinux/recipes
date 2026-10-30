@@ -202,6 +202,134 @@ assert_contains "status shows dependent PASS" "$TMP/status.out" "dependent"
 "$SAPHIRA_BUILD" log base > "$TMP/log.out" 2>&1
 assert_contains "log includes build.log" "$TMP/log.out" "build.log"
 
+# times: last finished attempt per package with wall/CPU/RSS; rows that
+# predate measurement show "-" where unrecoverable. SBU ratios stay out:
+# raw seconds until the reference workload is defined and calibrated.
+"$SAPHIRA_BUILD" times nosuchpackage > "$TMP/times-empty.out" 2>&1
+assert_contains "times names the miss" "$TMP/times-empty.out" "no finished builds matching nosuchpackage"
+python3 - "$STATE/queue.db" <<'PY'
+import sqlite3
+import sys
+conn = sqlite3.connect(sys.argv[1])
+conn.execute(
+    "INSERT INTO builds(package,version,revision,recipe_hash,state,started_at,finished_at,"
+    " duration_s,cpu_s,peak_rss_mb,arch,builder_host)"
+    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+    ("timepkg", "2.0", "3", "h" * 64, "PASS",
+     "2026-10-27T10:00:00Z", "2026-10-27T10:01:40Z",
+     100.0, 60.0, 512.5, "x86_64", "egg"))
+conn.execute(
+    "INSERT INTO builds(package,version,revision,recipe_hash,state,finished_at,"
+    " arch,builder_host)"
+    " VALUES (?,?,?,?,?,?,?,?)",
+    ("oldpkg", "1.0", "1", "a" * 64, "FAIL",
+     "2026-10-27T09:02:00Z", "x86_64", "egg"))
+conn.commit()
+PY
+"$SAPHIRA_BUILD" times > "$TMP/times.out" 2>&1
+assert_contains "times shows measured wall" "$TMP/times.out" "100s"
+assert_contains "times shows cpu" "$TMP/times.out" "60s"
+assert_contains "times shows rss" "$TMP/times.out" "512.5"
+if grep -Eq "^oldpkg +1\.0-r1 +FAIL + +- " "$TMP/times.out"; then
+	ok "times shows unmeasured wall as dash"
+else
+	bad "times unmeasured wall is not a dash"
+fi
+"$SAPHIRA_BUILD" times timepkg > "$TMP/times-one.out" 2>&1
+assert_contains "times filters by package" "$TMP/times-one.out" "timepkg"
+if grep -q "oldpkg" "$TMP/times-one.out"; then
+	bad "times filter leaked unselected package"
+else
+	ok "times filter excludes others"
+fi
+# Migration backfill: a pre-columns database gains durations computed
+# from its timestamps when any command first opens it.
+mkdir -p "$TMP/oldstate"
+python3 - "$TMP/oldstate/queue.db" <<'PY'
+import sqlite3
+import sys
+conn = sqlite3.connect(sys.argv[1])
+conn.execute(
+    "CREATE TABLE builds(id INTEGER PRIMARY KEY, package TEXT NOT NULL,"
+    " version TEXT, revision TEXT, recipe_hash TEXT NOT NULL, state TEXT NOT NULL,"
+    " result_json TEXT NOT NULL DEFAULT '{}', log_dir TEXT, commit_hash TEXT,"
+    " queued_at TEXT, started_at TEXT, finished_at TEXT, published_at TEXT)")
+conn.execute(
+    "INSERT INTO builds(package,version,revision,recipe_hash,state,started_at,finished_at)"
+    " VALUES (?,?,?,?,?,?,?)",
+    ("legacypkg", "1.0", "1", "b" * 64, "PASS",
+     "2026-10-27T09:00:00Z", "2026-10-27T09:05:00Z"))
+conn.commit()
+PY
+SAPHIRA_BUILD_STATE=$TMP/oldstate "$SAPHIRA_BUILD" times > "$TMP/times-old.out" 2>&1
+assert_contains "migration backfills wall from timestamps" "$TMP/times-old.out" "5m00s"
+# SBU: no baseline yet -> the report says so instead of dividing.
+"$SAPHIRA_BUILD" times --sbu > "$TMP/times-nosbu.out" 2>&1
+assert_contains "missing baseline is reported, not divided" "$TMP/times-nosbu.out" "no active musl baseline"
+# calibrate builds the reference through the identical run_one pipeline
+# (stub builder here) with a cold cache and pins the baseline row.
+"$SAPHIRA_BUILD" calibrate base > "$TMP/calibrate.out" 2>&1
+assert_contains "calibrate reports the baseline" "$TMP/calibrate.out" "baseline"
+python3 - "$STATE/queue.db" <<'PY'
+import sqlite3
+import sys
+conn = sqlite3.connect(sys.argv[1])
+rows = conn.execute(
+    "SELECT package, active, cache_policy, wall_s FROM sbu_baseline WHERE package='base'").fetchall()
+assert len(rows) == 1 and rows[0][1] == 1, rows
+assert "cold" in rows[0][2], rows
+assert rows[0][3] is not None and rows[0][3] >= 0, rows
+print("baseline row ok")
+PY
+# Second calibration retires the first (one active row per package).
+"$SAPHIRA_BUILD" calibrate base > /dev/null 2>&1
+python3 - "$STATE/queue.db" <<'PY'
+import sqlite3
+import sys
+conn = sqlite3.connect(sys.argv[1])
+active = conn.execute(
+    "SELECT COUNT(*) FROM sbu_baseline WHERE package='base' AND active=1").fetchone()[0]
+assert active == 1, active
+print("baseline rotation ok")
+PY
+# Deterministic ratio math on fixture rows (calibration walls above are
+# near-zero stub timings, useless as divisors).
+python3 - "$STATE/queue.db" <<'PY'
+import json
+import sqlite3
+import sys
+conn = sqlite3.connect(sys.argv[1])
+conn.execute(
+    "INSERT INTO sbu_baseline(package,version,revision,arch,builder_host,cache_policy,"
+    " wall_s,active,calibrated_at)"
+    " VALUES (?,?,?,?,?,?,?,?,?)",
+    ("mathref", "1.0", "1", "x86_64", "egg", "cold (fixture)", 50.0, 1,
+     "2026-10-27T11:00:00Z"))
+conn.execute(
+    "INSERT INTO builds(package,version,revision,recipe_hash,state,started_at,finished_at,"
+    " duration_s,arch,builder_host,result_json)"
+    " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+    ("mathpkg", "1.0", "1", "c" * 64, "PASS",
+     "2026-10-27T11:00:00Z", "2026-10-27T11:01:40Z", 100.0,
+     "x86_64", "egg", json.dumps({"stages": {}})))
+conn.execute(
+    "INSERT INTO builds(package,version,revision,recipe_hash,state,started_at,finished_at,"
+    " duration_s,arch,builder_host,result_json)"
+    " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+    ("refpkg", "1.0", "1", "d" * 64, "FAIL",
+     "2026-10-27T11:00:00Z", "2026-10-27T11:00:10Z", 10.0,
+     "x86_64", "egg", json.dumps({"attempt": "refusal", "stages": {}})))
+conn.commit()
+PY
+"$SAPHIRA_BUILD" times --sbu=mathref mathpkg > "$TMP/times-sbu.out" 2>&1
+assert_contains "ratio math divides by the baseline" "$TMP/times-sbu.out" "2.00"
+"$SAPHIRA_BUILD" times --sbu=mathref refpkg > "$TMP/times-sbu-ref.out" 2>&1
+if grep "refpkg" "$TMP/times-sbu-ref.out" | grep -Eq ' [0-9]+\.[0-9]{2}( |$)'; then
+	bad "refusal row carries an SBU ratio"
+else
+	ok "refusals are excluded from SBU math"
+fi
+
 # The disposable install root is a Saphira root, so it gets the root
 # initialisation that no package provides: /bin/sh -> bash and
 # /usr/bin/env -> /bin/env. buildpkg does this in a clean build root and

@@ -39,6 +39,13 @@
 #   user <name> <uid> <primary-group> <home> <shell> [supplementary-groups]
 #   (comma-separated supplementary names, no spaces; additive only)
 #   dir <path> <mode> <owner> <group>
+#   dir-children <parent> <lo>..<hi> <mode> <owner> <group>
+#   (bounded fan-out: converges each direct child <parent>/<n> for
+#   n in lo..hi exactly as a dir stanza would - computed names only,
+#   the parent is never listed or walked, so live content (qmail
+#   queue message files) is never touched. lo/hi are canonical
+#   decimal, lo <= hi, at most 64 children; anything else fails
+#   closed. The parent keeps its own dir stanza.)
 #   file <path> <mode> <owner> <group>
 # Blank lines and '#' comments are ignored.
 #
@@ -104,6 +111,13 @@
 #   are created with default modes, and only the final leaf gets the
 #   declared mode/ownership (changed only when different, to stay
 #   idempotent). Existing trees are never walked.
+# - service homes converge ownership but never relax mode: a missing home
+#   is created 0755, while an existing home keeps its mode (dir stanza,
+#   payload, or administrator owns it). A private home must never pass
+#   through 0755 mid-run only to be repaired afterwards. dir-children is the
+#   bounded exception that still never walks: it expands lo..hi into
+#   per-child dir operations on computed names only, never listing
+#   the parent.
 # - all account-file mutation happens under an exclusive lock so
 #   concurrent package installs cannot interleave appends.
 #
@@ -148,20 +162,37 @@ die()
 
 # --- sysusers.d replay (offline equivalent of systemd-sysusers) --------
 #
-# Deliberately NARROW: only the two line types Saphira actually ships with
-# pinned IDs, and only when the ID is explicit. A line with a dynamic or
-# name-resolved ID is reported and skipped rather than guessed, because
-# allocating an ID is precisely the decision this whole mechanism exists to
-# avoid making by accident.
+# Two rules govern everything below, and both are deliberate:
+# 1. Nothing is ever allocated. A line with a dynamic ID and no
+#    already-present identity behind it is an actionable error, never
+#    a guess, because allocating an ID is precisely the decision this
+#    whole mechanism exists to avoid making by accident.
+# 2. Nothing silently unresolved remains. Every declaration either
+#    converges, creates within its pinned namespace, or fails the
+#    build naming the file, line and missing identity.
 #
 # sysusers.d grammar handled:
 #   u<id> <name> ["GECOS"]      user with an explicit UID
 #   g<id> <name> ["GECOS"]      group with an explicit GID
 #   u <name> <id> ["GECOS"]     user, ID second
 #   g <name> <id> ["GECOS"]     group, ID second
+#   u <name> <uid>[:<gid>]      user with an explicit primary GID that
+#     [...]                     may differ from the UID, or name a group
+#                               (u root 0:0, u! nobody 65534:65534,
+#                               u name uid:GROUP). The group must already
+#                               exist: groups resolve before users, in
+#                               dependency order, whatever file order the
+#                               declarations arrive in. Unresolvable
+#                               references fail closed.
+#   u|g <name> - [...]          automatic ID: the identity must already
+#                               exist (seed, fragment or base). Missing is
+#                               an error telling the operator where to
+#                               declare it, never an allocation.
 # Everything else (m, f, l, s, b, t, p, a, n, r, c, U, G and the extension
-# types) is skipped: it declares a membership, a file, a sub-ID range, a
-# container or a cache, none of which is a Unix identity this helper owns.
+# types) is skipped with a notice: it declares a membership, a file, a
+# sub-ID range, a container or a cache, none of which is a Unix identity
+# this helper owns. (No shipped conf uses those kinds; the day one does,
+# its handling gets designed, not improvised.)
 #
 # Home directories are NOT created. systemd-sysusers would create them, but
 # doing so offline would materialise /home trees for identities that may
@@ -184,131 +215,242 @@ apply_sysusers_d()
 		test -f "$f" || die "account database is missing: $f"
 	done
 	conffile=
-	for candidate in "$FRAGMENT"/*.conf; do
-		[ -f "$candidate" ] || continue
-		conffile=$candidate
-		lineno=0
-		while IFS= read -r line || [ -n "$line" ]; do
-			lineno=$((lineno + 1))
-			case $line in
-				''|'#'*) continue ;;
-			esac
-			# strip an inline comment, then split
-			line=${line%%#*}
-			# shellcheck disable=SC2086
-			set -- $line
-			[ $# -ge 2 ] || continue
-			kind=$1
-			case $kind in
-				u*|g*)
-					case $kind in
-						u|g)
-							# name-first form: u NAME ID ...
-							name=$2
-							id=$3
-							;;
-						u!|g!)
-							# The '!' form means systemd-sysusers would ALLOCATE
-							# an ID. Saphira pins them, so the ID is the
-							# second field. This branch used to assign
-							# nothing, so every pinned systemd identity
-							# (u! systemd-oom 130 ...) was skipped as
-							# 'incomplete'.
-							name=$2
-							id=$3
-							;;
-						u[0-9]*|g[0-9]*)
-							# id-first form: u123 NAME ...
-							rest=${kind#?}
-							rest=${rest#!}
-							name=$2
-							id=$rest
-							;;
-					esac
-					;;
-				*)
-					skip_sysusers_line "$conffile" "line $lineno: $line"
-					continue
-					;;
-			esac
-			[ -n "${name:-}" ] && [ -n "${id:-}" ] || {
-				skip_sysusers_line "$conffile" "line $lineno: incomplete identity"
-				continue
-			}
-		case $id in
-			''|*[!0-9]*)
-				# A dynamic or name-resolved ID. Never guess: a
-				# wrong allocation is a permanent, silent
-				# identity conflict.
-				skip_sysusers_line "$conffile" "line $lineno: non-numeric ID '$id' for $name"
-				continue
-				;;
+	# Parse one sysusers line into SYS_kind/SYS_name/SYS_id. Returns 0
+	# with globals set for identity (u/g) lines. Anything else is
+	# reported once (pass 1) and silent afterwards; blank and comment
+	# lines are always silent. Callers `continue` on non-zero return.
+	sysusers_parse() {
+		SYS_line=$1
+		case $SYS_line in
+			''|'#'*) return 2 ;;
 		esac
-		# Reserved-identity convergence: upstream boilerplate
-		# (systemd basic.conf and kin) re-declares the foundation
-		# identities with their canonical IDs, and systemd-sysusers
-		# treats those declarations as no-ops live. The offline
-		# replay converges rather than dying: an EXACT match against
-		# the already-present identity is a logged no-op. This
-		# grants nothing: a missing identity, and any redefinition,
-		# still reaches ensure_* below, where the reserved guard
-		# refuses every creation and every move. Non-reserved
-		# names never enter this branch.
-		case $kind in
-			g*)
-				case $name in
-					root|wheel|spokes)
-						existing=$(group_entry "$name")
-						if [ -n "$existing" ] && [ "$(field 3 "$existing")" = "$id" ]; then
-							printf 'ensure-identity: notice: %s: reserved group %s %s already present, no change\n' \
-								"${conffile##*/}" "$name" "$id" >&2
-							unset name id kind existing
-							continue
-						fi
+		# strip an inline comment, then split
+		SYS_line=${SYS_line%%#*}
+		# shellcheck disable=SC2086
+		set -- $SYS_line
+		[ $# -ge 2 ] || return 2
+		SYS_kind=$1
+		case $SYS_kind in
+			u*|g*)
+				case $SYS_kind in
+					u|g)
+						# name-first form: u NAME ID ...
+						SYS_name=$2
+						SYS_id=${3-}
+						;;
+					u!|g!)
+						# The '!' form means systemd-sysusers would ALLOCATE
+						# an ID. Saphira pins them, so the ID is the
+						# second field.
+						SYS_name=$2
+						SYS_id=${3-}
+						;;
+					u[0-9]*|g[0-9]*)
+						# id-first form: u123 NAME ...
+						SYS_rest=${SYS_kind#?}
+						SYS_rest=${SYS_rest#!}
+						SYS_name=$2
+						SYS_id=$SYS_rest
+						unset SYS_rest
 						;;
 				esac
 				;;
 			*)
-				case $name in
-					root)
-						existing=$(passwd_entry "$name")
-						if [ -n "$existing" ] && [ "$(field 3 "$existing")" = "$id" ]; then
-							printf 'ensure-identity: notice: %s: reserved user %s %s already present, no change\n' \
-								"${conffile##*/}" "$name" "$id" >&2
-							unset name id kind existing
+				[ "$SYS_PASS" -eq 1 ] &&
+					skip_sysusers_line "$conffile" "line $lineno: $SYS_line"
+				unset SYS_kind SYS_name SYS_id SYS_line
+				return 1
+				;;
+		esac
+		[ -n "${SYS_name:-}" ] && [ -n "${SYS_id:-}" ] || {
+			[ "$SYS_PASS" -eq 1 ] &&
+				skip_sysusers_line "$conffile" "line $lineno: incomplete identity"
+			unset SYS_kind SYS_name SYS_id SYS_line
+			return 1
+		}
+		unset SYS_line
+		return 0
+	}
+	# Phase 1 (groups): every g line, before any user. A '-' group
+	# must already exist (seed, fragment or base): there is nothing to
+	# create it from, and inventing an ID would be exactly the silent
+	# allocation this mechanism refuses to do. A missing one is an
+	# actionable error, not a notice.
+	sysusers_phase_groups() {
+		for candidate in "$FRAGMENT"/*.conf; do
+			[ -f "$candidate" ] || continue
+			conffile=$candidate
+			lineno=0
+			while IFS= read -r line || [ -n "$line" ]; do
+				lineno=$((lineno + 1))
+				sysusers_parse "$line" || continue
+				case $SYS_kind in
+					g*) ;;
+					*) unset SYS_kind SYS_name SYS_id; continue ;;
+				esac
+				SYS_name2=$SYS_name; SYS_id2=$SYS_id
+				unset SYS_kind SYS_name SYS_id
+				if [ "$SYS_id2" = - ]; then
+					if [ -n "$(group_entry "$SYS_name2")" ]; then
+						printf 'ensure-identity: notice: %s: group %s already present, no allocation\n' \
+							"${conffile##*/}" "$SYS_name2" >&2
+					else
+						die "$conffile line $lineno: group $SYS_name2 has no numeric ID and is absent - add it to the base manifest (accounts.tsv) with a stable GID"
+					fi
+					continue
+				fi
+				case $SYS_id2 in
+					*:*) die "$conffile line $lineno: group $SYS_name2 must not carry '$SYS_id2'" ;;
+				esac
+				case $SYS_name2 in
+					root|wheel|spokes)
+						existing=$(group_entry "$SYS_name2")
+						if [ -n "$existing" ] && [ "$(field 3 "$existing")" = "$SYS_id2" ]; then
+							printf 'ensure-identity: notice: %s: reserved group %s %s already present, no change\n' \
+								"${conffile##*/}" "$SYS_name2" "$SYS_id2" >&2
 							continue
 						fi
 						;;
 				esac
-				;;
-		esac
-		unset existing
-		case $kind in
-			g*)
-				ensure_group "$name" "$id"
-				;;
-				*)
-					# A `u' line creates the user AND a group of the
-					# same name, which is what makes it usable as a
-					# primary group. Without this, ensure_user fails
-					# with 'primary group is not declared, present, or
-					# base-seeded' -- the pinned-ID case had never been
-					# exercised.
-					#
-					# /var/empty is the platform's established
-					# no-home idiom (ensure_home returns early for it).
-					# Home directories are firstboot's job on Saphira;
-					# creating them here would materialise /home
-					# trees for identities that may never log in.
-					ensure_group "$name" "$id"
-					ensure_user "$name" "$id" "$name" "/var/empty" "/sbin/nologin"
-					;;
-			esac
-			unset name id kind
-		done < "$candidate"
-	done
+				ensure_group "$SYS_name2" "$SYS_id2"
+			done < "$candidate"
+		done
+	}
+	# Phase 2 (implied same-name groups): u lines with a numeric UID
+	# and no divergent GID imply their primary group, whatever file
+	# order the declarations arrive in. Reserved names are excluded:
+	# they converge-or-refuse in the user phase, never via creation.
+	# Out-of-range IDs die here through ensure_group, as they should:
+	# no package may mint them.
+	sysusers_phase_implied() {
+		for candidate in "$FRAGMENT"/*.conf; do
+			[ -f "$candidate" ] || continue
+			conffile=$candidate
+			lineno=0
+			while IFS= read -r line || [ -n "$line" ]; do
+				lineno=$((lineno + 1))
+				sysusers_parse "$line" || continue
+				case $SYS_kind in
+					g*) unset SYS_kind SYS_name SYS_id; continue ;;
+				esac
+				SYS_uid=${SYS_id%%:*}
+				case $SYS_id in
+					*:*:*) unset SYS_kind SYS_name SYS_id; continue ;;
+					*:*) SYS_gid=${SYS_id#*:} ;;
+					*) SYS_gid= ;;
+				esac
+				case $SYS_uid in
+					''|*[!0-9]*|-) unset SYS_kind SYS_name SYS_id SYS_uid SYS_gid; continue ;;
+				esac
+				if [ -n "$SYS_gid" ] && [ "$SYS_gid" != "$SYS_uid" ]; then
+					unset SYS_kind SYS_name SYS_id SYS_uid SYS_gid
+					continue
+				fi
+				case $SYS_name in
+					root|wheel|spokes) unset SYS_kind SYS_name SYS_id SYS_uid SYS_gid; continue ;;
+				esac
+				existing=$(group_entry "$SYS_name")
+				if [ -z "$existing" ]; then
+					ensure_group "$SYS_name" "$SYS_uid"
+				elif [ "$(field 3 "$existing")" != "$SYS_uid" ]; then
+					die "$conffile line $lineno: group $SYS_name holds GID $(field 3 "$existing") but user $SYS_name declares UID $SYS_uid"
+				fi
+				unset SYS_kind SYS_name SYS_id SYS_uid SYS_gid existing
+			done < "$candidate"
+		done
+	}
+	# Phase 3 (users): every u line, with all groups settled.
+	sysusers_phase_users() {
+		for candidate in "$FRAGMENT"/*.conf; do
+			[ -f "$candidate" ] || continue
+			conffile=$candidate
+			lineno=0
+			while IFS= read -r line || [ -n "$line" ]; do
+				lineno=$((lineno + 1))
+				sysusers_parse "$line" || continue
+				case $SYS_kind in
+					g*) unset SYS_kind SYS_name SYS_id; continue ;;
+				esac
+				SYS_uid=${SYS_id%%:*}
+				case $SYS_id in
+					*:*:*) die "$conffile line $lineno: malformed ID '$SYS_id' for $SYS_name" ;;
+					*:*) SYS_gid=${SYS_id#*:} ;;
+					*) SYS_gid= ;;
+				esac
+				if [ "$SYS_uid" = - ] || [ "$SYS_id" = - ]; then
+					# Automatic UID: the user must already exist (its
+					# accounts.d fragment or the base seed provides it;
+					# upstream dbus.conf messagebus resolves exactly
+					# this way). Inventing a UID would be the silent
+					# allocation refused above.
+					if [ -n "$(passwd_entry "$SYS_name")" ]; then
+						printf 'ensure-identity: notice: %s: user %s already present, no allocation\n' \
+							"${conffile##*/}" "$SYS_name" >&2
+					else
+						die "$conffile line $lineno: user $SYS_name has no numeric ID and is absent - declare it with a pinned UID (accounts.d fragment or base manifest)"
+					fi
+					unset SYS_kind SYS_name SYS_id SYS_uid SYS_gid
+					continue
+				fi
+				case $SYS_uid in
+					''|*[!0-9]*) die "$conffile line $lineno: malformed UID in '$SYS_id' for $SYS_name" ;;
+				esac
+				pgname=
+				if [ -n "$SYS_gid" ] && [ "$SYS_gid" != "$SYS_uid" ]; then
+					case $SYS_gid in
+						*[!a-zA-Z0-9_.-]*|[-.]*|'')
+							die "$conffile line $lineno: malformed GID in '$SYS_id' for $SYS_name" ;;
+					esac
+					case $SYS_gid in
+						*[!0-9]*)
+							# Name-form primary group (u name uid:GROUP):
+							# resolve against the settled databases.
+							SYS_gexists=$(group_entry "$SYS_gid")
+							[ -n "$SYS_gexists" ] || die "$conffile line $lineno: primary group '$SYS_gid' for $SYS_name is not declared"
+							pgname=$SYS_gid
+							unset SYS_gexists
+							;;
+						*)
+							pgname=$(group_name_for_gid "$SYS_gid")
+							[ -n "$pgname" ] || die "$conffile line $lineno: primary GID $SYS_gid for $SYS_name is not declared"
+							;;
+					esac
+				fi
+				case $SYS_name in
+					root)
+						existing=$(passwd_entry "$SYS_name")
+						if [ -n "$existing" ] && [ "$(field 3 "$existing")" = "$SYS_uid" ]; then
+							printf 'ensure-identity: notice: %s: reserved user %s %s already present, no change\n' \
+								"${conffile##*/}" "$SYS_name" "$SYS_uid" >&2
+							unset SYS_kind SYS_name SYS_id SYS_uid SYS_gid pgname existing
+							continue
+						fi
+						;;
+				esac
+				# /var/empty is the platform's established
+				# no-home idiom (ensure_home returns early for it).
+				# Home directories are firstboot's job on Saphira;
+				# creating them here would materialise /home
+				# trees for identities that may never log in.
+				if [ -z "$pgname" ]; then
+					ensure_group "$SYS_name" "$SYS_uid"
+					ensure_user "$SYS_name" "$SYS_uid" "$SYS_name" "/var/empty" "/sbin/nologin"
+				else
+					ensure_user "$SYS_name" "$SYS_uid" "$pgname" "/var/empty" "/sbin/nologin"
+				fi
+				unset SYS_kind SYS_name SYS_id SYS_uid SYS_gid pgname existing
+			done < "$candidate"
+		done
+	}
+	SYS_PASS=1
+	sysusers_phase_groups
+	SYS_PASS=2
+	sysusers_phase_implied
+	SYS_PASS=3
+	sysusers_phase_users
+	unset SYS_PASS SYS_kind SYS_name SYS_id SYS_uid SYS_gid pgname SYS_gexists SYS_line SYS_rest conffile
 	if [ "$sysusers_notes" -gt 0 ]; then
-		printf 'ensure-identity: notice: %s sysusers.d line(s) skipped; only explicitly pinned u/g identities are replayed offline\n' \
+		printf 'ensure-identity: notice: %s sysusers.d line(s) skipped (non-identity kinds only); pinned and automatic identities are resolved above, never allocated silently\n' \
 			"$sysusers_notes" >&2
 	fi
 	return 0
@@ -772,6 +914,13 @@ group_gid()
 	field 3 "$(group_entry "$1")"
 }
 
+group_name_for_gid()
+{
+	# group name holding GID, empty when no group has it. Linear scan:
+	# group files are small and this runs at image-assembly pace.
+	awk -F: -v want="$1" '$3 == want { print $1; exit }' "$GROUPF"
+}
+
 ensure_shadow()
 {
 	name=$1
@@ -799,12 +948,90 @@ ensure_shadow()
 	log "shadow $name locked"
 }
 
+# Bounded fan-out for numbered sibling directories (qmail queue
+# split dirs): at most DIR_CHILDREN_MAX children per stanza.
+DIR_CHILDREN_MAX=64
+
+# Validate a dir-children declaration (fail closed). Shared by the
+# ensure path and disable validation so malformed stanzas die in
+# both modes; convergence itself only happens on the ensure path.
+check_dir_children()
+{
+	lineno=$1 parent=$2 range=$3 mode=$4
+	case $parent in
+		/*) ;;
+		*) die "fragment line $lineno: dir-children parent must be absolute" ;;
+	esac
+	case $parent in
+		*'..'*) die "fragment line $lineno: dir-children parent must be normalized (no ..)" ;;
+	esac
+	case $parent in
+		*/) die "fragment line $lineno: dir-children parent must not end in /" ;;
+	esac
+	case $mode in
+		0*|[1-7][0-7][0-7]|[1-7][0-7][0-7][0-7]) ;;
+		*) die "fragment line $lineno: invalid mode: $mode" ;;
+	esac
+	case $range in
+		*..*) ;;
+		*) die "fragment line $lineno: dir-children range must be lo..hi" ;;
+	esac
+	lo=${range%%..*} hi=${range##*..}
+	case $lo in
+		''|*[!0-9]*) die "fragment line $lineno: invalid range lo: $range" ;;
+	esac
+	case $hi in
+		''|*[!0-9]*) die "fragment line $lineno: invalid range hi: $range" ;;
+	esac
+	# Canonical decimal only: leading zeros would make $(( )) read
+	# octal (08/09 die, 010 means 8).
+	case $lo in
+		0) ;;
+		0*) die "fragment line $lineno: range must be canonical decimal (no leading zeros): $range" ;;
+	esac
+	case $hi in
+		0) ;;
+		0*) die "fragment line $lineno: range must be canonical decimal (no leading zeros): $range" ;;
+	esac
+	[ "$lo" -le "$hi" ] || die "fragment line $lineno: range lo exceeds hi: $range"
+	[ $((hi - lo + 1)) -le "$DIR_CHILDREN_MAX" ] ||
+		die "fragment line $lineno: range exceeds $DIR_CHILDREN_MAX children: $range"
+}
+
+# Expand a validated dir-children stanza into per-child dir
+# operations. Computed names only (<parent>/<n>); the parent is
+# never listed, so nothing but the numbered children is ever
+# created or converged - live content alongside them is untouched.
+expand_dir_children()
+{
+	lineno=$1 parent=$2 range=$3 mode=$4 owner=$5 group=$6
+	check_dir_children "$lineno" "$parent" "$range" "$mode"
+	n=${range%%..*} end=${range##*..}
+	while [ "$n" -le "$end" ]; do
+		ensure_leaf "$parent/$n" "$mode" "$owner" "$group"
+		n=$((n + 1))
+	done
+}
+
 ensure_leaf()
 {
 	path=$1
 	mode=$2
 	owner=$3
 	group=$4
+	# Mode policy: `converge` (default) reconciles mode on every run;
+	# `create-only` applies mode solely to directories this call creates
+	# and never chmods (nor mode-drifts in check mode) an existing one.
+	# The home path uses create-only: a service home that doubles as a
+	# declared dir (or carries a restrictive payload mode) must never be
+	# relaxed to the 0755 home default mid-run, only to be repaired
+	# afterwards. Ownership still converges in both policies: payload
+	# directories extract root-owned and must be claimed.
+	case ${5:-converge} in
+		converge) mode_policy=converge ;;
+		create-only) mode_policy=create-only ;;
+		*) die "internal: unknown dir mode policy: $5" ;;
+	esac
 	# Administrator override: ignore skips the leaf, pin
 	# substitutes its declared values (same helper as
 	# ensure-fhs/ensure-caps/ensure-permissions).
@@ -834,12 +1061,14 @@ ensure_leaf()
 			mkdir -p "$ROOT$parent" || die "cannot create $parent"
 		fi
 	fi
+	leaf_created=0
 	if [ ! -e "$ROOT$path" ] && [ ! -L "$ROOT$path" ]; then
 		if [ "$CHECK" -eq 1 ]; then
 			drift "directory $path would be created ($owner:$group $mode)"
 			return 0
 		fi
 		mkdir "$ROOT$path" || die "cannot create $path"
+		leaf_created=1
 		log "directory $path created"
 	fi
 	[ -d "$ROOT$path" ] || {
@@ -869,7 +1098,12 @@ ensure_leaf()
 		want_mode=${want_mode#0}
 	done
 	[ -n "$want_mode" ] || want_mode=0
-	if [ "$current_mode" != "$want_mode" ]; then
+	if [ "$mode_policy" = create-only ] && [ "$leaf_created" -eq 0 ]; then
+		# Existing path under create-only (service homes): ownership
+		# above already converged; mode belongs to the dir stanza,
+		# the payload, or the administrator - never relaxed here.
+		:
+	elif [ "$current_mode" != "$want_mode" ]; then
 		if [ "$CHECK" -eq 1 ]; then
 			drift "directory $path mode is $current_mode (want $mode)"
 		else
@@ -1317,7 +1551,13 @@ ensure_home()
 	case $home in
 		/var/empty|/nonexistent|/dev/null) return 0 ;;
 	esac
-	ensure_leaf "$home" 755 "$uid" "$(group_gid "$primary")"
+	# Create-only: a home that doubles as a declared dir (or carries a
+	# restrictive payload mode) keeps its mode; only missing homes are
+	# created (0755) and ownership always converges (payload extracts
+	# root-owned). This closes the relax-then-repair window where a
+	# private home (e.g. 0700) was chmodded to 0755 mid-run and only
+	# restored when the later dir stanza ran.
+	ensure_leaf "$home" 755 "$uid" "$(group_gid "$primary")" create-only
 }
 
 # Dispatched HERE, after ensure_group/ensure_user/ensure_leaf are all
@@ -1452,11 +1692,19 @@ disable_validate()
 			# the caller's native mechanism (the generated caller runs
 			# systemd-sysusers after the reconciler): it declares no
 			# user/group/dir/file.
-			sysusers)
-				[ $# -eq 1 ] || die "fragment line $lineno: sysusers takes no arguments"
-				;;
-			dir) continue ;;
-			*) die "fragment line $lineno: unknown stanza: $1" ;;
+		sysusers)
+			[ $# -eq 1 ] || die "fragment line $lineno: sysusers takes no arguments"
+			;;
+		dir) continue ;;
+		# Bounded fan-out over state, and state is untouched by
+		# disable mode: fully validated here so malformed stanzas
+		# still fail closed, then skipped like dir/file.
+		dir-children)
+			[ $# -eq 6 ] || die "fragment line $lineno: dir-children needs 5 fields"
+			check_dir_children "$lineno" "$2" "$3" "$4"
+			continue
+			;;
+		*) die "fragment line $lineno: unknown stanza: $1" ;;
 		esac
 	done < "$FRAGMENT"
 	lineno=0
@@ -1659,7 +1907,15 @@ while IFS= read -r line || [ -n "$line" ]; do
 				0*|[1-7][0-7][0-7]|[1-7][0-7][0-7][0-7]) ;;
 				*) die "fragment line $lineno: invalid mode: $3" ;;
 			esac
-			ensure_leaf "$2" "$3" "$4" "$5"
+		ensure_leaf "$2" "$3" "$4" "$5"
+		;;
+		# Bounded fan-out over numbered siblings: validated, then
+		# each child converged exactly as a dir stanza (same
+		# ensure_leaf path, so overrides, check mode and
+		# idempotence all behave identically per child).
+		dir-children)
+			[ $# -eq 6 ] || die "fragment line $lineno: dir-children needs 5 fields"
+			expand_dir_children "$lineno" "$2" "$3" "$4" "$5" "$6"
 			;;
 		# File stanzas are deferred to the post-pass below: owners
 		# must resolve after every user/group stanza has applied,
