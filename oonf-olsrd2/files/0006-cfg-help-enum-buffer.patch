@@ -1,0 +1,17 @@
+From: Saphira packaging <recipes@saphira.vm2.uk>
+Subject: [PATCH] cfg_help: size the enumerator buffer for any size_t
+
+"first".."tenth" cover idx<10; beyond that snprintf prints idx+1
+(up to 20 digits + '.'). A 10-byte buffer trips
+-Wformat-truncation. 32 bytes holds any 64-bit value with margin;
+stack-local, no behavior change.
+
+--- a/src-api/config/cfg_help.c
++++ b/src-api/config/cfg_help.c
+@@ -273,7 +273,7 @@
+ cfg_help_token(struct autobuf *out, bool preamble, const struct cfg_schema_entry *token_entry,
+   const struct cfg_schema_entry *sub_entries, size_t entry_count,
+   const struct cfg_schema_token_customizer *customizer) {
+-  char enum_buffer[10];
++  char enum_buffer[32];
+   size_t i;

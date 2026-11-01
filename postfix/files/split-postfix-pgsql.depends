@@ -1,0 +1,3 @@
+# postfix-pgsql runtime edge: plugin links libpq.
+# (Base pin postfix=<NVR> is added automatically by the splitter.)
+libpq

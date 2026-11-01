@@ -30,10 +30,12 @@ makedepends="
     make
     ncurses-dev
     openssl-dev
+    perl
     pkgconf
     readline-dev
     zlib-dev
 "
+# perl: configure probes it (fatal when absent).
 
 recipe_build()
 {

@@ -31,10 +31,12 @@ makedepends="
     make
     ncurses-dev
     openssl-dev
+    perl
     pkgconf
     readline-dev
     zlib-dev
 "
+# perl: configure probes it (fatal when absent).
 
 subpackages="postgresql-contrib-dev postgresql-contrib-doc"
 

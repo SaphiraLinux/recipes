@@ -30,6 +30,8 @@
 #                       config selects DHCP (firstboot offers it).
 #   vim                 the base editor. A headless server with no editor
 #                       is not administrable.
+#   procps-ng           process tools (ps, free, top): a working system
+#                       needs a way to inspect processes and memory.
 #   tzdata              a server with no timezone cannot reason about
 #                       logs, certificates or scheduling.
 #
@@ -50,4 +52,5 @@ openssh
 saphira-network
 dhcpcd
 vim
+procps-ng
 tzdata

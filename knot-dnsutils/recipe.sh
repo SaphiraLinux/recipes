@@ -20,6 +20,7 @@ sha256=922894f04a2835131a24c3b3edcbf761273c1b37d3dc4e46d6923ee3856af130
 depends="
     gnutls
     libedit
+    liblmdb
     nettle
 "
 
@@ -28,10 +29,15 @@ makedepends="
     gcc
     gnutls-dev
     libedit-dev
+    liblmdb
+    libtasn1-dev
     make
     nettle-dev
     pkgconf
+    zlib-dev
 "
+# libtasn1-dev + zlib-dev: gnutls.pc Requires them; transitive .pc
+# closure must be explicit (runtimes alone do not satisfy pkg-config).
 
 recipe_build()
 {

@@ -1,0 +1,5 @@
+# postfix-lmdb named split: LMDB map plugin + loader fragment.
+# Base ships a backend-free dynamicmaps.cf; installing this split
+# enables the lmdb: map type (also the compiled-in postmap default).
+usr/lib/postfix/postfix-lmdb.so
+etc/postfix/dynamicmaps.cf.d/lmdb.cf

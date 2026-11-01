@@ -26,15 +26,20 @@ makedepends="
     binutils
     cmake
     gcc
+    gettext
     make
 "
+# gettext: msgfmt builds the .po catalogs.
 
 recipe_build()
 {
 	mkdir -p "$BUILDDIR" && cd "$BUILDDIR"
 	cmake "$SRC" \
 		-DCMAKE_INSTALL_PREFIX=/usr \
-		-DCMAKE_BUILD_TYPE=Release
+		-DCMAKE_BUILD_TYPE=Release \
+		-DCMAKE_POLICY_VERSION_MINIMUM=3.5
+	# POLICY_MINIMUM: 2019 upstream floor is below cmake's 3.5
+	# cutoff; the flag is cmake's documented compatibility path.
 	make -j${JOBS:-$(nproc)}
 }
 

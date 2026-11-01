@@ -50,12 +50,13 @@ DEFAULT_DB = "/var/lib/saphira-build/queue.db"
 HISTORY_LIMIT = 500
 
 # Column indexes used below: 3 state, 4 result_json, 10 finished_at,
-# 11 started_at, 12 published_at (published_at is written when the
-# package publishes; see classify).
+# 11 started_at, 12 published_at, 13 queued_at (queued_at is only read for
+# stalled-age derivation; older callers using indexes 0-12 are unaffected).
+# published_at is written when the package publishes; see classify.
 COLUMNS = (
     "package, version, revision, state, result_json,"
     " duration_s, cpu_s, peak_rss_mb, arch, builder_host, finished_at,"
-    " started_at, published_at"
+    " started_at, published_at, queued_at"
 )
 
 TODAY_SQL = (
@@ -80,9 +81,15 @@ CSS = (
     ".counts{font-size:115%;font-weight:bold}"
     ".dot{font-size:130%}"
     ".red{color:#c00}.amber{color:#c80}.green{color:#090}"
+    ".blocked{color:#c80}.stalled{color:#c80}.interrupted{color:#c00}"
+    ".stale{color:#666}"
     "table{border-collapse:collapse;margin-top:0.6em}"
     "th,td{border:1px solid #999;padding:2px 6px;text-align:left}"
     "tr.failed td{background:#fdd}"
+    "tr.blocked td{background:#feecd0}"
+    "tr.stalled td{background:#fff3d0}"
+    "tr.interrupted td{background:#fde0e0}"
+    "tr.stale td{background:#f0f0f0;color:#555}"
     "tr.refused td{background:repeating-linear-gradient(45deg,"
     "#fdd,#fdd 6px,#fee 6px,#fee 12px)}"
     ".legend{color:#555}"
@@ -94,6 +101,67 @@ def open_db(path):
     return sqlite3.connect(
         "file:%s?mode=ro" % pathname2url(path), uri=True, timeout=5.0
     )
+
+
+def load_repo_map(repo_dir):
+    """{package: (nvr, published_at)} from repository.db newest rows.
+
+    Fail-open: missing/unreadable repo yields {}. The dashboard never
+    writes; this is a read-only join for the repository-newest label."""
+    out = {}
+    if not repo_dir:
+        return out
+    try:
+        db = sqlite3.connect(
+            "file:%s/repository.db?mode=ro" % pathname2url(repo_dir),
+            uri=True, timeout=5.0)
+        try:
+            for name, nvr, pub in db.execute(
+                    "SELECT name,nvr,published_at FROM packages"
+                    " WHERE is_newest=1"):
+                out[name] = (nvr, pub)
+        finally:
+            db.close()
+    except sqlite3.Error:
+        return {}
+    return out
+
+
+def load_req_map(recipes_dir):
+    """{package: nvr} requested by the recipe tree.
+
+    Fail-open line parse of pkgname/pkgver/pkgrel (recipes are never
+    sourced). Missing tree yields {}."""
+    import os as _os
+    import re as _re
+    out = {}
+    if not recipes_dir:
+        return out
+    try:
+        names = sorted(_os.listdir(recipes_dir))
+    except OSError:
+        return out
+    for pkg in names:
+        rp = _os.path.join(recipes_dir, pkg, "recipe.sh")
+        try:
+            with open(rp, encoding="utf-8", errors="replace") as f:
+                text = f.read(65536)
+        except OSError:
+            continue
+        ver = _re.search(r"^pkgver=(\S+)", text, _re.M)
+        rel = _re.search(r"^pkgrel=(\S+)", text, _re.M)
+        if ver:
+            nvr = ver.group(1) + ("-r" + rel.group(1) if rel else "")
+            out[pkg] = nvr
+    return out
+
+
+def row_nvr(row):
+    """'version-r revision' for a COLUMNS row, or ''."""
+    ver, rev = row[1], row[2]
+    if ver and rev:
+        return "%s-r%s" % (ver, rev)
+    return ver or ""
 
 
 TRUNC = 140
@@ -165,20 +233,34 @@ def classify(row):
     """(css class, state text, detail) for one build row.
 
     Row layout follows COLUMNS: 3 state, 4 result_json, 10 finished_at,
-    11 started_at, 12 published_at. Unfinished rows derive QUEUED vs
-    RUNNING from timestamps alone, so unknown state strings can never
-    break the page; unknown terminal states read FAILED with whatever
-    detail the result carries.
+    11 started_at, 12 published_at, 13 queued_at. Unfinished rows derive
+    QUEUED vs RUNNING vs STALLED from timestamps alone, so unknown state
+    strings can never break the page; unknown terminal states read FAILED
+    with whatever detail the result carries. BLOCKED and INTERRUPTED are
+    first-class states, never folded into FAILED: a blocked build waits
+    on dependencies (amber), an interrupted build died mid-flight (red,
+    retryable), a failed build ran and failed (red).
     """
     state, result_json = row[3], row[4]
     finished, started, published = row[10], row[11], row[12]
+    queued = row[13] if len(row) > 13 else None
     if finished is None:
+        if state == "BLOCKED":
+            obj = parse_result(result_json)
+            return ("blocked", "BLOCKED", fallback_detail(obj))
+        if _is_stalled(started or queued):
+            return ("stalled", "STALLED",
+                    "no progress for over 2h (started: %s)" % (started or queued or "?"))
         return ("amber", "QUEUED" if started is None else "RUNNING", "")
     obj = parse_result(result_json)
     if obj.get("attempt") == "refusal":
         why = build_detail(obj)
         return ("refused", "REFUSED",
                 "never built" + (": " + why if why else ""))
+    if state == "INTERRUPTED":
+        detail = stage_detail(obj, ("interrupted",)) or fallback_detail(obj)
+        return ("interrupted", "INTERRUPTED",
+                (detail or "builder died mid-flight; retry explicitly"))
     if state == "PASS":
         # published_at is written when the package publishes. A PASS
         # without one is built but awaiting signing (amber by
@@ -194,25 +276,102 @@ def classify(row):
     return ("failed", "FAILED", detail)
 
 
+def _is_stalled(ref):
+    """True when an unfinished row's reference timestamp is over 2h old."""
+    if not ref:
+        return False
+    try:
+        import time as _time
+        import calendar as _cal
+        now = _cal.timegm(_time.gmtime())
+        then = _cal.timegm(_time.strptime(str(ref)[:19], "%Y-%m-%dT%H:%M:%S"))
+        return (now - then) > 7200
+    except (ValueError, OverflowError):
+        return False
+
+
+def _is_recent(ref, days=7):
+    """True when the ISO UTC timestamp is within the last days."""
+    if not ref:
+        return False
+    try:
+        import time as _time
+        import calendar as _cal
+        now = _cal.timegm(_time.gmtime())
+        then = _cal.timegm(_time.strptime(str(ref)[:19], "%Y-%m-%dT%H:%M:%S"))
+        return 0 <= (now - then) <= days * 86400
+    except (ValueError, OverflowError):
+        return False
+
+
+def effective(row, repo_map, req_map, blocked_pkgs):
+    """Effective package state: requested NVR + actual repository
+    publication + the queue attempt - never the latest row alone.
+
+    Returns (css class, state text, detail, note). repo_map maps
+    package -> (repo newest NVR, published_at); req_map maps package
+    -> requested NVR; either may be empty (dimensions read "unknown",
+    the row verdict still stands). blocked_pkgs names packages with
+    any BLOCKED row (relevant context for QUEUED latest rows).
+    Classes: failed/interrupted (red), blocked/stalled/amber (amber),
+    ok (green), refused (hatched), stale (grey reference).
+    """
+    cls, text, detail = classify(row)
+    package = row[0]
+    nvr = row_nvr(row)
+    note = ""
+    req = req_map.get(package, "")
+    repo = repo_map.get(package)
+    # Exact-NVR publication wins over any row state, whether the
+    # queue stamped it or the repository alone knows it (direct
+    # sign-apk-repo publishes without touching the queue).
+    if nvr and (row[12] or (repo and repo[0] == "%s-%s" % (package, nvr))):
+        if text != "PUBLISHED" or not row[12]:
+            note = "succeeded (NVR live in repository)"
+        return ("ok", "PUBLISHED", detail, note)
+    if cls == "failed" and req and nvr and req != nvr:
+        return ("stale", "STALE",
+                detail, "failed %s; recipe now requests %s" % (nvr, req))
+    if text in ("QUEUED", "RUNNING") and package in blocked_pkgs:
+        note = "latest attempt %s; older BLOCKED rows on record" % text
+    if text == "BLOCKED" and req:
+        note = "requested %s" % req
+    return (cls, text, detail, note)
+
+
+def nvr_published_in_db(conn, package, version, revision):
+    """True when any row carries this exact NVR with published_at set.
+
+    Queue-only published-NVR rule: a BLOCKED/FAIL latest row whose exact
+    NVR is already published elsewhere in this database is succeeded work,
+    not outstanding. Same-NVR only: a failed r4 is never hidden by a
+    published r1."""
+    try:
+        hit = conn.execute(
+            "SELECT 1 FROM builds WHERE package=? AND version=? AND revision=?"
+            " AND published_at IS NOT NULL LIMIT 1",
+            (package, version, revision),
+        ).fetchone()
+        return bool(hit)
+    except sqlite3.Error:
+        return False
+
+
 DOT = '<span class="dot %s">●</span>'
 
 
-def hide_superseded_failures(rows):
-    """Drop FAILED rows a newer success for the same package supersedes.
+def hide_superseded_failures(rows, ctx):
+    """Drop FAILED/BLOCKED/INTERRUPTED/STALE rows a newer success supersedes.
 
-    Returns (kept_rows, hidden_count). A row counts as success when
-    classify() reads it PUBLISHED or AWAITING SIGNING (the build
-    passed; signing is a separate human step). Queued, running and
-    refused rows never hide anything: pending work is not success,
-    and a refusal is the absence of a build. A FAILED row newer than
-    the package's latest success (a regression) is always kept.
-    finished_at compares lexicographically: every timestamp the
-    builder writes shares one ISO UTC shape, and both sides are
-    guarded against None.
+    Success and staleness come from effective(): PUBLISHED or AWAITING
+    SIGNING counts as success; STALE means the recipe moved past the
+    attempt (kept when nothing newer succeeded, greyed as reference).
+    Queued, running, stalled and refused rows never hide anything.
     """
     newest_success = {}
     for row in rows:
-        cls, state_text, _ = classify(row)
+        cls, state_text, _, _ = effective(
+            row, ctx["repo"], ctx["req"], ctx["blocked"])
         finished = row[10]
         if finished is None:
             continue
@@ -222,9 +381,10 @@ def hide_superseded_failures(rows):
                 newest_success[row[0]] = finished
     kept, hidden = [], 0
     for row in rows:
-        cls, _, _ = classify(row)
+        cls, _, _, _ = effective(
+            row, ctx["repo"], ctx["req"], ctx["blocked"])
         finished = row[10]
-        if (cls == "failed" and finished is not None
+        if (cls in ("failed", "blocked", "interrupted", "stale") and finished is not None
                 and row[0] in newest_success
                 and finished < newest_success[row[0]]):
             hidden += 1
@@ -233,31 +393,107 @@ def hide_superseded_failures(rows):
     return kept, hidden
 
 
-def render_table(rows):
+OUTSTANDING_SQL = (
+    "SELECT " + COLUMNS + " FROM builds "
+    "WHERE id IN (SELECT max(id) FROM builds GROUP BY package) "
+    "ORDER BY package"
+)
+
+
+def outstanding_rows(conn, ctx):
+    """Currently-unresolved latest-per-package rows.
+
+    Four buckets, never folded together: terminal failures with no
+    later success (FAILED, incl. regressions), waiting work
+    (BLOCKED, INTERRUPTED, STALLED), stale verification (AWAITING
+    SIGNING over 24h), and stale recipe attempts (STALE: the recipe
+    moved past the failure - reference, not outstanding). A row whose
+    exact NVR is published is succeeded work, not outstanding
+    (same-NVR only; the repository map covers publishes the queue
+    never stamped). Successful builds do not imply signed, published,
+    verified or task-complete: PUB/Signoff stays per-row."""
+    kept = []
+    for row in conn.execute(OUTSTANDING_SQL).fetchall():
+        package, version, revision = row[0], row[1], row[2]
+        cls, state_text, _, _ = effective(
+            row, ctx["repo"], ctx["req"], ctx["blocked"])
+        if cls == "ok" or state_text in ("QUEUED", "RUNNING"):
+            if state_text in ("QUEUED", "RUNNING") and cls == "stalled":
+                pass
+            else:
+                continue
+        if cls == "refused":
+            continue
+        if nvr_published_in_db(conn, package, version, revision):
+            continue
+        if state_text == "AWAITING SIGNING" and not _stale_awaiting(row[10]):
+            continue
+        kept.append(row)
+    kept, _ = hide_superseded_failures(kept, ctx)
+    return kept
+
+
+def bucket_of(row, ctx):
+    """Sort key for outstanding ordering: needs-attention first."""
+    cls, state_text, _, _ = effective(
+        row, ctx["repo"], ctx["req"], ctx["blocked"])
+    if cls in ("failed", "interrupted"):
+        return 0
+    if cls in ("blocked", "stalled"):
+        return 1
+    if state_text == "AWAITING SIGNING":
+        return 2
+    return 3
+
+
+def _stale_awaiting(finished):
+    """True when an AWAITING SIGNING row finished over 24h ago."""
+    if not finished:
+        return True
+    try:
+        import time as _time
+        import calendar as _cal
+        now = _cal.timegm(_time.gmtime())
+        then = _cal.timegm(_time.strptime(str(finished)[:19], "%Y-%m-%dT%H:%M:%S"))
+        return (now - then) > 86400
+    except (ValueError, OverflowError):
+        return True
+
+
+def render_table(rows, ctx):
     out = [
         "<table><tr><th></th><th>package</th><th>nvr</th><th>state</th>"
-        "<th>detail</th><th>wall</th><th>cpu</th><th>rss MB</th>"
+        "<th>detail</th><th>requested</th><th>repo newest</th>"
+        "<th>wall</th><th>cpu</th><th>rss MB</th>"
         "<th>arch</th><th>builder</th><th>finished (UTC)</th></tr>"
     ]
     for row in rows:
         package, version, revision = row[0], row[1], row[2]
         wall, cpu, rss, arch, host = row[5], row[6], row[7], row[8], row[9]
         finished = row[10]
-        cls, state_text, detail = classify(row)
+        cls, state_text, detail, note = effective(
+            row, ctx["repo"], ctx["req"], ctx["blocked"])
+        if note:
+            detail = (detail + " [" + note + "]") if detail else note
+        req = ctx["req"].get(package, "-")
+        repo = ctx["repo"].get(package, ("-", ""))[0]
         if cls == "ok":
             dot_cls = "green"
-        elif cls == "amber":
+        elif cls in ("amber", "blocked", "stalled"):
             dot_cls = "amber"
+        elif cls == "stale":
+            dot_cls = "stale"
         else:
             dot_cls = "red"
         finished_text = "running" if finished is None else cell(finished)
         out.append(
             "<tr class=\"%s\"><td>%s</td><td>%s</td><td>%s-r%s</td>"
-            "<td>%s</td><td>%s</td>"
+            "<td>%s</td><td>%s</td><td>%s</td><td>%s</td>"
             "<td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td>"
             "<td>%s</td></tr>"
             % (cls, DOT % dot_cls, cell(package), cell(version),
                cell(revision), cell(state_text), cell(detail),
+               cell(req), cell(repo),
                cell(wall), cell(cpu), cell(rss), cell(arch), cell(host),
                finished_text)
         )
@@ -303,55 +539,87 @@ def render_sbu(conn):
     return "".join(out)
 
 
-def summarize(rows):
-    """(red, amber, green, refused) for one view. Red/green/refused
-    count distinct packages over the rows the view shows (superseded
-    failures are already hidden upstream, so red reads current state);
-    amber counts live rows (queued, running, awaiting signing are
-    current states, not history)."""
-    red, green, refused = set(), set(), set()
+def summarize(rows, ctx):
+    """(red, amber, green, refused, stale, recent_red) for one view.
+
+    Effective-state classes: failed/interrupted read red (recent_red
+    counts those finished within 7 days); blocked/stalled/amber read
+    amber; stale reads stale (reference, never attention); refused and
+    green as before. Red/green/refused/stale count distinct packages
+    over the rows shown (superseded rows are already hidden upstream,
+    so red reads current state); amber counts live rows."""
+    red, green, refused, stale = set(), set(), set(), set()
+    recent_red = set()
     amber = 0
     for row in rows:
-        cls, _, _ = classify(row)
-        if cls == "failed":
+        cls, _, _, _ = effective(
+            row, ctx["repo"], ctx["req"], ctx["blocked"])
+        if cls in ("failed", "interrupted"):
             red.add(row[0])
+            if _is_recent(row[10]):
+                recent_red.add(row[0])
         elif cls == "refused":
             refused.add(row[0])
-        elif cls == "amber":
+        elif cls in ("amber", "blocked", "stalled"):
             amber += 1
+        elif cls == "stale":
+            stale.add(row[0])
         else:
             green.add(row[0])
-    return len(red), amber, len(green), len(refused)
+    return len(red), amber, len(green), len(refused), len(stale), len(recent_red)
 
 
-def render_counts(red, amber, green, refused, scope):
+def render_counts(red, amber, green, refused, scope, stale=0, recent_red=0):
+    extra = ""
+    if recent_red or stale:
+        extra = " (%d recent" % recent_red
+        if stale:
+            extra += ", +%d stale (recipe moved on)" % stale
+        extra += ")"
     return (
         '<p class="counts">'
-        '<span class="dot red">●</span> %d failed %s · '
+        '<span class="dot red">●</span> %d failed %s%s · '
         '<span class="dot amber">●</span> %d pending / running / '
         "awaiting signing · "
         '<span class="dot green">●</span> %d published · '
         "%d refused (never built)</p>"
-        % (red, scope, amber, green, refused)
+        % (red, scope, extra, amber, green, refused)
     )
 
 
-def render_view(db_path, today):
+def view_ctx(conn, recipes_dir, repo_dir):
+    """Join context for one render: blocked packages plus the optional
+    recipe/repository dimensions. Empty maps keep the queue-only
+    verdict (row state stands; requested/repo read unknown)."""
+    blocked = {r[0] for r in conn.execute(
+        "SELECT DISTINCT package FROM builds WHERE state='BLOCKED'")}
+    return {"repo": load_repo_map(repo_dir),
+            "req": load_req_map(recipes_dir),
+            "blocked": blocked}
+
+
+def render_view(db_path, today, recipes_dir="", repo_dir=""):
     conn = open_db(db_path)
     try:
+        ctx = view_ctx(conn, recipes_dir, repo_dir)
         if today:
             rows = conn.execute(TODAY_SQL).fetchall()
-            rows, hidden = hide_superseded_failures(rows)
-            counts = render_counts(*summarize(rows), "today")
+            rows, hidden = hide_superseded_failures(rows, ctx)
+            _s = summarize(rows, ctx)
+            counts = render_counts(_s[0], _s[1], _s[2], _s[3], "today",
+                                   stale=_s[4], recent_red=_s[5])
             head = "<h1>TODAY</h1>" + counts
             nav = ('<nav><strong>TODAY</strong>'
+                   '<a href="/outstanding">Outstanding</a>'
                    '<a href="/history">History</a></nav>')
-            body = head + nav + render_table(rows)
+            body = head + nav + render_table(rows, ctx)
         else:
             total = conn.execute("SELECT COUNT(*) FROM builds").fetchone()[0]
             rows = conn.execute(HISTORY_SQL).fetchall()
-            rows, hidden = hide_superseded_failures(rows)
-            counts = render_counts(*summarize(rows), "shown")
+            rows, hidden = hide_superseded_failures(rows, ctx)
+            _s = summarize(rows, ctx)
+            counts = render_counts(_s[0], _s[1], _s[2], _s[3], "shown",
+                                   stale=_s[4], recent_red=_s[5])
             head = ("<h1>History</h1><p>Newest %d of %d recorded "
                     "builds" % (len(rows), total))
             if hidden:
@@ -359,20 +627,85 @@ def render_view(db_path, today):
                     hidden, "failure" if hidden == 1 else "failures")
             head += ".</p>" + counts
             nav = ('<nav><a href="/">TODAY</a>'
+                   '<a href="/outstanding">Outstanding</a>'
                    '<strong>History</strong></nav>')
-            body = (head + nav + render_table(rows) +
+            body = (head + nav + render_table(rows, ctx) +
                     "<h2>SBU baselines</h2>" + render_sbu(conn))
         legend = (
-            '<p class="legend">Red rows FAILED: the build ran and '
-            "failed and no newer build has succeeded since; the failed "
-            "stage is named in detail. Failures a later build fixed are "
-            "hidden as superseded (counted in the header above). Hatched "
+            '<p class="legend">State is effective: requested recipe NVR + '
+            "actual repository publication + the queue attempt - never the "
+            "latest row alone (requested/repo columns read unknown without "
+            "--recipes-dir/--repo-dir; the MCP joins all three). Red rows "
+            "FAILED/INTERRUPTED: the build ran and "
+            "failed (or died mid-flight) and no newer build has succeeded since; the failed "
+            "stage is named in detail. Grey rows STALE: the attempt failed for "
+            "an NVR the recipe has moved past (reference, not outstanding). "
+            "Failures a later build fixed are "
+            "hidden as superseded (counted in the header above). Amber rows "
+            "BLOCKED/STALLED: waiting on dependencies or no progress over 2h, "
+            "never failures. Hatched "
             "rows REFUSED: never built - refused before building, reason "
             "shown. Amber: queued, running, or built but awaiting "
             "signing. Green: built, signed and published. A refusal is "
-            "the absence of a build, never a failure.</p>"
+            "the absence of a build, never a failure. <a href=\"/outstanding\">"
+            "Outstanding</a> orders needs-attention first: failed, waiting, "
+            "stale awaiting-signing, then stale recipe attempts.</p>"
         )
         return body + legend
+    finally:
+        conn.close()
+
+
+def render_outstanding(db_path, recipes_dir="", repo_dir=""):
+    """Standalone outstanding view: currently-unresolved work only.
+
+    No MCP dependency. Buckets stay separate and ordered by priority:
+    terminal failures (FAILED/INTERRUPTED with no later success),
+    waiting work (BLOCKED/STALLED), stale verification (AWAITING
+    SIGNING over 24h), stale recipe attempts (reference only). A row
+    whose exact NVR is published is succeeded work, never listed.
+    Successful builds do not imply signed, published, verified or
+    task-complete: PUB/Signoff stays per-row. Complete history stays
+    in /history; the header keeps the totals."""
+    conn = open_db(db_path)
+    try:
+        ctx = view_ctx(conn, recipes_dir, repo_dir)
+        rows = outstanding_rows(conn, ctx)
+        # Needs-attention first, most-recent first within a bucket
+        # (unfinished rows sort before dated ones).
+        rows = sorted(rows, key=lambda r: (
+            bucket_of(r, ctx),
+            r[10] is not None,
+            r[10] or ""))
+        by_bucket = {"failed": [], "waiting": [], "awaiting": [],
+                     "stale": []}
+        for row in rows:
+            cls, state_text, _, _ = effective(
+                row, ctx["repo"], ctx["req"], ctx["blocked"])
+            if cls in ("failed", "interrupted"):
+                by_bucket["failed"].append(row)
+            elif state_text == "AWAITING SIGNING":
+                by_bucket["awaiting"].append(row)
+            elif cls == "stale":
+                by_bucket["stale"].append(row)
+            else:
+                by_bucket["waiting"].append(row)
+        red, amber, green, refused, stale, recent = summarize(rows, ctx)
+        counts = render_counts(red, amber, green, refused,
+                               "outstanding", stale, recent)
+        head = ("<h1>Outstanding</h1><p>Currently-unresolved work only, "
+                "needs-attention first: "
+                "%d failed (%d recent), %d waiting (blocked/interrupted/stalled), "
+                "%d stale awaiting signing, +%d stale recipe attempts (reference).</p>" % (
+                    len(by_bucket["failed"]),
+                    sum(1 for r in by_bucket["failed"] if _is_recent(r[10])),
+                    len(by_bucket["waiting"]),
+                    len(by_bucket["awaiting"]),
+                    len(by_bucket["stale"])) + counts)
+        nav = ('<nav><a href="/">TODAY</a>'
+               '<strong>Outstanding</strong>'
+               '<a href="/history">History</a></nav>')
+        return head + nav + render_table(rows, ctx)
     finally:
         conn.close()
 
@@ -387,8 +720,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
     server_version = "saphira-build-dashboard"
     sys_version = ""
 
-    def __init__(self, *args, db_path=None, **kwargs):
+    def __init__(self, *args, db_path=None, recipes_dir="",
+                   repo_dir="", **kwargs):
         self.db_path = db_path
+        self.recipes_dir = recipes_dir
+        self.repo_dir = repo_dir
         super().__init__(*args, **kwargs)
 
     def log_message(self, fmt, *args):
@@ -412,11 +748,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
         try:
             if path == "/":
                 self._send_page("TODAY - build dashboard",
-                                render_view(self.db_path, today=True),
+                                render_view(self.db_path, today=True,
+                                            recipes_dir=self.recipes_dir,
+                                            repo_dir=self.repo_dir),
+                                head_only=head_only)
+            elif path == "/outstanding":
+                self._send_page("Outstanding - build dashboard",
+                                render_outstanding(self.db_path,
+                                                   recipes_dir=self.recipes_dir,
+                                                   repo_dir=self.repo_dir),
                                 head_only=head_only)
             elif path == "/history":
                 self._send_page("History - build dashboard",
-                                render_view(self.db_path, today=False),
+                                render_view(self.db_path, today=False,
+                                            recipes_dir=self.recipes_dir,
+                                            repo_dir=self.repo_dir),
                                 head_only=head_only)
             else:
                 self._send_page("Not found", "<h1>404</h1>"
@@ -459,10 +805,18 @@ def main(argv=None):
                         help="port to listen on (default %(default)s)")
     parser.add_argument("--db", default=DEFAULT_DB,
                         help="queue database path (default %(default)s)")
+    parser.add_argument("--recipes-dir", default="",
+                        help="recipe tree for the requested-NVR column"
+                        " (default disabled: reads unknown)")
+    parser.add_argument("--repo-dir", default="",
+                        help="repository dir for the repo-newest column"
+                        " (default disabled: reads unknown)")
     args = parser.parse_args(argv)
     if not 1 <= args.port <= 65535:
         parser.error("port must be 1-65535")
-    handler = functools.partial(Handler, db_path=args.db)
+    handler = functools.partial(Handler, db_path=args.db,
+                                recipes_dir=args.recipes_dir,
+                                repo_dir=args.repo_dir)
     # A bind failure raises here and exits non-zero: loud, and never a
     # silent fallback to another address.
     server = IPv4Server((args.bind, args.port), handler)

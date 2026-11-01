@@ -29,7 +29,7 @@ pkgver=1.0
 # identity-less fragments) plus the legacy-gate namespace fix: a
 # legacy user's primary GID is a reference, not a group-namespace
 # history claim, so paired user+group sidecars publish.
-pkgrel=94
+pkgrel=96
 # r90: identity authority chain (GO-2; builder-infra change with
 # explicit author approval): TSV-enforced packaging (makepkg/buildpkg/
 # signer) plus surfaced stage diagnostics.

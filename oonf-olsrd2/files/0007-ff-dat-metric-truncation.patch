@@ -1,0 +1,20 @@
+From: Saphira packaging <recipes@saphira.vm2.uk>
+Subject: [PATCH] ff_dat_metric: bound the link string in path output
+
+nhdp_metric_str.buf is 128 bytes; the link rendering can itself fill
+it, so "%s (%u hops)" trips -Wformat-truncation (up to ~139 bytes).
+Cap the inner string at 100 chars (suffix " (255 hops)" is 11), which
+gcc proves fits: display-only truncation of an already long metric,
+snprintf stays NUL-guaranteed.
+
+--- a/src-plugins/nhdp/ff_dat_metric/ff_dat_metric.c
++++ b/src-plugins/nhdp/ff_dat_metric/ff_dat_metric.c
+@@ -1074,7 +1074,7 @@
+   if (hopcount == 0) {
+     /* prevent division by zero */
+     hopcount = 1;
+   }
+-  snprintf(buf->buf, sizeof(*buf), "%s (%u hops)", _link_to_string(&mbuf, metric / hopcount), hopcount);
++  snprintf(buf->buf, sizeof(*buf), "%.100s (%u hops)", _link_to_string(&mbuf, metric / hopcount), hopcount);
+   return buf->buf;
+ }

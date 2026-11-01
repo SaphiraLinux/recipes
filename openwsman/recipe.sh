@@ -37,11 +37,14 @@ recipe_build()
 	# musl port: PTHREAD_MUTEX_RECURSIVE_NP is a glibc extension
 	# (verified applicable by real application in scratch).
 	patch -d "$SRC" -Np1 -i "$RECIPE_DIR/files/musl-pthread-np.patch" || return 1
+	# -DLIB: upstream ignores LIBDIR (own LIB_SUFFIX logic);
+	# this is the switch it honors (libftdi1 precedent).
 	cmake -S "$SRC" -B "$BUILDDIR" \
 		-DCMAKE_C_COMPILER=gcc -DCMAKE_BUILD_TYPE=Release \
 		-DBUILD_SHARED_LIBS=ON \
 		-DCMAKE_INSTALL_PREFIX=/usr \
 		-DCMAKE_INSTALL_LIBDIR=lib \
+		-DLIB=lib \
 		-DDISABLE_SERVER=YES \
 		-DBUILD_LIBCIM=NO \
 		-DBUILD_EXAMPLES=NO \

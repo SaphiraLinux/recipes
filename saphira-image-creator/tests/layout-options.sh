@@ -91,6 +91,58 @@ plan_ok 'uefi +swap appends swap after root' \
 plan_ok 'uefi +boot +swap orders esp,boot,root,swap' \
 	$'esp\nboot\nroot\nswap' --target uefi-systemd --size 4G --boot-size 128 --swap-size 512M
 
+printf '%s\n' '# the swap line carries the sfdisk-writable type GUID'
+
+# sfdisk 2.41.1 fails to write the retired DPS swap GUID outright
+# ("Failed to add #N partition: Invalid argument" at add time,
+# "failed to set partition type" via --part-type; proven file-backed
+# on identical geometry while ESP/Linux/home/random GUIDs all apply
+# cleanly). Its `swap` alias canonicalizes to the GUID asserted
+# here, so the plan must emit exactly these bytes.
+plan_swap_type()
+{
+	# Swap type GUID from: tool plan <args...>
+	"$tool" plan "$@" 2>"$work/err" |
+		/usr/bin/sed -n 's/^start=.* type=\([^,]*\), name="swap".*/\1/p' || true
+}
+
+swap_type=$(plan_swap_type --target uefi-systemd --size 4G --boot-size 128 --swap-size 512M)
+if [ "$swap_type" = '0657FD6D-A4AB-43C4-84E5-0933C84B4F4F' ]; then
+	ok 'swap line carries the canonical sfdisk-writable GUID'
+else
+	bad "swap line carries [$swap_type], want the canonical GUID sfdisk accepts"
+fi
+
+printf '%s\n' '# the emitted 4-part plan applies cleanly through sfdisk'
+
+# Round-trip the exact plan through sfdisk onto a sparse file (no
+# device, no privileges, no loop mount): a plan that sfdisk cannot
+# apply is a plan that install-to-disk cannot use. This is the test
+# that would have caught the retired swap GUID before it reached
+# hardware.
+if command -v sfdisk >/dev/null 2>&1 && command -v truncate >/dev/null 2>&1; then
+	img=$work/disk.img
+	truncate -s 4G "$img" || bad 'cannot create scratch image'
+	if "$tool" plan --target uefi-systemd --size 2G --boot-size 128 --swap-size 512M >"$work/swap.sfdisk" 2>"$work/plan.err"; then
+		if sfdisk --label gpt "$img" <"$work/swap.sfdisk" >"$work/sfdisk.out" 2>&1; then
+			dump=$(sfdisk -d "$img" 2>/dev/null)
+			nparts=$(printf '%s\n' "$dump" | /usr/bin/grep -c '^/') || nparts=0
+			swapline=$(printf '%s\n' "$dump" | /usr/bin/grep -i 'name="swap"' || true)
+			if [ "$nparts" = 4 ] && printf '%s\n' "$swapline" | /usr/bin/grep -q '0657FD6D-A4AB-43C4-84E5-0933C84B4F4F'; then
+				ok 'esp+boot+root+swap plan applies with swap typed'
+			else
+				bad "sfdisk round-trip wrong: [$nparts parts] [$swapline]"
+			fi
+		else
+			bad "sfdisk rejected the emitted plan: $(tail -n 3 "$work/sfdisk.out")"
+		fi
+	else
+		bad "plan for the round-trip failed: $(cat "$work/plan.err")"
+	fi
+else
+	ok 'sfdisk replay skipped (sfdisk or truncate not installed)'
+fi
+
 printf '%s\n' '# impossible layouts refuse instead of emitting garbage'
 
 plan_refused 'over-budget boot+swap refused' \

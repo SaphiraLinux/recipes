@@ -1,0 +1,3 @@
+# postfix-mysql runtime edge: plugin links libmysqlclient.
+# (Base pin postfix=<NVR> is added automatically by the splitter.)
+mariadb

@@ -1,0 +1,19 @@
+From: Saphira packaging <recipes@saphira.vm2.uk>
+Subject: [PATCH] gcc16: cast signal handlers to sa_handler type
+
+handle_sigchld/server_exit are void(*)(void); struct sigaction
+wants void(*)(int). Cast at assignment (handlers ignore the argument;
+behavior unchanged). Env CFLAGS cannot carry -Wno-error here:
+configure overwrites CFLAGS.
+
+--- a/saslauthd/saslauthd-main.c
++++ b/saslauthd/saslauthd-main.c
+@@ -541 +541 @@
+-	act_sigchld.sa_handler = handle_sigchld;
++	act_sigchld.sa_handler = (void (*)(int))handle_sigchld;
+@@ -593 +593 @@
+-	act_sigterm.sa_handler = server_exit;
++	act_sigterm.sa_handler = (void (*)(int))server_exit;
+@@ -606 +606 @@
+-	act_sigint.sa_handler = server_exit;
++	act_sigint.sa_handler = (void (*)(int))server_exit;

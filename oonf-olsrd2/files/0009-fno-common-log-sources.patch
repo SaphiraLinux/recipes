@@ -1,0 +1,71 @@
+From: Saphira packaging <recipes@saphira.vm2.uk>
+Subject: [PATCH] gcc10+: declare plugin log sources extern, define once
+
+Each plugin's _internal.h carries a tentative `enum oonf_log_source
+LOG_*` definition, included by every TU of the plugin. Pre-gcc10
+-fcommon merged them; with -fno-common (default since gcc10) each TU
+emits its own definition and the shared-plugin link fails with
+"multiple definition of LOG_*". Declare extern in the headers and
+keep exactly one definition: the existing non-static ones stay, the
+`static` ones in nhdp.c/olsrv2.c become global.
+
+--- a/src-plugins/generic/nl80211_listener/nl80211_internal.h
++++ b/src-plugins/generic/nl80211_listener/nl80211_internal.h
+@@ -52,1 +52,1 @@
+-enum oonf_log_source LOG_NL80211;
++extern enum oonf_log_source LOG_NL80211;
+--- a/src-plugins/generic/dlep/radio/dlep_radio_internal.h
++++ b/src-plugins/generic/dlep/radio/dlep_radio_internal.h
+@@ -52,1 +52,1 @@
+-enum oonf_log_source LOG_DLEP_RADIO;
++extern enum oonf_log_source LOG_DLEP_RADIO;
+--- a/src-plugins/generic/dlep/router/dlep_router_internal.h
++++ b/src-plugins/generic/dlep/router/dlep_router_internal.h
+@@ -52,1 +52,1 @@
+-enum oonf_log_source LOG_DLEP_ROUTER;
++extern enum oonf_log_source LOG_DLEP_ROUTER;
+--- a/src-plugins/nhdp/mpr/mpr_internal.h
++++ b/src-plugins/nhdp/mpr/mpr_internal.h
+@@ -51,1 +51,1 @@
+-enum oonf_log_source LOG_MPR;
++extern enum oonf_log_source LOG_MPR;
+--- a/src-plugins/nhdp/nhdp/nhdp_internal.h
++++ b/src-plugins/nhdp/nhdp/nhdp_internal.h
+@@ -52,3 +52,3 @@
+-enum oonf_log_source LOG_NHDP;
+-enum oonf_log_source LOG_NHDP_R;
+-enum oonf_log_source LOG_NHDP_W;
++extern enum oonf_log_source LOG_NHDP;
++extern enum oonf_log_source LOG_NHDP_R;
++extern enum oonf_log_source LOG_NHDP_W;
+--- a/src-plugins/olsrv2/olsrv2/olsrv2_internal.h
++++ b/src-plugins/olsrv2/olsrv2/olsrv2_internal.h
+@@ -53,4 +53,4 @@
+-EXPORT enum oonf_log_source LOG_OLSRV2;
+-EXPORT enum oonf_log_source LOG_OLSRV2_R;
+-EXPORT enum oonf_log_source LOG_OLSRV2_ROUTING;
+-EXPORT enum oonf_log_source LOG_OLSRV2_W;
++EXPORT extern enum oonf_log_source LOG_OLSRV2;
++EXPORT extern enum oonf_log_source LOG_OLSRV2_R;
++EXPORT extern enum oonf_log_source LOG_OLSRV2_ROUTING;
++EXPORT extern enum oonf_log_source LOG_OLSRV2_W;
+--- a/src-plugins/nhdp/nhdp/nhdp.c
++++ b/src-plugins/nhdp/nhdp/nhdp.c
+@@ -190,3 +190,3 @@
+-static enum oonf_log_source LOG_NHDP;
+-static enum oonf_log_source LOG_NHDP_R;
+-static enum oonf_log_source LOG_NHDP_W;
++enum oonf_log_source LOG_NHDP;
++enum oonf_log_source LOG_NHDP_R;
++enum oonf_log_source LOG_NHDP_W;
+--- a/src-plugins/olsrv2/olsrv2/olsrv2.c
++++ b/src-plugins/olsrv2/olsrv2/olsrv2.c
+@@ -258,4 +258,4 @@
+-static enum oonf_log_source LOG_OLSRV2;
+-static enum oonf_log_source LOG_OLSRV2_R;
+-static enum oonf_log_source LOG_OLSRV2_ROUTING;
+-static enum oonf_log_source LOG_OLSRV2_W;
++enum oonf_log_source LOG_OLSRV2;
++enum oonf_log_source LOG_OLSRV2_R;
++enum oonf_log_source LOG_OLSRV2_ROUTING;
++enum oonf_log_source LOG_OLSRV2_W;

@@ -1,0 +1,21 @@
+From: Saphira packaging <recipes@saphira.vm2.uk>
+Subject: [PATCH] musl: use designated initializers for struct msghdr
+
+musl's struct msghdr carries __pad1/__pad2 on 64-bit little-endian,
+so the old positional initializers mis-assign (NULL into msg_iovlen:
+-Wint-conversion, missing __pad2: -Werror=missing-field-initializers).
+Designated initializers are portable across glibc/musl and leave the
+pads zero-initialized.
+
+--- a/src-plugins/subsystems/os_linux/os_system_linux.c
++++ b/src-plugins/subsystems/os_linux/os_system_linux.c
+@@ -95,2 +95,2 @@
+ static struct iovec _netlink_rcv_iov;
+-static struct msghdr _netlink_rcv_msg = { &_netlink_nladdr, sizeof(_netlink_nladdr), &_netlink_rcv_iov, 1, NULL, 0, 0 };
++static struct msghdr _netlink_rcv_msg = { .msg_name = &_netlink_nladdr, .msg_namelen = sizeof(_netlink_nladdr), .msg_iov = &_netlink_rcv_iov, .msg_iovlen = 1, .msg_control = NULL, .msg_controllen = 0, .msg_flags = 0 };
+@@ -105,2 +105,3 @@
+-static struct msghdr _netlink_send_msg = { &_netlink_nladdr, sizeof(_netlink_nladdr), _netlink_send_iov,
+-  ARRAYSIZE(_netlink_send_iov), NULL, 0, 0 };
++static struct msghdr _netlink_send_msg = { .msg_name = &_netlink_nladdr, .msg_namelen = sizeof(_netlink_nladdr),
++  .msg_iov = _netlink_send_iov, .msg_iovlen = ARRAYSIZE(_netlink_send_iov), .msg_control = NULL, .msg_controllen = 0,
++  .msg_flags = 0 };

@@ -3,7 +3,16 @@
 Convention: `PATCHES.md` sits beside the patches it documents. Every
 patch states why it exists and what breaks without it. See
 `musl/files/PATCHES.md` for the full convention statement. All kernel
-lines (7.1.5, 7.2.2, 7.2.3, 7.3-rc1, 7.3) carry the same pair.
+lines (7.1.5, 7.2.2, 7.2.3, 7.3-rc1, 7.3) carry the same pair of purposes,
+but each line owns its own exact-context bytes. The v3 patch has three
+per-line shapes (7.1.5, 7.2.x/7.3-rc1, and 7.3 with its APX block differ
+upstream); the regdb patch has one shape shared byte-identically by all
+lines (gatekeepers at the same Kconfig lines everywhere). Every
+application site fails closed on fuzz or offset instead of shipping a
+loosely applied patch. (Lesson 2026-10-31: generate and verify patches
+against explicit single-member tarball extracts -- multi-member
+`--wildcards` extraction concatenates files and silently shifts every
+hunk header.)
 
 | File | Why | Upstreamable? |
 |---|---|---|

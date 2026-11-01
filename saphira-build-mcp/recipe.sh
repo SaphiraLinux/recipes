@@ -1,7 +1,7 @@
 #!/bin/sh
 
 pkgname=saphira-build-mcp
-pkgver=0.10.9
+pkgver=0.10.12
 pkgrel=1
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='Read-only Saphira build/package queries for AI agents (local MCP stdio server, tools.conf extensions)'
@@ -12,8 +12,8 @@ url=https://github.com/SaphiraLinux/saphira-build-mcp
 # Pinned release bytes, vendored under files/ (verified, never
 # re-downloaded at build time; the public mirror stays pure-text and
 # public builders fetch via this URL):
-vendor=https://github.com/SaphiraLinux/saphira-build-mcp/releases/download/v0.10.9/saphira-build-mcp-0.10.9.tar.xz
-sha256=adf3b91aff61602d1867347a3af925b22b4151b5353bab4e924cad8d49732ccf
+vendor=https://github.com/SaphiraLinux/saphira-build-mcp/releases/download/v0.10.12/saphira-build-mcp-0.10.12.tar.xz
+sha256=fe603bfd67418ef513090538ac98274bb24480d75f94bb59af8a164790a6e424
 
 depends="
 	sqlite
@@ -29,12 +29,12 @@ recipe_build()
 {
 	# Local archive wins when present (verified, never re-downloaded);
 	# otherwise build from the builder-verified $SOURCE_ARCHIVE.
-	MCBALL="$RECIPE_DIR/files/saphira-build-mcp-0.10.9.tar.xz"
+	MCBALL="$RECIPE_DIR/files/saphira-build-mcp-0.10.12.tar.xz"
 	if [ -f "$MCBALL" ]; then
 		echo "$sha256  $MCBALL" | sha256sum -c -
 	else
 		[ -n "${SOURCE_ARCHIVE-}" ] && [ -f "$SOURCE_ARCHIVE" ] \
-			|| { echo "ERROR: no local saphira-build-mcp-0.10.9.tar.xz and no fetched SOURCE_ARCHIVE" >&2; return 1; }
+			|| { echo "ERROR: no local saphira-build-mcp-0.10.12.tar.xz and no fetched SOURCE_ARCHIVE" >&2; return 1; }
 		MCBALL=$SOURCE_ARCHIVE
 	fi
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$MCBALL"
@@ -59,7 +59,7 @@ recipe_build()
 		package_build_history package_build_log package_artifacts \
 		build_queue package_identity package_notes_get \
 		package_notes_add package_policy_status package_policy_record \
-		package_readiness build_request package_bump \
+		package_readiness obligations build_request package_bump \
 		checkpoint_save checkpoint_resume checkpoint_list \
 		checkpoint_close total_recall; do
 		grep -q "\"name\":\"$tool\"" "$BUILDDIR/tools.json" \
@@ -88,7 +88,7 @@ recipe_build()
 		./saphira-build-mcp --list-tools >"$BUILDDIR/tools-portable.json"
 	for tool in checkpoint_save checkpoint_resume checkpoint_list \
 		checkpoint_close package_notes_get package_notes_add \
-		total_recall package_policy_status package_policy_record \
+		total_recall obligations package_policy_status package_policy_record \
 		package_readiness; do
 		grep -q "\"name\":\"$tool\"" "$BUILDDIR/tools-portable.json" \
 			|| { echo "ERROR: portable tool $tool missing from tools/list" >&2; return 1; }
@@ -112,7 +112,7 @@ recipe_build()
 	SBM_BUILD=off SBM_TOOLS_CONF=/nonexistent-tools.conf \
 		./saphira-build-mcp --list-tools >"$BUILDDIR/tools-nobuild.json"
 	for tool in checkpoint_save package_notes_add package_policy_record \
-		package_readiness total_recall package_info; do
+		package_readiness total_recall obligations package_info; do
 		grep -q "\"name\":\"$tool\"" "$BUILDDIR/tools-nobuild.json" \
 			|| { echo "ERROR: journal tool $tool missing with build off" >&2; return 1; }
 	done
@@ -132,7 +132,7 @@ recipe_build()
 		|| { echo "ERROR: -h failed" >&2; return 1; }
 	cmp -s "$BUILDDIR/help.txt" "$BUILDDIR/help-h.txt" \
 		|| { echo "ERROR: -h differs from --help" >&2; return 1; }
-	for line in "saphira-build-mcp 0.10.9" "https://saphira.vm2.uk" \
+	for line in "saphira-build-mcp 0.10.12" "https://saphira.vm2.uk" \
 		"https://www.akadata.co.uk" "https://shampoo.op2.uk" \
 		"Shared Human-Agent-Model Platform for Orchestration"; do
 		grep -q "$line" "$BUILDDIR/help.txt" \
@@ -140,7 +140,7 @@ recipe_build()
 	done
 	./saphira-build-mcp --version >"$BUILDDIR/version.txt" 2>/dev/null \
 		|| { echo "ERROR: --version failed" >&2; return 1; }
-	grep -q "^saphira-build-mcp 0.10.9\$" "$BUILDDIR/version.txt" \
+	grep -q "^saphira-build-mcp 0.10.12\$" "$BUILDDIR/version.txt" \
 		|| { echo "ERROR: --version wrong" >&2; return 1; }
 	./saphira-build-mcp --frobnicate >/dev/null 2>&1 \
 		&& { echo "ERROR: unknown flag accepted" >&2; return 1; }

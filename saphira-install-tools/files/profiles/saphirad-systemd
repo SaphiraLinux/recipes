@@ -37,12 +37,9 @@
 #                       upgrades need it.
 #   e2fsprogs           fsck.ext4/mkfs.ext4 for the ext4 root filesystem.
 #   openssh             remote administration, client and server.
-#   saphira-network     the supported network-configuration framework
-#                       (static per-interface files, DHCP when configured).
-#                       Owns the iproute2 dependency, so iproute2 is not
-#                       named here.
-#   dhcpcd              DHCP client, used by saphira-network only when a
-#                       config selects DHCP. The boot-test network is DHCP.
+#   iproute2            the `ip` tool (addresses, routes, links): named
+#                       explicitly because no framework package pulls it
+#                       in on systemd targets (see absent list).
 #   nftables            firewalling.
 #   acpid               installed for roles needing custom ACPI event
 #                       handling, but never auto-enabled here:
@@ -73,13 +70,18 @@
 #                       image is ever generated or refreshed.
 #
 # Deliberately absent, each a decision rather than an oversight:
+#   - saphira-network + dhcpcd: the OpenRC network framework and its
+#     DHCP client. systemd-networkd owns the NIC on systemd targets;
+#     installing the framework alongside it is a conflicting network
+#     stack, not a complement. Firstboot configures systemd targets
+#     through networkd drop-ins directly, so nothing here needs the
+#     framework's tooling.
 #   - chrony (time sync is a service/role, not a base prerequisite);
 #   - bind (running DNS services are a role; resolver support is musl
-#     plus saphira-network-written resolv.conf, already covered);
+#     plus networkd-written resolv.conf, already covered);
 #   - dosfstools (vfat is a UEFI/ESP need; the 0.2.1 BIOS seed carries
 #     no FAT filesystem. UEFI profiles add it back);
 #   - ca-certificates (already inside saphira-base);
-#   - iproute2 (owned by the saphira-network dependency);
 #   - a graphical stack of any kind (see the headless policy);
 #   - compilers, headers, *-dev, Perl, Python, PHP, databases,
 #     QEMU/libvirt, saphira-tools, install/image tooling: builder-side
@@ -91,8 +93,7 @@ systemd
 grub
 e2fsprogs
 openssh
-saphira-network
-dhcpcd
+iproute2
 nftables
 acpid
 vim

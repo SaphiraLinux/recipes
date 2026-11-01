@@ -1,0 +1,5 @@
+# postfix-mysql named split: MariaDB/MySQL map plugin + loader fragment.
+# Base ships a backend-free dynamicmaps.cf; installing this split
+# enables the mysql: map type.
+usr/lib/postfix/postfix-mysql.so
+etc/postfix/dynamicmaps.cf.d/mysql.cf

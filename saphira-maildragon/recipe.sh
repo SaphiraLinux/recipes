@@ -2,7 +2,7 @@
 
 pkgname=saphira-maildragon
 pkgver=0.2
-pkgrel=4
+pkgrel=5
 # r4: rspamd antivirus backend socket aligned to the real clamd
 # LocalSocket (/var/run/clamav/clamd.sock - the old path was wrong
 # on both axes: dir and filename). Payload change, revision bumps.
@@ -20,6 +20,7 @@ depends="
     clamav-freshclam
     dovecot
     postfix
+    postfix-sqlite
     python3
     rspamd
 "
@@ -33,10 +34,13 @@ recipe_install()
 {
 	install -d -m 0755 \
 		"$PKGDEST/usr/share/saphira/maildragon/etc/rspamd" \
-		"$PKGDEST/usr/share/saphira/maildragon/scripts" \
-		"$PKGDEST/usr/share/saphira/maildragon/database" \
-		"$PKGDEST/usr/bin" \
 		"$PKGDEST/usr/lib/systemd/system"
+	# NOTE (aa8ef66c, 2026-08-27): the database/*.sql schema and the
+	# files/scripts/* tools were deliberately stripped pending the
+	# recovered five-package split (core/scripts/db) - the install
+	# loops referencing them were removed with the content. This
+	# interim glue ships configs only; scripts+schema return with
+	# the split. Do not re-add either loop without the content.
 	for f in "$RECIPE_DIR"/files/etc/sqlite-*.cf \
 	         "$RECIPE_DIR"/files/etc/main.cf.maildragon; do
 		install -m 0644 "$f" \
@@ -49,16 +53,6 @@ recipe_install()
 		[ -f "$RECIPE_DIR/files/etc/$f" ] && install -m 0644 \
 			"$RECIPE_DIR/files/etc/$f" \
 			"$PKGDEST/usr/share/saphira/maildragon/etc/"
-	done
-	for f in "$RECIPE_DIR"/files/database/*.sql; do
-		install -m 0644 "$f" \
-			"$PKGDEST/usr/share/saphira/maildragon/database/"
-	done
-	for f in $(cd "$RECIPE_DIR/files/scripts" && ls); do
-		install -m 0755 "$RECIPE_DIR/files/scripts/$f" \
-			"$PKGDEST/usr/share/saphira/maildragon/scripts/"
-		ln -sf ../share/saphira/maildragon/scripts/$f \
-			"$PKGDEST/usr/bin/$f"
 	done
 	install -m 0644 "$RECIPE_DIR/files/maildragon-setup.service" \
 		"$PKGDEST/usr/lib/systemd/system/maildragon-setup.service"

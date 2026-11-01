@@ -30,8 +30,9 @@ depends="kmod saphira-zfs-userspace saphira-kernel-7.3-rc1"
 # The worker refuses before spending anything when the builder did
 # not expose a readable /keys/module-signing.pem.
 saphira_sign_key_required=yes
-# saphira-kernel-headers stays kver-only (bare name, host UAPI only;
-# the build tree comes from staged /input). -rN never enters kmod deps.
+# Host UAPI only (bare saphira-linux-uapi-headers: there is only ever
+# one /usr/include provider); the kernel build tree is prepared
+# in-worker by kmod-zfs.sh from the kernel recipe's declared inputs.
 makedepends="
 	binutils
 	gcc
@@ -43,7 +44,7 @@ makedepends="
 	util-linux-dev
 	zlib-dev
 	openssl-dev
-	saphira-kernel-headers
+	saphira-linux-uapi-headers
 	make
 	pkgconf
 	python3

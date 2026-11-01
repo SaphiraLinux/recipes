@@ -32,7 +32,7 @@ set -eu
 
 root=${1:-$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)}
 kver=7.2.2
-kconfig=$root/saphira-kernel/files/config-$kver-akadata
+kconfig=$root/saphira-kernel-$kver/files/config-$kver-akadata
 sysd=$root/systemd/recipe.sh
 vmlinux=$root/systemd/files/vmlinux.h
 sidecar=$root/systemd/files/vmlinux.h.sha256
@@ -106,7 +106,7 @@ ok "kernel: bpf is in CONFIG_LSM"
 # business -- but silently losing them in a version that IS built would be
 # a bug, so assert the others are still the old states.
 for other in 7.1.5 7.2.3; do
-	f=$root/saphira-kernel/files/config-$other-akadata
+	f=$root/saphira-kernel-$other/files/config-$other-akadata
 	[ -f "$f" ] || continue
 	if grep -qE '^CONFIG_SECURITY_PATH=y$' "$f"; then
 		fail "config-$other-akadata has SECURITY_PATH=y; only $kver is in scope and proven"

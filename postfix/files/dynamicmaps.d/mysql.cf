@@ -1,0 +1,2 @@
+# postfix-mysql loader fragment: MariaDB/MySQL map plugin.
+mysql	postfix-mysql.so	dict_mysql_open

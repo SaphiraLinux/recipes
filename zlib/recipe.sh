@@ -1,7 +1,7 @@
 #!/bin/sh
 pkgname=zlib
 pkgver=1.3.1
-pkgrel=4
+pkgrel=5
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='Compression library implementing the deflate algorithm'
 license='Zlib'
@@ -17,7 +17,9 @@ recipe_build() {
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$RECIPE_DIR/files/zlib-1.3.1.tar.gz"
 	cd "$SRC"
 	echo "$zlib_sha256  $RECIPE_DIR/files/zlib-1.3.1.tar.gz" | sha256sum -c -
-	./configure --prefix=/usr --sysconfdir=/etc --libdir=/usr/lib --shared --localstatedir=/var
+	# -fPIC on the static archive too: qemu-user-static links libz.a
+	# into PIE binaries (R_X86_64_32 failure without it).
+	CFLAGS="${CFLAGS-} -fPIC" ./configure --prefix=/usr --sysconfdir=/etc --libdir=/usr/lib --shared --localstatedir=/var
 	make -j${JOBS:-$(nproc)}
 }
 recipe_install() {

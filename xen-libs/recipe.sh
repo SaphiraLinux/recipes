@@ -33,9 +33,12 @@ makedepends="
     perl
     pkgconf
     python3
+    python3-dev
     util-linux-dev
     yajl-dev
 "
+# python3-dev: configure needs the Python development headers
+# (perl above is for something else).
 
 subpackages="$pkgname-dev $pkgname-doc"
 

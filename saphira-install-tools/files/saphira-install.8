@@ -33,7 +33,12 @@ and are harmlessly skipped).
 .B --reinstall
 wipes the target's contents first and reinstalls from scratch.
 Preservation options (keep users, keep data, keep config) are future
-work; for now reinstall keeps nothing.
+work; for now reinstall keeps nothing. Separately mounted
+filesystems below the target (for example the installer's own
+.I /boot ,
+mounted before assembly so kernel files land in it) are the
+caller's scaffolding, not content: they are neither counted for the
+empty-target check nor disturbed by the reinstall wipe.
 .PP
 Requires root privileges. Whole-disk partitioning, filesystem
 creation and bootloader installation belong to

@@ -1,0 +1,2 @@
+# postfix-pgsql loader fragment: PostgreSQL map plugin.
+pgsql	postfix-pgsql.so	dict_pgsql_open

@@ -1,5 +1,14 @@
 #!/bin/sh
 
+# r40: swap partition type GUID (2026-10-31, proven file-backed on
+# identical geometry): emit the canonical Linux-swap GPT GUID
+# 0657FD6D-A4AB-43C4-84E5-0933C84B4F4F. The retired DPS GUID
+# ...43AF... is refused outright by sfdisk 2.41.1 ("Failed to add #N
+# partition: Invalid argument" at add time, "failed to set partition
+# type" via --part-type) while ESP/Linux/home/random GUIDs all apply,
+# so any --swap-size layout died at partitioning. Payload change
+# (tool); layout-options.sh now asserts the GUID and replays the
+# 4-part plan through sfdisk on a sparse file.
 # r4: bios-saphira/bios-saphirad product targets (0.2.1 seeds);
 # minimal-* kernel bare name -> saphira-kernel-7.2.3 (the bare name
 # died with the per-kver split; every matrix target was unbuildable).
@@ -14,7 +23,7 @@
 # only package intentions, per saphira-profiles(5)) and is optional.
 pkgname=saphira-image-creator
 pkgver=0.1
-pkgrel=39
+pkgrel=40
 # r39: layout options (--boot-size honored on ext4 with a separate
 # /boot, --swap-size with swap-last partitioning and fstab, --earlyfw
 # strict opt-in with a persistent marker), computed partition

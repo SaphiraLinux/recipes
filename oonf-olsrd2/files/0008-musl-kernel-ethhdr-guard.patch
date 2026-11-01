@@ -1,0 +1,22 @@
+From: Saphira packaging <recipes@saphira.vm2.uk>
+Subject: [PATCH] musl: deactivate kernel struct ethhdr in os_vif_linux
+
+musl <netinet/if_ether.h> (via common/netaddr.h) and kernel UAPI
+<linux/if_ether.h> (via <linux/if_tun.h>) both define struct ethhdr
+with no mutual guard. The kernel header honors __UAPI_DEF_ETHHDR=0
+(its documented libc mechanism): keep the libc copy, which also
+carries the ether_* declarations. This TU only needs TUN ioctls,
+never struct ethhdr.
+
+--- a/src-plugins/subsystems/os_linux/os_vif_linux.c
++++ b/src-plugins/subsystems/os_linux/os_vif_linux.c
+@@ -47,2 +47,9 @@
+ #include <fcntl.h>
++/* musl <netinet/if_ether.h> (via common/netaddr.h) and kernel UAPI
++ * <linux/if_ether.h> (via <linux/if_tun.h>) both define struct ethhdr
++ * with no mutual guard. The kernel header honors __UAPI_DEF_ETHHDR=0
++ * (its documented libc mechanism): keep the libc copy. This TU only
++ * needs TUN ioctls, never struct ethhdr.
++ */
++#define __UAPI_DEF_ETHHDR 0
+ #include <linux/if_tun.h>

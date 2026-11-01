@@ -54,20 +54,53 @@ profile_root=${SAPHIRA_PROFILE_ROOT:-/usr/share/saphira/profiles}
 
 test -d "$target" || die "target is not a directory: $target"
 target=$(readlink -f -- "$target") || die "cannot resolve target: $target"
+
+# A target with separately-mounted filesystems (the installer's own
+# /boot, mounted by the orchestrator ahead of assembly so kernel and
+# bootloader files land in it) is still an empty target: mount points
+# are the caller's scaffolding, not installed content. Entries residing
+# on a different device than the target itself are therefore skipped
+# here, both when testing emptiness and when clearing for --reinstall
+# (the caller owns its mounts; this tool never unmounts them and never
+# mistakes them for content). Anything else must be absent except
+# lost+found, or --reinstall applies.
+target_not_empty()
+{
+	dir=$1
+	tdev=$(stat -c %d "$dir") || return 0
+	for entry in "$dir"/* "$dir"/.*; do
+		[ -e "$entry" ] || [ -L "$entry" ] || continue
+		case ${entry##*/} in .|..|lost+found) continue ;; esac
+		edev=$(stat -c %d "$entry") || return 0
+		[ "$edev" != "$tdev" ] && continue
+		return 0
+	done
+	return 1
+}
 case $profile in
 	*[^A-Za-z0-9._+-]*|'') die "invalid profile name: $profile" ;;
 esac
 test -f "$profile_root/$profile" ||
 	die "profile is unavailable: $profile"
 
-if find "$target" -mindepth 1 -maxdepth 1 ! -name lost+found -print -quit |
-	grep -q .; then
+if target_not_empty "$target"; then
 	if test "$reinstall" -eq 1; then
 		# Reinstall starts from an empty filesystem. Preservation
 		# options are future work; for now this keeps nothing.
-		find "$target" -mindepth 1 -maxdepth 1 \
-			! -name lost+found -exec rm -rf -- {} + ||
-			die 'cannot clear target for reinstall'
+		# Caller-owned mounts are left alone (see target_not_empty):
+		# only the target's own filesystem is cleared, so a mounted
+		# /boot is neither wiped nor unmounted here.
+		tdev=$(stat -c %d "$target") ||
+			die 'cannot stat target for reinstall'
+		for entry in "$target"/* "$target"/.*; do
+			[ -e "$entry" ] || [ -L "$entry" ] || continue
+			case ${entry##*/} in .|..|lost+found) continue ;; esac
+			edev=$(stat -c %d "$entry") ||
+				die 'cannot stat target entry for reinstall'
+			[ "$edev" != "$tdev" ] && continue
+			rm -rf -- "$entry" ||
+				die 'cannot clear target for reinstall'
+		done
 	else
 		die 'target is not empty (use --reinstall to wipe and reinstall)'
 	fi

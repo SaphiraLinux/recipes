@@ -1,6 +1,7 @@
 # saphira-kernel-7.2.3 patches
 
-Same pair as every kernel line; see `saphira-kernel-7.3/files/PATCHES.md`.
+Same pair of purposes as every kernel line, with per-line exact-context
+bytes (this line's own hunk headers); see `saphira-kernel-7.3/files/PATCHES.md`.
 
 | File | Why |
 |---|---|

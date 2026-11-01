@@ -48,14 +48,12 @@ depends="
     zlib
 "
 makedepends="
-    alex
     bash
     binutils
     curl
     gcc
     gettext
     gmp-dev
-    happy
     libffi-dev
     make
     ncurses-dev
@@ -64,6 +62,11 @@ makedepends="
     python3
     zlib-dev
 "
+# No alex/happy (verified 2026-11-01 against the vendored sdist):
+# the only .x/.y sources in the tree are nofib benchmarks and the
+# Cabal testsuite, neither built; compiler/ ships pre-generated .hs,
+# so hadrian never invokes them. Listing them would also cycle
+# (alex/happy need ghc to build) and kills resolution in ~5s.
 # Only -doc splits (haddock HTML, users guide, man pages). If the
 # default Hadrian flavour ever stops emitting them, the file gate
 # skips the stale claims (rustc precedent) instead of failing.

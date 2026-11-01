@@ -1,0 +1,15 @@
+From: Saphira packaging <recipes@saphira.vm2.uk>
+Subject: [PATCH] cmake: minimum-required first, floor 3.10
+
+cmake_minimum_required() must precede project(); a 2.8.12 floor
+trips CMake deprecated warnings (removal announced for <3.10).
+3.10 keeps the existing policies (recipe also passes
+-DCMAKE_POLICY_VERSION_MINIMUM=3.5) while silencing the warning.
+
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1,5 +1,5 @@
+-project (OONF C)
+-cmake_minimum_required(VERSION 2.8.12 FATAL_ERROR)
++cmake_minimum_required(VERSION 3.10 FATAL_ERROR)
++project (OONF C)

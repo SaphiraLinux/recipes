@@ -113,7 +113,8 @@ variant_staged=0
 printf 'new-kmod-variant: wrote %s/recipe.sh\n' "$new"
 printf 'new-kmod-variant: unlock checklist for %s:\n' "$kver"
 printf '  1. no staging needed: the kmod build prepares its own tree in-worker\n'
-printf '     (needs the sibling saphira-kernel-%s inputs + published config present,\n' "$kver"
-printf '     else it fails loudly naming what is missing)\n'
+printf '     from the kernel recipe inputs (declare KRECIPE in the new recipe;\n'
+printf '     config, tarball and policy patches come from that recipe files/,\n'
+printf '     never from the builder /boot), else it fails loudly naming what is missing)\n'
 printf '  2. saphira-linux-uapi-headers published (else resolvepkg fails closed)\n'
 printf '  3. build: build-kmod-set.sh %s-%s\n' "$base" "$kver"

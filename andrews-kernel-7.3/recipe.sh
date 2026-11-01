@@ -38,7 +38,7 @@ pkgname=andrews-kernel-7.3
 # No prebuilt combined kernel ships merely because this recipe exists.
 kernel_version=7.3
 pkgver=1
-pkgrel=1
+pkgrel=2
 # r1: first andrews-kernel 7.3 revision. Mirrors saphira-kernel-7.3
 # (config, patches, gates, hooks, size policy) plus OpenZFS 2.4.4
 # integrated via copy-builtin with CONFIG_ZFS=y. 7.3 needs the five
@@ -64,9 +64,14 @@ url=https://saphira.vm2.uk/
 # than hidden, and publication remains an explicit operator decision
 # (see header above).
 
-# Sibling inputs (all pinned, all verified at build time):
+# Owned inputs (vendored in files/, byte-identical to the official line at
+# vendoring time, never symlinked, never auto-synced -- see files/PATCHES.md
+# independence rule; every kernel owns its files):
+# - kernel config: files/config-7.3-akadata
+# - freedom + v3 patches, policy gates, layout helper, hooks: files/
+# Referenced inputs (all pinned, all verified at build time):
 # - kernel tarball + .sha256 sidecar: ../saphira-kernel-7.3/files/
-# - kernel config, patches, gates, hooks: same directory
+#   (upstream bytes; the sidecar plus the pin cross-check prove identity)
 # - OpenZFS tarball + .sha256 sidecar + 000* compat patches:
 #   ../saphira-zfs-7.3/files/
 # - regdb anchor: ../wireless-regdb/files/saphira-regdb.x509 (pinned)
@@ -136,7 +141,14 @@ recipe_build()
 	tar --no-same-owner -C "$SRC/linux-${kernel_version}" --strip-components=1 -xf "$KBALL"
 	cd "$SRC/linux-${kernel_version}"
 
-	patch -Np1 -i "$RECIPE_DIR/files/x86-64-v3.patch"
+	patch -Np1 -i "$RECIPE_DIR/files/x86-64-v3.patch" > "$SRC/patch-v3.log" 2>&1 || return 1
+	# Strict application: this copy carries exact upstream context for 7.3,
+	# so any fuzz or offset is drift, not tolerance. Fail closed.
+	if grep -qE 'fuzz|offset' "$SRC/patch-v3.log"; then
+		echo "ERROR: x86-64-v3.patch applied loosely (fuzz/offset): rebase it, do not ship drift" >&2
+		grep -E 'fuzz|offset' "$SRC/patch-v3.log" >&2
+		return 1
+	fi
 	# Regulatory freedom (article: kernel must not mandate regdb
 	# signatures): flip the two gatekeeper Kconfig defaults y -> n so
 	# an absent symbol can never resolve to enforced verification.
@@ -145,8 +157,14 @@ recipe_build()
 	# below proves the final .config after olddefconfig.
 	# Both patches are vendored in files/ (see PATCHES.md), not
 	# referenced from the sibling line: this recipe owns its inputs.
-	patch -Np1 -i "$RECIPE_DIR/files/cfg80211-regdb-freedom.patch"
-	cp "$SIB/config-${kernel_version}-akadata" "$SRC/linux-${kernel_version}/.config"
+	patch -Np1 -i "$RECIPE_DIR/files/cfg80211-regdb-freedom.patch" > "$SRC/patch-freedom.log" 2>&1 || return 1
+	# Strict application, same rule as the v3 patch above.
+	if grep -qE 'fuzz|offset' "$SRC/patch-freedom.log"; then
+		echo "ERROR: cfg80211-regdb-freedom.patch applied loosely (fuzz/offset): rebase it, do not ship drift" >&2
+		grep -E 'fuzz|offset' "$SRC/patch-freedom.log" >&2
+		return 1
+	fi
+	cp "$RECIPE_DIR/files/config-${kernel_version}-akadata" "$SRC/linux-${kernel_version}/.config"
 	mkdir -p "$SRC/linux-${kernel_version}/certs/regdb"
 	# Canonical regdb trust anchor: single copy in wireless-regdb/files/,
 	# staged through $SRC (under /build) with sha256 verification.
@@ -171,7 +189,7 @@ recipe_build()
 	# re-enabling enforcement; this fails the build before compiling
 	# if it ever recurs. A signed db may still ship -- it must simply
 	# never be required.
-	. "$SIB/check-regdb-freedom.sh"
+	. "$RECIPE_DIR/files/check-regdb-freedom.sh"
 	check_regdb_freedom "$SRC/linux-${kernel_version}/.config" \
 		"$SRC/linux-${kernel_version}/net/wireless/Kconfig"
 	# No-initramfs builtin policy: drivers stay built in (early
@@ -181,7 +199,7 @@ recipe_build()
 	# silently resolves new and changed symbols to defaults, which is how
 	# a required builtin would be lost without anyone touching the config.
 	# This gate fails the build before the compile, not after publication.
-	. "$SIB/check-no-initramfs-builtins.sh"
+	. "$RECIPE_DIR/files/check-no-initramfs-builtins.sh"
 	check_no_initramfs_builtins "$SRC/linux-${kernel_version}/.config" "$kernel_version"
 	# Generated headers for the ZFS configure version probe
 	# (olddefconfig alone does not emit utsrelease.h; without it
@@ -253,10 +271,10 @@ recipe_build()
 		{ echo "ERROR: LOCALVERSION suffix missing (variant would collide with the official line)" >&2; return 1; }
 	# Re-prove both policy gates on the FINAL .config: integration must
 	# not have disturbed them.
-	. "$SIB/check-regdb-freedom.sh"
+	. "$RECIPE_DIR/files/check-regdb-freedom.sh"
 	check_regdb_freedom "$SRC/linux-${kernel_version}/.config" \
 		"$SRC/linux-${kernel_version}/net/wireless/Kconfig"
-	. "$SIB/check-no-initramfs-builtins.sh"
+	. "$RECIPE_DIR/files/check-no-initramfs-builtins.sh"
 	check_no_initramfs_builtins "$SRC/linux-${kernel_version}/.config" "$kernel_version"
 
 	# Strip CFI directives from ZFS assembly: hand-written crypto asm
@@ -299,7 +317,7 @@ recipe_install()
 	# with the official line). Every /boot name and the module dir
 	# follow KREL, never the bare version -- and never any release
 	# suffix beyond the variant discriminator.
-	. "$RECIPE_DIR/../saphira-kernel-${kernel_version}/files/install-kernel-layout.sh"
+	. "$RECIPE_DIR/files/install-kernel-layout.sh"
 	KREL=$(kernel_layout_release "$SRC/linux-${kernel_version}")
 	# KREL is the tree's own kernelrelease plus LOCALVERSION: 7.3 ->
 	# 7.3.0-zfs (SUBLEVEL 0 always prints), 7.3.1 would give
@@ -365,17 +383,17 @@ EOF
 	# the /boot payload lands (mirrors the official line; the hooks are
 	# release-agnostic infrastructure).
 	install -d -m 0755 "$PKGDEST/usr/share/saphira/hooks.d/$pkgname"
-	install -m 0755 "$RECIPE_DIR/../saphira-kernel-${kernel_version}/files/hooks-grub-mkconfig" \
+	install -m 0755 "$RECIPE_DIR/files/hooks-grub-mkconfig" \
 		"$PKGDEST/usr/share/saphira/hooks.d/$pkgname/post-install"
-	install -m 0755 "$RECIPE_DIR/../saphira-kernel-${kernel_version}/files/hooks-grub-mkconfig" \
+	install -m 0755 "$RECIPE_DIR/files/hooks-grub-mkconfig" \
 		"$PKGDEST/usr/share/saphira/hooks.d/$pkgname/post-upgrade"
-	install -m 0755 "$RECIPE_DIR/../saphira-kernel-${kernel_version}/files/hooks-grub-mkconfig" \
+	install -m 0755 "$RECIPE_DIR/files/hooks-grub-mkconfig" \
 		"$PKGDEST/usr/share/saphira/hooks.d/$pkgname/post-deinstall"
 	# Early-firmware images for the same three moments (mirrors official).
-	install -m 0755 "$RECIPE_DIR/../saphira-kernel-${kernel_version}/files/hooks-earlyfw" \
+	install -m 0755 "$RECIPE_DIR/files/hooks-earlyfw" \
 		"$PKGDEST/usr/share/saphira/hooks.d/$pkgname/post-install"
-	install -m 0755 "$RECIPE_DIR/../saphira-kernel-${kernel_version}/files/hooks-earlyfw" \
+	install -m 0755 "$RECIPE_DIR/files/hooks-earlyfw" \
 		"$PKGDEST/usr/share/saphira/hooks.d/$pkgname/post-upgrade"
-	install -m 0755 "$RECIPE_DIR/../saphira-kernel-${kernel_version}/files/hooks-earlyfw" \
+	install -m 0755 "$RECIPE_DIR/files/hooks-earlyfw" \
 		"$PKGDEST/usr/share/saphira/hooks.d/$pkgname/post-deinstall"
 }

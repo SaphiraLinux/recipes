@@ -1,6 +1,6 @@
 pkgname=saphira-kernel-source-7.2.3
 pkgver=1
-pkgrel=3
+pkgrel=4
 # r3: STOP BUILDING THE KERNEL TO PACKAGE ITS SOURCE. r2 tracked
 # saphira-kernel-7.2.3 r2 (CONFIG_DRM_FBDEV_EMULATION=y); r3 replaces the
 # whole staging contract, so the r2 payload description no longer applies.
@@ -139,8 +139,14 @@ recipe_build()
 	# made to upstream source, and it is a deliberate architecture decision
 	# (the shipped CPU baseline), not packaging fallout.
 	patch -Np1 --no-backup-if-mismatch -d "$PRISTINE" -i \
-		"$RECIPE_DIR/../saphira-kernel-$KVER/files/x86-64-v3.patch" ||
+		"$RECIPE_DIR/../saphira-kernel-$KVER/files/x86-64-v3.patch" > "$BUILDDIR/patch-v3.log" 2>&1 ||
 		{ echo "ERROR: x86-64-v3.patch did not apply" >&2; return 1; }
+	# Strict application (exact per-line context): fuzz or offset is drift.
+	if grep -qE 'fuzz|offset' "$BUILDDIR/patch-v3.log"; then
+		echo "ERROR: x86-64-v3.patch applied loosely (fuzz/offset): rebase it, do not ship drift" >&2
+		grep -E 'fuzz|offset' "$BUILDDIR/patch-v3.log" >&2
+		return 1
+	fi
 
 	# Deliberately NOT done here, and each omission is load-bearing:
 	#   - no .config            a source package carries no configuration

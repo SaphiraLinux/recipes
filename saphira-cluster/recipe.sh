@@ -55,9 +55,9 @@ subpackages="saphira-cluster-doc"
 
 recipe_build()
 {
-	# The worker flattens a single top-level archive dir into $SRC,
-	# so the tree root lands directly in $SRC.
-	cd "$SRC"
+	# The worker strips only the top archive dir, so the build root
+	# is $SRC/saphira-cluster (Makefile, tests/, src/ live there).
+	cd "$SRC/saphira-cluster"
 	make
 	# The CLI harness runs here, in the build: a binary that fails
 	# its own tests must not become a package.
@@ -66,7 +66,7 @@ recipe_build()
 
 recipe_install()
 {
-	make -C "$SRC" DESTDIR="$PKGDEST" install
+	make -C "$SRC/saphira-cluster" DESTDIR="$PKGDEST" install
 	[ -x "$PKGDEST/usr/sbin/saphira-cluster" ] || \
 		{ echo "ERROR: saphira-cluster payload is missing the binary" >&2; return 1; }
 	[ -e "$PKGDEST/usr/share/man/man8/saphira-cluster.8" ] || \

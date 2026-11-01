@@ -1,0 +1,5 @@
+# postfix-pgsql named split: PostgreSQL map plugin + loader fragment.
+# Base ships a backend-free dynamicmaps.cf; installing this split
+# enables the pgsql: map type.
+usr/lib/postfix/postfix-pgsql.so
+etc/postfix/dynamicmaps.cf.d/pgsql.cf

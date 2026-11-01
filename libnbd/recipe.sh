@@ -49,6 +49,11 @@ recipe_install()
 	make DESTDIR="$PKGDEST" install
 	install -D -m 0644 "$SRC/COPYING.LIB" \
 		"$PKGDEST/usr/share/licenses/libnbd/COPYING.LIB"
+	# Upstream installs only libnbd.h; nbd-protocol.h (stable
+	# on-wire protocol definitions, public interface) ships
+	# explicitly from the source tree.
+	install -D -m 0644 "$SRC/lib/nbd-protocol.h" \
+		"$PKGDEST/usr/include/nbd-protocol.h"
 	# .a/.pc/headers to -dev, man pages to -doc via the fixed split
 	# predicates; the versioned .so and tools stay in main.
 	for p in usr/lib/libnbd.so usr/include/nbd-protocol.h; do

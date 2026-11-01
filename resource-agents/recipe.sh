@@ -50,8 +50,11 @@ makedepends="
 	glib-dev
 	libqb-dev
 	make
+	pcre2-dev
 	pkgconf
 "
+# pcre2-dev: glib-2.0.pc Requires libpcre2-8 (same class as knot
+# and gobject-introspection).
 
 subpackages="$pkgname-doc"
 

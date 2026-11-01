@@ -25,6 +25,7 @@ makedepends="
     gcc
     make
     ncurses-dev
+    pkgconf
 "
 
 recipe_build()
@@ -34,5 +35,8 @@ recipe_build()
 
 recipe_install()
 {
-	make DESTDIR="$PKGDEST" PREFIX=/usr install
+	# Upstream install ignores DESTDIR (writes to $(BINDIR) and
+	# $(PREFIX)/share/man bare), so stage both files by hand.
+	install -D -m 0755 "$SRC/iotop" "$PKGDEST/usr/sbin/iotop"
+	install -D -m 0644 "$SRC/iotop.8" "$PKGDEST/usr/share/man/man8/iotop.8"
 }

@@ -36,6 +36,7 @@ recipe_build()
 	mkdir -p "$BUILDDIR" && cd "$BUILDDIR"
 	cmake "$SRC" \
 		-DCMAKE_INSTALL_PREFIX=/usr \
+		-DCMAKE_INSTALL_LIBDIR=lib \
 		-DCMAKE_BUILD_TYPE=Release
 	make -j${JOBS:-$(nproc)}
 }

@@ -26,6 +26,7 @@ depends="
 
 makedepends="
     gcc
+    libucontext
     lxc-dev
     pkgconf
     python3
@@ -34,6 +35,8 @@ makedepends="
     setuptools
     wheel
 "
+# libucontext: the import test loads system libsystemd, which needs
+# libucontext.so.1; the lxc-dev closure does not stage it.
 
 recipe_build()
 {

@@ -1,7 +1,7 @@
 #!/bin/sh
 pkgname=nftables
 pkgver=1.1.6
-pkgrel=9
+pkgrel=10
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='Netfilter nftables userspace tools'
 license='GPL-2.0-only'
@@ -38,6 +38,11 @@ recipe_install() {
 		"$PKGDEST/etc/nftables.conf"
 	# Operator drop-in directory included by the default configuration.
 	install -d "$PKGDEST/etc/nftables.d"
+	# RFC 7126 IPv4-options filtering defaults (audit counters live,
+	# dangerous first-byte types dropped, RA ignored, EOOL/NOP/IPSO
+	# never matched - see the fragment header for the full mapping).
+	install -m 0644 "$RECIPE_DIR/files/rfc7126-options.nft" \
+		"$PKGDEST/etc/nftables.d/rfc7126-options.nft"
 	# nftables-native classification layer (marks/sets/osf + reserved
 	# NFQUEUE extension point) and its design document.
 	install -d "$PKGDEST/usr/share/nftables/saphira"

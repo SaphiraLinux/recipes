@@ -92,7 +92,15 @@ kmod_prepare_tree()
 			{ echo "ERROR: kernel tarball extraction failed" >&2; return 1; }
 		[ -f "$_krecipe/files/x86-64-v3.patch" ] ||
 			{ echo "ERROR: sibling policy patch missing for $_kshort" >&2; return 1; }
-		patch -d "$_kdir" -Np1 -i "$_krecipe/files/x86-64-v3.patch" || return 1
+		patch -d "$_kdir" -Np1 -i "$_krecipe/files/x86-64-v3.patch" > "$SRC/kmod-v3.log" 2>&1 || return 1
+		# Strict application (exact per-line context): fuzz or offset is
+		# drift. The kernel and source builds gate the same bytes, so a
+		# failure here means the copy regressed, never tolerance.
+		if grep -qE 'fuzz|offset' "$SRC/kmod-v3.log"; then
+			echo "ERROR: x86-64-v3.patch applied loosely (fuzz/offset): rebase it, do not ship drift" >&2
+			grep -E 'fuzz|offset' "$SRC/kmod-v3.log" >&2
+			return 1
+		fi
 		cp "$_kconfig" "$_kdir/.config" ||
 			{ echo "ERROR: cannot seed tree .config" >&2; return 1; }
 		(cd "$_kdir" && make modules_prepare -j${JOBS:-$(nproc)}) ||

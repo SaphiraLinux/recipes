@@ -14,16 +14,23 @@ url=https://raid.wiki.kernel.org/
 source=https://kernel.org/pub/linux/utils/raid/mdadm/mdadm-4.4.tar.xz
 sha256=9b488f35ed153df99924b5fe41eed380e8512de8f18a118628cacdd681b1d573
 
-depends=""
+depends="udev"
 
 makedepends="
     binutils
     gcc
     make
+    udev-dev
 "
+# udev: monitor mode links libudev (udev.h + -ludev).
 
 recipe_build()
 {
+	# files/ patch: Makefile assigns CFLAGS unconditionally, so env
+	# flags never reach the compiler; the -Werror carve-out ships
+	# as a patch instead (see PATCHES.md).
+	patch -d "$SRC" -Np1 \
+		-i "$RECIPE_DIR/files/0001-gcc16-unused-but-set-variable.patch"
 	make -j${JOBS:-$(nproc)} CC=gcc
 }
 

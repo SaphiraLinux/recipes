@@ -2,7 +2,7 @@
 
 pkgname=saphira-build-dashboard
 pkgver=1.0
-pkgrel=5
+pkgrel=7
 # r2: stage the accounts.d fragment into the payload (r1 shipped no
 # identity scripts: makepkg generates ONLY from the payload copy at
 # usr/share/saphira/accounts.d/<name>, and the r1 recipe never staged

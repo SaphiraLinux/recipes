@@ -45,6 +45,7 @@ recipe_build()
 {
 	patch -Np1 -i "$RECIPE_DIR/files/time-h-gcc14.patch" || return 1
 	patch -Np1 -i "$RECIPE_DIR/files/gcc16-md5-casts.patch" || return 1
+	patch -Np1 -i "$RECIPE_DIR/files/gcc16-signal-handler-casts.patch" || return 1
 	CPPFLAGS="${CPPFLAGS-} -DPROTOTYPES=1" ./configure \
 		--prefix=/usr \
 		--sysconfdir=/etc \

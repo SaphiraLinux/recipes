@@ -42,7 +42,13 @@ recipe_build()
 		--mandir=/usr/share/man \
 		--localstatedir=/var \
 		--with-default-snmp-version=3 \
-		--with-persistent-directory=/var/lib/snmp
+		--with-persistent-directory=/var/lib/snmp \
+		--with-sys-contact="@@no.where" \
+		--with-sys-location="Unknown" \
+		--with-logfile=/var/log/snmpd.log
+	# Contact/location/logfile answered explicitly (values equal
+	# configure's own defaults): otherwise configure prompts on
+	# stdin and hangs the sandbox forever.
 	make -j${JOBS:-$(nproc)}
 }
 
@@ -50,6 +56,11 @@ recipe_install()
 {
 	cd "$SRC"
 	make DESTDIR="$PKGDEST" install
+	# perllocal.pod is a per-install perl index (like info/dir):
+	# never package payload - nginx already owns the path and the
+	# publish gate refuses dual ownership. find, not globs: the
+	# path nests three deep (perl5/<ver>/<arch>/perllocal.pod).
+	find "$PKGDEST" -name perllocal.pod -delete
 	# Least privilege by construction: both daemons drop to the snmp
 	# account via -u/-g, but must bind ports 161/162 (<1024). The file
 	# capability carries that single privilege; both service units
@@ -71,9 +82,11 @@ recipe_install()
 		"$PKGDEST/usr/lib/systemd/system/snmpd.service"
 	install -D -m 0644 "$RECIPE_DIR/files/snmptrapd.service" \
 		"$PKGDEST/usr/lib/systemd/system/snmptrapd.service"
-	# Runtime identity declaration: snmp:105 required by the shipped
+	# Runtime identity declaration: snmp:148 required by the shipped
 	# service units. makepkg generates the install scripts from this
 	# fragment; the package creates its identity at install time.
+	# The staged filename must match the owning output (net-snmp);
+	# the user inside stays snmp (mariadb-server precedent).
 	install -D -m 0644 "$RECIPE_DIR/files/accounts.d/snmp" \
-		"$PKGDEST/usr/share/saphira/accounts.d/snmp"
+		"$PKGDEST/usr/share/saphira/accounts.d/net-snmp"
 }

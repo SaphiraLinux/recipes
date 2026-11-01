@@ -55,6 +55,23 @@ for banned in saphira-network dhcpcd saphira-image-firstboot; do
 		bad "installer profile still carries $banned" || ok "installer profile excludes $banned"
 done
 
+printf '%s\n' '# systemd products exclude the OpenRC network framework'
+
+# systemd-networkd owns the NIC on systemd targets; installing the
+# framework alongside it is a conflicting stack, not a complement.
+# iproute2 stays explicitly (nothing else in these closures pulls it
+# in once the framework is gone).
+for profile in saphirad-systemd minimal-systemd; do
+	prof_pkgs=$(awk '{ line = $0; sub(/#.*$/, "", line); gsub(/^[ \t]+|[ \t]+$/, "", line) }
+		line == "" { next } { print line }' "$profiles/$profile")
+	for banned in saphira-network dhcpcd; do
+		printf '%s\n' "$prof_pkgs" | grep -qxF "$banned" &&
+			bad "$profile still carries $banned" || ok "$profile excludes $banned"
+	done
+	printf '%s\n' "$prof_pkgs" | grep -qxF iproute2 &&
+		ok "$profile carries iproute2 explicitly" || bad "$profile lost iproute2"
+done
+
 printf '%s\n' '# internal usb-creator target row (not offered by the menu)'
 
 "$tool" list-targets 2>/dev/null | grep -q '^usb-creator *bios *openrc *image-creator-appliance' &&

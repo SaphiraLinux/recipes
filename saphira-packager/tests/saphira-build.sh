@@ -747,6 +747,276 @@ assert_contains "reconcile is still idempotent once everything is retired" "$TMP
 "$SAPHIRA_BUILD" status > "$TMP/status-interrupted.out" 2>&1
 assert_contains "status renders an interrupted row legibly" "$TMP/status-interrupted.out" "INTERRUPTED"
 
+# --- MCP journal bridge (optional, fail-open, non-blocking) -----------------
+#
+# The builder never requires the journal: missing file (never created),
+# read-only file, wrong schema, locked database, and concurrent writers
+# must all leave build logic unaffected. Recovery of anything skipped is
+# the MCP's startup reconciliation. Event identity is the exact title
+# key bridge:<builder>:<build_id>:<event>:<seq> - never LIKE.
+BST=$TMP/bstate
+BREC=$TMP/brecipes
+BREP=$TMP/brepo
+BINC=$TMP/bincoming
+BJOURNAL=$TMP/journal.db
+mkdir -p "$BST" "$BREC" "$BREP" "$BINC"
+export SBM_NOTES_DB="$BJOURNAL"
+BENV="SAPHIRA_BUILD_STATE=$BST SAPHIRA_RECIPES=$BREC SAPHIRA_INCOMING=$BINC SAPHIRA_REPO=$BREP SAPHIRA_BUILDCMD=$TMP/stub-buildpkg SAPHIRA_APK=$TMP/stub-apk SAPHIRA_TEST_ROOTS=$TMP/btestroots SAPHIRA_INCOMING_STUB=$BINC RECIPE_ROOT=$BREC SBM_NOTES_DB=$BJOURNAL"
+mkdir -p "$BREP"
+: > "$BREP/Packages.adb"
+mkrecipe() { # name ver rel deps...
+	name=$1; ver=$2; rel=$3; shift 3
+	mkdir -p "$BREC/$name/files"
+	printf 'pkgname=%s\npkgver=%s\npkgrel=%s\ndepends="%s"\n' "$name" "$ver" "$rel" "$*" > "$BREC/$name/recipe.sh"
+}
+mkjournal() {
+	rm -f "$BJOURNAL"
+	python3 - "$BJOURNAL" <<'PY'
+import sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+conn.execute("CREATE TABLE session_events(id INTEGER PRIMARY KEY, event TEXT, package TEXT, label TEXT, title TEXT, body TEXT, author TEXT, recorder TEXT, created_at TEXT, session_id TEXT, hostname TEXT, username TEXT, cwd TEXT, agent TEXT, ctx_origin TEXT)")
+conn.commit()
+PY
+}
+bridge_rows() { # event -> count
+	python3 -c 'import sqlite3,sys; print(sqlite3.connect(sys.argv[1]).execute("SELECT count(*) FROM session_events WHERE event=?",(sys.argv[2],)).fetchone()[0])' "$BJOURNAL" "$1"
+}
+bridge_titles() { # event -> titles
+	python3 -c 'import sqlite3,sys; [print(r[0]) for r in sqlite3.connect(sys.argv[1]).execute("SELECT title FROM session_events WHERE event=?",(sys.argv[2],))]' "$BJOURNAL" "$1"
+}
+
+# 1. Missing journal: bridge never creates it, builds unaffected.
+rm -f "$BJOURNAL"
+mkrecipe okpkg 1.0 1 ""
+env $BENV "$SAPHIRA_BUILD" scan > "$TMP/bridge-scan-nojournal.out" 2>&1
+[ -e "$BJOURNAL" ] && bad "bridge created the journal file" || ok "bridge never creates a missing journal"
+assert_contains "scan works with no journal" "$TMP/bridge-scan-nojournal.out" "newly queued"
+
+# 2. FAIL emits one exact-keyed build.failed; resweep never duplicates.
+mkjournal
+mkrecipe brokenbridge 1.0 1 ""
+env $BENV "$SAPHIRA_BUILD" scan > /dev/null 2>&1
+env $BENV "$SAPHIRA_BUILD" run --limit=5 > "$TMP/bridge-run-fail.out" 2>&1 || true
+assert_contains "broken build fails" "$TMP/bridge-run-fail.out" "brokenbridge -> FAIL"
+[ "$(bridge_rows build.failed)" = "1" ] && ok "FAIL emits exactly one build.failed" || bad "FAIL emitted $(bridge_rows build.failed) build.failed rows"
+key=$(bridge_titles build.failed)
+case "$key" in bridge:*:*:build.failed:1) ok "FAIL identity is the exact bridge key ($key)";; *) bad "FAIL key malformed: $key";; esac
+env $BENV "$SAPHIRA_BUILD" scan > /dev/null 2>&1
+[ "$(bridge_rows build.failed)" = "1" ] && ok "resweep does not duplicate build.failed" || bad "resweep duplicated build.failed"
+
+# 3. BLOCKED transition emits with seq; identical resweep is idempotent;
+# changed blockers emit a new seq; unblock emits build.unblocked.
+mkrecipe ghostdep 9.9 9 ""
+mkrecipe blockedpkg 1.0 1 "ghostdep"
+env $BENV "$SAPHIRA_BUILD" scan > /dev/null 2>&1
+[ "$(bridge_rows build.blocked)" = "1" ] && ok "BLOCKED emits one build.blocked" || bad "BLOCKED emitted $(bridge_rows build.blocked)"
+env $BENV "$SAPHIRA_BUILD" scan > /dev/null 2>&1
+[ "$(bridge_rows build.blocked)" = "1" ] && ok "identical BLOCKED resweep is idempotent" || bad "identical BLOCKED resweep duplicated"
+# Satisfy the dep: ghostdep builds PASS, blockedpkg unblocks.
+env $BENV "$SAPHIRA_BUILD" run --limit=10 > /dev/null 2>&1 || true
+env $BENV "$SAPHIRA_BUILD" scan > /dev/null 2>&1
+[ "$(bridge_rows build.unblocked)" = "1" ] && ok "unblock emits one build.unblocked" || bad "unblocked emitted $(bridge_rows build.unblocked)"
+
+# 4. Locked journal: contention is skipped fast, build still passes.
+mkjournal
+mkrecipe lockpkg 1.0 1 ""
+chmod 444 "$BJOURNAL"
+env $BENV "$SAPHIRA_BUILD" scan > /dev/null 2>&1
+env $BENV "$SAPHIRA_BUILD" run --limit=5 > "$TMP/bridge-run-locked.out" 2>&1 || true
+assert_contains "build passes with read-only journal" "$TMP/bridge-run-locked.out" "lockpkg -> PASS"
+chmod 644 "$BJOURNAL"
+python3 - "$SAPHIRA_BUILD" "$BJOURNAL" <<'PY' > "$TMP/bridge-lock-timing.out" 2>&1
+import importlib.machinery, importlib.util, sqlite3, sys, time
+path, jpath = sys.argv[1], sys.argv[2]
+loader = importlib.machinery.SourceFileLoader("sb_bridge", path)
+spec = importlib.util.spec_from_loader("sb_bridge", loader)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+hold = sqlite3.connect(jpath, timeout=10)
+hold.execute("BEGIN EXCLUSIVE")
+hold.execute("INSERT INTO session_events(event,package,label,title,body,author,recorder,created_at) VALUES('hold','h','l','hold','{}','a','r','t')")
+t0 = time.time()
+assert mod.bridge_emit("build.failed", "p", "1.0-r1", 999999, 1, {}) is False
+dt = time.time() - t0
+hold.rollback()
+print(f"contention-skipped in {dt:.2f}s")
+assert dt < 2.0, dt
+PY
+assert_contains "lock contention is skipped with negligible delay" "$TMP/bridge-lock-timing.out" "contention-skipped"
+
+# 5. Wrong schema: skipped, never raises, build unaffected.
+python3 - "$BJOURNAL" <<'PY'
+import sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+conn.execute("DROP TABLE session_events")
+conn.execute("CREATE TABLE session_events(id INTEGER PRIMARY KEY, nope TEXT)")
+conn.commit()
+PY
+mkrecipe schemapkg 1.0 1 ""
+env $BENV "$SAPHIRA_BUILD" scan > /dev/null 2>&1
+env $BENV "$SAPHIRA_BUILD" run --limit=5 > "$TMP/bridge-run-schema.out" 2>&1 || true
+assert_contains "build passes with wrong-schema journal" "$TMP/bridge-run-schema.out" "schemapkg -> PASS"
+
+# 6. Concurrency: parallel writers, MCP-style unique index present.
+mkjournal
+python3 - "$BJOURNAL" <<'PY'
+import sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_session_events_bridge_key ON session_events(title)")
+conn.commit()
+PY
+python3 - "$SAPHIRA_BUILD" "$BJOURNAL" <<'PY'
+import importlib.machinery, importlib.util, os, sys, threading
+path, jpath = sys.argv[1], sys.argv[2]
+os.environ["SBM_NOTES_DB"] = jpath
+loader = importlib.machinery.SourceFileLoader("sbw", path)
+spec = importlib.util.spec_from_loader("sbw", loader)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+results = []
+def worker(_):
+    try:
+        # Contention is skipped, never waited on: retry briefly so a
+        # 16-way pile-up still delivers at least once without ever
+        # blocking. The race itself (shared key, shared file) is real
+        # on every attempt; retries only tolerate total lock-out.
+        import time as _t
+        for _ in range(50):
+            if mod.bridge_emit("build.failed", "racepkg", "1.0-r1", 4242, 1, {}):
+                results.append(True)
+                return
+            _t.sleep(0.005)
+        results.append(False)
+    except Exception as e:  # noqa: BLE001 - the bridge must never raise; record it
+        results.append(f"RAISED:{e}")
+threads = [threading.Thread(target=worker, args=(i,)) for i in range(16)]
+[t.start() for t in threads]
+[t.join() for t in threads]
+assert all(r in (True, False) for r in results), results
+assert any(results), "event lost under concurrency"
+print(f"concurrency ok: {len(results)} writers, none raised")
+PY
+n=$(python3 -c 'import sqlite3,sys; print(sqlite3.connect(sys.argv[1]).execute("SELECT count(*) FROM session_events WHERE event=\"build.failed\"").fetchone()[0])' "$BJOURNAL")
+[ "$n" -ge "1" ] && ok "concurrent writers deliver the event (rows=$n, deduped by obligations GROUP BY)" || bad "concurrent writers lost the event"
+
+# 7. Published-NVR rule: a BLOCKED row whose exact NVR is published reads succeeded.
+mkjournal
+mkrecipe pubpkg 2.0 4 "ghost-missing-dep"
+env $BENV "$SAPHIRA_BUILD" scan > /dev/null 2>&1
+printf 'not an apk\n' > "$BREP/pubpkg-2.0-r4.apk"
+env $BENV "$SAPHIRA_BUILD" status > "$TMP/bridge-status-pub.out" 2>&1
+if grep -q "pubpkg" "$TMP/bridge-status-pub.out" && grep "pubpkg" "$TMP/bridge-status-pub.out" | grep -q "PUBLISHED"; then
+	ok "status reports succeeded for a published NVR despite BLOCKED row"
+else
+	bad "status does not report succeeded for published NVR"
+fi
+env $BENV "$SAPHIRA_BUILD" queue > "$TMP/bridge-queue-pub.out" 2>&1 || true
+if grep -q "pubpkg" "$TMP/bridge-queue-pub.out"; then
+	bad "queue lists a published NVR as outstanding"
+else
+	ok "queue hides a published NVR from outstanding states"
+fi
+rm -f "$BREP/pubpkg-2.0-r4.apk"
+
+# 8. Stalled sweep: old QUEUED row emits one bucketed build.stalled event.
+mkjournal
+mkrecipe stallpkg 1.0 1 ""
+env $BENV "$SAPHIRA_BUILD" scan > /dev/null 2>&1
+python3 - "$BST/queue.db" <<'PY'
+import sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+conn.execute("UPDATE builds SET queued_at='2020-01-01T00:00:00Z' WHERE package='stallpkg'")
+conn.commit()
+PY
+env $BENV "$SAPHIRA_BUILD" scan > /dev/null 2>&1
+stalled=$(python3 -c 'import sqlite3,sys; print(sqlite3.connect(sys.argv[1]).execute("SELECT count(*) FROM session_events WHERE event LIKE \"build.stalled.%\"").fetchone()[0])' "$BJOURNAL")
+[ "$stalled" = "1" ] && ok "stalled sweep emits one bucketed event" || bad "stalled sweep emitted $stalled"
+env $BENV "$SAPHIRA_BUILD" scan > /dev/null 2>&1
+stalled2=$(python3 -c 'import sqlite3,sys; print(sqlite3.connect(sys.argv[1]).execute("SELECT count(*) FROM session_events WHERE event LIKE \"build.stalled.%\"").fetchone()[0])' "$BJOURNAL")
+[ "$stalled2" = "1" ] && ok "stalled resweep does not duplicate" || bad "stalled resweep duplicated ($stalled2)"
+# --- publication reconciliation + effective state -----------------------
+#
+# The queue is not the only publication path: operators run
+# `sudo sign-apk-repo` directly (the documented human step), which
+# regenerates repository.db without touching queue.db. Rows then read
+# AWAITING SIGNING forever while their exact NVR is live (observed:
+# grub/lvm2 r3). sync_published() backfills published_at from
+# repository.db (exact-NVR only, repo timestamp, fail-open).
+# Effective state is requested recipe NVR + actual repo publication +
+# the attempt, never the latest row alone.
+SREP=$TMP/syncrepo
+mkdir -p "$SREP"
+python3 - "$SREP/repository.db" <<'PY'
+import sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+conn.execute("CREATE TABLE packages(package_id INTEGER PRIMARY KEY, name TEXT NOT NULL, version TEXT NOT NULL, pkgrel INTEGER NOT NULL, nvr TEXT NOT NULL, apk_sha256 TEXT NOT NULL, is_newest INTEGER NOT NULL, published_at TEXT, UNIQUE(name, version))")
+conn.execute("INSERT INTO packages(name,version,pkgrel,nvr,apk_sha256,is_newest,published_at) VALUES('syncpkg','3.1',2,'syncpkg-3.1-r2','x'*64,1,'2026-10-01T00:00:00Z')")
+conn.commit()
+PY
+mkrecipe syncpkg 3.1 2 ""
+SENV="SAPHIRA_BUILD_STATE=$BST SAPHIRA_RECIPES=$BREC SAPHIRA_INCOMING=$BINC SAPHIRA_REPO=$SREP SAPHIRA_BUILDCMD=$TMP/stub-buildpkg SAPHIRA_APK=$TMP/stub-apk SAPHIRA_TEST_ROOTS=$TMP/btestroots SAPHIRA_INCOMING_STUB=$BINC REPO_ROOT=$BREC"
+# Deterministic PASS row (direct insert, like the STALE test): the point
+# under test is publication reconciliation, not the stub build.
+python3 - "$BST/queue.db" <<'PY'
+import sqlite3, json, sys
+conn = sqlite3.connect(sys.argv[1])
+conn.execute("INSERT INTO builds(package,version,revision,recipe_hash,state,result_json,queued_at,started_at,finished_at) VALUES(?,?,?,?,?,?,?,?,?)",
+    ("syncpkg", "3.1", "2", "0" * 64, "PASS", json.dumps({"stages": {"BUILD": {"status": "pass"}}}),
+     "2026-10-01T00:00:00Z", "2026-10-01T00:00:01Z", "2026-10-01T00:00:02Z"))
+conn.commit()
+PY
+env $SENV "$SAPHIRA_BUILD" reconcile > "$TMP/reconcile-sync.out" 2>&1
+assert_contains "reconcile stamps repo-published rows" "$TMP/reconcile-sync.out" "stamped published from the repository"
+pub=$(python3 -c 'import sqlite3,sys; print(sqlite3.connect(sys.argv[1]).execute("SELECT published_at FROM builds WHERE package=\"syncpkg\" ORDER BY id DESC LIMIT 1").fetchone()[0])' "$BST/queue.db")
+t_eq_tmp="2026-10-01T00:00:00Z"
+[ "$pub" = "$t_eq_tmp" ] && ok "published_at backfilled with the repo timestamp, not now" || bad "published_at is $pub, want repo timestamp"
+env $SENV "$SAPHIRA_BUILD" status > "$TMP/status-sync.out" 2>&1
+if grep "syncpkg" "$TMP/status-sync.out" | grep -q "PUBLISHED"; then
+	ok "effective state reads PUBLISHED after sync"
+else
+	bad "effective state does not read PUBLISHED after sync"
+fi
+
+# STALE: the attempt failed for an NVR the recipe has moved past.
+mkrecipe stalepkg 2.0 2 ""
+python3 - "$BST/queue.db" <<'PY'
+import sqlite3, json, sys
+conn = sqlite3.connect(sys.argv[1])
+conn.execute("INSERT INTO builds(package,version,revision,recipe_hash,state,result_json,queued_at,started_at,finished_at) VALUES(?,?,?,?,?,?,?,?,?)",
+    ("stalepkg", "1.0", "1", "0" * 64, "FAIL", json.dumps({"stages": {"BUILD": {"status": "fail"}}}),
+     "2026-10-01T00:00:00Z", "2026-10-01T00:00:01Z", "2026-10-01T00:00:02Z"))
+conn.commit()
+PY
+env $SENV "$SAPHIRA_BUILD" status > "$TMP/status-stale.out" 2>&1
+if grep "stalepkg" "$TMP/status-stale.out" | grep -q "STALE"; then
+	ok "failed attempt past the recipe NVR reads STALE, not FAILED"
+else
+	bad "stale failure not distinguished"
+fi
+if grep "stalepkg" "$TMP/status-stale.out" | grep -q "recipe now 2.0-r2"; then
+	ok "stale note names the requested revision"
+else
+	bad "stale note missing requested revision"
+fi
+# gpu-unlock shape: latest QUEUED with older BLOCKED rows reads QUEUED
+# (latest attempt wins) while history keeps the BLOCKED attempts.
+mkrecipe gunlock 2.0.0 1 "ghostdep-unlock"
+env $SENV "$SAPHIRA_BUILD" scan > /dev/null 2>&1
+python3 - "$BST/queue.db" <<'PY'
+import sqlite3, json, sys
+conn = sqlite3.connect(sys.argv[1])
+conn.execute("UPDATE builds SET state='QUEUED', result_json=? WHERE package='gunlock' AND state='BLOCKED'",
+    (json.dumps({"stages": {}}),))
+conn.commit()
+PY
+env $SENV "$SAPHIRA_BUILD" status > "$TMP/status-gunlock.out" 2>&1
+if grep "gunlock" "$TMP/status-gunlock.out" | grep -q "QUEUED"; then
+	ok "latest QUEUED wins over older BLOCKED rows (with history kept)"
+else
+	bad "gpu-unlock-shaped rows do not read QUEUED"
+fi
+unset SBM_NOTES_DB
+
 WORLD_AFTER2=$(sha256sum /etc/apk/world 2>/dev/null | cut -d' ' -f1 || echo none)
 [ "$WORLD_BEFORE" = "$WORLD_AFTER2" ] && ok "Egg package world unchanged after recovery" || bad "Egg package world CHANGED"
 

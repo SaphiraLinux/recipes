@@ -55,8 +55,29 @@ test -n "$repository" || test -s /etc/apk/repositories ||
 	die 'host repository configuration is unavailable'
 test -d "$target" || die "target is not a directory: $target"
 target=$(readlink -f -- "$target") || die "cannot resolve target: $target"
-if find "$target" -mindepth 1 -maxdepth 1 ! -name lost+found -print -quit |
-	grep -q .; then
+
+# A target with separately mounted filesystems (the installer's own
+# /boot, mounted by the orchestrator ahead of assembly so kernel files
+# land in it) is still an empty target: mount points are the caller's
+# scaffolding, not installed content. Entries residing on a different
+# device than the target itself are therefore skipped here. Anything
+# else must be absent except lost+found (this tool has no --reinstall;
+# clearing a non-empty target is the caller's job).
+target_not_empty()
+{
+	dir=$1
+	tdev=$(stat -c %d "$dir") || return 0
+	for entry in "$dir"/* "$dir"/.*; do
+		[ -e "$entry" ] || [ -L "$entry" ] || continue
+		case ${entry##*/} in .|..|lost+found) continue ;; esac
+		edev=$(stat -c %d "$entry") || return 0
+		[ "$edev" != "$tdev" ] && continue
+		return 0
+	done
+	return 1
+}
+
+if target_not_empty "$target"; then
 	die 'target is not empty'
 fi
 

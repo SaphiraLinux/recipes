@@ -1,0 +1,2 @@
+# postfix-pcre loader fragment: PCRE map plugin.
+pcre	postfix-pcre.so	dict_pcre_open

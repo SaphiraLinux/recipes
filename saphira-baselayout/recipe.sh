@@ -2,7 +2,7 @@
 
 pkgname=saphira-baselayout
 pkgver=0.1
-pkgrel=64
+pkgrel=65
 # r62: backfilled identity registry (86 packaged/systemd rows; existing
 # rows byte-identical) plus firstboot arming on the apk skeleton's empty
 # root hash (0.2.2 images shipped locked-root with no marker and no
@@ -465,6 +465,10 @@ recipe_install()
 		"$PKGDEST/etc/systemd/system.conf.d/10-saphira-path.conf"
 	install -m 0644 "$RECIPE_DIR/files/network.conf" \
 		"$PKGDEST/etc/network.conf"
+	# Base sysctl defaults (source-route lock per RFC 7126; applied
+	# by the sysctl service at boot, both init systems).
+	install -m 0644 "$RECIPE_DIR/files/sysctl.conf" \
+		"$PKGDEST/etc/sysctl.conf"
 	install -m 0644 "$RECIPE_DIR/files/default-grub" \
 		"$PKGDEST/etc/default/grub"
 	for example in 10-eth0.conf.example 20-eth1.conf.example; do

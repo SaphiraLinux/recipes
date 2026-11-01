@@ -64,7 +64,9 @@ makedepends="
 "
 
 # No tcmalloc packaged (upstream defaults it on - must opt out or
-# configure hard-fails); no SELinux on Saphira. Upstream sysv init
+# configure hard-fails); no SELinux on Saphira. No liburing recipe
+# exists anywhere, so io_uring is disabled with that documented
+# reason (not to ease the port). Upstream sysv init
 # scripts are parked out of /etc/init.d; ours take their place.
 #
 # Dual-init: files/*.initd and files/*.service ship unconditionally and
@@ -85,6 +87,7 @@ gluster_options="
     --with-initdir=/usr/share/glusterfs/init.d
     --without-tcmalloc
     --disable-selinux
+    --disable-linux-io_uring
 "
 
 recipe_build()

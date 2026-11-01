@@ -23,9 +23,10 @@ makedepends="
 	brotli-dev
 	nghttp2
 	libidn2-dev
+	libunistring-dev
 	openldap-dev
 "
-depends_dev="openssl-dev zlib-dev zstd-dev brotli-dev nghttp2 libidn2-dev openldap-dev"
+depends_dev="openssl-dev zlib-dev zstd-dev brotli-dev nghttp2 libidn2-dev libunistring-dev openldap-dev"
 subpackages="$pkgname-dev"
 recipe_build() {
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$RECIPE_DIR/files/curl-8.20.0.tar.xz"

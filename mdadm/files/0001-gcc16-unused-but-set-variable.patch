@@ -1,0 +1,14 @@
+From: Saphira packaging <recipes@saphira.vm2.uk>
+Subject: [PATCH] gcc16/musl: tolerate new errors, map off64_t
+
+mdadm 4.4 trips -Werror=unused-but-set-variable (Assemble.c,
+Detail.c), -Werror=format-overflow (super-intel.c) under gcc 16,
+and uses glibc-only off64_t (restripe.c; musl off_t is always
+64-bit, so the mapping is exact). Narrow carve-outs instead of
+dropping -Werror wholesale.
+
+--- a/Makefile
++++ b/Makefile
+@@ -53 +53 @@
+-CWFLAGS ?= -Wall -Werror -Wstrict-prototypes -Wextra -Wno-unused-parameter -Wformat -Wformat-security -Werror=format-security -fstack-protector-strong -fPIE -Warray-bounds
++CWFLAGS ?= -Wall -Werror -Wstrict-prototypes -Wextra -Wno-unused-parameter -Wformat -Wformat-security -Werror=format-security -fstack-protector-strong -fPIE -Warray-bounds -Wno-error=unused-but-set-variable -Wno-error=format-overflow -Doff64_t=off_t

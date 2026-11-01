@@ -29,6 +29,7 @@ makedepends="
     autoconf
     automake
     binutils
+    elfutils-dev
     gcc
     json-c-dev
     libtool
@@ -37,8 +38,10 @@ makedepends="
     openssl-dev
     pkgconf
     python3
+    python3-dev
     readline-dev
 "
+# python3-dev: configure probes the python-3.14 pkg-config module.
 
 recipe_build()
 {

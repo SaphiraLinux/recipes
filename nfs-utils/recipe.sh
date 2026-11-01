@@ -27,11 +27,14 @@ makedepends="
 	libnl-dev
 	libtirpc-dev
 	make
+	ncurses-dev
 	pkgconf
 	readline-dev
 	sqlite-dev
 	util-linux-dev
 "
+# ncurses-dev: readline.pc Requires termcap (same transitive-.pc
+# class as knot/glib).
 
 # libevent/sqlite: upstream 2.9.2 builds nfsdcld by default (operator
 # decision: KEEP) but its configure.ac never sets LIBEVENT/LIBSQLITE, so

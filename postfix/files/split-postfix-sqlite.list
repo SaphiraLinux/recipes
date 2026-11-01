@@ -1,0 +1,5 @@
+# postfix-sqlite named split: SQLite map plugin + loader fragment.
+# Base ships a backend-free dynamicmaps.cf; installing this split
+# enables the sqlite: map type.
+usr/lib/postfix/postfix-sqlite.so
+etc/postfix/dynamicmaps.cf.d/sqlite.cf

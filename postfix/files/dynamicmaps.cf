@@ -1,0 +1,5 @@
+# Saphira base dynamicmaps.cf: no backend entries. Each optional
+# database backend (sqlite, mysql, lmdb, pgsql, pcre) is enabled by
+# the dynamicmaps.cf.d fragment its postfix-<backend> split ships.
+# A lookup for a type with no installed plugin fails loudly at
+# lookup time instead of shipping silent misbehavior.

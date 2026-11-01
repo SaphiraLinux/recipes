@@ -52,7 +52,9 @@ recipe_build()
 	printf '%s  %s\n' "$expected" "$BUILDDIR/stage0.tar.xz" | sha256sum -c - ||
 		fatal "bootstrap archive checksum mismatch"
 	mkdir -p "$stage0"
-	tar -xf "$BUILDDIR/stage0.tar.xz" -C "$stage0" --strip-components=1
+	# --no-same-owner: upstream archives record uid/gid 1000, which
+	# the build namespace cannot chown (same class as lldpd usermode).
+	tar --no-same-owner -xf "$BUILDDIR/stage0.tar.xz" -C "$stage0" --strip-components=1
 	test -x "$stage0/zig" || fatal "bootstrap archive has no zig binary"
 	"$stage0/zig" version | grep -q "^0.16.0" || fatal "unexpected bootstrap version"
 	cd "$SRC"

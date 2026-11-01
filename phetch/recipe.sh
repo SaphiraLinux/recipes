@@ -18,6 +18,7 @@ sha256=a0806d2ea41a70dd803f9a0d8c670995c71982f8e333919251c8fbe004f2de11
 
 depends="
     openssl
+    zlib
 "
 
 # Native Saphira Rust toolchain model (same as ripgrep): pinned rustc
@@ -28,12 +29,15 @@ makedepends="
     binutils
     curl
     gcc
+    libunwind-dev
     make
     openssl-dev
     pkgconf
     python3
     rustc>=1.97.1-r1
+    zlib-dev
 "
+# libunwind-dev: the libc crate build script links -lunwind.
 
 fatal()
 {
@@ -77,6 +81,11 @@ for path in sorted(root.rglob("*")):
 )
 PY
 	done < "$RECIPE_DIR/crates.lock"
+	# The .crate ships .cargo/config (build rustflags only); cargo
+	# prefers it over config.toml, which would shadow our vendored
+	# source replacement and break offline resolution. Our RUSTFLAGS
+	# govern flags instead.
+	rm -f "$SRC/.cargo/config"
 	cat > "$SRC/.cargo/config.toml" <<EOF
 [source.crates-io]
 replace-with = "saphira-vendored"
@@ -86,8 +95,9 @@ directory = "$vendor"
 EOF
 	cd "$SRC"
 	CARGO_HOME=$BUILDDIR/cargo-home \
-		RUSTFLAGS='-Ctarget-cpu=x86-64-v3 -Clink-arg=-Wl,--build-id=sha1' \
+		RUSTFLAGS='-Ctarget-cpu=x86-64-v3 -Clink-arg=-Wl,--build-id=sha1 -Clink-arg=-lz' \
 		cargo build --frozen --offline --release
+	# -lz: static libcrypto.a needs zlib symbols at final link.
 }
 
 recipe_install()

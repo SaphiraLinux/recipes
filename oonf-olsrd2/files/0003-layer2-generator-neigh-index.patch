@@ -1,0 +1,18 @@
+From: Saphira packaging <recipes@saphira.vm2.uk>
+Subject: [PATCH] layer2-generator: use neighbor index for neighbor metadata
+
+_cb_l2gen_event indexed neighbor metadata with net_idx (enum
+oonf_layer2_network_index) instead of neigh_idx (enum
+oonf_layer2_neighbor_index): -Wenum-conversion, and the wrong slot
+when the two counts differ. The sibling loop above already uses each
+index for its own domain.
+
+--- a/src-plugins/generic/layer2_generator/layer2_generator.c
++++ b/src-plugins/generic/layer2_generator/layer2_generator.c
+@@ -246,7 +246,7 @@
+   for (neigh_idx = 0; neigh_idx < OONF_LAYER2_NEIGH_COUNT; neigh_idx++) {
+-    _set_data(&neigh->data[neigh_idx], oonf_layer2_neigh_metadata_get(net_idx)->type, event_counter);
++    _set_data(&neigh->data[neigh_idx], oonf_layer2_neigh_metadata_get(neigh_idx)->type, event_counter);
+   }
+   oonf_layer2_neigh_commit(neigh);
+ }

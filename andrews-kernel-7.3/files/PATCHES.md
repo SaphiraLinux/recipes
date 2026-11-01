@@ -8,7 +8,9 @@ new bytes here deliberately (never symlink, never auto-sync) and note
 it in the recipe header.
 
 Kernel freedom patches (copies of `saphira-kernel-7.3/files/`, see
-https://articles.akadata.co.uk/when-the-kernel-turns-against-you-linux-freedom-of-choice/):
+https://articles.akadata.co.uk/when-the-kernel-turns-against-you-linux-freedom-of-choice/).
+Both copies carry the exact 7.3 upstream context and every application
+site fails closed on fuzz or offset.
 
 | File | Why | Upstreamable? |
 |---|---|---|

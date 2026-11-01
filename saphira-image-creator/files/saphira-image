@@ -674,7 +674,16 @@ partition_plan()
 	# must stay consistent with this single formula.
 	swap_start=$((first_sector + fixed_head + root_sectors))
 	if [ -n "${SWAP_SECTORS:-}" ]; then
-		swap_line="start=$swap_start, size=$SWAP_SECTORS, type=0657FD6D-A4AB-43AF-A651-DD3D514A0FB, name=\"swap\""
+		# Canonical Linux-swap GPT type GUID (Discoverable Partitions
+		# Specification as implemented by util-linux sfdisk: its
+		# `swap` alias resolves to exactly this value). The retired
+		# DPS GUID 0657FD6D-A4AB-43AF-A651-DD3D514A0FB must NOT be
+		# used: sfdisk 2.41.1 fails to write it outright ("Failed
+		# to add #N partition: Invalid argument" at add time and
+		# "failed to set partition type" via --part-type), proven
+		# file-backed on identical geometry, while every other
+		# tested GUID (ESP, Linux, home, random) writes cleanly.
+		swap_line="start=$swap_start, size=$SWAP_SECTORS, type=0657FD6D-A4AB-43C4-84E5-0933C84B4F4F, name=\"swap\""
 	else
 		swap_line=
 	fi

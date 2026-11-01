@@ -1,0 +1,27 @@
+#!/bin/sh
+# Regenerate the boot configuration after this package changes /boot.
+#
+# Without this, installing or upgrading saphira-kernel left
+# /boot/grub/grub.cfg describing the PREVIOUS kernel. That is not
+# cosmetic: a stale config can label one release and boot another, and a
+# newly installed kernel does not appear in the menu at all. This was
+# observed on a live host, where the generated config offered three
+# entries all labelled 7.1.5 while every one of them loaded
+# vmlinuz-7.2.2-akadata.
+#
+# GRUB absent is a legitimate no-op: a system that does not boot through
+# GRUB has nothing to regenerate. GRUB present but failing is NOT
+# swallowed -- this script is the last thing standing between a kernel
+# upgrade and a boot menu that cannot see it, and a verified failure is
+# exactly what an operator needs to see. Verified behaviour: a non-zero
+# hook makes apk report the error and exit non-zero, while the package
+# itself still commits, so the failure is loud without rolling back a
+# kernel that is already correctly installed.
+#
+# apk runs this AFTER the payload is in its final state, so the new
+# image is on disk and discoverable when grub-mkconfig scans /boot.
+#
+# Absolute paths only: hooks run under apk with a minimal PATH.
+if [ -x /usr/sbin/grub-mkconfig ]; then
+	/usr/sbin/grub-mkconfig -o /boot/grub/grub.cfg
+fi

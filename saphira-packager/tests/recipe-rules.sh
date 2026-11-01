@@ -425,6 +425,19 @@ grep -Eq '^depends="[^"]*systemd-libs' "$source_root/dbus/recipe.sh" || {
 	exit 1
 }
 
+# Incident: expat declared depends="gcc-libs", dragging an 8,389 KiB
+# compiler runtime library into every minimal image via
+# systemd -> dbus -> expat. The payload never needed it: libexpat links
+# only libc (readelf -d shows NEEDED libc.so alone) and xmlwf links only
+# libexpat and libc, so no libgcc_s or libstdc++ reference exists. The
+# efivar r2->r3 fix is the precedent for the same shape (a C payload
+# with a wholesale toolchain-runtime dep). The compiler belongs in
+# makedepends, never in the runtime closure: gcc itself stays optional.
+grep -Eq '^depends="[^"]*gcc-libs' "$source_root/expat/recipe.sh" && {
+	printf '%s\n' 'expat must not depend on gcc-libs (libc-only payload; compiler is makedepends-only)' >&2
+	exit 1
+}
+
 # Incident: legacy sidecars steer install-blocked migrations, so a
 # malformed or dangling sidecar is a broken repair path. Every
 # accounts.d/*.legacy must sit beside its fragment, contain only
@@ -747,6 +760,39 @@ for kver in 7.1.5 7.2.2 7.2.3 7.3-rc1; do
 		exit 1
 	}
 done
+
+# Kernel file ownership (absolute): every kernel owns its files. A kernel
+# recipe must seed .config from its own files/ copy, never from another
+# kernel's tree, and no config-*-akadata may exist directly under
+# saphira-kernel/files/ (that directory holds shared build logic, not
+# per-kernel identity; stale duplicates once shadowed the owned copies at
+# different line numbers). Violations fail closed here rather than
+# shipping a kernel built from the wrong config.
+if ls "$source_root"/saphira-kernel/files/config-*-akadata >/dev/null 2>&1; then
+	printf '%s\n' 'saphira-kernel/files/ must not contain config-*-akadata (per-kernel identity lives in its own files/)' >&2
+	exit 1
+fi
+for kdir in "$source_root"/saphira-kernel-[0-9]*/ "$source_root"/andrews-kernel-*/; do
+	[ -d "$kdir" ] || continue
+	kbase=${kdir%/}; kbase=${kbase##*/}
+	k_recipe=$kdir/recipe.sh
+	[ -f "$k_recipe" ] || continue
+	if grep -qE 'SIB/config|\.\./saphira-kernel-[^/]+/files/config|\.\./andrews-kernel-[^/]+/files/config' "$k_recipe"; then
+		printf '%s\n' "$kbase recipe seeds .config from another kernel tree (every kernel owns its files)" >&2
+		exit 1
+	fi
+done
+# Every versioned kernel line must carry its own config copy.
+for kver in 7.1.5 7.2.2 7.2.3 7.3-rc1 7.3; do
+	[ -f "$source_root/saphira-kernel-$kver/files/config-$kver-akadata" ] || {
+		printf '%s\n' "saphira-kernel-$kver lost its owned config copy" >&2
+		exit 1
+	}
+done
+[ -f "$source_root/andrews-kernel-7.3/files/config-7.3-akadata" ] || {
+	printf '%s\n' 'andrews-kernel-7.3 lost its owned config copy' >&2
+	exit 1
+}
 
 # FHS migration declarations (hotfix/var-packaging-bug-var-run-isnot-run):
 # every files/fhs.d/* fragment must parse under makepkg's strict

@@ -24,11 +24,18 @@ makedepends="
     binutils
     gcc
     glib-dev
+    libffi-dev
     meson
     ninja
+    pcre2-dev
     pkgconf
     python3-dev
+    setuptools
 "
+# setuptools: meson probes the python3 module (python3-dev ships no
+# setuptools); provider package is named `setuptools`.
+# pcre2-dev: glib-2.0.pc Requires libpcre2-8 (meson-log evidence).
+# libffi-dev: gobject-2.0.pc Requires libffi (meson-log evidence).
 
 subpackages="gobject-introspection-dev"
 

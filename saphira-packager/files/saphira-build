@@ -38,6 +38,192 @@ STATE = Path(os.environ.get("SAPHIRA_BUILD_STATE", "/var/lib/saphira-build"))
 RECIPES = Path(os.environ.get("SAPHIRA_RECIPES", "/recipes"))
 
 
+# --- Optional MCP journal bridge (fail-open, non-blocking) -----------------
+#
+# saphira-build is independent: it never requires the MCP journal to exist,
+# be writable, or be schema-compatible. When the journal database IS present
+# (SBM_NOTES_DB, else STATE/notes.db - the MCP's own database), the builder
+# opportunistically records outstanding-work transitions as session_events
+# rows so the agent learns of failures without polling.
+#
+# Rules, all load-bearing:
+# - Never create the journal file. sqlite3.connect() creates on open, so the
+#   path must pass is_file() first. No journal, no bridge, build unaffected.
+# - Negligible delay only: timeout=0 (never wait on a lock). On contention,
+#   missing file, read-only dir, schema mismatch, or ANY error: skip and
+#   return False. Recovery is the MCP's startup reconciliation, never a
+#   builder retry. The builder's own builds-table commit always precedes any
+#   bridge attempt and never depends on its outcome.
+# - Exact-match identity only, never LIKE: title is the stable key
+#   "bridge:<builder>:<build_id>:<event>:<seq>", checked with `=`. The body
+#   carries the full JSON detail (bridge_v, builder, build_id, seq, event,
+#   nvr, state, stage/detail, hashes, log dir, timestamps).
+# - One event per transition: terminal FAIL/INTERRUPTED use seq 1 (the row
+#   never transitions again; retries create new rows). BLOCKED uses a
+#   per-row blocked_seq stored in result_json["bridge"] so re-entries with
+#   identical blockers still distinguish transitions. STALLED/AWAITING use
+#   age buckets in the event name (build.stalled.6h) so each bucket emits
+#   at most once per row.
+BRIDGE_VERSION = 1
+BRIDGE_REQUIRED_COLUMNS = {
+    "event", "package", "label", "title", "body",
+    "author", "recorder", "created_at",
+}
+STALLED_AFTER_S = 3600
+AWAITING_AFTER_S = 86400
+
+
+def builder_id():
+    """Stable builder identity: explicit env wins, else the builder hostname.
+
+    Survives reboots (unlike pid/boot_id) and distinguishes builders sharing
+    one journal (Egg vs armer via hostname). Deliberately reconstructible
+    from builds.builder_host so MCP reconciliation computes identical event
+    keys without the builder present. Never requires the MCP to exist."""
+
+    explicit = os.environ.get("SAPHIRA_BUILDER_ID")
+    if explicit:
+        return explicit
+    explicit = os.environ.get("SAPHIRA_BUILDER_NAME")
+    if explicit:
+        return explicit
+    try:
+        return socket.gethostname()
+    except OSError:
+        return "unknown-builder"
+
+
+def bridge_journal_path():
+    """Journal path the bridge may write, or None when bridging is off."""
+    override = os.environ.get("SBM_NOTES_DB")
+    if override:
+        return Path(override)
+    return STATE / "notes.db"
+
+
+def bridge_emit(event, pkg, nvr, build_id, seq, detail):
+    """Opportunistically insert one session_events row. Never raises.
+
+    Returns True when the event is present (already there or just inserted),
+    False when bridging was skipped (no journal, locked, schema mismatch,
+    any error). Callers must never branch build logic on the outcome."""
+    try:
+        path = bridge_journal_path()
+        if not path.is_file():
+            return False
+        key = f"bridge:{builder_id()}:{int(build_id)}:{event}:{int(seq)}"
+        body = json.dumps({
+            "bridge_v": BRIDGE_VERSION,
+            "builder": builder_id(),
+            "build_id": int(build_id),
+            "seq": int(seq),
+            "event": event,
+            "package": pkg,
+            "nvr": nvr,
+            "detail": detail,
+        }, sort_keys=True)
+        conn = sqlite3.connect(str(path), timeout=0)
+        try:
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(session_events)")}
+            if not BRIDGE_REQUIRED_COLUMNS.issubset(cols):
+                return False
+            hit = conn.execute(
+                "SELECT 1 FROM session_events WHERE event=? AND title=?",
+                (event, key),
+            ).fetchone()
+            if hit:
+                return True
+            conn.execute(
+                "INSERT OR IGNORE INTO session_events"
+                "(event,package,label,title,body,author,recorder,created_at)"
+                " VALUES(?,?,?,?,?,?,?,?)",
+                (event, pkg, nvr or "", key, body,
+                 "saphira-build", "builder-bridge", now()),
+            )
+            conn.commit()
+            return True
+        finally:
+            conn.close()
+    except Exception:
+        return False
+
+
+def bridge_row_seq(result, field="seq"):
+    """Current per-row bridge sequence number stored in result_json."""
+    try:
+        return int(result.get("bridge", {}).get(field, 0))
+    except (ValueError, TypeError, AttributeError):
+        return 0
+
+
+def bridge_bump_seq(result, field="seq"):
+    """Increment and return the per-row bridge sequence number."""
+    seq = bridge_row_seq(result, field) + 1
+    bridge = dict(result.get("bridge") or {})
+    bridge[field] = seq
+    result["bridge"] = bridge
+    return seq
+
+
+def nvr_is_published(pkg, ver_rel):
+    """True when the exact NVR exists in the live repository.
+
+    A published NVR is succeeded work even when an older queue row for the
+    package reads BLOCKED or FAIL: the revision the queue was working toward
+    is already in the repo. Callers use the ROW's NVR, never the recipe's,
+    so a failed r4 is never hidden by a published r1."""
+    if not ver_rel:
+        return False
+    try:
+        return ver_rel in published_versions(pkg)
+    except Exception:
+        return False
+
+
+def row_nvr(row):
+    """'version-r revision' for a builds row, or '' when unknown."""
+    try:
+        ver = row["version"] if isinstance(row, sqlite3.Row) else row.get("version")
+        rev = row["revision"] if isinstance(row, sqlite3.Row) else row.get("revision")
+    except Exception:
+        return ""
+    parts = [p for p in (ver, ("r" + str(rev)) if rev else "") if p and p != "r"]
+    return "-".join(parts)
+
+
+def effective_state(conn, row, req_nvr, repo_nvrs):
+    """Current effective state for a latest-per-package queue row.
+
+    Determined from the requested recipe NVR, actual repository
+    publication and the row's own attempt - never from the latest row
+    alone: a FAILED r4 with a published r1 behind it is still FAILED
+    (the requested work failed), while any exact-NVR match in the repo
+    is succeeded work even when the row reads BLOCKED/FAIL (stale
+    queue state must never shadow a satisfied revision). Returns
+    (state_text, note). STALE means the recipe moved past this attempt:
+    kept visible for history, excluded from needs-attention counts.
+    """
+    row_ver_rel = row_nvr(row)
+    state = row["state"]
+    if row_ver_rel and row_ver_rel in repo_nvrs:
+        return "PUBLISHED", "succeeded (NVR published)"
+    if state in ("QUEUED", "BUILDING"):
+        return state, ""
+    if state == "BLOCKED":
+        return state, ""
+    if state == "INTERRUPTED":
+        return state, ""
+    if state == "FAIL":
+        if req_nvr and row_ver_rel and req_nvr != row_ver_rel:
+            return "STALE", f"failed {row_ver_rel}; recipe now {req_nvr}"
+        return state, ""
+    if state == "PASS":
+        if row["published_at"]:
+            return "PUBLISHED", ""
+        return "AWAITING SIGNING", ""
+    return state, ""
+
+
 def _packager_conf(name, default):
     """Read one packager config value: explicit env wins, else the
     SAPHIRA_CONFIG_FILE default chain (/etc/saphira/package_builder.sh),
@@ -331,6 +517,56 @@ def commit_hash():
     return r.stdout.strip() if r.returncode == 0 else ""
 
 
+def sync_published(conn):
+    """Backfill published_at for PASS rows already live in the repository.
+
+    Publication normally runs through `saphira-build publish`, which stamps
+    the row. But operators also run `sudo sign-apk-repo` directly (the
+    documented human signing step), which regenerates indexes without
+    touching the queue: the row then reads AWAITING SIGNING forever while
+    its exact NVR is live (observed: grub/lvm2 r3 in the repo since Oct
+    26/27, rows still AWAITING). This reconciles from repository.db,
+    authoritative for what is published, using the repo's own
+    published_at timestamp - never fabricated, never backdated to now.
+    Exact-NVR only; fail-open (missing/unreadable repo DB skips silently).
+    Returns the number of rows stamped.
+    """
+    try:
+        import sqlite3 as _sq
+        repodb = REPO / "repository.db"
+        if not repodb.is_file():
+            return 0
+        rconn = _sq.connect(f"file:{repodb}?mode=ro", uri=True, timeout=0)
+        try:
+            rows = conn.execute(
+                "SELECT id,package,version,revision FROM builds"
+                " WHERE state='PASS' AND published_at IS NULL"
+            ).fetchall()
+            fixed = 0
+            for r in rows:
+                rel = ("r" + str(r["revision"])) if r["revision"] else ""
+                ver_rel = "-".join(
+                    x for x in (r["version"], rel) if x and x != "r")
+                if not ver_rel:
+                    continue
+                hit = rconn.execute(
+                    "SELECT published_at FROM packages WHERE name=? AND nvr=?",
+                    (r["package"], f"{r['package']}-{ver_rel}"),
+                ).fetchone()
+                if hit and hit[0]:
+                    conn.execute(
+                        "UPDATE builds SET published_at=? WHERE id=?",
+                        (hit[0], r["id"]),
+                    )
+                    fixed += 1
+            conn.commit()
+            return fixed
+        finally:
+            rconn.close()
+    except Exception:
+        return 0
+
+
 def dep_state(conn, dep):
     """-> (satisfied: bool, blocker: bool, reason: str)"""
     rdir = RECIPES / dep
@@ -444,6 +680,10 @@ def reconcile_interrupted(conn):
              row["id"]),
         )
         retired.append((row["package"], row["version"], reason))
+        nvr_i = "-".join(x for x in (row["version"], ("r" + str(row["revision"])) if row["revision"] else "") if x and x != "r")
+        bridge_emit("build.interrupted", row["package"], nvr_i, row["id"], 1,
+                    {"state": "INTERRUPTED", "reason": reason,
+                     "started_at": row["started_at"], "log_dir": row["log_dir"]})
     if retired:
         conn.commit()
     for pkg, ver, reason in retired:
@@ -468,16 +708,81 @@ def recompute_blocking(conn):
                     break
         if blockers:
             res = json.loads(row["result_json"])
+            old_detail = (res.get("stages", {}).get("DEPENDENCIES", {})
+                          .get("detail"))
             res.setdefault("stages", {})["DEPENDENCIES"] = {
                 "status": "blocked", "detail": blockers,
             }
+            if row["state"] != "BLOCKED" or old_detail != blockers:
+                seq = bridge_bump_seq(res, "blocked_seq")
+            else:
+                seq = bridge_row_seq(res, "blocked_seq") or 1
+                if "bridge" not in res:
+                    res["bridge"] = {"blocked_seq": seq}
             conn.execute(
                 "UPDATE builds SET state='BLOCKED', result_json=? WHERE id=?",
                 (json.dumps(res), row["id"]),
             )
+            nvr = "-".join(x for x in (row["version"], ("r" + str(row["revision"])) if row["revision"] else "") if x and x != "r")
+            bridge_emit("build.blocked", row["package"], nvr, row["id"], seq,
+                        {"state": "BLOCKED", "blockers": blockers,
+                         "recipe_hash": row["recipe_hash"]})
         elif row["state"] == "BLOCKED":
+            res = json.loads(row["result_json"])
+            seq = bridge_row_seq(res, "blocked_seq") or 1
             conn.execute("UPDATE builds SET state='QUEUED' WHERE id=?", (row["id"],))
+            nvr = "-".join(x for x in (row["version"], ("r" + str(row["revision"])) if row["revision"] else "") if x and x != "r")
+            bridge_emit("build.unblocked", row["package"], nvr, row["id"], seq,
+                        {"state": "QUEUED", "previous": "BLOCKED"})
     conn.commit()
+
+
+def bridge_sweep_outstanding(conn):
+    """Best-effort sweep for STALLED and stale AWAITING SIGNING rows.
+
+    Called only from daemon-side paths (scan/run/daemon), never from
+    read-only reporting (status/queue/log). Every attempt is opportunistic
+    (bridge_emit never raises, timeout=0); anything skipped here is
+    recovered by MCP startup reconciliation. Emits at most one row per
+    (build, bucket); buckets distinguish transitions while exact-title
+    dedup prevents duplicate delivery."""
+    try:
+        rows = conn.execute(
+            "SELECT * FROM builds WHERE finished_at IS NULL"
+            " OR (state='PASS' AND published_at IS NULL)"
+        ).fetchall()
+    except Exception:
+        return
+    for row in rows:
+        try:
+            nvr = "-".join(x for x in (row["version"], ("r" + str(row["revision"])) if row["revision"] else "") if x and x != "r")
+            if row["state"] in ("QUEUED", "BUILDING"):
+                try:
+                    ref = row["queued_at"] or row["started_at"]
+                    age = (calendar.timegm(time.strptime(now(), "%Y-%m-%dT%H:%M:%SZ"))
+                           - calendar.timegm(time.strptime(ref, "%Y-%m-%dT%H:%M:%SZ"))) if ref else 0
+                except Exception:
+                    age = 0
+                if age >= STALLED_AFTER_S:
+                    bucket = "24h" if age >= 86400 else ("6h" if age >= 21600 else "1h")
+                    bridge_emit(f"build.stalled.{bucket}", row["package"], nvr,
+                                row["id"], 1,
+                                {"state": row["state"], "age_s": age,
+                                 "bucket": bucket})
+            elif row["state"] == "PASS" and not row["published_at"]:
+                try:
+                    ref = row["finished_at"]
+                    age = (calendar.timegm(time.strptime(now(), "%Y-%m-%dT%H:%M:%SZ"))
+                           - calendar.timegm(time.strptime(ref, "%Y-%m-%dT%H:%M:%SZ"))) if ref else 0
+                except Exception:
+                    age = 0
+                if age >= AWAITING_AFTER_S:
+                    bridge_emit("build.awaiting_signing", row["package"], nvr,
+                                row["id"], 1,
+                                {"state": "PASS", "age_s": age,
+                                 "finished_at": row["finished_at"]})
+        except Exception:
+            continue
 
 
 REQUEUE_WARN_THRESHOLD = 5
@@ -549,6 +854,8 @@ def cmd_scan(args):
         )
         queued += 1
     recompute_blocking(conn)
+    sync_published(conn)
+    bridge_sweep_outstanding(conn)
     print(f"scan: {queued} newly queued, {failed} left failed, {skipped} already proven/current")
     q = conn.execute("SELECT count(*) c FROM builds WHERE state='QUEUED'").fetchone()["c"]
     b = conn.execute("SELECT count(*) c FROM builds WHERE state='BLOCKED'").fetchone()["c"]
@@ -1002,6 +1309,17 @@ def run_one(conn, row, info):
          row["id"]),
     )
     conn.commit()
+    if overall == "FAIL":
+        fail_stage = next(
+            (k for k, v in stages.items()
+             if isinstance(v, dict) and v.get("status") == "fail"),
+            "BUILD",
+        )
+        bridge_emit("build.failed", pkg, ver_rel, row["id"], 1,
+                    {"state": "FAIL", "stage": fail_stage,
+                     "detail": (stages.get(fail_stage, {}) or {}).get("detail", ""),
+                     "recipe_hash": row["recipe_hash"],
+                     "log_dir": str(log_dir)})
     recompute_blocking(conn)
     if ver_rel and ver_rel in published_versions(pkg) and ready_dir is not None:
         discarded = INCOMING / ".validation-discarded"
@@ -1094,9 +1412,14 @@ def row_start(conn, rid):
 def cmd_reconcile(args):
     """Operator-facing form of the startup recovery: retire BUILDING rows no
     live builder owns, without waiting for a daemon restart."""
-    retired = reconcile_interrupted(db())
+    conn = db()
+    retired = reconcile_interrupted(conn)
+    synced = sync_published(conn)
+    bridge_sweep_outstanding(conn)
     if not retired:
         print("reconcile: no interrupted build rows")
+    if synced:
+        print(f"reconcile: {synced} PASS row(s) stamped published from the repository")
     return 0
 
 
@@ -1120,14 +1443,34 @@ def cmd_status(args):
                 v.get("status"), "?") for k, v in
             sorted(st.items(), key=lambda kv: ["BUILD", "INSTALL", "RUNTIME", "POLICY", "OPENRC", "SYSTEMD", "IDENTITY", "TEST", "DEPENDENCIES"].index(kv[0]) if kv[0] in ["BUILD", "INSTALL", "RUNTIME", "POLICY", "OPENRC", "SYSTEMD", "IDENTITY", "TEST", "DEPENDENCIES"] else 99)
         )
-        pub = "yes" if r["published_at"] else ("built" if r["state"] == "PASS" else "no")
-        skew = ""
         info = recipe_info(RECIPES / r["package"]) if (RECIPES / r["package"] / "recipe.sh").is_file() else {}
         rv = "-".join(x for x in (info.get("version"), "r" + str(info.get("revision"))) if x and x != "r")
         pv = published_versions(r["package"])
+        # Effective state: requested recipe NVR + actual repository
+        # publication + this attempt - never the latest row alone.
+        # Labels stay explicit: requested recipe revision, current
+        # repository newest, and this row's own publication record.
+        # Older BLOCKED rows stay relevant context: the daemon
+        # re-derives blocking every scan, so a flip back is one scan
+        # away.
+        state_text, note = effective_state(conn, r, rv or "", pv)
+        if state_text in ("QUEUED", "BUILDING"):
+            nblocked = conn.execute(
+                "SELECT COUNT(*) c FROM builds WHERE package=? AND state='BLOCKED'",
+                (r["package"],),
+            ).fetchone()["c"]
+            if nblocked:
+                note = (note + " " if note else "") + f"{nblocked} older BLOCKED row{'s' if nblocked != 1 else ''} on record"
+        pub = "yes" if (r["published_at"] or state_text == "PUBLISHED") else ("built" if r["state"] == "PASS" else "no")
+        skew = ""
         if rv and pv and rv not in pv and rv > max(pv):
             skew = f"recipe {rv} ahead of repo"
-        print(f"{r['package']:<28} {rv or (r['version'] or '?'):<18} {r['state']:<9} {s:<34} {pub:<4} {skew}")
+        repo_newest = max(pv) if pv else ""
+        if repo_newest and repo_newest != (rv or ""):
+            skew = (skew + " " if skew else "") + f"repo newest {repo_newest}"
+        if note:
+            skew = (skew + " " if skew else "") + note
+        print(f"{r['package']:<28} {rv or (r['version'] or '?'):<18} {state_text:<9} {s:<34} {pub:<4} {skew}")
 
 
 def cmd_times(args):
@@ -1241,18 +1584,28 @@ def cmd_log(args):
 
 def cmd_queue(args):
     conn = db()
+    print("queue lists unfinished rows by row-state; effective package state: see status")
     for state in ("QUEUED", "BLOCKED", "BUILDING"):
         rows = conn.execute(
-            "SELECT package,version,revision,result_json FROM builds WHERE state=? AND id IN (SELECT max(id) FROM builds GROUP BY package)",
+            "SELECT package,version,revision,state,result_json,published_at FROM builds WHERE state=? AND id IN (SELECT max(id) FROM builds GROUP BY package)",
             (state,),
         ).fetchall()
-        print(f"{state}: {len(rows)}")
+        shown = []
         for r in rows:
+            ver_rel = "-".join(x for x in (r["version"], ("r" + str(r["revision"])) if r["revision"] else "") if x and x != "r")
+            if ver_rel and nvr_is_published(r["package"], ver_rel):
+                continue
+            shown.append(r)
+        print(f"{state}: {len(shown)}")
+        for r in shown:
             extra = ""
             if state == "BLOCKED":
                 res = json.loads(r["result_json"])
                 d = res.get("stages", {}).get("DEPENDENCIES", {}).get("detail", [])
                 extra = "  # " + "; ".join(d)
+            eff, note = effective_state(conn, r, "", published_versions(r["package"]))
+            if eff != state:
+                extra += f"  [effective: {eff}{(': ' + note) if note else ''}]"
             print(f"  {r['package']} {r['version'] or ''}-r{r['revision'] or '?'}{extra}")
 
 

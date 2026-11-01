@@ -2,7 +2,21 @@
 
 pkgname=saphira-install-tools
 pkgver=0.1
-pkgrel=39
+pkgrel=42
+# r42: minimal-openrc/minimal-systemd gain procps-ng (minimer live gap:
+# nothing owned /bin/ps in the installer profiles). Manifest refreshed.
+# r41: same mount-aware target acceptance in saphira-bootstrap
+# (its own emptiness gate refused the mounted /boot one layer below
+# saphira-install, aborting every separate-/boot assembly after the
+# installer gate had already passed). New bootstrap-target-emptiness
+# suite, gated in recipe_build like the install one. Payload change.
+# r40: saphira-install target acceptance is mount-aware: separately
+# mounted filesystems below the target (the installer's own /boot)
+# are the caller's scaffolding, not content, for both the
+# empty-target refusal and the --reinstall wipe (which no longer
+# tries to rm -rf a live mountpoint). Without this every
+# --boot-size install died at assembly and --reinstall died
+# clearing. Payload change (tool + man page + test).
 # r39: minimal profiles gain vim, saphira-network and dhcpcd (both
 # inits); supplied --root-password spends the firstboot marker again.
 # Payload change (profiles + tool).
@@ -138,6 +152,10 @@ recipe_build()
 		{ echo "ERROR: image-creator-appliance suite failed" >&2; return 1; }
 	sh "$RECIPE_DIR/tests/genfstab.sh" ||
 		{ echo "ERROR: genfstab suite failed" >&2; return 1; }
+	sh "$RECIPE_DIR/tests/install-target-emptiness.sh" ||
+		{ echo "ERROR: install-target-emptiness suite failed" >&2; return 1; }
+	sh "$RECIPE_DIR/tests/bootstrap-target-emptiness.sh" ||
+		{ echo "ERROR: bootstrap-target-emptiness suite failed" >&2; return 1; }
 	for f in "$RECIPE_DIR"/files/saphira-* "$RECIPE_DIR"/files/profiles/*; do
 		grep -q 'akadata-base-abi' "$f" && {
 			echo "ERROR: unmigrated akadata-base-abi reference in $f" >&2

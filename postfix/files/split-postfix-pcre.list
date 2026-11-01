@@ -1,0 +1,5 @@
+# postfix-pcre named split: PCRE map plugin + loader fragment.
+# Base ships a backend-free dynamicmaps.cf; installing this split
+# enables the pcre: map type.
+usr/lib/postfix/postfix-pcre.so
+etc/postfix/dynamicmaps.cf.d/pcre.cf

@@ -2,6 +2,8 @@
 pkgname=cronie
 pkgver=1.7.2
 pkgrel=2
+# Unbumped r3->r2 (operator rule): only bump over a PUBLISHED revision.
+# r2 never published (r1 live), so the PAM-headers fix stays r2.
 # r2: PAM enabled (linux-pam 1.7.2 + saphira-pambase now in tree):
 # --with-pam; ships the crond leaf file. Sole cron (dcron retired,
 # same /usr/sbin/crond + man pages, cannot coexist). Payload change,
@@ -15,11 +17,11 @@ url=https://github.com/cronie-crond/cronie
 cronie_sha256=241ecc1dcd8d4b2a6744fe93509932254d20b7bb9d979d27429809493806357f
 # Sole cron: dcron retired (same /usr/sbin/crond + man pages, cannot
 # coexist). replaces takes the legacy names over on upgrade.
-# linux-pam: linked at build (headers in the single-output package,
-# no -dev split) and needed at runtime.
+# linux-pam: linked at build (headers in linux-pam-dev) and needed
+# at runtime.
 replaces="dcron dcron-doc"
 depends="linux-pam saphira-pambase"
-makedepends="autoconf automake gcc linux-pam make saphira-linux-uapi-headers"
+makedepends="autoconf automake gcc linux-pam-dev make saphira-linux-uapi-headers"
 recipe_build() {
 	tar --no-same-owner -C "$SRC" --strip-components=1 -xf "$RECIPE_DIR/files/cronie-1.7.2.tar.gz"
 	cd "$SRC"
@@ -57,10 +59,10 @@ recipe_install() {
 		"$PKGDEST/usr/lib/systemd/system/crond.service"
 	# The spool must exist and be private before crond ever runs.
 	install -d -m 0700 "$PKGDEST/var/spool/cron" "$PKGDEST/var/spool/cron/crontabs"
-	# Park upstream's own sysv init script so it does not compete with
-	# ours under /etc/init.d.
-	rm -f "$PKGDEST/etc/init.d/crond" "$PKGDEST/etc/init.d/cron" \
-		"$PKGDEST/etc/init.d/crond.bz2" 2>/dev/null || :
+	# Upstream installs no init script with our flags
+	# (--with-systemdsystemunitdir=no, no sysv target), so there is
+	# nothing to park: the rm that stood here deleted our own
+	# etc/init.d/crond installed above and tripped the gate below.
 	for p in etc/init.d/crond usr/lib/systemd/system/crond.service; do
 		[ -e "$PKGDEST/$p" ] || {
 			echo "ERROR: cronie payload is missing $p" >&2

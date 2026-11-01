@@ -28,17 +28,22 @@ sha256=552baa55118bccbcd1e61c51db438930a36ce04e0abd84c4c0b7b20633ca2b5a
 
 depends="
     libevent
+    libmd
     readline
 "
 
 makedepends="
     binutils
     gcc
+    libbsd-dev
     libevent-dev
+    libmd-dev
     make
     pkgconf
     readline-dev
 "
+# libbsd-dev: musl ships no sys/queue.h. libmd-dev + libmd: the
+# libbsd overlay links -lbsd -lmd (config.log evidence).
 
 recipe_build()
 {

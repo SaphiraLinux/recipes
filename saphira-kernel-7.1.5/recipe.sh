@@ -18,7 +18,7 @@ pkgname=saphira-kernel-7.1.5
 # automatic replacement.
 kernel_version=7.1.5
 pkgver=1
-pkgrel=15
+pkgrel=16
 # r14: earlyfw refresh hook honors the opt-in marker (generation only
 # on opted machines; grub regen stays unconditional). Payload change.
 # r12: framebuffer console capability completion (2026-10-23):
@@ -149,14 +149,28 @@ recipe_build()
 	tar --no-same-owner -C "$SRC/linux-${kernel_version}" --strip-components=1 -xf "$KBALL"
 	cd "$SRC/linux-${kernel_version}"
 
-	patch -Np1 -i "$RECIPE_DIR/files/x86-64-v3.patch"
+	patch -Np1 -i "$RECIPE_DIR/files/x86-64-v3.patch" > "$SRC/patch-v3.log" 2>&1 || return 1
+	# Strict application: this copy carries exact upstream context for its
+	# line, so any fuzz or offset is drift, not tolerance. Fail closed
+	# rather than shipping a loosely applied baseline.
+	if grep -qE 'fuzz|offset' "$SRC/patch-v3.log"; then
+		echo "ERROR: x86-64-v3.patch applied loosely (fuzz/offset): rebase it, do not ship drift" >&2
+		grep -E 'fuzz|offset' "$SRC/patch-v3.log" >&2
+		return 1
+	fi
 	# Regulatory freedom (article: kernel must not mandate regdb
 	# signatures): flip the two gatekeeper Kconfig defaults y -> n so
 	# an absent symbol can never resolve to enforced verification.
 	# Fails closed on upstream drift like the v3 patch. The recipe
 	# config carries both symbols as explicit "is not set"; the gate
 	# below proves the final .config after olddefconfig.
-	patch -Np1 -i "$RECIPE_DIR/files/cfg80211-regdb-freedom.patch"
+	patch -Np1 -i "$RECIPE_DIR/files/cfg80211-regdb-freedom.patch" > "$SRC/patch-freedom.log" 2>&1 || return 1
+	# Strict application, same rule as the v3 patch above.
+	if grep -qE 'fuzz|offset' "$SRC/patch-freedom.log"; then
+		echo "ERROR: cfg80211-regdb-freedom.patch applied loosely (fuzz/offset): rebase it, do not ship drift" >&2
+		grep -E 'fuzz|offset' "$SRC/patch-freedom.log" >&2
+		return 1
+	fi
 	# CVE-2026-98432 (9.8 CRITICAL, IPv4 TCP use-after-free): free
 	# inet_opt and ireq_opt after an RCU grace period (kfree ->
 	# kfree_rcu in inet_sock_destruct and tcp_v4_reqsk_destructor).

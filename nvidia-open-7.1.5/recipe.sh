@@ -39,8 +39,11 @@ makedepends="
 	m4
 	make
 	openssl-dev
+	pahole
 	patch
 	perl
+	saphira-linux-uapi-headers
+	zlib-dev
 "
 # Handover from the retired monolithic nvidia-open (owned these module
 # paths plus firmware/doc): the file gate exempts retired names listed
@@ -50,6 +53,7 @@ replaces="nvidia-open"
 # CUDA policy: the Saphira host stays pure musl. CUDA runs inside a
 # version-matched glibc systemd-nspawn container; only these kmods and
 # the matching GSP firmware belong on the host.
+KRECIPE=saphira-kernel-7.1.5
 KVER_SHORT=7.1.5
 
 recipe_build()

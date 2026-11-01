@@ -23,13 +23,16 @@ makedepends="
     cmake
     gcc
     gettext
-    llvm>=22.1.8-r1
+    libclang
+    libffi-dev
+    llvm-dev>=22.1.8-r1
     ninja
     python3
     zlib-dev
     zstd-dev
     libxml2-dev
 "
+# llvm-dev, not llvm: the build consumes LLVMConfig.cmake.
 
 # Proven v0 flags: standalone superproject build against the installed
 # LLVM and Clang cmake configs, tests/docs off, a fixed tool set built
