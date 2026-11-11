@@ -1,0 +1,44 @@
+From 30cc6422bc614d289630917cdd648805185b01ed Mon Sep 17 00:00:00 2001
+From: Matthias Goergens <matthias.goergens@gmail.com>
+Date: Wed, 5 Aug 2026 15:52:00 +0800
+Subject: [PATCH] fseeko: avoid overflow adjusting relative seek offset
+
+For SEEK_CUR, fseeko subtracts the unread input-buffer length from the
+caller's offset before invoking the underlying seek operation. A valid
+LLONG_MIN offset therefore overflows before the seek can reject the
+unrepresentable logical result.
+
+Detect the underflow and fail with EOVERFLOW without flushing or
+discarding the stream's buffers.
+---
+ src/stdio/fseek.c | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/src/stdio/fseek.c b/src/stdio/fseek.c
+index c7425802..9f6a981e 100644
+--- a/src/stdio/fseek.c
++++ b/src/stdio/fseek.c
+@@ -1,4 +1,5 @@
+ #include "stdio_impl.h"
++#include <limits.h>
+ #include <errno.h>
+ 
+ int __fseeko_unlocked(FILE *f, off_t off, int whence)
+@@ -10,7 +11,13 @@ int __fseeko_unlocked(FILE *f, off_t off, int whence)
+ 	}
+ 
+ 	/* Adjust relative offset for unread data in buffer, if any. */
+-	if (whence == SEEK_CUR && f->rend) off -= f->rend - f->rpos;
++	if (whence == SEEK_CUR && f->rend) {
++		if (off < LLONG_MIN + (f->rend - f->rpos)) {
++			errno = EOVERFLOW;
++			return -1;
++		}
++		off -= f->rend - f->rpos;
++	}
+ 
+ 	/* Flush write buffer, and report error on failure. */
+ 	if (f->wpos != f->wbase) {
+-- 
+2.55.0
+

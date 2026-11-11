@@ -1,0 +1,73 @@
+# F8 Phase 3 staged validation results (UNWIRED patch 0014, scratch builds only)
+# Branch exp/musl-f8-strstr. Base: pinned ball + 0001-0011 + upstreams.
+# Cand: base + files/0014-x86_64-strstr-sse2-short-needle.patch.
+# Lords of restraint: no recipe.sh wiring, no bump/build/sign/publish/install.
+
+## linkage (staged cand objects)
+- __twobyte_strstr/__threebyte_strstr/__fourbyte_strstr: exactly one T each,
+  GLOBAL HIDDEN, in own TUs (auto-picked via ARCH_GLOBS, no REPLACED conflict).
+- staged strstr.o: U refs only; final .so calls are direct (tail jmp, no PLT).
+- dynamic exports: NO new symbols (dynsym grep empty); strstr still exported.
+- static listing: base libc.a has 0 helper objects; cand has the 3 .lo files.
+- relocations: 0 R_X86_64_32/64 in new objects and strstr.o (static-PIE clean).
+- helpers are pure SSE2 (no VEX byte in any helper disassembly).
+
+## staged differential (strstr_staged.c, 401431 cases incl. guard pages)
+- sdiff-base rc=0, sdiff-cand rc=0 (no faults on PROT_NONE-adjacent inputs).
+- diff out-base.txt out-cand.txt: IDENTICAL (all offsets match).
+
+## staged bench (strstr_staged_bench.c, static, per-root; ns/call base -> cand)
+1B frequent-e          3.66 -> 9.70  (0.38x: see note N1)
+1B absent-Z            3129.99 -> 3106.76 (1.01x)
+2B early               7.93 -> 8.11   (0.98x)
+2B absent              28437.87 -> 3296.97 (8.63x)
+2B late                13.21 -> 14.19 (0.93x)
+3B mid                 56.98 -> 15.64 (3.64x)
+3B absent              24731.61 -> 4750.11 (5.21x)
+4B mid                 106.67 -> 24.76 (4.31x)
+4B absent              27357.60 -> 6125.60 (4.47x)
+32B early              76.83 -> 76.93 (1.00x)
+32B late               4310.57 -> 4402.50 (0.98x)
+32B absent             9209.06 -> 9102.17 (1.01x)
+128B mid               363.53 -> 366.07 (0.99x)
+ADV a*63+b absent      172236.87 -> 173761.25 (0.99x)
+ADV a*15+b absent      179168.14 -> 179753.82 (1.00x)
+PERIODIC near-miss     56489.80 -> 56294.20 (1.00x)
+SHORT h=60 n=6         27.88 -> 26.90 (1.04x)
+SHORT absent           6.76 -> 6.56 (1.03x)
+N1: 1B frequent-e shows 0.38x in the staged run but 1.01x in the pilot
+interleaved run and identical checksums/offsets; the staged bench runs
+base-then-cand as separate processes (no interleaving), so small-ns
+cases are scheduling noise. No 1B code changed (identical path in both
+roots); treat as noise, not a regression. All offsets/checksums match.
+
+## dynamic loader smoke (staged cand ld.so + libc.so)
+- dynamic strstr smoke (2B/3B/4B/13B incl. absent): "4 -1 40 12" correct, rc=0.
+
+## libc-testsuite (tsrun flat suite, rebuilt, static-linked per root)
+- ts-base vs ts-cand outputs: IDENTICAL.
+- vs r2.txt known baseline: same 5 failures only (snprintf x2, swprintf,
+  strtol, wcstol — all pre-existing, __FILE__ path prefix differs).
+- string test passed in both. No new regressions.
+
+## code size
+- text: base strstr.lo 1748B; cand strstr.lo 1531B + helpers 252+305+355=912B
+  => net +695B if wired. libc.so file size: 797.9K -> 798.1K (+0.2K).
+
+## R5 release-candidate addendum (r4 baseline vs r5 candidate, wired recipe)
+Roots built from pinned ball following wired recipe.sh order (pins verified):
+r4 = 0001-0012 + upstreams; r5 = r4 + 0014. bumppkg r4->r5 with --force under
+explicit r5 GO (24h guard would otherwise block; F4 precedent identical).
+- Staged differential r4-vs-r5: 401431/0, both exit 0 (guard pages clean).
+- Staged bench r4 -> r5 (ns/call): 2B absent 27899->3156 (8.8x); 3B mid
+  53.5->15.0 (3.6x), absent 23995->4525 (5.3x); 4B mid 103.1->24.1 (4.3x),
+  absent 27221->5964 (4.6x); 1B/32B/128B/ADV/PERIODIC/SHORT all tie
+  (0.93-1.04x, scheduling noise on sub-10ns cases; offsets+checksums match).
+- Dynamic loader smoke via staged r5 ld.so: "4 -1 40 12" correct, rc=0.
+- libc-testsuite r4 vs r5: byte-identical; 23 passed, only the 5 known
+  failures (snprintf x2, swprintf, strtol, wcstol); string test passed.
+- F4 preservation smoke (nearbyint/nearbyintf incl. subnormals, signed
+  zeros): r4 vs r5 outputs identical and correct.
+- Code size r4 -> r5: strstr.lo 1748 -> 1531 + 912 new = net +695B text;
+  libc.so 797.9K -> 798.0K. No VEX in helpers (SSE2-only confirmed);
+  no new dynamic exports (only public nearbyint* as before).

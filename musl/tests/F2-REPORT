@@ -1,0 +1,72 @@
+F2 floor-family differential vs published musl 1.2.6-r7 (live libc).
+Method: table sweep (8 entries: floor/ceil/trunc/nearbyint + float,
+plus nearbyint-combo = generic nearbyint source bound to arch rint,
+mirroring sinew libc) x 28 double + 21 float values x 4 RC modes =
+980 checks, value bits + full MXCSR flags. Candidates: single
+roundsd/roundss suppress-imms ($09 floor, $0A ceil, $0B trunc,
+$0C MXCSR-mode). DAZ/FTZ matrix, sticky isolation, fork-isolated
+unmasked traps, disassembly, 5-CPU perf. Egg + route/keeper/minimer/
+homer. See f2-floor-family.c, f2b-env.c, f2-dazval.c, f2-dazmatrix.c,
+f2-cand.c, f2-perf.c in this directory (im-perf probe: imm-probe.c).
+
+CORRECTION (operator-directed, supersedes F1 wording): imm bit 3
+suppresses the PRECISION exception only. ROUNDSD never signals the
+denormal-operand exception; sNaN still signals invalid.
+
+RESULT: 0 value-diffs in default mode (values bit-identical incl
+subnormals, zeros, inf, qNaN across all modes). Flag diffs only:
+floor/ceil/trunc 60 each (15/mode), floorf/ceilf/truncf 48 each
+(12/mode), nearbyint(f) 12 each (3/mode: 2 subnormal-DE + 1 sNaN),
+nearbyint-combo 4 total (sNaN only — combo inherits DE behaviour
+from arch rint exactly).
+
+DIFFERENCE CATALOG (required C/POSIX vs musl-observable):
+D1 inexact on fractionals: generic raises (toint arithmetic /
+FORCE_EVAL side effect), candidates silent. IEEE roundToIntegral*
+are quiet (no inexact); rint is the signalling variant. So
+candidates are standard-correct; generic raising is musl-observable
+quirk. DECISION NEEDED: preserve (explicit raise) or accept silent.
+D2 DE on subnormals: generic sets (denormal operand in toint
+arithmetic), candidates never signal DE (instruction cannot).
+Same verdict shape as D1; rint precedent chose PRESERVE.
+D3 sNaN invalid: generic propagates sNaN silently (no invalid —
+bit tricks, arguably non-conforming); candidates raise invalid +
+quiet NaN (IEEE-correct). Unmasked: generic quiet, candidate traps
+(SIGFPE, fork-proven). DECISION NEEDED: accept invalid-on-sNaN.
+D4 nearbyint-combo == generic everywhere except D3. CONCLUSION:
+nearbyint/nearbyintf need NO arch files — they inherit arch rint
+through the existing in-tree call. Only D3 applies.
+D5 DAZ=1 value divergence (floor/ceil, subnormal inputs only):
+generic returns the denormal UNCHANGED (UCOMISD x==0 fast path fires
+under DAZ) while candidates return +-0. Non-default opt-in x86 mode;
+C/POSIX silent. Document as known caveat; default-mode values match.
+D6 FTZ changes generic flags on denorm-min (0x22 -> 0x32, UE added)
+while candidates stay silent. Same caveat class as D5.
+D7 reversed traps (fork-proven): PE-unmasked + 0.1 -> generic
+TRAPs (floor/trunc/nearbyint-via-rint), candidates quiet; IM-
+unmasked + sNaN -> generic quiet, candidates TRAP. Behaviour change
+for the small set of programs that unmask FP exceptions.
+D8 combo DAZ-blind DE: arch rint sets DE explicitly even under DAZ,
+where generic+DAZ is silent. Micro-refinement: gate the DE
+preservation on DAZ-clear in a later revision.
+
+RC behaviour: floor/ceil/trunc candidates RC-independent (directed)
+in all 4 modes; 0x0C follows MXCSR (nearbyint requirement).
+MXCSR control bits (RC/masks) preserved by all candidates.
+Sticky flags: exact inputs preserved both sides; differences only
+the D1/D2 bits above.
+
+DISASSEMBLY (musl build flags, -O2): each candidate is one
+roundsd/roundss $imm + ret (f2-cand.o).
+
+PERF mixed-input (ns/call, higher=better ratio cand:g):
+Egg floor 1.8/4.6 (2.5x), nearby 0.8/7.1 (8.9x);
+route 4.5/8.6 (1.9x), 1.1/10.2 (9.1x);
+keeper 1.0/5.8 (5.5x), 0.9/6.9 (7.6x);
+minimer 2.9/7.5 (2.6x), 1.2/10.3 (8.4x);
+homer 1.1/4.1 (3.8x), 0.7/5.2 (7.0x).
+
+NOT IMPLEMENTED (per GO): no recipe wiring, no arch files in sinew/
+beyond the rint 0004. Next: operator decisions D1/D3/D5/D8, then
+floor/ceil/trunc(+f) implementation with chosen semantics; re-verify
+nearbyint-combo after any rint change.

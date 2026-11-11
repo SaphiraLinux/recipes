@@ -1,0 +1,37 @@
+From 4a0406c85122cf0ea19a572590d4473e9d124ff7 Mon Sep 17 00:00:00 2001
+From: Matthias Goergens <matthias.goergens@gmail.com>
+Date: Wed, 5 Aug 2026 15:52:01 +0800
+Subject: [PATCH] ftello: report overflow in buffered stream position
+
+ftello adds pending buffered output to the position reported by the
+underlying seek operation. Near LLONG_MAX, the addition can overflow
+signed off_t and return an apparently successful negative position.
+
+Check that the buffered-byte count fits before adding it. Fail with
+EOVERFLOW when the logical position cannot be represented.
+---
+ src/stdio/ftell.c | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/src/stdio/ftell.c b/src/stdio/ftell.c
+index 1e1a08d8..c2f104b1 100644
+--- a/src/stdio/ftell.c
++++ b/src/stdio/ftell.c
+@@ -12,8 +12,13 @@ off_t __ftello_unlocked(FILE *f)
+ 	/* Adjust for data in buffer. */
+ 	if (f->rend)
+ 		pos += f->rpos - f->rend;
+-	else if (f->wbase)
++	else if (f->wbase) {
++		if (f->wpos - f->wbase > LLONG_MAX - pos) {
++			errno = EOVERFLOW;
++			return -1;
++		}
+ 		pos += f->wpos - f->wbase;
++	}
+ 	return pos;
+ }
+ 
+-- 
+2.55.0
+

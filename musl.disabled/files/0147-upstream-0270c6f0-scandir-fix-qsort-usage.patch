@@ -1,0 +1,57 @@
+From 0270c6f03b044de546e0808ef99efd8148a67435 Mon Sep 17 00:00:00 2001
+From: Luca Kellermann <mailto.luca.kellermann@gmail.com>
+Date: Wed, 15 Apr 2026 20:08:44 +0200
+Subject: [PATCH] scandir: fix qsort usage
+
+calling qsort() with a pointer to a function whose type is not
+compatible with int(const void *, const void *) results in UB because
+qsort() would call this function with an incompatible type.
+
+avoid this by using qsort_r(). this is similar to how qsort() is
+implemented on top of qsort_r().
+
+the types of the pointers passed to wrapper_cmp() are
+struct dirent *const * but the caller's comparison function expects
+const struct dirent **. copy the pointer values into local variables
+and pass their addresses to the caller's comparison function to get
+the right type and avoid aliasing violations.
+
+this is only necessary because the pointer to the comparison function
+for scandir() was (incorrectly) specified as
+int (*)(const struct dirent **, const struct dirent **) rather than
+int (*)(struct dirent *const *, struct dirent *const *).
+---
+ src/dirent/scandir.c | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/src/dirent/scandir.c b/src/dirent/scandir.c
+index f3c8c14c..170f9283 100644
+--- a/src/dirent/scandir.c
++++ b/src/dirent/scandir.c
+@@ -7,6 +7,14 @@
+ #include <errno.h>
+ #include <stddef.h>
+ 
++static int wrapper_cmp(const void *v1, const void *v2, void *cmp)
++{
++	const struct dirent *de1 = *(struct dirent *const *){v1};
++	const struct dirent *de2 = *(struct dirent *const *){v2};
++	return ((int (*)(const struct dirent **, const struct dirent **))cmp)(
++		&de1, &de2);
++}
++
+ int scandir(const char *path, struct dirent ***res,
+ 	int (*sel)(const struct dirent *),
+ 	int (*cmp)(const struct dirent **, const struct dirent **))
+@@ -71,7 +79,7 @@ int scandir(const char *path, struct dirent ***res,
+ 	/* cmp() and caller must not observe that errno was set to 0. */
+ 	errno = old_errno;
+ 
+-	if (cmp) qsort(names, cnt, sizeof *names, (int (*)(const void *, const void *))cmp);
++	if (cmp) __qsort_r(names, cnt, sizeof *names, wrapper_cmp, (void *)cmp);
+ 	*res = names;
+ 	return cnt;
+ }
+-- 
+2.55.0
+

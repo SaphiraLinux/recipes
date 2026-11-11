@@ -1,0 +1,9 @@
+== fractional ==
+nearbyint      22.267 ns/call chk=46155bf7267918c2
+nearbyintf     23.874 ns/call chk=4e0031dea364048f
+== big ==
+nearbyint      18.283 ns/call chk=e18c761b6e370861
+nearbyintf     28.558 ns/call chk=c0a2068acfcbf207
+== integral ==
+nearbyint      20.139 ns/call chk=e8bf8badebced67f
+nearbyintf     27.917 ns/call chk=792fd316a9ac2636

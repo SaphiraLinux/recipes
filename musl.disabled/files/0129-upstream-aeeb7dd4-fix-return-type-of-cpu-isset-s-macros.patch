@@ -1,0 +1,28 @@
+From aeeb7dd4c4f3eff15751a6dc7b473b4decf98ff2 Mon Sep 17 00:00:00 2001
+From: Rich Felker <dalias@aerifal.cx>
+Date: Mon, 7 Sep 2026 19:48:12 -0400
+Subject: [PATCH] fix return type of CPU_ISSET[_S] macros
+
+the documented type is int. on 64-bit archs, callers which truncate
+the result from the raw bitmask to int will not see any bits above 31
+as being set.
+---
+ include/sched.h | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/include/sched.h b/include/sched.h
+index 8c3b53f0..148fd31d 100644
+--- a/include/sched.h
++++ b/include/sched.h
+@@ -94,7 +94,7 @@ int sched_setaffinity(pid_t, size_t, const cpu_set_t *);
+ 
+ #define CPU_SET_S(i, size, set) __CPU_op_S(i, size, set, |=)
+ #define CPU_CLR_S(i, size, set) __CPU_op_S(i, size, set, &=~)
+-#define CPU_ISSET_S(i, size, set) __CPU_op_S(i, size, set, &)
++#define CPU_ISSET_S(i, size, set) (!!__CPU_op_S(i, size, set, &))
+ 
+ #define __CPU_op_func_S(func, op) \
+ static __inline void __CPU_##func##_S(size_t __size, cpu_set_t *__dest, \
+-- 
+2.55.0
+

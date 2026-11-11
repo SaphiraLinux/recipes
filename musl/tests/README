@@ -1,0 +1,102 @@
+# Sinew tests (experimental, scratch)
+
+Promoted from `exp/musl-r8 @9fd47a9` (evidence in checkpoint 61 +
+musl journal notes 463–474). Wire the exact tree objects with
+`-Drint=...` as in the r8 review; harnesses are standalone and do
+not alter `run-tests.sh` semantics.
+
+- `rint-sweep.c` — 2.16M-case differential: arch `roundsd` imm=4 vs
+  generic C, all 4 rounding modes, specials, subnormal sweep,
+  500k randoms/mode, value bits + exception flags. Expect 0 fails;
+  only informational DE-bit delta (now preserved by construction).
+- `rint-3way.c` — 3-way: experimental arch vs generic C reference
+  vs MPFR truth (~1M checks, values + inexactness, NaN-aware).
+  Expect 0 fails.
+- `rintf-diff.c` — float coverage (~956k checks, all modes).
+  Expect 0 fails.
+- `rint-time2.c` — mixed-input throughput benchmark (static binary
+  friendly; scp to route/keeper/minimer/homer for host numbers).
+  Reference ratios: Egg 1.37x, route 1.30x, keeper 2.29x,
+  minimer 1.76x, homer 1.33x (mixed inputs; uniform microbenchmarks
+  favour the branchy generic via hot predictor).
+- `nearbyint-lrint.c` — in-libc caller check: `nearbyint`/`lrint`
+  outputs byte-identical between trees (link once per tree, diff).
+
+Static-PIE: `piecheck` (in `recipe_build`) must stay green; verify
+with a static-PIE link + run match against RC-69 outputs.
+libc-testsuite must stay byte-identical to the RC-69 baseline
+(same 5 expected failures).
+
+Future floor/ceil/trunc/nearbyint work lands here under the Sinew
+recipe (imm `0x09`–`0x0C` investigation), never in musl.
+
+F3 (exp/musl-r8, checkpoint 92/93/95): arch floor/floorf, ceil/ceilf,
+trunc/truncf via SSE4.1 suppress + DAZ-gated cold path (truth in both
+modes, sacrificial orig+1.0 real op for flag/trap fidelity) + rint/rintf
+real-op denormal handling (0011). Evidence bundle in `f3-work/`:
+validated sources, transcribed upstream 1.2.6 generic refs, `f3diff.c`
+(388224-case masked differential: ffails=0; only accepted classes
+remain) + `f3trap.c` (trap matrix vs operator policy), staged-artifact
+runs (`staged/`: r3 differential + trap table bit-identical to scratch;
+testsuite byte-identical across r2/staged/sys with the 5 known failures;
+bench parity within VM noise).
+
+F6 pilot (exp/musl-f6-mbsrtowcs, checkpoint 104): AVX2 ASCII fast path
+for the mbsrtowcs converting loop, PROPOSED ONLY — not wired, not built
+into any APK. Evidence in `f6-work/`: `__avx2_ascii_run.s` v2 helper
+(NUL-aware, maxlen-bounded; 355009-case standalone differential, 0
+fails incl. guard pages) + `0013-...PROPOSED.patch` (helper as
+`src/multibyte/x86_64/__avx2_ascii_run.s`, GLOBAL HIDDEN, zero
+R_X86_64_32; converting-loop block bounded by min(wn, page bytes)).
+Scratch full build (series 0001-0011 + proposed 0013 + upstreams)
+links clean; complete-function differential base-vs-candidate 813/813
+identical (wn truncation, EILSEQ offsets, mbstate resume, guard pages
+with wn=1<<20, C locale, mbsnrtowcs; transcripts sha256 127d5ea3..,
+reproduce with `mbsrtowcs_diff.c`). The differential caught one real
+defect in revision 1 (missing `if (!wn)` re-check after the copy loop
+underflowed wn; fixed). VERDICT: correct but SLOWER — complete-fn
+bench (Egg, ns/conv) ascii40 5.24->17.08, ascii200 25.50->38.20,
+ascii1500 154.63->226.67, mix553 69.51->122.04, mb12 7.63->10.85;
++295 B text. Mechanism: out-of-line call spills caller-saved regs per
+iteration, byte-wise C copy loop vs gcc-vectorized base stores, and
+count-then-copy is two passes vs the base fused single pass (store
+traffic dominates). Do not wire. If pursued: fused single-pass
+`__avx2_ascii_copy` in asm, or apply the count-only helper to the
+counting loop (`ws == NULL`, no stores) — each a new pilot.
+
+F8 Phase 2 (exp/musl-f8-strstr, checkpoint 106): SIMD pilot for the 2/3/4B
+needle paths only; 1B path and >=5B two-way untouched; NOT WIRED into any
+recipe. `f8-work/cand2.s cand3.s cand4.s` replace twobyte/threebyte/fourbyte
+with ordinary SSE2 equality-mask 16B windows (overlap step m-1, page-bounded
+loads, scalar tail with generic fault profile; NO AVX/VEX anywhere, so no
+clock/transition risk and no v2 gate needed — N100-safe). `strstr_harness.c`
+is the pristine entry+twoway with only the 3 short-needle bodies swapped to
+extern candidates. Differential harness-vs-staged-generic: 401431 cases, 0
+fails (Egg and Minimer N100), covering alignments, NUL positions, overlap
+straddles, repetitive/high-bit corpora, guard pages, cross-page matches.
+pcmpistri variant attempted and REJECTED (`rejected-pcmpistri/`): three probe
+rounds gave contradictory ECX/CF/ZF semantics (0x0c matched single bytes not
+substrings; implicit-0x08 reported NUL positions; explicit form matched only
+at index 0); operand-role/length-register model not establishable from memory
+— masks chosen for certain semantics. Complete-function bench, interleaved,
+checksums OK (ns/call, Egg then Minimer N100):
+1B frequent 9.6/9.5 22.6/21.2 | 2B early 8.5/7.8 15.8/16.2 | 2B absent
+27736/3156 (8.8x) 42571/6909 (6.2x) | 3B mid 53.9/14.4 (3.8x) 98.9/32.9 (3.0x)
+| 3B absent 23943/4542 (5.3x) 44854/9083 (4.9x) | 4B mid 103.5/23.9 (4.3x)
+164.5/50.6 (3.3x) | 4B absent 27048/6020 (4.5x) 42784/11593 (3.7x) | 32B
+early/late/absent and 128B/ADV/PERIODIC/SHORT controls all 0.91-1.15x (noise,
+no regression). Code size: candidates 252+305+355=912B text vs ~224B of C
+loop bodies replaced (est. from staged disasm ranges) = ~+690B net if wired.
+STOP before integration; separate release decision required. F8 Phase 3
+(integration + staged validation, checkpoint 108): patch prepared as
+`files/0014-x86_64-strstr-sse2-short-needle.patch` — UNWIRED (recipe.sh
+untouched, no bump/build/sign/publish/install). Wiring: strstr.c keeps the
+generic bodies under `#else` (other arches + readable fallback) and calls
+hidden `__twobyte/threebyte/fourbyte_strstr` on x86_64; helpers are GLOBAL
+HIDDEN (no new dynamic exports, direct tail calls, 0 bad relocs, SSE2-only).
+Scratch full builds (pinned ball + 0001-0011 + upstreams ± 0014): staged
+differential 401431/0 with guard pages clean; staged bench repeats the pilot
+wins (2B absent 8.6x, 3B 5.2x, 4B 4.5x, mid 3.6-4.3x; controls tie incl.
+ADV/PERIODIC); dynamic loader smoke correct; libc-testsuite identical
+(5 known failures only, string passed); net +695B text. Full numbers in
+`f8-work/STAGED-RESULTS.txt`. Awaiting release decision.

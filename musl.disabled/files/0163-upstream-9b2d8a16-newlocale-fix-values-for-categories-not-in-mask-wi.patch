@@ -1,0 +1,35 @@
+From 9b2d8a1646391d5217f9a358555aebcaab5b8aaf Mon Sep 17 00:00:00 2001
+From: Rich Felker <dalias@aerifal.cx>
+Date: Fri, 2 Oct 2026 00:52:22 -0400
+Subject: [PATCH] newlocale: fix values for categories not in mask with
+ (locale_t)0 base
+
+the category values from the old locale were only being used for a
+non-null base; for null ((locale_t)0) base, a lookup for "" was
+wrongly being performed rather than using the C locale values.
+
+this caused, for example, newlocale(LC_CTYPE_MASK,"",0) to produce a
+locale_t matching newlocale(LC_ALL_MASK,"",0) rather than one that
+only reflects LC_CTYPE.
+---
+ src/locale/newlocale.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/src/locale/newlocale.c b/src/locale/newlocale.c
+index 9ac3cd38..10d68f6b 100644
+--- a/src/locale/newlocale.c
++++ b/src/locale/newlocale.c
+@@ -23,8 +23,8 @@ static locale_t do_newlocale(int mask, const char *name, locale_t loc)
+ 	struct __locale_struct tmp;
+ 
+ 	for (int i=0; i<LC_ALL; i++) {
+-		tmp.cat[i] = (!(mask & (1<<i)) && loc) ? loc->cat[i] :
+-			__get_locale(i, (mask & (1<<i)) ? name : "");
++		tmp.cat[i] = !(mask & (1<<i)) ? loc ? loc->cat[i] : 0 :
++			__get_locale(i, name);
+ 		if (tmp.cat[i] == LOC_MAP_FAILED)
+ 			return 0;
+ 	}
+-- 
+2.55.0
+

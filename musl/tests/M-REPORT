@@ -1,0 +1,55 @@
+memmove SSE2-backward investigation (Parker Loflin proposal,
+openwall musl 2026/10/31; newer than the frozen 14-Oct RC-69 audit;
+musl master anticipated this in 2bf46931). r8/_p1 UNCHANGED:
+candidate lives only in files/0005 (UNWIRED) + this tests dir.
+
+F2 METHODOLOGY CONFIRMATION (operator question): f2-perf-static
+links the candidate asm objects AND the generic-C reference objects
+compiled from sinew sources directly into the binary (in-binary
+differential). The installed libc only provides printf/malloc. So
+all F2 ratios measure candidate-vs-generic CODE, never the live
+libc. (Same construction as the memmove harnesses here.)
+
+ACTUAL SOURCES VERIFIED (1.2.6 tree): arch
+src/string/x86_64/memmove.s forks forward to __memcpy_fwd
+(rep movsq, ERMS-capable) and runs backward via std; rep movsb;
+cld — the exact expensive path the proposal replaces. Generic
+src/string/memmove.c exists as fallback (word-at-a-time when
+aligned, byte loop otherwise).
+
+CORRECTNESS: mmatrix.c — 112,890 checks per host x 5 hosts
+(Egg/route/keeper/minimer/homer) = 564,450 total, 0 FAILS everywhere.
+Deterministic matrix: sizes 0..4MiB sampled (all 0..33, 8/16/32/64
+boundaries, powers to 2M), deltas +-0..128 + sampled non-overlap,
+16 source alignments, canary redzones both sides, return-value
+check, byte-exact vs naive reference. Guard pages: 150
+child-isolated runs (fault = fail). Fuzz: 120k randomized
+(lengths 0..4200 + periodic up to 1MiB, random delta/alignment),
+heap buffers, bounds-checked. Canary bug found and fixed DURING
+the work (low redzone overlapped dst for forward deltas; both base
+and candidate flagged identically — harness bug, not libc).
+
+PERFORMANCE (ns/call, min of 5; backward = dst above src):
+Egg i5-8400-class: bwd-d1 21x(n=4) 12x(16) 17x(256) 15x(4K) 15.8x(64K) 12.6x(2M); fwd 1.00x all; nonov 1.00x; sorted-insert 30k 167->13ms (12.5x).
+route i5-8400: bwd-d1 14.9x(4K) 13.0x(64K) 9.7x(2M); fwd 1.00x; sorted-insert 10.1x.
+keeper i3-10105: bwd-d1 15.2x(4K) 13.0x(64K) 10.0x(2M); fwd 1.00x; sorted-insert 10.2x.
+minimer N100: bwd-d1 14.7x(4K) 9.2x(64K) 9.8x(2M); fwd 1.00x; sorted-insert 9.4x.
+homer i9-13900K: bwd-d1 15.3x(4K) 15.8x(64K) 14.4x(2M); fwd 1.00x; sorted-insert 12.6x.
+ACCEPTANCE: forward copies 1.00x on every host/size (identical code
+path by construction — cannot regress); overlapping copies correct
+for all tested alignments/lengths/distances incl. guard pages.
+
+CONTRACT ANALYSIS: SSE2 is baseline x86-64 (subset of v3; no new
+ISA, no capability gating needed). Integer code: no FP state, no
+MXCSR/DE/DAZ/FTZ/unmasked-exception surface (unlike roundsd work).
+Same return value (dst), no errno, no ABI change, forward path
+object-code-identical. Upstream offers a GPR-only variant (~2x
+slower); NOT recommended — SSE2 is baseline, keep the fast form.
+Disassembly proof: zero std/cld/rep in the candidate backward path.
+
+STATUS: files/0005-x86_64-memmove-sse2-backward.patch committed
+UNWIRED (recipe.sh untouched; r8 and _p1 bytes unchanged).
+Implementation (wire + rebuild + re-validate + publish decision) is
+the next GO. Next in operator priority: strchr/strnlen/strncmp/memchr
+(searching), then memcpy/memset/memcmp vs ERMS/AVX2, conversions,
+malloc, pthread — each measured first, same evidence bar.

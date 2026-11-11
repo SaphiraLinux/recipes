@@ -1,0 +1,95 @@
+# F4 integration proposal — REVIEW ONLY, NOT APPLIED
+
+Branch: exp/musl-f4-nearbyint. No recipe, patch-series, version,
+build, sign, publish, install, or fleet action taken. Checkpoint 98
+evidence stands unchanged; this file only proposes the next step.
+
+## 1. Proposed patch (created, verified, UNTRACKED for review)
+
+- File: `musl/files/0012-x86_64-nearbyint-roundsd.patch`
+- sha256: `d7331d5f7259f85e24915160c78209d95f4d4f26afee4367e840fdb92b68946c`
+- Contents: two new files, one function per TU (REPLACED_OBJS rule):
+  `src/math/x86_64/nearbyint.s` (double) + `src/math/x86_64/nearbyintf.s`
+- Verified: whitespace-clean, applies with plain `patch -p1` after
+  0004..0011 in order, both files byte-identical to the validated
+  /build/tmp/f4 sources the 97,056-case differential ran against.
+- Disposition: 0011 (rint) untouched; 0012 is purely additive.
+
+## 2. Proposed recipe.sh wiring (PROPOSED TEXT ONLY — NOT APPLIED)
+
+(a) Pin, after line 92 (`rint_realop_patch_sha256=...`):
+
+    # F4 nearbyint optimisation (proposal only, see PATCHES.md + f4-work/):
+    # arch nearbyint/nearbyintf via SSE4.1 roundsd/roundss suppress ($0x0C)
+    # + DAZ-gated cold path with ucomisd DE-only flag restoration.
+    nearbyint_patch_sha256=d7331d5f7259f85e24915160c78209d95f4d4f26afee4367e840fdb92b68946c
+
+(b) Apply block, after the P15 block (line 148), before the upstream
+    backports section:
+
+    # F4 (proposal only): arch nearbyint/nearbyintf.
+    P16="$RECIPE_DIR/files/0012-x86_64-nearbyint-roundsd.patch"
+    echo "$nearbyint_patch_sha256  $P16" | sha256sum -c -
+    patch -d "$SRC" -Np1 -i "$P16"
+
+(c) Header comment: extend the F3 paragraph to name 0012 as proposed.
+
+## 3. Proposed PATCHES.md row (PROPOSED TEXT ONLY — NOT APPLIED)
+
+| `0012-x86_64-nearbyint-roundsd.patch` | **EXPERIMENTAL, PROPOSED (F4, not wired).** New arch `src/math/x86_64/nearbyint.s` + `nearbyintf.s` (one function per TU): SSE4.1 `roundsd`/`roundss` suppress (`$0x0C`, MXCSR mode) + DAZ-gated cold path; subnormal DAZ=0 flags via sacrificial `ucomisd` (DE only — never PE/UE/IE, FTZ-independent). Masked flags bit-identical to generic; inexact never raised (defining contract). Evidence: F4 97,056-case differential (vfails=0 ffails=0 pefails=0) + trap matrix, in `musl/tests/f4-work/`. Drop file + block to revert (generic wrapper returns). |
+
+Also extend the `rint` (0004) row note if desired: rint stays as-is;
+0012 does not modify it.
+
+## 4. PM/UM trap reconciliation (decision 3 — no unexplained diffs)
+
+Measured on Egg (x86_64, 4RM x DAZ x FTZ, directed + PRNG corpus),
+ref = transcribed upstream generic wrapper, cand = proposed arch.
+Default ABI (all traps masked) is the contract surface; unmasked
+configurations are debug-only. Table (ref traps / cand traps):
+
+| Mask | nearbyint ref/cand | nearbyintf ref/cand | Status |
+|---|---|---|---|
+| IM (sNaN) | 0 / N | 0 / N | DIFFERENT, accepted per decision 1: cand quiets + raises IE (x86 semantics: roundsd raises invalid on sNaN; payload otherwise preserved — proven bit-exact). Generic is silent. Payload behaviour preserved both sides. IM-unmasked traps documented, not reproduced from generic. |
+| DM (denormal, DAZ=0 subnormal) | N / N | N / N | PARITY: both trap via denormal-operand detection (generic toint-add, cand ucomisd). |
+| DM (DAZ=1) | 0 / 0 | 0 / 0 | PARITY (silent both sides; inputs flushed). |
+| UM | 0 / 0 | 0 / 0 | PARITY BY ABSENCE: neither implementation can produce a tiny result (generic rint chain is normal-scale throughout; cand has no FP result on the cold path). No quirk to reproduce — unlike F3 floor/ceil, whose generic `- x` op traps here. |
+| PM | N / 0 | N / 0 | DIFFERENT, accepted per decision 2: generic raises PE via its toint intermediate (masked: cleared by the wrapper; unmasked: traps). Candidate never raises PE — this is the required nearbyint behaviour, not a gap. Reproducing the trap would require raising PE, which the contract forbids. The function cannot simultaneously "never raise inexact" and "trap on inexact"; masked behaviour (the specified surface) is identical. |
+| ZM / OM | 0 / 0 | 0 / 0 | PARITY (no division, no overflow possible). |
+| ALL | ref = PM-set | cand = IM+DM sets | Consistent with the rows above (first exception wins per call). |
+
+No other (fn, mask, mode) divergence exists in the matrix:
+f4diff masked totals are vfails=0 ffails=0 pefails=0 over 97,056
+cases, and the sNaN class (4,873 cases) is the sole classified
+event, all with payload preserved and quiet-bit-only value delta.
+
+## 5. Validation gates proposed for the future build (for review)
+
+If/when integration is authorised, the build is accepted only if ALL
+hold (adapted from F3 gates, checkpoint 92/95):
+
+1. `patch -p1` series 0004..0012 applies in order, zero fuzz/offset;
+   pins verify (`sha256sum -c`); `sh -n recipe.sh` clean.
+2. Staged `obj/src/math/x86_64/nearbyint.{o,lo}` +
+   `nearbyintf.{o,lo}` exist; NO generic `obj/src/math/nearbyint.o`
+   (REPLACED_OBJS proof); each arch object defines exactly one `T`
+   symbol, no undefined symbols.
+3. Disassembly of staged objects: `roundsd $0x0c` / `roundss $0x0c`
+   present, `stmxcsr` present, `ldmxcsr` ABSENT in both.
+4. `nm -D` dynamic symbol count unchanged vs published r3 (1650),
+   set-identical; `/lib/ld-musl-x86_64.so.1` path preserved.
+5. Rebuilt f4diff against staged artifacts reproduces checkpoint-98
+   numbers exactly (vfails=0 ffails=0 pefails=0; sNaN class only).
+6. Rebuilt f4trap against staged artifacts reproduces the table in
+   §4 exactly (DM parity, UM 0/0, PM ref-only, IM cand-only).
+7. libc-testsuite byte-identical to the r3 baseline (5 known
+   printf/strtol failures, zero regressions).
+8. pthread smoke + a libm-calling app smoke (e.g. python math check)
+   green; guard-page argument holds (cold path touches only (rsp)).
+9. Bench vs live generic under comparable conditions, checksums
+   identical; record throughput separately from correctness.
+10. Evidence commit on the F4 branch; STOP before release (no sign /
+    publish / install / fleet without explicit GO).
+
+No package revision is proposed at this stage (bumppkg owns that
+transition when and if integration is authorised).

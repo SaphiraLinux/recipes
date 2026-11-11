@@ -1,0 +1,45 @@
+CAND-ONLY fn=0 x=nan mask=IM rm=0 daz=0 ftz=0
+CAND-ONLY fn=1 x=nan mask=IM rm=0 daz=0 ftz=0
+CAND-ONLY fn=2 x=nan mask=IM rm=0 daz=0 ftz=0
+CAND-ONLY fn=3 x=nan mask=IM rm=0 daz=0 ftz=0
+CAND-ONLY fn=0 x=-nan mask=IM rm=0 daz=0 ftz=0
+REF-ONLY fn=0 x=0x1p-1074 mask=UM rm=0 daz=0 ftz=0
+REF-ONLY fn=1 x=0x1p-1074 mask=UM rm=0 daz=0 ftz=0
+REF-ONLY fn=0 x=-0x1p-1074 mask=UM rm=0 daz=0 ftz=0
+REF-ONLY fn=1 x=-0x1p-1074 mask=UM rm=0 daz=0 ftz=0
+REF-ONLY fn=0 x=0x1.ffffffffffffep-1023 mask=UM rm=0 daz=0 ftz=0
+f3trap: ref_traps=47144 cand_traps=26766 ref_only=27798 cand_only=7420
+tbucket fn=0 mask=0 ref=0 cand=466
+tbucket fn=0 mask=1 ref=432 cand=432
+tbucket fn=0 mask=4 ref=432 cand=0
+tbucket fn=0 mask=5 ref=2601 cand=432
+tbucket fn=0 mask=6 ref=2574 cand=886
+tbucket fn=1 mask=0 ref=0 cand=466
+tbucket fn=1 mask=1 ref=432 cand=432
+tbucket fn=1 mask=4 ref=432 cand=0
+tbucket fn=1 mask=5 ref=2601 cand=432
+tbucket fn=1 mask=6 ref=2574 cand=886
+tbucket fn=2 mask=0 ref=0 cand=466
+tbucket fn=2 mask=1 ref=432 cand=432
+tbucket fn=2 mask=5 ref=2601 cand=432
+tbucket fn=2 mask=6 ref=2574 cand=886
+tbucket fn=3 mask=0 ref=0 cand=466
+tbucket fn=3 mask=1 ref=432 cand=432
+tbucket fn=3 mask=5 ref=2601 cand=2601
+tbucket fn=3 mask=6 ref=2574 cand=3028
+tbucket fn=4 mask=0 ref=0 cand=465
+tbucket fn=4 mask=1 ref=432 cand=432
+tbucket fn=4 mask=5 ref=2761 cand=432
+tbucket fn=4 mask=6 ref=2770 cand=902
+tbucket fn=5 mask=0 ref=0 cand=465
+tbucket fn=5 mask=1 ref=432 cand=432
+tbucket fn=5 mask=5 ref=2761 cand=432
+tbucket fn=5 mask=6 ref=2770 cand=902
+tbucket fn=6 mask=0 ref=0 cand=465
+tbucket fn=6 mask=1 ref=432 cand=432
+tbucket fn=6 mask=5 ref=2761 cand=432
+tbucket fn=6 mask=6 ref=2770 cand=902
+tbucket fn=7 mask=0 ref=0 cand=465
+tbucket fn=7 mask=1 ref=432 cand=432
+tbucket fn=7 mask=5 ref=2761 cand=2761
+tbucket fn=7 mask=6 ref=2770 cand=3240

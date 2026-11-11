@@ -1,0 +1,49 @@
+From 212926d106bc757a554d88044812963b35cb1543 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Alex=20R=C3=B8nne=20Petersen?= <alex@alexrp.com>
+Date: Sun, 9 Aug 2026 03:03:03 +0200
+Subject: [PATCH] powerpc: set up a proper stack frame in the parent thread in
+ clone()
+
+The ABI requires a stack frame to, at minimum, consist of the backchain slot and
+the LR save slot at sp+0 and sp+4 respectively. The old code spilled r30/r31
+into those slots, meaning that a backchain-based unwinder would see a nonsense
+value as the backchain pointer and go on a wild goose chase.
+
+It's admittedly a very small window where this is possible -- a thread that's
+stopped in the middle of the clone() parent body -- but fixing it just requires
+shifting the r30/r31 spill slots down by 8 bytes and storing the old sp in the
+backchain slot, so seems reasonable to do.
+---
+ src/thread/powerpc/clone.s | 9 +++++----
+ 1 file changed, 5 insertions(+), 4 deletions(-)
+
+diff --git a/src/thread/powerpc/clone.s b/src/thread/powerpc/clone.s
+index da13f446..55163585 100644
+--- a/src/thread/powerpc/clone.s
++++ b/src/thread/powerpc/clone.s
+@@ -16,8 +16,9 @@ __clone:
+ 
+ # store non-volatile regs r30, r31 on stack in order to put our
+ # start func and its arg there
+-stwu 30, -16(1)
+-stw 31, 4(1)
++stwu 1, -16(1)
++stw 30, 8(1)
++stw 31, 12(1)
+ 
+ # save r3 (func) into r30, and r6(arg) into r31
+ mr 30, 3
+@@ -65,8 +66,8 @@ sc
+ 2:
+ 
+ # restore stack
+-lwz 30, 0(1)
+-lwz 31, 4(1)
++lwz 30, 8(1)
++lwz 31, 12(1)
+ addi 1, 1, 16
+ 
+ blr
+-- 
+2.55.0
+

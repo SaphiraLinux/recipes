@@ -1,0 +1,31 @@
+From 208480aa89545ae48dc5888cbeaeceb6b3bfb486 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Alex=20R=C3=B8nne=20Petersen?= <alex@alexrp.com>
+Date: Fri, 19 Jun 2026 08:24:06 +0200
+Subject: [PATCH] x32: clone: fix read of stack slot containing ctid
+
+It's a 32-bit pointer and passed on the stack; the upper 32 bits of the stack
+slot are garbage. This works out fine if we're lucky and those bits happen to be
+zeroed, but if they're not, we ask the kernel to write to some random 64-bit
+location, which it will just silently fail to do (the process is in x32 mode;
+nothing can be mapped up there), and consequently, we never learn the new
+thread's tid.
+---
+ src/thread/x32/clone.s | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/thread/x32/clone.s b/src/thread/x32/clone.s
+index b870880f..d62944ac 100644
+--- a/src/thread/x32/clone.s
++++ b/src/thread/x32/clone.s
+@@ -8,7 +8,7 @@ __clone:
+ 	mov %rdx,%rdi
+ 	mov %r8,%rdx
+ 	mov %r9,%r8
+-	mov 8(%rsp),%r10
++	mov 8(%rsp),%r10d
+ 	mov %r11,%r9
+ 	and $-16,%rsi
+ 	sub $8,%rsi
+-- 
+2.55.0
+

@@ -1,0 +1,36 @@
+String-search investigation (operator priority: strchr, strnlen,
+strncmp, memchr). No recipe changes; no patch wired.
+
+BASELINE (live libc, Egg): strchr found 1.6-5.6ns (SWAR strchrnul,
+already fast); strnlen bounded SWAR; strncmp eq 6.1/28.6/100.9/1504ns
+for 16/64/256/4K (byte loop ~0.37ns/B); memcmp eq 3.5/19.4/758ns
+(byte loop); memchr SWAR ~0.04ns/B long scans. Compiler does NOT
+auto-vectorize any of these (verified: zero SIMD/rep in built
+objects) — early-exit search idioms defeat the vectorizer.
+
+SKETCHES (SSE2, page-guarded 16B blocks; strncmp NUL-aware both
+sides): differential vs live libc 120,000 checks x 5 hosts
+(Egg/route/keeper/minimer/homer, musl AND glibc) = 600,000 total,
+0 FAILS. Guard-page child-isolated runs included. One harness bug
+found and fixed during the work (low-canary overlap on forward
+deltas flagged both impls identically — same lesson as memmove).
+
+RESULTS (sketch vs current, min/5):
+strncmp eq: Egg 4.4/8.6/9.1/8.3x (16/64/256/4K); route 4.7-7.9x;
+keeper 5.0-8.5x; minimer 3.9-7.6x; homer 4.4-9.1x.
+memcmp eq: 5.5-8.7x (64B), 6.0-7.0x (4K) across hosts.
+memchr absent: 1.6-2.6x (64B/4K/64K) across hosts.
+
+VERDICTS:
+PROPOSE strncmp + memcmp arch work (6-9x sustained, all hosts,
+short-string behaviour preserved: eq16 still wins 4-5x).
+HOLD memchr/strchr/strnlen (1.6-2.6x long-only; SWAR C already
+decent; page-guard complexity in the hot loop not justified).
+strcmp shares the strncmp shape but was NOT measured — not proposed.
+Translation sketch->arch .s is mechanical on implementation GO;
+evidence bar for wiring: re-run matrix vs built libc + static-PIE
++ testsuite, same as rint/memmove.
+
+Rule kept throughout: measure first (sqrt/FMA precedent); page-safe
+loads only (in-page check); no new ISA (SSE2 baseline); no ABI or
+observable-contract change.

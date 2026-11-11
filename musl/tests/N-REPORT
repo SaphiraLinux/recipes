@@ -1,0 +1,39 @@
+strncmp/memcmp arch .s validation (0006/0007, wired but UNPUBLISHED).
+Requirement: re-run everything against the REAL built artifacts,
+not just scratch objects.
+
+STAGED PAYLOAD PROOF (daemon build musl-1.2.6_p1-r2, incoming txn):
+- strncmp.lo disassembles to page-guarded movups loop + dual NUL
+  detect + stop-mask + bsf; zero std/cld/rep; caller-saved regs
+  only; DF untouched; n==0 returns without touching memory.
+- Same verified for memcmp/rint (roundsd+DE dance)/memmove (movups loop).
+- Staged libc.a objects extracted and re-linked into harnesses below.
+
+DIFFERENTIAL vs STAGED (staged .o + generic C + live musl):
+- str-diff full matrix: 120,000 checks, 0 fails (incl. guard-page
+  child-isolated runs, 120k fuzz, all alignments, qNaN/sNaN-free
+  string domain, embedded NULs).
+- edge.c directed cases: 5234 checks, 0 fails, EXACT return values
+  (first/last-byte diffs, NUL at 0 and n-1, all-equal, all-0xFF vs
+  all-0x00, 0x80 vs 0x7F, matching prefixes, lengths 0..39).
+- rint-3way re-run: 1,039,673 checks, 0 fails.
+- mmatrix re-run: 112,841 checks/host x Egg (0 fails; 5-host proof
+  already recorded: 564,450 total, 0 fails).
+- libc-testsuite (musl suite incl. pthread/sem/spawn/cancel) built
+  against staged _p1-r2 static root: output BYTE-IDENTICAL to RC-69
+  baseline (same 5 expected failures; run rc=1 both).
+- Live memmove probe on hatchling _p1: 15/15 correct.
+- Static-PIE piecheck: green inside the daemon build (required for
+  AWAITING SIGNING).
+
+BENCHMARKS (arch .s in-binary vs generic C, min of 5):
+strncmp eq16/64/256/4K: Egg 4.4/8.6/9.1/8.3x; route 4.7-7.9x;
+keeper 3.9-6.6x; minimer 3.2-7.6x; homer 4.4-9.1x.
+memcmp eq64/4K: Egg 7.3/6.1x; route 3.1-3.4x (weakest host);
+keeper 4.4-6.7x; minimer 5.6-7.0x; homer 7.3-6.1x.
+Small-buffer (16B) verdict: 3-5x FASTER, no regression anywhere.
+memchr held in C (1.6-2.6x long-only; SWAR already decent).
+
+OUTSTANDING (operator decisions): sign/publish/install all withheld
+by standing GO. Revision for publish: pkgrel is r2 (bumppkg guard
+overridden once with explicit GO; ledger records it).

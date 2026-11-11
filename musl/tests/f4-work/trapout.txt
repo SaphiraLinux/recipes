@@ -1,0 +1,21 @@
+CAND-ONLY fn=0 x=nan mask=IM rm=0 daz=0 ftz=0
+CAND-ONLY fn=0 x=-nan mask=IM rm=0 daz=0 ftz=0
+CAND-ONLY fn=0 x=nan mask=IM rm=0 daz=0 ftz=0
+CAND-ONLY fn=0 x=-nan mask=IM rm=0 daz=0 ftz=0
+CAND-ONLY fn=1 x=nan mask=IM rm=0 daz=0 ftz=0
+CAND-ONLY fn=1 x=-nan mask=IM rm=0 daz=0 ftz=0
+CAND-ONLY fn=1 x=nan mask=IM rm=0 daz=0 ftz=0
+CAND-ONLY fn=1 x=-nan mask=IM rm=0 daz=0 ftz=0
+CAND-ONLY fn=0 x=nan mask=IM rm=0 daz=0 ftz=1
+CAND-ONLY fn=0 x=-nan mask=IM rm=0 daz=0 ftz=1
+CAND-ONLY fn=0 x=nan mask=IM rm=0 daz=0 ftz=1
+CAND-ONLY fn=0 x=-nan mask=IM rm=0 daz=0 ftz=1
+f4trap: ref_traps=11570 cand_traps=3583 ref_only=9842 cand_only=1855
+tbucket fn=0 mask=0 ref=0 cand=64
+tbucket fn=0 mask=1 ref=32 cand=32
+tbucket fn=0 mask=5 ref=160 cand=0
+tbucket fn=0 mask=6 ref=160 cand=96
+tbucket fn=1 mask=0 ref=0 cand=64
+tbucket fn=1 mask=1 ref=32 cand=32
+tbucket fn=1 mask=5 ref=160 cand=0
+tbucket fn=1 mask=6 ref=160 cand=96

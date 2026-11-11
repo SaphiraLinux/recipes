@@ -1,0 +1,40 @@
+From 67e12dfcb8f1e1f9f80cd8d51659da95f5d8db56 Mon Sep 17 00:00:00 2001
+From: Luca Kellermann <mailto.luca.kellermann@gmail.com>
+Date: Tue, 21 Jul 2026 22:31:04 +0200
+Subject: [PATCH] sprintf: fix one byte truncation when producing string of
+ length INT_MAX
+
+(v)sprint() is supposed to return the number of bytes written to s,
+excluding the terminating null byte. however, when these functions
+return INT_MAX, only INT_MAX - 1 bytes (excluding the terminating null
+byte) are written.
+
+this is caused by the way vsprintf() is implemented: calling
+vsnprintf() with n = INT_MAX. vsnprintf() returns the number of bytes
+that would be written to s had n been sufficiently large excluding the
+terminating null byte. output bytes beyond the n-1st are discarded.
+
+to accommodate the largest strings (v)sprintf() can produce (length
+INT_MAX, the return value is of type int), vsnprintf() has to be
+called with n >= INT_MAX + 1.
+
+calling vsnprintf() with n > INT_MAX is possible since commit
+11fb383275d20f5f94c00425bd888a02ecbd218e.
+---
+ src/stdio/vsprintf.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/stdio/vsprintf.c b/src/stdio/vsprintf.c
+index c57349d4..daceeba7 100644
+--- a/src/stdio/vsprintf.c
++++ b/src/stdio/vsprintf.c
+@@ -3,5 +3,5 @@
+ 
+ int vsprintf(char *restrict s, const char *restrict fmt, va_list ap)
+ {
+-	return vsnprintf(s, INT_MAX, fmt, ap);
++	return vsnprintf(s, INT_MAX + 1U, fmt, ap);
+ }
+-- 
+2.55.0
+

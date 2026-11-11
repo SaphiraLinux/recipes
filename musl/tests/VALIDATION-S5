@@ -1,0 +1,37 @@
+S5 independence validation (exp/musl-r8 @c51ac1e, daemon row 6169).
+
+1. BUILD: recipe_build SUCCEEDED from sinew's own recipe + pins.
+   build.log: "built sinew; 1 authoritative transaction(s) staged"
+   -> /out/stage4/incoming/x86_64/sinew-f2a9eb17e319-ready/
+   (sinew-1.2.6-r1.apk 378.6K, sinew-dev 585.1K, plan.json).
+   INSTALL test FAILED as predicted: 8 collisions against
+   live musl-1.2.6-r7 (ld-musl loader, ldd, Scrt1/crt1/crti/crtn,
+   libc.so, rcrt1.o). Co-install refusal is correct behaviour;
+   replaces/provides stay OFF. Nothing signed or published
+   (repository: none).
+
+2. SMOKE (scratch root /build/tmp/sinew-root, apk --usermode
+   into EMPTY root: sinew+sinew-dev install cleanly, 3858 KiB):
+   static, static-PIE and dynamic (staged loader) hello all rc=0;
+   rint(0.5)=0.0 rint(-2.5)=-2.0 flags=0x20 (inexact, correct).
+
+3. ABI: exported symbols 1650 staged == 1650 live, name-identical.
+   Loader /lib/ld-musl-x86_64.so.1 -> /usr/lib/libc.so retained.
+   rint.lo disassembles to roundsd $0x4 + stmxcsr/ldmxcsr (DE
+   preservation); rintf.lo to roundss $0x4 + stmxcsr/ldmxcsr.
+
+4. RINT HARNESSES (fresh objects from sinew ball + 0004, Egg):
+   rint-3way (double, generic-C + MPFR): 1039673 checks, 0 fails.
+   rintf-diff (float): 956842 checks, 0 fails.
+   rint-sweep (differential, 4 modes): 2159076 checks, 0 fails
+     (denormal-bit-only 20239/40505/60752/80978 — preserved).
+   rint-time2 (mixed): roundsd 2.8-2.9 vs generic 4.0 ns (1.38x).
+   nearbyint-lrint: staged-sinew vs live-musl outputs IDENTICAL.
+   All match the committed experiment (checkpoint 61) exactly.
+
+5. MUSL: git diff Master -- musl/ EMPTY. Touched areas: sinew only.
+
+6. LIVE: installed musl/musl-dev 1.2.6-r7 unchanged; no sinew
+   installed; gcc 16.2.0 untouched; no sign/publish/upgrade.
+
+Next: floor/ceil/trunc/nearbyint imm investigation under sinew/.

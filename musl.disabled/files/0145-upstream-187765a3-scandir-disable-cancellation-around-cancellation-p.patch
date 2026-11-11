@@ -1,0 +1,53 @@
+From 187765a32a062715e6966a7ced3ec8af15cc1c0c Mon Sep 17 00:00:00 2001
+From: Luca Kellermann <mailto.luca.kellermann@gmail.com>
+Date: Wed, 15 Apr 2026 16:54:57 +0200
+Subject: [PATCH] scandir: disable cancellation around cancellation points
+
+opendir() or closedir() might act upon a cancellation request. because
+scandir() did not disable cancellation or install a cancellation
+cleanup handler, this could lead to memory and file descriptor leaks.
+---
+ src/dirent/scandir.c | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+diff --git a/src/dirent/scandir.c b/src/dirent/scandir.c
+index aa0d10e2..1807c034 100644
+--- a/src/dirent/scandir.c
++++ b/src/dirent/scandir.c
+@@ -1,4 +1,5 @@
+ #include <dirent.h>
++#include <pthread.h>
+ #include <string.h>
+ #include <stdlib.h>
+ #include <stdint.h>
+@@ -9,7 +10,17 @@ int scandir(const char *path, struct dirent ***res,
+ 	int (*sel)(const struct dirent *),
+ 	int (*cmp)(const struct dirent **, const struct dirent **))
+ {
++	/* opendir() and closedir() are cancellation points. scandir() is also
++	 * allowed to be a cancellation point but we choose not to make it one.
++	 * To avoid calling sel() and cmp() with altered thread state,
++	 * cancellation is not explicitly disabled for those calls. This means
++	 * if either of the callbacks acts upon a cancellation request, there
++	 * can be memory and file descriptor leaks. */
++	int cs;
++	pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &cs);
+ 	DIR *d = opendir(path);
++	pthread_setcancelstate(cs, 0);
++
+ 	struct dirent *de, **names=0, **tmp;
+ 	size_t cnt=0, len=0;
+ 	int old_errno = errno;
+@@ -39,7 +50,9 @@ int scandir(const char *path, struct dirent ***res,
+ 	 * "failure" of closedir() as a failure of scandir(). */
+ 	int err = errno;
+ 
++	pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &cs);
+ 	closedir(d);
++	pthread_setcancelstate(cs, 0);
+ 
+ 	if (err) {
+ 		if (names) while (cnt-->0) free(names[cnt]);
+-- 
+2.55.0
+

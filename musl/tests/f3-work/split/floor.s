@@ -1,0 +1,51 @@
+	.text
+	.globl floor
+	.type floor,@function
+# double floor(double x) — SSE4.1, DAZ-gated cold path (F3).
+# Hot path (normal x, any MXCSR): 4 insns, no MXCSR read, no stack.
+# Cold path (zero/subnormal): DAZ=0 -> arch insn value; DAZ=1 ->
+# DAZ-free integer fallback computing the TRUE result (truth in both
+# modes: floor(-sub)=-1.0, floor(+sub)=+0, floor(±0)=±0 identity).
+# Flags (both DAZ modes) come from ONE sacrificial real op,
+# orig+1.0: DAZ=0 subnormal -> PE|DE (traps iff DM/PM unmasked);
+# DAZ=1 or zero -> silent. Masked flags are then bit-identical to
+# generic musl; UM-trap non-parity is documented (generic's exact-tiny
+# intermediate traps; we do not reproduce incidental traps).
+# No ldmxcsr anywhere; callee-saved and DF untouched.
+floor:
+	movq %xmm0,%rax
+	addq %rax,%rax		# drop sign; top 11 bits = biased exponent
+	shrq $53,%rax		# 0 iff x is ±0 or subnormal
+	jnz .Lfloor_arch
+	movq %xmm0,%rcx		# cold entry: save orig bits (cold only)
+	subq $8,%rsp
+	stmxcsr (%rsp)
+	movl (%rsp),%eax
+	addq $8,%rsp
+	testl $0x40,%eax	# DAZ?
+	jnz .Lfloor_daz1
+	roundsd $0x09,%xmm0,%xmm0	# DAZ=0: arch value (exact here)
+	jmp .Lfloor_sac
+.Lfloor_daz1:			# DAZ=1: integer fallback (truth)
+	movq %rcx,%rax
+	addq %rax,%rax
+	jz .Lfloor_sac		# ±0 -> identity (xmm0 untouched)
+	testq %rcx,%rcx		# sign of original x
+	js .Lfloor_neg
+	xorpd %xmm0,%xmm0	# +sub -> +0.0
+	jmp .Lfloor_sac
+.Lfloor_neg:
+	movabs $0xbff0000000000000,%rax	# -sub -> -1.0
+	movq %rax,%xmm0
+	# fallthrough
+.Lfloor_sac:			# flags via real op; orig bits in rcx
+	movabs $0x3ff0000000000000,%rax	# 1.0
+	movq %rax,%xmm1
+	movq %rcx,%xmm2
+	addsd %xmm2,%xmm1	# sacrificial orig+1.0 (result discarded)
+	ret
+.Lfloor_arch:
+	roundsd $0x09,%xmm0,%xmm0	# suppress exceptions, round down
+	ret
+	.size floor,.-floor
+	.section .note.GNU-stack,"",@progbits

@@ -1,0 +1,25 @@
+== fractional (|x| in (0,2^52), non-integral) ==
+floor      28.474 ns/call chk=87c7db8ce3815bef
+ceil       20.018 ns/call chk=cb27b892575414ce
+trunc      22.493 ns/call chk=5ae6d94e42344755
+rint       19.546 ns/call chk=6cc5806c34decddb
+== big (|x|>=2^52) ==
+floor      19.816 ns/call chk=a5f393b0ce86d656
+ceil       18.491 ns/call chk=a5f393b0ce86d656
+trunc      19.072 ns/call chk=a5f393b0ce86d656
+rint       19.011 ns/call chk=a5f393b0ce86d656
+== integral ==
+floor      19.849 ns/call chk=0caddd7be2b7fc46
+ceil       19.725 ns/call chk=0caddd7be2b7fc46
+trunc      19.048 ns/call chk=0caddd7be2b7fc46
+rint       19.189 ns/call chk=0caddd7be2b7fc46
+== float fractional ==
+floorf     29.163 ns/call chk=a6b13ce24f7c8035
+ceilf      29.231 ns/call chk=2a706b8bbef636fb
+truncf     28.411 ns/call chk=1b10ee8123ef8c44
+rintf      27.707 ns/call chk=4e0031dea364048f
+== float big ==
+floorf     27.155 ns/call chk=c0a2068acfcbf207
+ceilf      26.898 ns/call chk=c0a2068acfcbf207
+truncf     29.378 ns/call chk=c0a2068acfcbf207
+rintf      27.842 ns/call chk=c0a2068acfcbf207

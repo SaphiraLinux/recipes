@@ -1,0 +1,36 @@
+From be5ba5695df9197365cdb1c95b12fa423059ce34 Mon Sep 17 00:00:00 2001
+From: Rich Felker <dalias@aerifal.cx>
+Date: Thu, 17 Sep 2026 11:58:23 -0400
+Subject: [PATCH] asprintf: always clear the result pointer on failure
+
+previously, the malloc-failure error path cleared it, but other
+failures from vsnprintf such as EILSEQ or EOVERFLOW left the original
+contents of the result object in place.
+
+leaving any old value in place is allowed, and would be required if
+the specification did not explicitly permit clobbering it on failure,
+but it does.
+
+by overwriting any old value there with a null pointer, we harden
+callers that might have failed to check the return value for errors
+against accessing and possibly exposing unrelated data; instead they
+will fault on dereference.
+---
+ src/stdio/vasprintf.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/src/stdio/vasprintf.c b/src/stdio/vasprintf.c
+index 08251bc2..107295ab 100644
+--- a/src/stdio/vasprintf.c
++++ b/src/stdio/vasprintf.c
+@@ -10,6 +10,7 @@ int vasprintf(char **s, const char *fmt, va_list ap)
+ 	int l = vsnprintf(0, 0, fmt, ap2);
+ 	va_end(ap2);
+ 
++	*s = 0;
+ 	if (l<0 || !(*s=malloc(l+1U))) return -1;
+ 	return vsnprintf(*s, l+1U, fmt, ap);
+ }
+-- 
+2.55.0
+

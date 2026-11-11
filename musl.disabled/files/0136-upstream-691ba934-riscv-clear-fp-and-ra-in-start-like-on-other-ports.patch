@@ -1,0 +1,55 @@
+From 691ba934aec3fbb61b25dea5059b7ffc996a64c8 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Alex=20R=C3=B8nne=20Petersen?= <alex@alexrp.com>
+Date: Wed, 8 Jul 2026 14:31:46 +0200
+Subject: [PATCH] riscv: clear fp and ra in _start like on other ports
+
+As usual, clearing fp helps simple/generic frame-pointer-based unwinders.
+
+Clearing ra unbreaks DWARF unwinders because ra would otherwise contain garbage
+from _start all the way through to libc_start_main_stage2. The CFI for
+libc_start_main_stage2 would then incorrectly claim that ra contains a perfectly
+valid return address that the unwinder should proceed through. If that return
+address just so happened to land inside a real function somewhere, the unwinder
+would then happily proceed to run that function's CFI on a completely unrelated
+register context, unsurprisingly leading to weird crashes.
+
+As an aside: Some ports don't clear their ra equivalent in _start, but they do
+use a linked branch to _start_c. That works out too because the unwinder then
+actually reaches _start which intentionally has no CFI, so it stops there.
+Between these approaches, clearing ra and using an unlinked branch tends to lead
+to slightly nicer stack traces for users because there won't be an unwind error
+printed for the _start frame (due to missing CFI).
+---
+ arch/riscv32/crt_arch.h | 2 ++
+ arch/riscv64/crt_arch.h | 2 ++
+ 2 files changed, 4 insertions(+)
+
+diff --git a/arch/riscv32/crt_arch.h b/arch/riscv32/crt_arch.h
+index 6b93fcfd..ad556137 100644
+--- a/arch/riscv32/crt_arch.h
++++ b/arch/riscv32/crt_arch.h
+@@ -10,6 +10,8 @@ START ":\n"
+ ".option norelax\n\t"
+ "lla gp, __global_pointer$\n"
+ ".option pop\n\t"
++"li fp, 0\n"
++"li ra, 0\n"
+ "mv a0, sp\n"
+ ".weak _DYNAMIC\n"
+ ".hidden _DYNAMIC\n\t"
+diff --git a/arch/riscv64/crt_arch.h b/arch/riscv64/crt_arch.h
+index 6b93fcfd..ad556137 100644
+--- a/arch/riscv64/crt_arch.h
++++ b/arch/riscv64/crt_arch.h
+@@ -10,6 +10,8 @@ START ":\n"
+ ".option norelax\n\t"
+ "lla gp, __global_pointer$\n"
+ ".option pop\n\t"
++"li fp, 0\n"
++"li ra, 0\n"
+ "mv a0, sp\n"
+ ".weak _DYNAMIC\n"
+ ".hidden _DYNAMIC\n\t"
+-- 
+2.55.0
+

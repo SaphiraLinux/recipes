@@ -1,0 +1,16 @@
+VFAIL fn=0 x=0x1p-1074 ref=0x1p-1074[1] cand=0x0p+0[0] rm=0 daz=1 ftz=0
+VFAIL fn=1 x=0x1p-1074 ref=0x1p-1074[1] cand=0x1p+0[3ff0000000000000] rm=0 daz=1 ftz=0
+VFAIL fn=0 x=-0x1p-1074 ref=-0x1p-1074[8000000000000001] cand=-0x1p+0[bff0000000000000] rm=0 daz=1 ftz=0
+VFAIL fn=1 x=-0x1p-1074 ref=-0x1p-1074[8000000000000001] cand=-0x0p+0[8000000000000000] rm=0 daz=1 ftz=0
+VFAIL fn=0 x=0x1.ffffffffffffep-1023 ref=0x1.ffffffffffffep-1023[fffffffffffff] cand=0x0p+0[0] rm=0 daz=1 ftz=0
+VFAIL fn=1 x=0x1.ffffffffffffep-1023 ref=0x1.ffffffffffffep-1023[fffffffffffff] cand=0x1p+0[3ff0000000000000] rm=0 daz=1 ftz=0
+VFAIL fn=0 x=-0x1.ffffffffffffep-1023 ref=-0x1.ffffffffffffep-1023[800fffffffffffff] cand=-0x1p+0[bff0000000000000] rm=0 daz=1 ftz=0
+VFAIL fn=1 x=-0x1.ffffffffffffep-1023 ref=-0x1.ffffffffffffep-1023[800fffffffffffff] cand=-0x0p+0[8000000000000000] rm=0 daz=1 ftz=0
+VFAIL fn=0 x=0x1.2cab5bf4dbf4p-1028 ref=0x1.2cab5bf4dbf4p-1028[4b2ad6fd36fd] cand=0x0p+0[0] rm=0 daz=1 ftz=0
+VFAIL fn=1 x=0x1.2cab5bf4dbf4p-1028 ref=0x1.2cab5bf4dbf4p-1028[4b2ad6fd36fd] cand=0x1p+0[3ff0000000000000] rm=0 daz=1 ftz=0
+f3diff: total=388224 vfails=4864 ffails=0 pe_silence=113973 snan_quiet=19492 snan_ie=19492 snan_silent=0 ue_ftz=2432
+vfn: 2432 2432 0 0 0 0 0 0
+ffn: 0 0 0 0 0 0 0 0
+ffn_daz0_subclass: 0 0 0 0 0 0 0 0
+vbucket fn=0 daz=1 vFails=2432
+vbucket fn=1 daz=1 vFails=2432
