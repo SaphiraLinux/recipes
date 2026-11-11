@@ -391,11 +391,20 @@ for subpackage in $subpackages; do
 			dev_dependencies="$pkgname=$pkgver-r$pkgrel $(echo ${depends_dev-})"
 			;;
 		"$pkgname"-doc) description="$pkgdesc documentation" ;;
-		# -libs packages are STANDALONE runtime libraries: no parent pin.
-		# The parent depends on them, never the reverse - a parent pin
-		# made gcc-libs drag the full compiler (binutils, gmp, isl, mpc,
-		# mpfr) into every runtime consumer chain.
-		"$pkgname"-libs) description="$pkgdesc runtime libraries"; dev_dependencies="" ;;
+		# depends_libs (Alpine-style convention, mirrors depends_dev):
+		# extra runtime dependencies carried by the -libs subpackage:
+		# the providers of the libraries the shipped SONAME objects
+		# link directly (DT_NEEDED). A -libs split whose closure is
+		# under-declared installs libraries whose loader requirements
+		# are unmet on any system without the parent (proven Minimer
+		# 2026-11-08: libcryptsetup.so.12 without libjson-c.so.5).
+		# Still no parent pin: the parent depends on -libs, never the
+		# reverse - a parent pin made gcc-libs drag the full compiler
+		# (binutils, gmp, isl, mpc, mpfr) into every runtime chain.
+		"$pkgname"-libs)
+			description="$pkgdesc runtime libraries"
+			dev_dependencies="$(echo ${depends_libs-})"
+			;;
 		*)
 			# Named splits pin the base release (like -doc) plus the
 			# optional files/split-<name>.depends words, so the split

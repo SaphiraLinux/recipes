@@ -51,13 +51,16 @@ kmod_prepare_tree()
 {
 	# $1 = KVER_SHORT. Ensures a usable kernel tree at
 	# $SRC/linux-<short>, entirely under /build. A tree already
-	# staged there (via buildpkg /input) is honoured only after
-	# proving its .config matches the published kernel config;
-	# otherwise a fresh tree is prepared from the vendored tarball
-	# plus the published kernel's own built .config
-	# (/boot/config-<short>-akadata, shipped by the installed
-	# saphira-kernel-<short> package). Either way no operator
-	# staging is required and /usr/src is never read or written.
+	# staged there is honoured only if its .config matches the
+	# installed kernel config (legacy path, fails closed when the
+	# kernel package is absent); otherwise a fresh tree is prepared
+	# from the vendored tarball plus the kernel recipe's own
+	# vendored .config (config-<short>-akadata, same bytes the
+	# kernel build consumes). Either way no operator staging is
+	# required and /usr/src is never read or written. The fresh
+	# path never reads /boot: the build root does not install the
+	# kernel package, so /boot/config-*-akadata is absent by design
+	# (proven 2026-11-06: every self-prepare died there).
 	#
 	# modules_prepare depth: MODVERSIONS is off on every supported
 	# line, so scripts + generated headers + sign-file suffice for
@@ -77,9 +80,14 @@ kmod_prepare_tree()
 		[ "$_tree_cfg" = "$_pub_cfg" ] ||
 			{ echo "ERROR: staged tree .config disagrees with published $_kconfig (stale tree?)" >&2; return 1; }
 	else
-		[ -f "$_kconfig" ] ||
-			{ echo "ERROR: published kernel config missing at $_kconfig (install saphira-kernel-$_kshort?)" >&2; return 1; }
 		_krecipe="$RECIPE_DIR/../saphira-kernel-$_kshort"
+		# .config seed: the kernel recipe's own vendored config
+		# (pre-merge input, same bytes the kernel build consumes).
+		# Never /boot: the build root does not install the kernel
+		# package, so /boot/config-*-akadata is absent by design.
+		_kseedcfg="$_krecipe/files/config-$_kshort-akadata"
+		[ -f "$_kseedcfg" ] ||
+			{ echo "ERROR: no vendored kernel config for $_kshort in $_krecipe/files" >&2; return 1; }
 		_kball="$RECIPE_DIR/../saphira-kernel-$_kshort/files/linux-$_kshort.tar.xz"
 		[ -f "$_kball" ] || _kball="$RECIPE_DIR/../saphira-kernel-$_kshort/files/linux-$_kshort.tar.gz"
 		[ -f "$_kball" ] ||
@@ -101,8 +109,10 @@ kmod_prepare_tree()
 			grep -E 'fuzz|offset' "$SRC/kmod-v3.log" >&2
 			return 1
 		fi
-		cp "$_kconfig" "$_kdir/.config" ||
+		cp "$_kseedcfg" "$_kdir/.config" ||
 			{ echo "ERROR: cannot seed tree .config" >&2; return 1; }
+		(cd "$_kdir" && make olddefconfig) ||
+			{ echo "ERROR: kernel olddefconfig failed" >&2; return 1; }
 		(cd "$_kdir" && make modules_prepare -j${JOBS:-$(nproc)}) ||
 			{ echo "ERROR: kernel modules_prepare failed" >&2; return 1; }
 	fi

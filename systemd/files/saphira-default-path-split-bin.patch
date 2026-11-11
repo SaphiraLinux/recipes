@@ -1,0 +1,21 @@
+--- a/src/basic/path-util.c
++++ b/src/basic/path-util.c
+@@ -1506,8 +1506,17 @@
+         if (default_path)
+                 return default_path;
+
+-        if (dir_is_split("/usr/sbin", "/usr/bin"))
++        if (dir_is_split("/usr/sbin", "/usr/bin")) {
++                /* Saphira is non-usrmerged: /sbin and /bin are real
++                 * directories holding the other half of the toolset
++                 * (coreutils --bindir=/bin, sbin-class tools in /sbin).
++                 * Upstream's split-/usr default omits them (merged
++                 * systems alias them into /usr), which blinds
++                 * find_executable() to every /bin|/sbin helper. */
++                if (dir_is_split("/sbin", "/bin"))
++                        return (default_path = DEFAULT_PATH_WITH_FULL_SBIN ":/sbin:/bin");
+                 return (default_path = DEFAULT_PATH_WITH_FULL_SBIN);  /* a */
++        }
+         if (dir_is_split("/usr/local/sbin", "/usr/local/bin"))
+                 return (default_path = DEFAULT_PATH_WITH_LOCAL_SBIN); /* b */
+         return (default_path = DEFAULT_PATH_WITHOUT_SBIN);            /* c */

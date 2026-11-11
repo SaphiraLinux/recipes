@@ -5,7 +5,7 @@ pkgver=1.0
 # r2: payload change (multi-backend installer: npm + vendor-direct
 # with hash verification + pip machinery; ten musl-proven agents in
 # the catalogue, failures hidden per policy). r1 was published.
-pkgrel=2
+pkgrel=3
 # x86_64, not noarch: apk-tools v3 fetches noarch payloads from a
 # per-arch noarch/ subdir that the Saphira repo layout does not
 # publish yet (verified 2026-09-08: hatched/noarch/ absent, fetch

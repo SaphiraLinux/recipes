@@ -9,6 +9,6 @@ dropping -Werror wholesale.
 
 --- a/Makefile
 +++ b/Makefile
-@@ -53 +53 @@
+@@ -43 +43 @@
 -CWFLAGS ?= -Wall -Werror -Wstrict-prototypes -Wextra -Wno-unused-parameter -Wformat -Wformat-security -Werror=format-security -fstack-protector-strong -fPIE -Warray-bounds
 +CWFLAGS ?= -Wall -Werror -Wstrict-prototypes -Wextra -Wno-unused-parameter -Wformat -Wformat-security -Werror=format-security -fstack-protector-strong -fPIE -Warray-bounds -Wno-error=unused-but-set-variable -Wno-error=format-overflow -Doff64_t=off_t

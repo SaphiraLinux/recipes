@@ -16,9 +16,9 @@ D-Bus API unchanged:
 Genuine systemd-owned /run paths are untouched: this patch only
 removes /var/run -> /run transformations, never /run itself.
 
---- a/src/core/dbus-service.c	2026-09-17 02:34:55.627415894 +0000
-+++ b/src/core/dbus-service.c	2026-09-17 02:35:03.011100319 +0000
-@@ -653,7 +653,7 @@
+--- a/src/core/dbus-service.c
++++ b/src/core/dbus-service.c
+@@ -690,7 +690,7 @@
  
          if (streq(name, "PIDFile")) {
                  _cleanup_free_ char *n = NULL;
@@ -27,7 +27,7 @@ removes /var/run -> /run transformations, never /run itself.
  
                  r = sd_bus_message_read(message, "s", &v);
                  if (r < 0)
-@@ -669,20 +669,6 @@
+@@ -706,20 +706,6 @@
                          if (!path_is_normalized(n))
                                  return sd_bus_error_setf(reterr_error, SD_BUS_ERROR_INVALID_ARGS, "PIDFile= path '%s' is not valid", n);
  
@@ -48,9 +48,9 @@ removes /var/run -> /run transformations, never /run itself.
                  }
  
                  if (!UNIT_WRITE_FLAGS_NOOP(flags)) {
---- a/src/core/load-fragment.c	2026-09-17 02:34:55.625256227 +0000
-+++ b/src/core/load-fragment.c	2026-09-17 02:35:03.010642230 +0000
-@@ -566,26 +566,15 @@
+--- a/src/core/load-fragment.c
++++ b/src/core/load-fragment.c
+@@ -578,26 +578,15 @@
                  const char *lvalue,
                  char **path) {
  
@@ -85,22 +85,23 @@ removes /var/run -> /run transformations, never /run itself.
  }
  
  int config_parse_socket_listen(
---- a/src/core/taint.c	2026-09-17 02:34:55.631291153 +0000
-+++ b/src/core/taint.c	2026-09-17 02:35:03.011920249 +0000
-@@ -40,7 +40,7 @@
+--- a/src/core/taint.c
++++ b/src/core/taint.c
+@@ -42,7 +42,7 @@
           * runtime should be tagged here. For stuff that is known during compilation, emit a warning in the
           * configuration phase. */
  
 -        _cleanup_free_ char *bin = NULL, *usr_sbin = NULL, *var_run = NULL;
 +        _cleanup_free_ char *bin = NULL, *usr_sbin = NULL;
  
-         if (readlink_malloc("/bin", &bin) < 0 || !PATH_IN_SET(bin, "usr/bin", "/usr/bin"))
-                 stage[n++] = "unmerged-usr";
-@@ -50,8 +50,9 @@
-         if (readlink_malloc("/usr/sbin", &usr_sbin) < 0 || !PATH_IN_SET(usr_sbin, "bin", "/usr/bin"))
+         r = readlink_malloc("/bin", &bin);
+         if (r != -ENOENT && (r < 0 || !PATH_IN_SET(bin, "usr/bin", "/usr/bin")))
+@@ -54,9 +54,9 @@
+         if (r != -ENOENT && (r < 0 || !PATH_IN_SET(usr_sbin, "bin", "/usr/bin")))
                  stage[n++] = "unmerged-bin";
  
--        if (readlink_malloc("/var/run", &var_run) < 0 || !PATH_IN_SET(var_run, "../run", "/run"))
+-        r = readlink_malloc("/var/run", &var_run);
+-        if (r != -ENOENT && (r < 0 || !PATH_IN_SET(var_run, "../run", "/run")))
 -                stage[n++] = "var-run-bad";
 +        /* Saphira split-/run layout: /var/run is a real directory by
 +         * design, never an alias. A non-symlink /var/run is correct and
@@ -108,9 +109,9 @@ removes /var/run -> /run transformations, never /run itself.
  
          if (clock_is_localtime(NULL) > 0)
                  stage[n++] = "local-hwclock";
---- a/src/tmpfiles/tmpfiles.c	2026-09-17 02:34:55.629349537 +0000
-+++ b/src/tmpfiles/tmpfiles.c	2026-09-17 02:35:03.011755226 +0000
-@@ -3721,42 +3721,13 @@
+--- a/src/tmpfiles/tmpfiles.c
++++ b/src/tmpfiles/tmpfiles.c
+@@ -4176,42 +4176,13 @@
  }
  
  static int patch_var_run(const char *fname, unsigned line, char **path) {
@@ -158,9 +159,9 @@ removes /var/run -> /run transformations, never /run itself.
          return 0;
  }
  
---- a/tmpfiles.d/var.conf.in	2026-09-17 02:34:55.632959833 +0000
-+++ b/tmpfiles.d/var.conf.in	2026-09-17 02:35:03.011990786 +0000
-@@ -10,7 +10,8 @@
+--- a/tmpfiles.d/var.conf.in
++++ b/tmpfiles.d/var.conf.in
+@@ -9,7 +9,8 @@
  
  q /var 0755 - - -
  

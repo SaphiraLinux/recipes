@@ -1,0 +1,13 @@
+From: Saphira packaging <recipes@saphira.vm2.uk>
+Subject: [PATCH] gcc15+: mark imsm_orom.signature nonstring
+
+The "$VER"/"$NVM"/"$VMD" tags are 4-byte OROM magic compared with
+memcmp(): the truncated NUL is intentional. Tell gcc so with the
+nonstring field attribute instead of weakening -Werror (one
+attribute fixes all three initializer sites).
+
+--- a/platform-intel.h
++++ b/platform-intel.h
+@@ -27,1 +27,1 @@
+-	__u8 signature[4];
++	__u8 signature[4] __attribute__((nonstring));

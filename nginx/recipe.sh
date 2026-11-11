@@ -1,9 +1,10 @@
 #!/bin/sh
 
 pkgname=nginx
-pkgver=1.30.5
-# 1.30.5: stable security release (CVE-2026-90439: heap buffer overflow
-# in ngx_http_v3_module with OpenSSL <= 3.5.0; Saphira builds http_v3).
+pkgver=1.30.6
+# 1.30.6: stable security release (CVE-2026-15176: heap buffer overflow,
+# remote unauthenticated, public PoC; CVE-2026-97205: UAF in AIO+SSI;
+# plus 15176-adjacent fixes in 95101/97629). Stays on the 1.30 line.
 # New upstream version: pkgrel resets to 1. Carries forward the r11
 # /var/run runtime contract, feature set, and rule locks unchanged.
 # r3: ngx_brotli headers track brotli 1.2.1 (CVE-2026-111497 decoder
@@ -43,15 +44,15 @@ pkgver=1.30.5
 # these hold transient response bodies, so world-readable temp
 # storage was never intended). client_body and the other temp
 # paths keep 0755 (no signal either way). Payload change, bumps.
-pkgrel=3
+pkgrel=1
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="Saphira webDragon HTTP server and reverse proxy"
 license="BSD-2-Clause"
 origin=nginx
 repo=main
 url=https://nginx.org/
-source=https://nginx.org/download/nginx-1.30.5.tar.gz
-sha256=6c20565aa2325cb82216ae804f4a4ff1875179014759a381c42ddc8e11c4906d
+source=https://nginx.org/download/nginx-1.30.6.tar.gz
+sha256=3cf46f5ed7504d460125866b7bea99fb357f31d887e2e63b35503310e9b8b6c8
 
 depends="
     brotli

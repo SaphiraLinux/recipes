@@ -105,6 +105,11 @@ build options:
                     (default) writes nothing
   --role NAME         add a role layer; repeatable
   --role-file PATH    add intentions from a file; repeatable
+                      Firmware layers are automatic, never operator-
+                      selected: bios-* targets gain base-bios, uefi-*
+                      targets gain base-efi (ESP and NVRAM tooling),
+                      hybrid installer targets gain neither (installer
+                      profiles carry both toolchains explicitly).
   --no-enable         do not enable the target's services in the image
   --kernel-arg ARG    append ARG to GRUB_CMDLINE_LINUX in the image;
                       repeatable. For what a deployment needs and the
@@ -144,6 +149,11 @@ install-to-disk options:
   --netconf LIST      comma-separated IFACE:MODE (dhcp|off), as in build
   --role NAME         add a role layer; repeatable
   --role-file PATH    add intentions from a file; repeatable
+                      Firmware layers are automatic, never operator-
+                      selected: bios-* targets gain base-bios, uefi-*
+                      targets gain base-efi (ESP and NVRAM tooling),
+                      hybrid installer targets gain neither (installer
+                      profiles carry both toolchains explicitly).
   --arch ARCH         target architecture: x86_64 (default) or aarch64
   --repository PATH   repository index/Packages.adb to install from
   --kernel-arg ARG    append ARG to GRUB_CMDLINE_LINUX; repeatable
@@ -160,7 +170,9 @@ install-to-disk options:
 plan options:
   --size SIZE         minimum image size used to size the partitions
 
-Saphira tool scratch lives under SAPHIRA_TMPDIR, never host /tmp.
+Saphira tool scratch lives under SAPHIRA_TMPDIR, falling back to
+host /tmp only when SAPHIRA_TMPDIR names no usable directory
+(installed machines have no /build tree).
 USAGE
 	exit 2
 }
@@ -173,7 +185,16 @@ die()
 
 saphira_tmpdir()
 {
-	printf '%s\n' "${SAPHIRA_TMPDIR:-/build/tmp}"
+	# Tool scratch prefers SAPHIRA_TMPDIR and falls back to host /tmp
+	# when it names no usable directory (installed machines have no
+	# /build tree, so the Egg default is absent there - minimer
+	# 2026-11-08: mktemp died on /build/tmp/saphira-plan.XXXXXX).
+	# Same contract as saphira-earlyfw's stage_base (r5): never invent
+	# /build on a machine that does not have one, never fail merely
+	# because the preferred scratch root is absent.
+	base=${SAPHIRA_TMPDIR:-/build/tmp}
+	[ -d "$base" ] || base=/tmp
+	printf '%s\n' "$base"
 }
 
 # --- the tool directory, so the canonical path is found first ----------
@@ -294,6 +315,31 @@ resolve_target()
 	# and build all resolve a target, so all three get the same
 	# architecture without any of them remembering to.
 	ARCH=${arch:-x86_64}
+}
+
+# Firmware layer: bios-* targets gain base-bios (deliberately empty -
+# BIOS needs nothing beyond the common set), uefi-* targets gain
+# base-efi (ESP and NVRAM tooling), hybrid installer targets gain
+# neither: installer profiles carry both toolchains explicitly,
+# because the firmware booted is not necessarily the firmware
+# targeted. Automatic, never operator-selected: firmware is a property
+# of the target, not a role, so plan, report, build and install-to-disk
+# all apply the same rule through this one function.
+append_firmware_layer()
+{
+	# $1 composed profile file. $BOOT is set by resolve_target.
+	case $BOOT in
+	bios) firmware_layers="base-bios" ;;
+	uefi) firmware_layers="base-efi" ;;
+	hybrid) firmware_layers="" ;;
+	*) die "internal: unknown boot $BOOT (resolve_target should have refused it)" ;;
+	esac
+	for f in $firmware_layers; do
+		[ -f "$profiles_dir/$f" ] ||
+			die "firmware layer is unavailable: $f"
+		printf '\n# firmware: %s (automatic for %s targets)\n' "$f" "$BOOT" >> "$1"
+		cat "$profiles_dir/$f" >> "$1"
+	done
 }
 
 # --- partition plan ---------------------------------------------------
@@ -1550,23 +1596,50 @@ INITTAB
 		fi
 		# Firstboot boot gate (normal-boot dependency structure, never a
 		# boot mode): while the assembly-written marker exists, the
-		# whole operational transaction waits for setup; without the
-		# marker the condition-skipped unit costs nothing. Two drop-ins, both
+		# operational boot waits for setup; without the marker the
+		# condition-skipped unit costs nothing. Two layers, both
 		# image-owned platform plumbing like the masks above:
 		#   multi-user.target Wants+After firstboot: multi-user is the
-		#     default target, so everything an operator meets - getty
-		#     target and the gettys under it, sshd, and every other
-		#     operational unit it pulls - starts only after the wizard
-		#     completes. Wants, not Requires: a failed setup must not
-		#     fail the boot (the marker is kept and setup retries next
-		#     boot); an After-only wait releases on failure and on
-		#     condition-skip alike.
-		#   nftables After firstboot: it carries DefaultDependencies=no
-		#     with only After=modules-load, so a gate placed at or
-		#     above sysinit would not hold it and its status line would
-		#     print mid-wizard. (networkd shares the flag but is a
-		#     wizard prerequisite that must run first; wait-online is
-		#     dormant because nothing pulls network-online.target.)
+		#     default target, so its own completion - and every unit
+		#     explicitly ordered after it - waits for the wizard.
+		#     Wants, not Requires: a failed setup must not fail the
+		#     boot (the marker is kept and setup retries next boot);
+		#     an After-only wait releases on failure and on
+		#     condition-skip alike. This holds the transaction's
+		#     completion but does NOT hold console login by itself.
+		#   getty serialization: upstream getty.target carries no
+		#     ordering against multi-user.target, and a Before edge on
+		#     a getty does not delay that getty's own start - so
+		#     generator-spawned getty@tty1 (same display,
+		#     screen-clearing) and console-getty (idle-start: fires the
+		#     instant the wizard waits for input) both raced the
+		#     wizard on the console (Minimer 2026-11-07). Each login
+		#     path therefore waits for setup itself, After-only: all
+		#     three already run in the same transaction (firstboot is
+		#     pulled in by the gate above), so a bare After edge
+		#     serializes with no new pull-in edge and no cycle
+		#     surface. Wants is deliberately absent here too: a failed
+		#     setup must release the console to a login, never wedge
+		#     the boot. The serial template covers serial-console
+		#     deployments, where the generator would otherwise spawn a
+		#     serial getty on the wizard's own port.
+		#   nftables is deliberately NOT ordered against firstboot:
+		#     an After= edge from the nftables unit onto firstboot
+		#     closed a transaction cycle (nftables -> network-pre.target
+		#     -> systemd-networkd -> firstboot -> nftables: firstboot
+		#     needs networkd, networkd waits on network-pre, nftables
+		#     has Before=network-pre), proven on Minimer 2026-11-07
+		#     where systemd-analyze verify reports the cycle as
+		#     unfixable and the boot breaks ordering by deleting the
+		#     networkd start job. nftables keeps its packaged order
+		#     (DefaultDependencies=no, After=modules-load,
+		#     Before=network-pre.target): it loads the static ruleset
+		#     before the network comes up, its status line may print
+		#     mid-wizard, and that cosmetic cost is accepted - a gate
+		#     that breaks boot is not a gate. (networkd shares the
+		#     DefaultDependencies=no flag but is a wizard prerequisite
+		#     that must run first; wait-online is dormant because
+		#     nothing pulls network-online.target.)
 		#
 		# The gate is on multi-user.target and NOT on basic.target. The
 		# unit now carries systemd's default dependencies, so it is
@@ -1583,12 +1656,18 @@ INITTAB
 		# added no ordering and is the shape that turns healthy
 		# orderings into reported transaction cycles.
 		if [ -f "$mnt/usr/lib/systemd/system/saphira-firstboot.service" ] && [ "$PROFILE" != usb-installer ] && [ "$PROFILE" != image-installer-appliance ]; then
-			mkdir -p "$mnt/etc/systemd/system/multi-user.target.d" \
-				"$mnt/etc/systemd/system/nftables.service.d"
+			mkdir -p "$mnt/etc/systemd/system/multi-user.target.d"
 			printf '[Unit]\nWants=saphira-firstboot.service\nAfter=saphira-firstboot.service\n' \
 				> "$mnt/etc/systemd/system/multi-user.target.d/10-firstboot-gate.conf"
+			mkdir -p "$mnt/etc/systemd/system/console-getty.service.d"
 			printf '[Unit]\nAfter=saphira-firstboot.service\n' \
-				> "$mnt/etc/systemd/system/nftables.service.d/10-firstboot-order.conf"
+				> "$mnt/etc/systemd/system/console-getty.service.d/10-firstboot-order.conf"
+			mkdir -p "$mnt/etc/systemd/system/getty@tty1.service.d"
+			printf '[Unit]\nAfter=saphira-firstboot.service\n' \
+				> "$mnt/etc/systemd/system/getty@tty1.service.d/10-firstboot-order.conf"
+			mkdir -p "$mnt/etc/systemd/system/serial-getty@.service.d"
+			printf '[Unit]\nAfter=saphira-firstboot.service\n' \
+				> "$mnt/etc/systemd/system/serial-getty@.service.d/10-firstboot-order.conf"
 		fi
 		# Dedicated installer appliance: the creator menu owns tty1.
 		# No firstboot wizard runs here and no password exists here:
@@ -1628,6 +1707,36 @@ INITTAB
 		fi
 		;;
 esac
+}
+
+# Firstboot completeness gate: the armed marker, the target gate,
+# the enabled unit, and the three getty ordering drop-ins must all be
+# present on any target that carries the wizard. A silent miss ships an
+# image that boots straight to login with locked root and no setup path
+# (Minimer 2026-11-07: a completed install with no wizard and no error
+# anywhere), or a machine whose login races the wizard on the console
+# (Minimer 2026-11-07: getty prompt over the setup screen). Fail closed
+# instead, naming exactly what is missing. Skipped exactly where the
+# gate itself is skipped (installer appliances own a different flow).
+verify_firstboot()
+{
+	mnt=$1
+	[ -f "$mnt/usr/lib/systemd/system/saphira-firstboot.service" ] || return 0
+	case ${PROFILE:-} in
+		usb-installer|image-installer-appliance) return 0 ;;
+	esac
+	[ -f "$mnt/etc/saphira-firstboot-required" ] ||
+		die 'firstboot marker missing from target: setup would never run (expected /etc/saphira-firstboot-required)'
+	[ -f "$mnt/etc/systemd/system/multi-user.target.d/10-firstboot-gate.conf" ] ||
+		die 'firstboot gate missing from target: multi-user would not wait for setup'
+	[ -f "$mnt/etc/systemd/system/console-getty.service.d/10-firstboot-order.conf" ] ||
+		die 'getty ordering missing from target: console-getty would race setup'
+	[ -f "$mnt/etc/systemd/system/getty@tty1.service.d/10-firstboot-order.conf" ] ||
+		die 'getty ordering missing from target: getty@tty1 would race setup'
+	[ -f "$mnt/etc/systemd/system/serial-getty@.service.d/10-firstboot-order.conf" ] ||
+		die 'getty ordering missing from target: serial getty would race setup'
+	[ -e "$mnt/etc/systemd/system/multi-user.target.wants/saphira-firstboot.service" ] ||
+		die 'saphira-firstboot not enabled in target: setup would never start'
 }
 
 # The init services a package provides, one base name per line.
@@ -1908,7 +2017,7 @@ cmd_plan()
 	validate_arch
 	printf '# saphira-image plan: target=%s arch=%s boot=%s init=%s profile=%s size=%s allocate=%s esp=%sMiB root=%s\n' \
 		"$TARGET" "$ARCH" "$BOOT" "$INIT" "$PROFILE" "$SIZE" "${ALLOCATE:-all}" "${ESP_SIZE:-64}" "${ROOT_SIZE:-fill}"
-	PLAN_BUFFER=$(mktemp "${SAPHIRA_TMPDIR:-/build/tmp}/saphira-plan.XXXXXX") ||
+	PLAN_BUFFER=$(mktemp "$(saphira_tmpdir)/saphira-plan.XXXXXX") ||
 		die 'cannot create a scratch file for the partition plan'
 	trap 'rm -f -- "$PLAN_BUFFER"' EXIT HUP INT TERM
 	partition_plan
@@ -1952,6 +2061,7 @@ cmd_report()
 		[ -f "$f" ] || die "no such role file: $f"
 		cat "$f" >> "$composed"
 	done
+	append_firmware_layer "$composed"
 	printf 'composed profile: %s\n' "$composed"
 	awk '
 		{ line = $0; sub(/#.*$/, "", line); gsub(/^[ \t]+|[ \t]+$/, "", line) }
@@ -2186,6 +2296,7 @@ cmd_build()
 		[ -f "$f" ] || die "no such role file: $f"
 		cat "$f" >> "$composed"
 	done
+	append_firmware_layer "$composed"
 	if [ "${ROOTFS:-ext4}" = zfs ]; then
 		require_zfs_target "$composed"
 	fi
@@ -2302,6 +2413,10 @@ cmd_build()
 
 	report_closure "$mnt"
 
+	# Firstboot triad must be whole before the image is declared
+	# ready: a silent miss ships an unconfigurable machine.
+	verify_firstboot "$mnt"
+
 	umount -R -- "$mnt" || die 'cannot unmount the image'
 	mounted= esp_mounted=
 	if [ -n "${pool_created:-}" ]; then
@@ -2355,9 +2470,11 @@ cmd_build()
 #     the kernel's own default. Strip every init= token for both.
 #   getty autospawn  systemd's getty-generator spawns a serial getty
 #     for every kernel console= (proven: it HUP-killed the firstboot
-#     wizard fighting it for /dev/console). No serial getty may exist
-#     at all (Saphira ships none), so systemd targets disable the
-#     generator here.
+#     wizard fighting it for /dev/console). Suppression of that
+#     generator is systemd configuration, never a kernel argument:
+#     the image writes no init-specific tokens at all, so with the
+#     default console=tty0-only cmdline the generator has nothing to
+#     spawn and the wizard owns the console uncontested.
 fix_kernel_cmdline()
 {
 	# $1 mountpoint, $2 root partition device
@@ -2375,18 +2492,17 @@ fix_kernel_cmdline()
 		[ -n "$partuuid" ] || die "empty PARTUUID for $rootdev"
 		roottoken="root=PARTUUID=$partuuid"
 	fi
-	getty_opt=
-	# Systemd-only kernel arguments, added here rather than shipped in the
-	# packaged default, so an OpenRC target never carries them:
-	#   systemd.getty_auto=0  no getty generator autospawn (the wizard and
-	#                         the explicit agetty services own the console)
-	#   systemd.imds=no       Saphira is not a cloud image; in auto mode
-	#                         the IMDS generator still opens the hardware
-	#                         database every boot and logs a failed lookup.
-	# Both are meaningless without systemd, and a systemd argument on an
-	# OpenRC cmdline is target leakage that reads as a defect in
-	# /proc/cmdline.
-	[ "$INIT" = systemd ] && getty_opt=" systemd.getty_auto=0 systemd.imds=no"
+	# No init-specific kernel arguments, ever. The bootloader config
+	# must not change with the init (2026-11-06: systemd.* args on the
+	# kernel line made grub differ between inits for no boot reason;
+	# the operator is right and the r12/r22 mechanism is removed).
+	# Generator concerns stay init-side: Saphira ships no serial
+	# getty, and with the default console=tty0-only cmdline the
+	# getty generator has nothing to spawn, so the wizard owns the
+	# console uncontested. A serial-console systemd target is a
+	# separate, explicitly decided configuration - its generator
+	# suppression belongs in systemd configuration, never as a
+	# bootloader token.
 	# Requested by --kernel-arg. set -u is in force, so it is always
 	# defined even when the option was never used.
 	KERNEL_ARGS=${KERNEL_ARGS:-}
@@ -2395,11 +2511,11 @@ fix_kernel_cmdline()
 	# Strip any root=/init= the packaged default carries, then append
 	# the deployment-stable root=. Portable sed, single backup-free
 	# edit of the image copy (the package conffile stays untouched).
-	python3 - "$defgrub" "$roottoken" "$getty_opt" "$KERNEL_ARGS" <<'PY' || die 'cannot repair GRUB_CMDLINE_LINUX'
+	python3 - "$defgrub" "$roottoken" "$KERNEL_ARGS" <<'PY' || die 'cannot repair GRUB_CMDLINE_LINUX'
 import re
 import sys
-path, roottoken, getty_opt = sys.argv[1], sys.argv[2], sys.argv[3]
-extra = sys.argv[4].split()
+path, roottoken = sys.argv[1], sys.argv[2]
+extra = sys.argv[3].split()
 text = open(path, encoding="utf-8").read()
 lines = text.splitlines(keepends=True)
 found = False
@@ -2411,8 +2527,6 @@ for i, line in enumerate(lines):
         tokens = [t for t in m.group(1).split()
                   if not t.startswith("root=") and not t.startswith("init=")]
         tokens.append(roottoken)
-        if getty_opt:
-            tokens.append(getty_opt.strip())
         # Operator-requested arguments go last so they can override
         # anything the default set. Duplicates are dropped: a repeated
         # token in a kernel command line is legal but is a typo here.
@@ -2698,7 +2812,7 @@ cmd_install_to_disk()
 	# The plan validator needs a scratch buffer (it re-emits the
 	# validated plan from it); without one it truncates to nothing
 	# inside a subshell and the preview prints an empty plan.
-	PLAN_BUFFER=$(mktemp "${SAPHIRA_TMPDIR:-/build/tmp}/saphira-plan.XXXXXX") ||
+	PLAN_BUFFER=$(mktemp "$(saphira_tmpdir)/saphira-plan.XXXXXX") ||
 		die 'cannot create a scratch file for the partition plan'
 	trap 'rm -f -- "$PLAN_BUFFER"' EXIT HUP INT TERM
 	print_install_plan "$device"
@@ -2846,6 +2960,7 @@ cmd_install_to_disk()
 		[ -f "$f" ] || die "no such role file: $f"
 		cat "$f" >> "$composed"
 	done
+	append_firmware_layer "$composed"
 	if [ "${ROOTFS:-ext4}" = zfs ]; then
 		require_zfs_target "$composed"
 	fi
@@ -2921,6 +3036,10 @@ cmd_install_to_disk()
 	finalize_bootloader "$mnt" "$rootdev"
 
 	report_closure "$mnt"
+
+	# Firstboot triad must be whole before the disk is declared
+	# installed: a silent miss ships an unconfigurable machine.
+	verify_firstboot "$mnt"
 
 	umount -R -- "$mnt" || die 'cannot unmount the disk'
 	mounted= esp_mounted=

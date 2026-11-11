@@ -1,0 +1,42 @@
+From 3594657b88962d093e9d2a36ae0f3a11e758d6dd Mon Sep 17 00:00:00 2001
+From: Rich Felker <dalias@aerifal.cx>
+Date: Wed, 16 Sep 2026 13:55:04 -0400
+Subject: [PATCH] fix printf handling of indirect (asterisk) field width of
+ INT_MIN
+
+in this case, negation produces integer overflow. since a field width
+of the faithfully negated value would necessarily overflow INT_MAX,
+just detect this case and immediately treat it as an output overflow
+error.
+---
+ src/stdio/vfprintf.c  | 1 +
+ src/stdio/vfwprintf.c | 1 +
+ 2 files changed, 2 insertions(+)
+
+diff --git a/src/stdio/vfprintf.c b/src/stdio/vfprintf.c
+index 514a44dd..e0c09e45 100644
+--- a/src/stdio/vfprintf.c
++++ b/src/stdio/vfprintf.c
+@@ -485,6 +485,7 @@ static int printf_core(FILE *f, const char *fmt, va_list *ap, union arg *nl_arg,
+ 				w = f ? va_arg(*ap, int) : 0;
+ 				s++;
+ 			} else goto inval;
++			if (w==INT_MIN) goto overflow;
+ 			if (w<0) fl|=LEFT_ADJ, w=-w;
+ 		} else if ((w=getint(&s))<0) goto overflow;
+ 
+diff --git a/src/stdio/vfwprintf.c b/src/stdio/vfwprintf.c
+index 59d5471b..d47e045d 100644
+--- a/src/stdio/vfwprintf.c
++++ b/src/stdio/vfwprintf.c
+@@ -206,6 +206,7 @@ static int wprintf_core(FILE *f, const wchar_t *fmt, va_list *ap, union arg *nl_
+ 				w = f ? va_arg(*ap, int) : 0;
+ 				s++;
+ 			} else goto inval;
++			if (w==INT_MIN) goto overflow;
+ 			if (w<0) fl|=LEFT_ADJ, w=-w;
+ 		} else if ((w=getint(&s))<0) goto overflow;
+ 
+-- 
+2.55.0
+

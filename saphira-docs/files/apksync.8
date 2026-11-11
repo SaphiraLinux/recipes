@@ -7,11 +7,47 @@ apksync \- repository synchronisation to publication mirrors
 .B apksync
 synchronises the local generation repositories outward to the
 publication target with rsync (archive, compress, delayed updates).
+.PP
+The mirror converges exactly to the published set:
+.I .apk
+payloads,
+.I APKINDEX.tar.gz
+and
+.I Packages.adb
+indexes, and
+.I keys/*.pub
+trust keys (key sync preserves the status quo; drop the rule if key
+distribution is handled elsewhere).
+Everything else on the mirror is deleted:
+stale withdrawn NVRs, builder fossils
+(gen-root
+.IR repository.db ,
+.IR compact.sh ,
+per-arch
+.IR repository.db
+files), migration evidence, journals and
+.I *.sh
+helpers.
+.I aarch64
+and
+.I noarch
+subdirectories sync like any other directory:
+traversal is by directory, selection is by filename.
+.PP
+Deletion is guarded, never blind: preflight refuses the run unless
+both generation indexes exist and the source holds at least 1000
+APKs, so an empty or half-mounted source can never wipe the mirror.
+Preview any first run with rsync
+.I -n
+(dry run) using the same filter set and review the
+.I *deleting
+lines before the real run.
+.PP
 In-flight
 .I *.publishing-*
 temporaries and the local
 .I ownership.json
-migration evidence are excluded and never leave the host.
+migration evidence are excluded by the same rule and never leave the host.
 .PP
 Configuration comes from
 .IR /etc/saphira/apksync.conf :

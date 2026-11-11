@@ -40,6 +40,11 @@
 # files, and pins no parent. Symlinks must stay symlinks - move_staged_file
 # uses mv, and makepkg's copy_payload checks is_symlink() before its hardlink
 # bookkeeping, so no symlink is ever turned into a hardlink.
+# The closure half, added with depends_libs: a -libs split declares its own
+# DT_NEEDED requirements (Alpine-style, mirrors depends_dev) instead of
+# shipping an empty set. cryptsetup-libs without json-c broke at exec on
+# Minimer, so the empty set is no longer the only honest shape - but the
+# parent pin stays forbidden.
 
 set -u
 
@@ -56,7 +61,7 @@ check() { if [ "$1" = "$2" ]; then ok "$3"; else no "$3 (want '$1', got '$2')"; 
 echo "buildpkg-single -libs standalone-runtime contract"
 echo "  buildpkg-single: $BUILDPKG"
 
-# --- 1. no parent pin -------------------------------------------------------
+# --- 1. no parent pin, declared -libs closure -------------------------------
 if grep -q 'dev_dependencies:-\$pkgname' "$BUILDPKG"; then
 	no 'outputs line does not use ${dev_dependencies:-...} (fires on empty)'
 else
@@ -67,14 +72,22 @@ if grep -q 'dev_dependencies-\$pkgname' "$BUILDPKG"; then
 else
 	no 'outputs line uses ${dev_dependencies-...} (empty means empty)'
 fi
-# The intent must still be expressed, not just the mechanism removed.
-if grep -q '"$pkgname"-libs) description=.*dev_dependencies=""' "$BUILDPKG"; then
-	ok '-libs still declares an explicitly empty dependency set'
+# The -libs branch maps the recipe's depends_libs instead of hard-coding
+# an empty set: a -libs split with shared-library requirements names
+# them, and the mapping must be as stable as the no-parent-pin rule.
+libs_case=$(sed -n '/"\$pkgname"-libs)/,/;;/p' "$BUILDPKG" | grep -v '^[[:space:]]*#')
+if [ -z "$libs_case" ]; then
+	no 'the -libs case block is present'
 else
-	no '-libs still declares an explicitly empty dependency set'
+	ok 'the -libs case block is present'
+	if printf '%s' "$libs_case" | grep -q 'depends_libs-'; then
+		ok '-libs maps the recipe depends_libs declaration'
+	else
+		no '-libs maps the recipe depends_libs declaration'
+	fi
 fi
 # The comment recording WHY must survive, so the next reader keeps it.
-if grep -q 'STANDALONE runtime libraries: no parent pin' "$BUILDPKG"; then
+if grep -q 'no parent pin' "$BUILDPKG"; then
 	ok 'the no-parent-pin rationale is still documented'
 else
 	no 'the no-parent-pin rationale is still documented'
@@ -191,6 +204,43 @@ moved libfoo.so.1 && ok 'the SONAME .so.N symlink moves with it' \
 [ -L "$work/root/usr/lib/libfoo.so" ] \
 	&& ok 'the unversioned dev link stays in the parent (dangling only because its target moved)' \
 	|| no 'the unversioned dev link stays in the parent'
+
+# --- 6. the contract's declared consumers -------------------------------------
+# Minimer-proven closures, declared in the recipes so the builder mapping
+# above carries real requirements. Textual assertions on the declaration
+# lines: every named provider must match a published package (that match
+# was verified against the repository at declaration time - cryptsetup-libs
+# without json-c, systemd-libs without libucontext, and openssl without
+# zlib each broke at exec on Minimer 2026-11-08).
+recipes_root=$(cd -- "$(dirname "$0")/../.." && pwd)
+for spec in \
+	"cryptsetup depends_libs json-c lvm2-libs openssl util-linux" \
+	"systemd depends_libs libucontext" \
+	"openssl depends zlib"; do
+	set -- $spec
+	pkg=$1; var=$2; shift 2
+	recipe=$recipes_root/$pkg/recipe.sh
+	if [ ! -f "$recipe" ]; then
+		no "$pkg recipe not found"
+		continue
+	fi
+	# Normalize = to a space so the first dependency matches the same
+	# way as the rest (it follows the variable name, not whitespace).
+	line=$(grep -E "^$var=" "$recipe" | head -1 | tr -d '"' | tr '=' ' ')
+	if [ -z "$line" ]; then
+		no "$pkg declares $var"
+		continue
+	fi
+	missing=
+	for dep in "$@"; do
+		case " $line " in *" $dep "*) ;; *) missing="$missing $dep" ;; esac
+	done
+	if [ -z "$missing" ]; then
+		ok "$pkg declares $var with the proven closure"
+	else
+		no "$pkg $var is missing:$missing"
+	fi
+done
 
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ] || exit 1

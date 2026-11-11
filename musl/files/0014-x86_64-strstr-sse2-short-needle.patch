@@ -1,0 +1,335 @@
+diff -Naur old/src/string/strstr.c new/src/string/strstr.c
+--- old/src/string/strstr.c	2026-11-10 12:02:52.183777221 +0000
++++ new/src/string/strstr.c	2026-11-10 12:02:52.215930740 +0000
+@@ -1,6 +1,18 @@
+ #include <string.h>
+ #include <stdint.h>
+ 
++#ifdef __x86_64__
++/* F8: arch SSE2 short-needle helpers (src/string/x86_64/*byte_strstr.s).
++ * Same contract as the generic static functions below, which are kept
++ * verbatim for all other architectures. Hidden visibility: direct calls,
++ * no PLT, no new dynamic exports. */
++hidden char *__twobyte_strstr(const unsigned char *, const unsigned char *);
++hidden char *__threebyte_strstr(const unsigned char *, const unsigned char *);
++hidden char *__fourbyte_strstr(const unsigned char *, const unsigned char *);
++#define twobyte_strstr __twobyte_strstr
++#define threebyte_strstr __threebyte_strstr
++#define fourbyte_strstr __fourbyte_strstr
++#else
+ static char *twobyte_strstr(const unsigned char *h, const unsigned char *n)
+ {
+ 	uint16_t nw = n[0]<<8 | n[1], hw = h[0]<<8 | h[1];
+@@ -23,6 +35,7 @@
+ 	for (h+=3; *h && hw != nw; hw = hw<<8 | *++h);
+ 	return *h ? (char *)h-3 : 0;
+ }
++#endif
+ 
+ #define MAX(a,b) ((a)>(b)?(a):(b))
+ #define MIN(a,b) ((a)<(b)?(a):(b))
+diff -Naur old/src/string/x86_64/fourbyte_strstr.s new/src/string/x86_64/fourbyte_strstr.s
+--- old/src/string/x86_64/fourbyte_strstr.s	1970-01-01 00:00:00.000000000 +0000
++++ new/src/string/x86_64/fourbyte_strstr.s	2026-11-10 12:02:52.216217993 +0000
+@@ -0,0 +1,107 @@
++	.text
++	.globl __fourbyte_strstr
++	.hidden __fourbyte_strstr
++	.type __fourbyte_strstr,@function
++# char *__fourbyte_strstr(const unsigned char *h, const unsigned char *n)
++# F8 arch helper for 4-byte needles (original Saphira code,
++# upstream musl MIT). Replaces fourbyte_strstr: same contract.
++# Method: 16-byte windows with 13-byte step (3-byte overlap), ordinary
++# SSE2 equality masks: eq(n0) & (eq(n1)>>1) & (eq(n2)>>2) & (eq(n3)>>3),
++# accepted only for start j <= 12. NUL/page handling as in simd2_strstr.
++# No AVX/VEX anywhere (SSE-only, no clock/transition risk).
++# Touches: rax, rcx, rdx, rsi, r8-r11, xmm0-xmm6 (xmm7 zero). Callee-saved
++# registers, DF and stack discipline preserved; integer flags unspecified.
++__fourbyte_strstr:
++	movzbq (%rsi),%r8	# n0
++	movzbq 1(%rsi),%r9	# n1
++	movzbq 2(%rsi),%r10	# n2
++	movzbq 3(%rsi),%r11	# n3
++	mov %r8,%rax
++	mov %r9,%rcx
++	imul $0x01010101,%eax
++	imul $0x01010101,%ecx
++	movd %eax,%xmm1
++	movd %ecx,%xmm2
++	mov %r10,%rax
++	mov %r11,%rcx
++	imul $0x01010101,%eax
++	imul $0x01010101,%ecx
++	movd %eax,%xmm3
++	movd %ecx,%xmm4
++	pshufd $0,%xmm1,%xmm1
++	pshufd $0,%xmm2,%xmm2
++	pshufd $0,%xmm3,%xmm3
++	pshufd $0,%xmm4,%xmm4
++	pxor %xmm7,%xmm7
++	mov %rdi,%rsi		# rsi = cursor
++.Ls4_page:
++	mov %rsi,%rax
++	and $4095,%rax
++	neg %rax
++	add $4096,%rax
++	cmp $16,%rax
++	jb .Ls4_tail
++	movdqu (%rsi),%xmm0
++	movdqa %xmm0,%xmm5
++	movdqa %xmm0,%xmm6
++	pcmpeqb %xmm1,%xmm5
++	pcmpeqb %xmm2,%xmm6
++	pmovmskb %xmm5,%eax
++	pmovmskb %xmm6,%ecx
++	shr $1,%ecx
++	and %ecx,%eax
++	movdqa %xmm0,%xmm5
++	pcmpeqb %xmm3,%xmm5
++	pmovmskb %xmm5,%ecx
++	shr $2,%ecx
++	and %ecx,%eax
++	movdqa %xmm0,%xmm5
++	pcmpeqb %xmm4,%xmm5
++	pmovmskb %xmm5,%ecx
++	shr $3,%ecx
++	and %ecx,%eax
++	and $0x1fff,%eax	# starts j <= 12 only
++	jnz .Ls4_hit
++	pcmpeqb %xmm7,%xmm0
++	pmovmskb %xmm0,%edx
++	test $0x1fff,%edx
++	jnz .Ls4_null
++	add $13,%rsi		# overlap step
++	jmp .Ls4_page
++.Ls4_tail:
++	movzbq (%rsi),%rcx
++	test %rcx,%rcx
++	jz .Ls4_null
++	cmp %r8b,%cl
++	jne .Ls4_adv
++	movzbq 1(%rsi),%rdx
++	cmp %r9b,%dl
++	jne .Ls4_adv
++	movzbq 2(%rsi),%rdx
++	cmp %r10b,%dl
++	jne .Ls4_adv
++	movzbq 3(%rsi),%rdx
++	cmp %r11b,%dl
++	jne .Ls4_adv
++	mov %rsi,%rax
++	ret
++.Ls4_adv:
++	inc %rsi
++	jmp .Ls4_page
++.Ls4_hit:
++	bsf %eax,%eax		# j = first hit (0..12)
++	pcmpeqb %xmm7,%xmm0
++	pmovmskb %xmm0,%edx
++	mov %eax,%ecx
++	mov $1,%eax
++	shl %cl,%eax
++	dec %eax
++	test %eax,%edx
++	jnz .Ls4_null
++	lea (%rsi,%rcx,1),%rax
++	ret
++.Ls4_null:
++	xor %eax,%eax
++	ret
++	.size __fourbyte_strstr,.-__fourbyte_strstr
++	.section .note.GNU-stack,"",@progbits
+diff -Naur old/src/string/x86_64/threebyte_strstr.s new/src/string/x86_64/threebyte_strstr.s
+--- old/src/string/x86_64/threebyte_strstr.s	1970-01-01 00:00:00.000000000 +0000
++++ new/src/string/x86_64/threebyte_strstr.s	2026-11-10 12:02:52.216229549 +0000
+@@ -0,0 +1,96 @@
++	.text
++	.globl __threebyte_strstr
++	.hidden __threebyte_strstr
++	.type __threebyte_strstr,@function
++# char *__threebyte_strstr(const unsigned char *h, const unsigned char *n)
++# F8 arch helper for 3-byte needles (original Saphira code,
++# upstream musl MIT). Replaces threebyte_strstr: same contract.
++# Method: 16-byte windows with 14-byte step (2-byte overlap), ordinary
++# SSE2 equality masks: hits = eq(n0) & (eq(n1)>>1) & (eq(n2)>>2),
++# accepted only for start j <= 13. NUL/page handling as in simd2_strstr:
++# 16B loads only when fully mapped; scalar tail uses single-byte reads
++# with the generic's fault profile; rsi strictly increases.
++# No AVX/VEX anywhere (SSE-only, no clock/transition risk).
++# Touches: rax, rcx, rdx, rsi, r8-r10, xmm0-xmm3, xmm5-xmm7. Callee-saved
++# registers, DF and stack discipline preserved; integer flags unspecified.
++__threebyte_strstr:
++	movzbq (%rsi),%r8	# n0
++	movzbq 1(%rsi),%r9	# n1
++	movzbq 2(%rsi),%r10	# n2
++	mov %r8,%rax
++	mov %r9,%rcx
++	mov %r10,%rdx
++	imul $0x01010101,%eax
++	imul $0x01010101,%ecx
++	imul $0x01010101,%edx
++	movd %eax,%xmm1
++	movd %ecx,%xmm2
++	movd %edx,%xmm3
++	pshufd $0,%xmm1,%xmm1
++	pshufd $0,%xmm2,%xmm2
++	pshufd $0,%xmm3,%xmm3
++	pxor %xmm7,%xmm7
++	mov %rdi,%rsi		# rsi = cursor
++.Ls3_page:
++	mov %rsi,%rax
++	and $4095,%rax
++	neg %rax
++	add $4096,%rax
++	cmp $16,%rax
++	jb .Ls3_tail
++	movdqu (%rsi),%xmm0
++	movdqa %xmm0,%xmm5
++	movdqa %xmm0,%xmm6
++	pcmpeqb %xmm1,%xmm5	# eq(n0)
++	pcmpeqb %xmm2,%xmm6	# eq(n1)
++	pmovmskb %xmm5,%eax
++	pmovmskb %xmm6,%ecx
++	shr $1,%ecx
++	and %ecx,%eax
++	movdqa %xmm0,%xmm5
++	pcmpeqb %xmm3,%xmm5	# eq(n2)
++	pmovmskb %xmm5,%ecx
++	shr $2,%ecx
++	and %ecx,%eax
++	and $0x3fff,%eax	# starts j <= 13 only
++	jnz .Ls3_hit
++	pcmpeqb %xmm7,%xmm0
++	pmovmskb %xmm0,%edx
++	test $0x3fff,%edx
++	jnz .Ls3_null
++	add $14,%rsi		# overlap step
++	jmp .Ls3_page
++.Ls3_tail:
++	movzbq (%rsi),%rcx
++	test %rcx,%rcx
++	jz .Ls3_null
++	cmp %r8b,%cl
++	jne .Ls3_adv
++	movzbq 1(%rsi),%rdx
++	cmp %r9b,%dl
++	jne .Ls3_adv
++	movzbq 2(%rsi),%rdx
++	cmp %r10b,%dl
++	jne .Ls3_adv
++	mov %rsi,%rax
++	ret
++.Ls3_adv:
++	inc %rsi
++	jmp .Ls3_page
++.Ls3_hit:
++	bsf %eax,%eax		# j = first hit (0..13)
++	pcmpeqb %xmm7,%xmm0
++	pmovmskb %xmm0,%edx
++	mov %eax,%ecx
++	mov $1,%eax
++	shl %cl,%eax
++	dec %eax
++	test %eax,%edx
++	jnz .Ls3_null
++	lea (%rsi,%rcx,1),%rax
++	ret
++.Ls3_null:
++	xor %eax,%eax
++	ret
++	.size __threebyte_strstr,.-__threebyte_strstr
++	.section .note.GNU-stack,"",@progbits
+diff -Naur old/src/string/x86_64/twobyte_strstr.s new/src/string/x86_64/twobyte_strstr.s
+--- old/src/string/x86_64/twobyte_strstr.s	1970-01-01 00:00:00.000000000 +0000
++++ new/src/string/x86_64/twobyte_strstr.s	2026-11-10 12:02:52.216236707 +0000
+@@ -0,0 +1,90 @@
++	.text
++	.globl __twobyte_strstr
++	.hidden __twobyte_strstr
++	.type __twobyte_strstr,@function
++# char *__twobyte_strstr(const unsigned char *h, const unsigned char *n)
++# F8 arch helper for 2-byte needles (original Saphira code,
++# upstream musl MIT). Replaces twobyte_strstr: same contract (first match
++# address, NUL-terminated haystack, NULL if none).
++# Method: 16-byte windows with 15-byte step (1-byte overlap), ordinary
++# SSE2 equality masks: hits = eq(n0) & (eq(n1) >> 1), accepted only for
++# start j <= 14. NUL handling: zero-mask check; a hit preceded by NUL or
++# a NUL inside the accepted start range with no hit ends the search.
++# Page safety: a 16-byte vector load executes only when all 16 bytes are
++# mapped (page_bytes >= 16). All other reads are single bytes exactly
++# where the generic shift loop would also read (same fault profile).
++# Coverage is gap-free: vector chunks overlap by m-1 and the scalar loop
++# advances byte by byte; rsi strictly increases, so termination matches
++# the generic (NUL stop, or a fault on invalid unterminated input).
++# No AVX/VEX anywhere (SSE-only, no clock/transition risk).
++# Touches: rax, rcx, rdx, rsi, r8, r9, xmm0-xmm2, xmm5-xmm7. Callee-saved
++# registers, DF and stack discipline preserved; integer flags unspecified.
++__twobyte_strstr:
++	movzbq (%rsi),%r8	# n0 (kept for scalar tail)
++	movzbq 1(%rsi),%r9	# n1 (kept for scalar tail)
++	mov %r8,%rax
++	mov %r9,%rcx
++	imul $0x01010101,%eax
++	imul $0x01010101,%ecx
++	movd %eax,%xmm1
++	movd %ecx,%xmm2
++	pshufd $0,%xmm1,%xmm1	# broadcast n0
++	pshufd $0,%xmm2,%xmm2	# broadcast n1
++	pxor %xmm7,%xmm7		# zero
++	mov %rdi,%rsi		# rsi = cursor (n no longer needed)
++.Ls2_page:
++	mov %rsi,%rax
++	and $4095,%rax
++	neg %rax
++	add $4096,%rax		# rax = bytes to page end (1..4096)
++	cmp $16,%rax
++	jb .Ls2_tail
++	movdqu (%rsi),%xmm0	# 16B load, fully mapped
++	movdqa %xmm0,%xmm5
++	movdqa %xmm0,%xmm6
++	pcmpeqb %xmm1,%xmm5	# eq(n0)
++	pcmpeqb %xmm2,%xmm6	# eq(n1)
++	pmovmskb %xmm5,%eax
++	pmovmskb %xmm6,%ecx
++	shr $1,%ecx
++	and %ecx,%eax
++	and $0x7fff,%eax	# starts j <= 14 only
++	jnz .Ls2_hit
++	pcmpeqb %xmm7,%xmm0	# zero mask for NUL-stop
++	pmovmskb %xmm0,%edx
++	test $0x7fff,%edx	# NUL in accepted range?
++	jnz .Ls2_null
++	add $15,%rsi		# overlap step
++	jmp .Ls2_page
++.Ls2_tail:
++	# single-byte reads only: same fault profile as generic
++	movzbq (%rsi),%rcx
++	test %rcx,%rcx
++	jz .Ls2_null
++	cmp %r8b,%cl
++	jne .Ls2_adv
++	movzbq 1(%rsi),%rdx	# generic reads this byte too
++	cmp %r9b,%dl
++	jne .Ls2_adv
++	mov %rsi,%rax		# match
++	ret
++.Ls2_adv:
++	inc %rsi
++	jmp .Ls2_page
++.Ls2_hit:
++	bsf %eax,%eax		# j = first hit (0..14)
++	pcmpeqb %xmm7,%xmm0
++	pmovmskb %xmm0,%edx
++	mov %eax,%ecx		# j for lea
++	mov $1,%eax
++	shl %cl,%eax		# 1<<j (j<=14, exact)
++	dec %eax		# (1<<j)-1
++	test %eax,%edx		# NUL before match?
++	jnz .Ls2_null
++	lea (%rsi,%rcx,1),%rax	# h + j
++	ret
++.Ls2_null:
++	xor %eax,%eax
++	ret
++	.size __twobyte_strstr,.-__twobyte_strstr
++	.section .note.GNU-stack,"",@progbits

@@ -2,7 +2,10 @@
 
 pkgname=nvidia-open-firmware
 pkgver=610.57.04
-pkgrel=1
+pkgrel=2
+# r2: sole owner of usr/lib/modprobe.d/nvidia-open.conf (nouveau
+# blacklist, moved out of the five per-kernel kmod outputs so the
+# signer sees exactly one claimant). Payload change.
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='NVIDIA open GPU GSP firmware 610.57.04 (shared by all nvidia-open-<kver> kmod packages)'
 license="NVIDIA firmware license"
@@ -32,6 +35,15 @@ recipe_install()
 		"$PKGDEST/lib/firmware/nvidia/$pkgver/gsp_ga10x.bin"
 	install -m 0644 "$RECIPE_DIR/files/gsp_tu10x.bin" \
 		"$PKGDEST/lib/firmware/nvidia/$pkgver/gsp_tu10x.bin"
+	# Sole owner of the nouveau blacklist (driver handover): every
+	# nvidia-open-<kver> kmod package depends on this firmware
+	# package, so exactly one package owns
+	# usr/lib/modprobe.d/nvidia-open.conf however many kernel
+	# variants are installed (the signer refuses multi-owned paths).
+	# (Saphira kernels no longer build nouveau at all; this covers
+	# foreign/older trees.)
+	install -d "$PKGDEST/usr/lib/modprobe.d"
+	printf 'blacklist nouveau\n' > "$PKGDEST/usr/lib/modprobe.d/nvidia-open.conf"
 	install -d "$PKGDEST/usr/share/doc/nvidia-open-firmware"
 	cat > "$PKGDEST/usr/share/doc/nvidia-open-firmware/README.Saphira" <<'EOF'
 NVIDIA open GPU GSP firmware 610.57.04 (host side only).

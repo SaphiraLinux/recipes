@@ -97,13 +97,16 @@ else
 fi
 
 # --- 6. legacy branches byte-stable -----------------------------------------
-# These exact lines must survive any edit of this file: they are the
-# -dev/-doc/-libs contract other suites and packages rely on.
+# These shapes must survive any edit of this file: they are the
+# -dev/-doc/-libs contract other suites and packages rely on. The -libs
+# branch carries the depends_libs mapping (never a parent pin, never an
+# undeclared closure) since the Minimer cryptsetup-libs proof.
 if grep -q "move_staged_tree usr/include \"\$subpackage\"" "$BUILDPKG" && \
    grep -q "move_staged_tree usr/share/doc \"\$subpackage\"" "$BUILDPKG" && \
    grep -q "find \"\$root\" \\\( -type f -o -type l \\\) -name '\*\.so\.\*'" "$BUILDPKG" && \
-   grep -q '"$pkgname"-libs) description="$pkgdesc runtime libraries"; dev_dependencies=""' "$BUILDPKG"; then
-	ok "legacy -dev/-doc/-libs branches intact"
+   grep -q '"$pkgname"-libs)' "$BUILDPKG" && \
+   grep -q 'depends_libs-' "$BUILDPKG"; then
+	ok "legacy -dev/-doc/-libs branches intact, -libs maps depends_libs"
 else
 	no "legacy split branches were altered"
 fi

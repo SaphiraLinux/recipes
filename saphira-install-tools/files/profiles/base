@@ -13,6 +13,5 @@ saphira-install-tools
 util-linux
 e2fsprogs
 dosfstools
-efibootmgr
 grub
 tzdata

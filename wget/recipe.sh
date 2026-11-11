@@ -1,7 +1,7 @@
 #!/bin/sh
 pkgname=wget
 pkgver=1.25.0
-pkgrel=3
+pkgrel=4
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='Network utility to retrieve files over HTTP/HTTPS/FTP'
 license='GPL-3.0-or-later'

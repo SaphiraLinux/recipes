@@ -1,0 +1,66 @@
+From cb0cdc2e88c652af225d2fc31c1dec99b9880d39 Mon Sep 17 00:00:00 2001
+From: Rich Felker <dalias@aerifal.cx>
+Date: Mon, 17 Aug 2026 20:47:19 -0400
+Subject: [PATCH] clock_nanosleep: don't assume nanosleep syscall exists
+
+this fixes a build regression for riscv32 introduced in commit
+b306b16af15c89a04d8e0c55cac2dadbeb39c083. prior to that, the riscv32
+bits/syscall.h.in defined a macro for the nanosleep syscall, despite
+the kernel on time64-native archs having no such syscall.
+
+our clock_nanosleep uses the old nanosleep syscall when possible as
+part of minimal compatibility with pre-2.6 kernels. using a
+non-functional syscall number didn't have any ill effect on riscv32 or
+future time64-native archs, since the affected code is unreachable in
+that case, but removing the wrongly defined macro broke the build.
+this change fixes it.
+
+in order not to need to fix this again if future 64-bit archs also
+drop the old nanosleep syscall factor out the conditional use of
+SYS_nanosleep and use the same approach in the preprocessor else block
+for them.
+---
+ src/time/clock_nanosleep.c | 13 +++++++++++--
+ 1 file changed, 11 insertions(+), 2 deletions(-)
+
+diff --git a/src/time/clock_nanosleep.c b/src/time/clock_nanosleep.c
+index e195499c..c36d7ba5 100644
+--- a/src/time/clock_nanosleep.c
++++ b/src/time/clock_nanosleep.c
+@@ -5,6 +5,15 @@
+ #define IS32BIT(x) !((x)+0x80000000ULL>>32)
+ #define CLAMP(x) (int)(IS32BIT(x) ? (x) : 0x7fffffffU+((0ULL+(x))>>63))
+ 
++static int __sys_nanosleep_cp(const void *req, void *rem)
++{
++#ifdef SYS_nanosleep
++	return __syscall_cp(SYS_nanosleep, req, rem);
++#else
++	return __syscall_cp(SYS_clock_nanosleep, CLOCK_REALTIME, 0, req, rem);
++#endif
++}
++
+ int __clock_nanosleep(clockid_t clk, int flags, const struct timespec *req, struct timespec *rem)
+ {
+ 	if (clk == CLOCK_THREAD_CPUTIME_ID) return EINVAL;
+@@ -20,7 +29,7 @@ int __clock_nanosleep(clockid_t clk, int flags, const struct timespec *req, stru
+ 	long long extra = s - CLAMP(s);
+ 	long ts32[2] = { CLAMP(s), ns };
+ 	if (clk == CLOCK_REALTIME && !flags)
+-		r = __syscall_cp(SYS_nanosleep, &ts32, &ts32);
++		r = __sys_nanosleep_cp(&ts32, &ts32);
+ 	else
+ 		r = __syscall_cp(SYS_clock_nanosleep, clk, flags, &ts32, &ts32);
+ 	if (r==-EINTR && rem && !(flags & TIMER_ABSTIME)) {
+@@ -30,7 +39,7 @@ int __clock_nanosleep(clockid_t clk, int flags, const struct timespec *req, stru
+ 	return -r;
+ #else
+ 	if (clk == CLOCK_REALTIME && !flags)
+-		return -__syscall_cp(SYS_nanosleep, req, rem);
++		return -__sys_nanosleep_cp(SYS_nanosleep, req, rem);
+ 	return -__syscall_cp(SYS_clock_nanosleep, clk, flags, req, rem);
+ #endif
+ }
+-- 
+2.55.0
+

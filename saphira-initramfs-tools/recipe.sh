@@ -1,7 +1,12 @@
 #!/bin/sh
 pkgname=saphira-initramfs-tools
 pkgver=0.1
-pkgrel=6
+pkgrel=7
+# r7: earlyfw selection failure is fatal in the real shell (was
+# swallowed when the map/conf walk died inside a command
+# substitution: message printed, image still built without the
+# required firmware). Plus earlyfw-structure.sh regression tests.
+# Payload change (script).
 # r6: earlyfw-<release>.img naming (was initramfs-<release>.img),
 # legacy-name pruning, updated man page. Payload change.
 # r5: saphira-earlyfw stages under a usable directory in its own root

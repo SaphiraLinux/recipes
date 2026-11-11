@@ -42,8 +42,8 @@ Run the interactive installer (per-user scope by default; global
 scope under root where package policy permits it).
 .TP
 .BR --list
-Show installable selections with their npm package names, permitted
-scopes, and script-approval notes.
+Show installable selections with their npm packages, permitted
+scopes, and script-approval notes, plus the suggested MCP servers.
 .TP
 .BR --installed
 Show packages recorded by saphira-agents, per scope, cross-checked
@@ -81,10 +81,22 @@ Install interactively (per-user default):
 Install machine-wide (as root):
 .B sudo saphira-agents --setup
 .TP
-Audit and refresh:
+  Audit and refresh:
 .B saphira-agents --installed
 .br
 .B saphira-agents --update
+.SH "SUGGESTED MCP SERVERS"
+After agents and SDKs, --setup offers two native Saphira MCP
+servers: saphira-build-mcp (package and build knowledge) and
+peabrain (persistent agent memory). Unlike everything else here they
+are APKs, so selection installs them with apk when run as root and
+otherwise prints the exact install command. Nothing is recorded:
+their upgrades belong to apk, and --update never touches them.
+.PP
+For each installed server the tool discovers the real executable on
+PATH and prints the corresponding OpenCode MCP snippet to merge into
+opencode.json. opencode.json is never written by this tool, and an
+existing MCP configuration is never assumed empty.
 .SH SEE ALSO
 .BR npm (1)
 .PP

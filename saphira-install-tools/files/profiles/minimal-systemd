@@ -17,9 +17,6 @@
 #                       intention: a bootable image carries its own
 #                       bootloader, and later kernel upgrades need it.
 #   e2fsprogs           mkfs.ext4 for the root filesystem.
-#   dosfstools          mkfs.vfat for the EFI System Partition. Required
-#                       for any uefi-* target; harmless on bios-* (the
-#                       creator refuses to use it there).
 #   openssh             login/access. A server with no remote access is
 #                       not manageable.
 #   iproute2            the `ip` tool (addresses, routes, links): named
@@ -31,8 +28,19 @@
 #                       needs a way to inspect processes and memory.
 #   tzdata              a server with no timezone cannot reason about
 #                       logs, certificates or scheduling.
+#   kbd                 loadkeys/dumpkeys/kbd_mode: vconsole-setup execs
+#                       /usr/bin/loadkeys at boot; without it the first
+#                       console keeps the kernel keymap (proven Minimer
+#                       2026-11-08). An image intention, not a systemd
+#                       dependency: minimal hosts without a console still
+#                       run the same init package.
 #
 # Deliberately absent, each a decision rather than an oversight:
+#   - acpid: systemd-logind owns ACPI power-event handling on systemd
+#     targets; a separate daemon would duplicate it. OpenRC has no
+#     logind, so minimal-openrc carries acpid instead. A virsh
+#     shutdown test must establish which component handled the event
+#     before this is revisited.
 #   - saphira-network + dhcpcd: the OpenRC network framework and its
 #     DHCP client. systemd-networkd owns the NIC on systemd targets;
 #     installing the framework alongside it is a conflicting network
@@ -48,9 +56,9 @@ saphira-kernel-7.2.3
 systemd
 grub
 e2fsprogs
-dosfstools
 openssh
 iproute2
 vim
 procps-ng
 tzdata
+kbd

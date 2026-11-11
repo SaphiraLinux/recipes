@@ -1,0 +1,66 @@
+From bf96b52a4429eeeb60e6c961c8687e52d90c5fa1 Mon Sep 17 00:00:00 2001
+From: Rich Felker <dalias@aerifal.cx>
+Date: Tue, 12 May 2026 09:19:26 -0400
+Subject: [PATCH] mallocng: fix handling of allocations with extreme alignment
+
+aligned allocations are handled by over-allocating enough to ensure an
+aligned subrange exists and framing the usable space to that subrange.
+the framing can only handle offsets up to a 32-bit multiple of the
+allocation UNIT (16 bytes), and aligned_alloc correctly checks for and
+rejects larger alignments.
+
+however, when get_meta reads back the offset, the type of the variable
+and everything else in the expression where it's used was int, not
+size_t, and offset*UNIT can overflow. modulo the "anything can happen"
+aspect of overflow being undefined, a clean trap will occur and the
+program will terminate. this would happen on any call to free,
+realloc, or malloc_usable_size call on the large-alignment object.
+
+switch the type of offset in get_meta from int to size_t. this has
+been checked not to break any of the subsequent assertions:
+
+- assert(offset > 0xffff) was wrongly rejecting offsets that would be
+  interpreted as negative when converted to signed int. this is fixed
+  by processing offset as unsigned.
+
+- the check against the slot boundaries switches which assert would
+  catch values that were previously interpreted as negative, but the
+  net effect is the same.
+
+- the check against maplen was already converting to unsigned long due
+  to the 4096UL in the expression. in doing so, it was incorrectly
+  sign-extending the offset rather than zero-extending. this is fixed
+  by using unsigned type to begin with.
+
+in addition, take the opportunity to trap on offsets were offset*UNIT
+would overflow. this cannot happen on 64-bit archs (and it should be
+optimized out by the compiler there), but it's an additional signal we
+can use to catch out-of-bounds writes on 32-bit ones. and the check
+only happens when operating on extremely large, overaligned objects,
+so the relative cost of checking is essentially zero.
+---
+ src/malloc/mallocng/meta.h | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/src/malloc/mallocng/meta.h b/src/malloc/mallocng/meta.h
+index 61ec53f9..3a27af64 100644
+--- a/src/malloc/mallocng/meta.h
++++ b/src/malloc/mallocng/meta.h
+@@ -129,12 +129,13 @@ static inline int get_slot_index(const unsigned char *p)
+ static inline struct meta *get_meta(const unsigned char *p)
+ {
+ 	assert(!((uintptr_t)p & 15));
+-	int offset = *(const uint16_t *)(p - 2);
++	size_t offset = *(const uint16_t *)(p - 2);
+ 	int index = get_slot_index(p);
+ 	if (p[-4]) {
+ 		assert(!offset);
+ 		offset = *(uint32_t *)(p - 8);
+ 		assert(offset > 0xffff);
++		assert(offset < PTRDIFF_MAX/UNIT);
+ 	}
+ 	const struct group *base = (const void *)(p - UNIT*offset - UNIT);
+ 	const struct meta *meta = base->meta;
+-- 
+2.55.0
+

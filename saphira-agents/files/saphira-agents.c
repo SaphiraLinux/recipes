@@ -35,6 +35,24 @@
  * credentials, tokens, keys or environment values are ever stored,
  * and no login or provider configuration is performed.
  *
+ * Suggested MCP servers (Saphira workflow) are offered as a third
+ * menu section after agents and SDKs: saphira-build-mcp (package
+ * and build knowledge) and peabrain (persistent agent memory).
+ * Unlike everything else here they are native Saphira APKs, so the
+ * installer never fetches them itself: with appropriate privileges
+ * it runs `apk add`, otherwise it prints the exact install command.
+ * After installation it discovers the real executable on PATH and
+ * prints the corresponding OpenCode MCP snippet to paste. Nothing
+ * is recorded in the npm state file (--update leaves APK lifecycle
+ * to apk), opencode.json is never written by this tool, and an
+ * existing MCP configuration is never assumed empty.
+ *
+ * A manual `sudo npm install -g` uses npm's compiled-in /usr/local
+ * default, which is not on Saphira's PATH and not managed here. A
+ * same-named package there shadows nothing but confuses everything,
+ * so global installs warn loudly with the exact cleanup instead of
+ * silently duplicating it under /usr.
+ *
  * Release invariant (Saphira Node policy): Node.js comes from the
  * Saphira nodejs APK only. saphira-agents installs npm *application*
  * packages, never the Node/npm runtime itself: no Node downloads,
@@ -250,6 +268,36 @@ static const struct pkg sdks[] = {
 #define NAGENTS (sizeof agents / sizeof agents[0])
 #define NSDKS (sizeof sdks / sizeof sdks[0])
 
+/*
+ * Suggested MCP servers (Saphira workflow). Unlike agents and SDKs
+ * these are native Saphira APKs, not npm packages: they install
+ * through apk, their upgrades belong to apk (never to --update,
+ * never to the npm state file), and the installer only suggests and
+ * wires them. saphira-build-mcp answers package and build questions
+ * from the repository; peabrain is persistent agent memory over
+ * stdio JSON-RPC. Other agents can reuse the same two servers; only
+ * the client-side snippet printer is per-agent (see
+ * print_opencode_mcp below).
+ */
+struct mcp_server {
+	const char *selection;	/* UI label */
+	const char *apk;	/* Saphira package name */
+	const char *binary;	/* binary name for PATH discovery */
+	const char *config_key;	/* opencode.json "mcp" object key */
+	const char *blurb;	/* one-line purpose */
+};
+
+static const struct mcp_server mcp_servers[] = {
+	{ "Saphira build", "saphira-build-mcp", "saphira-build-mcp",
+	  "saphira-build",
+	  "Saphira package and build knowledge for agents" },
+	{ "PeaBrain memory", "peabrain", "peabrain",
+	  "peabrain",
+	  "Persistent agent memory (SQLite-backed MCP stdio)" },
+};
+
+#define NMCPS (sizeof mcp_servers / sizeof mcp_servers[0])
+
 static void die(const char *msg)
 {
 	fprintf(stderr, "saphira-agents: %s\n", msg);
@@ -262,7 +310,7 @@ static void usage(FILE *f)
 "usage: saphira-agents [--setup | --list | --installed | --update | --help]\n"
 "\n"
 "  --setup        interactive installer (per-user scope by default)\n"
-"  --list         show installable selections and their npm packages\n"
+"  --list         show installable selections, npm packages, and suggested MCP servers\n"
 "  --installed    show packages recorded by saphira-agents\n"
 "  --update       reinstall recorded packages at their current release\n"
 "  --help         show this text\n");
@@ -345,7 +393,7 @@ static int scope_state_path(int scope, char *out, size_t n)
  * commands. argv[0] resolves via PATH. Returns the child's exit
  * status, or -1 when it did not exit.
  */
-static int npm_run(char *const argv[])
+static int run_child(char *const argv[])
 {
 	pid_t pid;
 	int status;
@@ -415,6 +463,7 @@ static int pkg_installed(const char *prefix, const char *npm)
 }
 
 static const struct pkg *find_pkg(const char *sid);
+static void warn_stray_prefix(const char *npm);
 
 static int pkg_present(const char *prefix, const char *sid)
 {
@@ -504,7 +553,7 @@ static int fetch_url(const char *url, const char *dest)
 	argv[argc++] = (char *)dest;
 	argv[argc++] = (char *)url;
 	argv[argc] = NULL;
-	return npm_run(argv);
+	return run_child(argv);
 }
 
 /* Read a small whole file (manifests); caps at 1 MiB. */
@@ -918,7 +967,7 @@ static int install_direct(int scope, const char *prefix, const char *state,
 	argv[3] = "-C";
 	argv[4] = work;
 	argv[5] = NULL;
-	if (npm_run(argv) != 0) {
+	if (run_child(argv) != 0) {
 		fprintf(stderr, "saphira-agents: extraction failed for %s\n",
 		    p->selection);
 		return 1;
@@ -954,7 +1003,7 @@ static int install_direct(int scope, const char *prefix, const char *state,
 	argv[1] = "-rf";
 	argv[2] = work;
 	argv[3] = NULL;
-	rc = npm_run(argv);
+	rc = run_child(argv);
 	(void)rc;
 	printf("%s: installed %s %s\n", p->selection, p->bin_name, a.version);
 	return record_install(state, scope, p->sid, p->selection, a.version);
@@ -1060,7 +1109,7 @@ static int install_pip(int scope, const char *prefix, const char *state,
 	argv[argc++] = (char *)p->pypi;
 	argv[argc] = NULL;
 	printf("%s: pip install %s\n", p->selection, p->pypi);
-	if (npm_run(argv) != 0) {
+	if (run_child(argv) != 0) {
 		fprintf(stderr, "saphira-agents: pip install failed for %s\n",
 		    p->pypi);
 		return 1;
@@ -1141,12 +1190,24 @@ static int install_npm(int scope, const char *prefix, const char *state,
 		rm_argv[2] = "-g";
 		rm_argv[3] = (char *)p->conflicts;
 		rm_argv[4] = NULL;
-		if (npm_run(rm_argv) != 0) {
+		if (run_child(rm_argv) != 0) {
 			fprintf(stderr,
 			    "saphira-agents: cannot remove %s; aborting %s\n",
 			    p->conflicts, p->selection);
 			return 1;
 		}
+	}
+	/*
+	 * Global installs land in /usr (scope prefix above). A copy of
+	 * the same package - or of the package being replaced - under
+	 * npm's compiled-in /usr/local default is a manual install the
+	 * tool never manages; warn with the exact cleanup instead of
+	 * silently duplicating it.
+	 */
+	if (scope == SCOPE_GLOBAL) {
+		warn_stray_prefix(p->npm);
+		if (p->conflicts != NULL)
+			warn_stray_prefix(p->conflicts);
 	}
 	if (snprintf(spec, sizeof spec, "%s@latest", p->npm) >= (int)sizeof spec)
 		return 1;
@@ -1164,7 +1225,7 @@ static int install_npm(int scope, const char *prefix, const char *state,
 	printf("%s: npm install -g%s%s %s\n", p->selection,
 	    p->allow_scripts != NULL ? " " : "",
 	    p->allow_scripts != NULL ? allow : "", spec);
-	rc = npm_run(argv);
+	rc = run_child(argv);
 	if (rc != 0) {
 		fprintf(stderr, "saphira-agents: install failed for %s (rc=%d)\n",
 		    p->npm, rc);
@@ -1193,6 +1254,72 @@ static const struct pkg *find_pkg(const char *sid)
 			return &sdks[i];
 	}
 	return NULL;
+}
+
+/* Locate an installed binary through PATH, never by assumption: the
+ * snippet printer reports the path actually found. Bare names only;
+ * anything with a slash is refused rather than probed. */
+static int find_in_path(const char *name, char *out, size_t n)
+{
+	const char *path = getenv("PATH");
+	char dirs[4096];
+	char *d;
+
+	if (strchr(name, '/') != NULL)
+		return -1;
+	if (path == NULL || path[0] == '\0')
+		path = "/usr/bin:/bin";
+	if (strlen(path) >= sizeof dirs)
+		return -1;
+	strcpy(dirs, path);
+	d = strtok(dirs, ":");
+	while (d != NULL) {
+		char cand[PATH_MAX];
+
+		if (d[0] == '\0') {
+			d = strtok(NULL, ":");
+			continue;
+		}
+		if (snprintf(cand, sizeof cand, "%s/%s", d, name) >=
+		    (int)sizeof cand) {
+			d = strtok(NULL, ":");
+			continue;
+		}
+		if (access(cand, X_OK) == 0) {
+			if (strlen(cand) + 1 > n)
+				return -1;
+			strcpy(out, cand);
+			return 0;
+		}
+		d = strtok(NULL, ":");
+	}
+	return -1;
+}
+
+/*
+ * A manual `sudo npm install -g` uses npm's compiled-in /usr/local
+ * default, which is not on Saphira's PATH and not managed here. A
+ * same-named package there shadows nothing at runtime but confuses
+ * everything (seen live: a manual opencode-ai v1 under /usr/local
+ * surviving beside the managed v2 under /usr). Warn loudly with the
+ * exact cleanup; never delete outside our own prefix.
+ */
+static void warn_stray_prefix(const char *npm)
+{
+	char path[PATH_MAX];
+	struct stat st;
+
+	if (snprintf(path, sizeof path, "/usr/local/lib/node_modules/%s",
+	    npm) >= (int)sizeof path)
+		return;
+	if (stat(path, &st) != 0)
+		return;
+	printf("saphira-agents: note: %s is also installed at %s\n"
+	    "  (a manual install under npm's /usr/local default, which is not\n"
+	    "  on Saphira's PATH and not managed here; only the saphira-agents\n"
+	    "  copy runs). Remove the stray with:\n"
+	    "    sudo npm uninstall -g --prefix=/usr/local %s\n",
+	    npm, path, npm);
 }
 
 static void print_scopes(int scopes)
@@ -1233,6 +1360,12 @@ static int cmd_list(void)
 		printf("  %-22s %-32s [", sdks[i].selection, sdks[i].npm);
 		print_scopes(sdks[i].scopes);
 		printf("]\n");
+	}
+	printf("Suggested MCP servers (Saphira APKs,"
+	    " installed via apk, never recorded)\n");
+	for (i = 0; i < NMCPS; i++) {
+		printf("  %-22s %-32s %s\n", mcp_servers[i].selection,
+		    mcp_servers[i].apk, mcp_servers[i].blurb);
 	}
 	return 0;
 }
@@ -1535,10 +1668,104 @@ static int pick_section(const char *title, const struct pkg *table, size_t n,
 	return 0;
 }
 
+static int pick_mcp_section(size_t *picks, size_t max, size_t *npicks)
+{
+	char in[1024];
+	size_t i;
+
+	printf("\nSuggested MCP servers (Saphira workflow)\n");
+	for (i = 0; i < NMCPS; i++) {
+		printf("  [%2zu] %-18s %-20s %s\n", i + 1,
+		    mcp_servers[i].selection, mcp_servers[i].apk,
+		    mcp_servers[i].blurb);
+	}
+	if (read_line("Select (numbers, space-separated, empty for none): ",
+	    in, sizeof in) != 0)
+		return -1;
+	if (in[0] == '\0') {
+		*npicks = 0;
+		return 0;
+	}
+	if (parse_picks(in, NMCPS, picks, max, npicks) != 0) {
+		fprintf(stderr, "saphira-agents: bad selection: %s\n", in);
+		return -1;
+	}
+	return 0;
+}
+
+/*
+ * Ensure one MCP server's APK is installed, then discover its real
+ * executable on PATH. Returns 0 with the discovered path, nonzero
+ * otherwise. APK lifecycle belongs to apk: with privilege this runs
+ * `apk add`, without it prints the exact install command and stops
+ * (no snippet is printed for a path never verified).
+ */
+static int ensure_mcp_server(const struct mcp_server *m, char *path,
+    size_t n)
+{
+	if (find_in_path(m->binary, path, n) == 0)
+		return 0;
+	if (geteuid() == 0) {
+		char *argv[4];
+
+		printf("%s: installing Saphira package %s\n",
+		    m->selection, m->apk);
+		argv[0] = "apk";
+		argv[1] = "add";
+		argv[2] = (char *)m->apk;
+		argv[3] = NULL;
+		if (run_child(argv) != 0) {
+			fprintf(stderr, "saphira-agents: apk add %s failed\n",
+			    m->apk);
+			return 1;
+		}
+		if (find_in_path(m->binary, path, n) == 0)
+			return 0;
+		fprintf(stderr,
+		    "saphira-agents: %s installed but %s not found on PATH\n",
+		    m->apk, m->binary);
+		return 1;
+	}
+	printf("%s: Saphira package %s is not installed; install it with:\n"
+	    "  sudo apk add %s\n",
+	    m->selection, m->apk, m->apk);
+	return 1;
+}
+
+/*
+ * Client-side snippets, one printer per agent family. OpenCode
+ * first: its opencode.json takes an "mcp" object; print a merge-ready
+ * block for every discovered server at once so the operator pastes a
+ * single valid fragment. Never write the file here: the operator
+ * pastes it, so an existing configuration is never overwritten and
+ * never assumed empty. Other agents get their own printer following
+ * this shape; the server table above stays shared.
+ */
+static void print_opencode_mcp(const struct mcp_server *const *found,
+    char paths[][PATH_MAX], size_t n)
+{
+	size_t i;
+
+	printf("\nOpenCode MCP configuration"
+	    " (~/.config/opencode/opencode.json).\n"
+	    "Merge under \"mcp\"; existing entries are left untouched:\n\n");
+	printf("  \"mcp\": {\n");
+	for (i = 0; i < n; i++) {
+		printf("    \"%s\": {\n"
+		    "      \"type\": \"local\",\n"
+		    "      \"command\": [\"%s\"],\n"
+		    "      \"enabled\": true\n"
+		    "    }%s\n",
+		    found[i]->config_key, paths[i],
+		    i + 1 < n ? "," : "");
+	}
+	printf("  }\n");
+}
+
 static int interactive(void)
 {
-	static size_t apicks[8], spicks[64];
-	size_t na = 0, ns = 0, i;
+	static size_t apicks[8], spicks[64], mpicks[8];
+	size_t na = 0, ns = 0, nm = 0, i;
 	int scope = SCOPE_USER;
 	char in[64];
 	char prefix[PATH_MAX], state[PATH_MAX];
@@ -1552,7 +1779,9 @@ static int interactive(void)
 	if (pick_section("Provider SDKs", sdks, NSDKS,
 	    spicks, 64, &ns) != 0)
 		return 1;
-	if (na == 0 && ns == 0) {
+	if (pick_mcp_section(mpicks, 8, &nm) != 0)
+		return 1;
+	if (na == 0 && ns == 0 && nm == 0) {
 		printf("saphira-agents: nothing selected\n");
 		return 0;
 	}
@@ -1612,6 +1841,35 @@ static int interactive(void)
 	for (k = 0; k < nplan; k++) {
 		if (install_pkg(scope, prefix, state, plan[k]) != 0)
 			failures++;
+	}
+	/*
+	 * Suggested MCP servers: APK lifecycle, never the npm state
+	 * file (--update must not see them), and no client files are
+	 * written here. Install (or point at the install command),
+	 * discover the real executable, print the merge-ready snippet.
+	 */
+	if (nm > 0) {
+		const struct mcp_server *found[8];
+		static char mpaths[8][PATH_MAX];
+		size_t nf = 0, m;
+		int mcp_failures = 0;
+
+		for (m = 0; m < nm; m++) {
+			if (ensure_mcp_server(&mcp_servers[mpicks[m]],
+			    mpaths[nf], sizeof mpaths[nf]) != 0) {
+				mcp_failures++;
+				continue;
+			}
+			found[nf++] = &mcp_servers[mpicks[m]];
+		}
+		if (nf > 0)
+			print_opencode_mcp(found, mpaths, nf);
+		if (mcp_failures != 0) {
+			fprintf(stderr,
+			    "saphira-agents: %d MCP server(s) not configured\n",
+			    mcp_failures);
+			failures++;
+		}
 	}
 	if (failures != 0) {
 		fprintf(stderr, "saphira-agents: %d install(s) failed\n", failures);

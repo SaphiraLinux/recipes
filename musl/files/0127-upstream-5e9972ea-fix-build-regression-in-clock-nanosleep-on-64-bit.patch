@@ -1,0 +1,27 @@
+From 5e9972eaef08ccf55dabe254ac829a30329793d3 Mon Sep 17 00:00:00 2001
+From: Rich Felker <dalias@aerifal.cx>
+Date: Sun, 6 Sep 2026 14:25:12 -0400
+Subject: [PATCH] fix build regression in clock_nanosleep on 64-bit archs
+
+commit cb0cdc2e88c652af225d2fc31c1dec99b9880d39 broke this as part of
+future proofing.
+---
+ src/time/clock_nanosleep.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/time/clock_nanosleep.c b/src/time/clock_nanosleep.c
+index c36d7ba5..8b5e214e 100644
+--- a/src/time/clock_nanosleep.c
++++ b/src/time/clock_nanosleep.c
+@@ -39,7 +39,7 @@ int __clock_nanosleep(clockid_t clk, int flags, const struct timespec *req, stru
+ 	return -r;
+ #else
+ 	if (clk == CLOCK_REALTIME && !flags)
+-		return -__sys_nanosleep_cp(SYS_nanosleep, req, rem);
++		return -__sys_nanosleep_cp(req, rem);
+ 	return -__syscall_cp(SYS_clock_nanosleep, clk, flags, req, rem);
+ #endif
+ }
+-- 
+2.55.0
+

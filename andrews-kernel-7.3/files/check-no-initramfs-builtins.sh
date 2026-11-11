@@ -51,9 +51,13 @@ nib_required_symbols()
 		SERIAL_8250_CONSOLE SERIAL_EARLYCON SYSFB SYSFB_SIMPLEFB \
 		VGA_CONSOLE VT VT_CONSOLE
 	# KMS: virtio-gpu (QEMU/KVM guests, UEFI handoff target of the fbcon
-	# above), i915 (Intel integrated graphics), SimpleDRM (early
-	# UEFI/firmware framebuffer before native drivers bind).
-	printf '%s\n' DRM DRM_I915 DRM_KMS_HELPER DRM_SIMPLEDRM \
+	# above), SimpleDRM (early UEFI/firmware framebuffer before native
+	# drivers bind). i915 is deliberately NOT required built in: it
+	# loads as a module so its GuC/HuC/DMC firmware comes from
+	# /lib/firmware post-root instead of baked-in EXTRA_FIRMWARE;
+	# early console is covered by SIMPLEDRM (UEFI) and VGA text
+	# (BIOS), so no boot path depends on the native Intel driver.
+	printf '%s\n' DRM DRM_KMS_HELPER DRM_SIMPLEDRM \
 		DRM_VIRTIO_GPU DRM_VIRTIO_GPU_KMS
 	# KMS framebuffer console: without fbdev emulation a modesetting
 	# driver takes over the VGA console and shows nothing (proven blind

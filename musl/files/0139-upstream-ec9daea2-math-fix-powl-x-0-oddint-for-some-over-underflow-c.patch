@@ -1,0 +1,38 @@
+From ec9daea2c3a95291841990e1e4d7211d510f298b Mon Sep 17 00:00:00 2001
+From: Szabolcs Nagy <nsz@port70.net>
+Date: Tue, 25 Aug 2026 08:52:42 +0000
+Subject: [PATCH] math: fix powl(x<0,oddint) for some over/underflow cases
+
+when x<0 and y is an odd int then powl is computed for -x first
+then negated at the end. some overflow cases missed the negation:
+
+  powl(-1.5, 50001)
+  powl(-0.5, 50001)
+  powl(-0x1p-16444L, -1)
+
+returned inf, 0 and inf instead of the negated values.
+
+Reported-by: Paul Zimmermann <Paul.Zimmermann@inria.fr>
+---
+ src/math/powl.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/src/math/powl.c b/src/math/powl.c
+index 9eb22162..536f30fb 100644
+--- a/src/math/powl.c
++++ b/src/math/powl.c
+@@ -368,9 +368,9 @@ long double powl(long double x, long double y)
+ 
+ 	/* Test the power of 2 for overflow */
+ 	if (w > MEXP)
+-		return huge * huge;  /* overflow */
++		return (nflg ? -1 : 1) * huge * huge; /* overflow */
+ 	if (w < MNEXP)
+-		return twom10000 * twom10000;  /* underflow */
++		return (nflg ? -1 : 1) * twom10000 * twom10000; /* underflow */
+ 
+ 	e = w;
+ 	Hb = H - Ha;
+-- 
+2.55.0
+

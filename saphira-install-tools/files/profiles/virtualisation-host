@@ -12,6 +12,10 @@ systemd
 saphira-virtualisation
 saphira-network-host
 openssh
+# Timezone data: a hypervisor with no timezone cannot reason about
+# guest logs, certificates or scheduling - the same reason every
+# other machine profile names it.
+tzdata
 # Boot infrastructure is an explicit intention: a bootable host
 # carries its bootloader (in-target grub-install/grub-mkconfig for
 # image builds and later kernel upgrades).

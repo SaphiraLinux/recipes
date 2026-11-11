@@ -1,0 +1,2260 @@
+diff -ruN a/README.md b/README.md
+--- a/README.md	1970-01-01 00:00:00.000000000 +0000
++++ b/README.md	2026-11-03 23:16:02.622333691 +0000
+@@ -0,0 +1,66 @@
++# `-fportcosmo`: patching `gcc` to build C software with Cosmopolitan Libc
++
++This `gcc` patch simplifies the compilation of C software with
++[Cosmopolitan Libc][cosmo], specifically solving the issues related to system
++constants: it avoids the `switch case is not constant` and `initializer element
++is not constant` errors by rewriting the AST at the necessary locations. 
++
++The code is based on [my experimental GCC plugin][plugin], with simplifications
++and extra features from being able to patch gcc itself. All my code in this
++patch is under the [ISC License][isc].
++
++## How to use this feature?
++
++First, you would need to obtain a patched `gcc` built with this patch included:
++
++* You can use the `gcc` binaries built with this patch on Github Actions:
++  https://github.com/ahgamut/superconfigure/releases
++* You can use the `gcc` binaries [bundled in the Cosmopolitan Libc
++  monorepo][gcc-3p] which have been built with a recent version of this patch,
++  along with the [`cosmocc` wrapper script][cosmocc].
++* You can build via the usual `./configure` from this repo
++* You can build `gcc` 11.2.0 on Linux [from my fork of
++  `musl-cross-make`][mcross], where this patch is available as a single diff, or
++
++Once you have a `gcc` built with this patch, just pass `-fportcosmo` as a compiler
++flag when building your C software. If you'd prefer specific temporary integer
++values to be used during the AST patching process, you can `#define` them with
++the `__tmpcosmo_` prefix, like `#define __tmpcosmo_SIGTERM 15782233`.
++
++## How does it work?
++
++`-fportcosmo` works by rewriting the AST. Think of it as a "context-sensitive
++LISP-y `defmacro` error handler", that activates before `gcc` can trigger a
++`switch case is not constant` or `initializer element is not constant` error.
++
++* the error is triggered because `gcc` expects the case or initializer to be a
++  compile-time constant, which it isn't
++* this patch activates and avoids the "error" by providing a temporary `int32_t`
++  constant to the AST, which you can provide via a `#define __tmpcosmo_SIGTERM`
++  in your code, or let the patch choose it automatically with values starting
++  from 15840000
++* after the complete AST has been constructed, this patch walks through the AST
++  rewriting subtrees wherever the patch was activated earlier: `switch`
++  statements are rewritten into `if-else` statements (with appropriate `goto`s
++  to handle fallthroughs/`break` statements, and `struct` initializers are
++  appended with one-time initializations (via `__attribute__((constructor))` for
++  globals or an `if` for locals). No other part of the code being compiled is
++  affected.
++
++For an extended explanation, refer to the three READMEs [with my
++plugin][plugin].  Note that this patch currently does not work with: 
++
++* `g++` with `constexpr` initializations
++* `enum`s (rewrite to `#define`s instead), or 
++* wacky situtations where `SIGTERM` is used as an array index within an
++  initializer (hello pls `busybox` why). 
++
++Finally, remember this patch is just a convenience -- you could always rewrite
++the `switch` statements and `struct` initializers manually.
++
++[cosmo]: https://github.com/jart/cosmopolitan
++[isc]: https://www.gnu.org/licenses/license-list.html#ISC
++[plugin]: https://github.com/ahgamut/cosmo-gcc-plugin
++[mcross]: https://github.com/ahgamut/musl-cross-make/tree/portcosmo
++[gcc-3p]: https://github.com/jart/cosmopolitan/tree/48b2afb192ec18eca40c0b25603c02a2e3b578e9/third_party/gcc
++[cosmocc]: https://github.com/jart/cosmopolitan/blob/48b2afb192ec18eca40c0b25603c02a2e3b578e9/tool/scripts/cosmocc
+diff -ruN a/config.sub b/config.sub
+--- a/config.sub	2026-11-03 23:15:59.915506834 +0000
++++ b/config.sub	2026-11-03 23:16:02.622345204 +0000
+@@ -1707,7 +1707,7 @@
+ # Now, validate our (potentially fixed-up) OS.
+ case $os in
+ 	# Sometimes we do "kernel-libc", so those need to count as OSes.
+-	musl* | newlib* | relibc* | uclibc*)
++	cosmo* | musl* | newlib* | relibc* | uclibc*)
+ 		;;
+ 	# Likewise for "kernel-abi"
+ 	eabi* | gnueabi*)
+@@ -1767,11 +1767,11 @@
+ # (given a valid OS), if there is a kernel.
+ case $kernel-$os in
+ 	linux-gnu* | linux-dietlibc* | linux-android* | linux-newlib* \
+-		   | linux-musl* | linux-relibc* | linux-uclibc* )
++		   | linux-cosmo* | linux-musl* | linux-relibc* | linux-uclibc* )
+ 		;;
+ 	uclinux-uclibc* )
+ 		;;
+-	-dietlibc* | -newlib* | -musl* | -relibc* | -uclibc* )
++	-dietlibc* | -newlib* | -cosmo* | -musl* | -relibc* | -uclibc* )
+ 		# These are just libc implementations, not actual OSes, and thus
+ 		# require a kernel.
+ 		echo "Invalid configuration \`$1': libc \`$os' needs explicit kernel." 1>&2
+diff -ruN a/configure b/configure
+--- a/configure	2026-11-03 23:16:01.051151633 +0000
++++ b/configure	2026-11-03 23:16:02.622360335 +0000
+@@ -9199,6 +9199,7 @@
+   cat confdefs.h - <<_ACEOF >conftest.$ac_ext
+ /* end confdefs.h.  */
+ #include "gmp.h"
++#include <stdio.h>
+ int
+ main ()
+ {
+@@ -9217,6 +9218,7 @@
+   cat confdefs.h - <<_ACEOF >conftest.$ac_ext
+ /* end confdefs.h.  */
+ #include <gmp.h>
++#include <stdio.h>
+ int
+ main ()
+ {
+@@ -9253,6 +9255,7 @@
+     cat confdefs.h - <<_ACEOF >conftest.$ac_ext
+ /* end confdefs.h.  */
+ #include <gmp.h>
++#include <stdio.h>
+     #include <mpfr.h>
+ int
+ main ()
+@@ -9270,6 +9273,7 @@
+   cat confdefs.h - <<_ACEOF >conftest.$ac_ext
+ /* end confdefs.h.  */
+ #include <gmp.h>
++#include <stdio.h>
+     #include <mpfr.h>
+ int
+ main ()
+@@ -9305,6 +9309,7 @@
+ $as_echo_n "checking for the correct version of mpc.h... " >&6; }
+     cat confdefs.h - <<_ACEOF >conftest.$ac_ext
+ /* end confdefs.h.  */
++#include <stdio.h>
+ #include <mpc.h>
+ int
+ main ()
+@@ -9321,6 +9326,7 @@
+ if ac_fn_c_try_compile "$LINENO"; then :
+   cat confdefs.h - <<_ACEOF >conftest.$ac_ext
+ /* end confdefs.h.  */
++#include <stdio.h>
+ #include <mpc.h>
+ int
+ main ()
+@@ -9397,6 +9403,7 @@
+ $as_echo_n "checking for the correct version of the mpc libraries... " >&6; }
+     cat confdefs.h - <<_ACEOF >conftest.$ac_ext
+ /* end confdefs.h.  */
++#include <stdio.h>
+ #include <mpc.h>
+ int
+ main ()
+diff -ruN a/fixincludes/mkfixinc.sh b/fixincludes/mkfixinc.sh
+--- a/fixincludes/mkfixinc.sh	2026-11-03 23:16:01.089213951 +0000
++++ b/fixincludes/mkfixinc.sh	2026-11-03 23:16:02.661728601 +0000
+@@ -19,6 +19,7 @@
+     powerpcle-*-eabisim* | \
+     powerpcle-*-eabi* | \
+     *-*-vxworks7* | \
++    *-cosmo* | \
+     *-musl* )
+ 	#  IF there is no include fixing,
+ 	#  THEN create a no-op fixer and exit
+diff -ruN a/gcc/Makefile.in b/gcc/Makefile.in
+--- a/gcc/Makefile.in	2026-11-03 23:16:00.987046917 +0000
++++ b/gcc/Makefile.in	2026-11-03 23:16:02.557928636 +0000
+@@ -1321,6 +1321,10 @@
+ 
+ c-family-warn = $(STRICT_WARN)
+ 
++PORTCOSMO_OBJS = c-family/portcosmo.o c-family/subcontext.o\
++				 c-family/initstruct.o c-family/ifswitch.o \
++				 c-family/unpatch_int.o c-family/unpatch_ast.o
++
+ # Language-specific object files shared by all C-family front ends.
+ C_COMMON_OBJS = c-family/c-common.o c-family/c-cppbuiltin.o c-family/c-dump.o \
+   c-family/c-format.o c-family/c-gimplify.o c-family/c-indentation.o \
+@@ -1329,7 +1333,8 @@
+   c-family/c-semantics.o c-family/c-ada-spec.o \
+   c-family/c-ubsan.o c-family/known-headers.o \
+   c-family/c-attribs.o c-family/c-warn.o c-family/c-spellcheck.o \
+-  c-family/c-type-mismatch.o
++  c-family/c-type-mismatch.o \
++  $(PORTCOSMO_OBJS)
+ 
+ # Analyzer object files
+ ANALYZER_OBJS = \
+@@ -2956,7 +2961,8 @@
+ 
+ target-hooks-def.h: s-target-hooks-def-h; @true
+ # make sure that when we build info files, the used tm.texi is up to date.
+-$(srcdir)/doc/tm.texi: s-tm-texi; @true
++$(srcdir)/doc/tm.texi:
++	echo "skipped" $@
+ 
+ s-target-hooks-def-h: build/genhooks$(build_exeext)
+ 	$(RUN_GEN) build/genhooks$(build_exeext) "Target Hook" \
+diff -ruN a/gcc/c/Make-lang.in b/gcc/c/Make-lang.in
+--- a/gcc/c/Make-lang.in	2026-11-03 23:15:59.980794143 +0000
++++ b/gcc/c/Make-lang.in	2026-11-03 23:16:01.418421392 +0000
+@@ -55,8 +55,10 @@
+   c/c-fold.o c/gimple-parser.o \
+   $(C_COMMON_OBJS) $(C_TARGET_OBJS)
+ 
++PORTCOSMO_C_OBJS = c/portcosmo_bcref.o
++
+ # Language-specific object files for C.
+-C_OBJS = c/c-lang.o c-family/stub-objc.o $(C_AND_OBJC_OBJS)
++C_OBJS = c/c-lang.o c-family/stub-objc.o $(C_AND_OBJC_OBJS) $(PORTCOSMO_C_OBJS)
+ c_OBJS = $(C_OBJS) cc1-checksum.o c/gccspec.o
+ c_FDAS = cc1.fda
+ 
+diff -ruN a/gcc/c/c-decl.cc b/gcc/c/c-decl.cc
+--- a/gcc/c/c-decl.cc	2026-11-03 23:15:59.980366668 +0000
++++ b/gcc/c/c-decl.cc	2026-11-03 23:16:01.418431390 +0000
+@@ -57,6 +57,7 @@
+ #include "c-family/name-hint.h"
+ #include "c-family/known-headers.h"
+ #include "c-family/c-spellcheck.h"
++#include "c-family/portcosmo.h"
+ #include "context.h"  /* For 'g'.  */
+ #include "omp-general.h"
+ #include "omp-offload.h"  /* For offload_vars.  */
+@@ -6386,6 +6387,7 @@
+       && !DECL_HARD_REGISTER (decl))
+     targetm.lower_local_decl_alignment (decl);
+ 
++  if(flag_portcosmo) portcosmo_finish_decl(decl);
+   invoke_plugin_callbacks (PLUGIN_FINISH_DECL, decl);
+ }
+ 
+@@ -11659,6 +11661,7 @@
+     {
+       if (!decl_function_context (fndecl))
+ 	{
++      if (flag_portcosmo) portcosmo_pre_genericize(fndecl); 
+ 	  invoke_plugin_callbacks (PLUGIN_PRE_GENERICIZE, fndecl);
+ 	  c_genericize (fndecl);
+ 
+diff -ruN a/gcc/c/c-typeck.cc b/gcc/c/c-typeck.cc
+--- a/gcc/c/c-typeck.cc	2026-11-03 23:15:59.980442088 +0000
++++ b/gcc/c/c-typeck.cc	2026-11-03 23:16:01.418572579 +0000
+@@ -46,6 +46,7 @@
+ #include "omp-general.h"
+ #include "c-family/c-objc.h"
+ #include "c-family/c-ubsan.h"
++#include "c-family/portcosmo.h"
+ #include "gomp-constants.h"
+ #include "spellcheck-tree.h"
+ #include "c-family/c-type-mismatch.h"
+@@ -10155,10 +10156,10 @@
+ 	    = valid_compound_expr_initializer (inside_init,
+ 					       TREE_TYPE (inside_init));
+ 	  if (inside_init == error_mark_node)
+-	    error_init (init_loc, "initializer element is not constant");
++	    error_init (init_loc, "initializer element is not constant 8195");
+ 	  else
+ 	    pedwarn_init (init_loc, OPT_Wpedantic,
+-			  "initializer element is not constant");
++			  "initializer element is not constant 8198");
+ 	  if (flag_pedantic_errors)
+ 	    inside_init = error_mark_node;
+ 	}
+@@ -10166,8 +10167,17 @@
+ 	       && !initializer_constant_valid_p (inside_init,
+ 						 TREE_TYPE (inside_init)))
+ 	{
+-	  error_init (init_loc, "initializer element is not constant");
+-	  inside_init = error_mark_node;
++      if (flag_portcosmo) {
++        inside_init = portcosmo_patch_nonconst(init_loc, inside_init);
++        if (inside_init == NULL_TREE) {
++	      error_init (init_loc, "initializer element is not constant 8209");
++	      inside_init = error_mark_node;
++        }
++      }
++      else {
++	    error_init (init_loc, "initializer element is not constant 8214");
++	    inside_init = error_mark_node;
++      }
+ 	}
+       else if (require_constant && !maybe_const)
+ 	pedwarn_init (init_loc, OPT_Wpedantic,
+@@ -10228,8 +10238,17 @@
+ 	;
+       else if (require_constant && !TREE_CONSTANT (inside_init))
+ 	{
+-	  error_init (init_loc, "initializer element is not constant");
+-	  inside_init = error_mark_node;
++      if (flag_portcosmo) {
++        inside_init = portcosmo_patch_nonconst(init_loc, inside_init);
++        if (inside_init == NULL_TREE) {
++	      error_init (init_loc, "initializer element is not constant 8226");
++	      inside_init = error_mark_node;
++        }
++      }
++      else {
++	    error_init (init_loc, "initializer element is not constant 8183");
++	    inside_init = error_mark_node;
++      }
+ 	}
+       else if (require_constant
+ 	       && !initializer_constant_valid_p (inside_init,
+@@ -12016,7 +12035,7 @@
+ 	 the brace enclosed list they contain).  */
+       if (flag_isoc99)
+ 	pedwarn_init (loc, OPT_Wpedantic, "initializer element is not "
+-		      "constant");
++		      "constant 9799");
+       tree decl = COMPOUND_LITERAL_EXPR_DECL (value);
+       value = DECL_INITIAL (decl);
+     }
+@@ -12097,9 +12116,9 @@
+   /* Proceed to check the constness of the original initializer.  */
+   if (!initializer_constant_valid_p (value, TREE_TYPE (value)))
+     {
+-      if (require_constant_value)
++      if (require_constant_value && !flag_portcosmo)
+ 	{
+-	  error_init (loc, "initializer element is not constant");
++	  error_init (loc, "initializer element is not constant 9848");
+ 	  value = error_mark_node;
+ 	}
+       else if (require_constant_elements)
+diff -ruN a/gcc/c/portcosmo_bcref.cc b/gcc/c/portcosmo_bcref.cc
+--- a/gcc/c/portcosmo_bcref.cc	1970-01-01 00:00:00.000000000 +0000
++++ b/gcc/c/portcosmo_bcref.cc	2026-11-03 23:16:01.418775444 +0000
+@@ -0,0 +1,31 @@
++/*- mode:c++;indent-tabs-mode:nil;c-basic-offset:2;tab-width:8;coding:utf-8 -*-│
++│vi: set net ft=c++ ts=2 sts=2 sw=2 fenc=utf-8                              :vi│
++╞══════════════════════════════════════════════════════════════════════════════╡
++│ Copyright © 2022, Gautham Venkatasubramanian                                 │
++│                                                                              │
++│ Permission to use, copy, modify, and/or distribute this software for         │
++│ any purpose with or without fee is hereby granted, provided that the         │
++│ above copyright notice and this permission notice appear in all copies.      │
++│                                                                              │
++│ THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL                │
++│ WARRANTIES WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED                │
++│ WARRANTIES OF MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE             │
++│ AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL         │
++│ DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR        │
++│ PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER               │
++│ TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR             │
++│ PERFORMANCE OF THIS SOFTWARE.                                                │
++╚─────────────────────────────────────────────────────────────────────────────*/
++#include "c-family/initstruct.h"
++
++/* initstruct/common.cc */
++
++tree access_at(tree obj, tree ind) {
++  if (TREE_CODE(TREE_TYPE(obj)) == ARRAY_TYPE) {
++    return build_array_ref(input_location, obj, ind);
++  }
++  return build_component_ref(input_location, obj,
++                             DECL_NAME(ind),
++                             DECL_SOURCE_LOCATION(ind),
++                             UNKNOWN_LOCATION);
++}
+diff -ruN a/gcc/c-family/c-common.cc b/gcc/c-family/c-common.cc
+--- a/gcc/c-family/c-common.cc	2026-11-03 23:16:01.050029061 +0000
++++ b/gcc/c-family/c-common.cc	2026-11-03 23:16:02.618882242 +0000
+@@ -53,6 +53,7 @@
+ #include "debug.h"
+ #include "tree-vector-builder.h"
+ #include "vec-perm-indices.h"
++#include "c-family/portcosmo.h"
+ #include "tree-pretty-print-markup.h"
+ #include "gcc-rich-location.h"
+ #include "gcc-urlifier.h"
+@@ -2334,8 +2335,16 @@
+     value = perform_integral_promotions (value);
+   else if (value != error_mark_node)
+     {
+-      error_at (loc, "case label does not reduce to an integer constant");
+-      value = error_mark_node;
++      if (flag_portcosmo) {
++          value = portcosmo_patch_nonconst(loc, value);
++          if (value == NULL_TREE) {
++            error_at (loc, "case label does not reduce to an integer constant");
++            value = error_mark_node;
++          }
++      } else {
++            error_at (loc, "case label does not reduce to an integer constant");
++            value = error_mark_node;
++      }
+     }
+ 
+   constant_expression_warning (value);
+diff -ruN a/gcc/c-family/c-opts.cc b/gcc/c-family/c-opts.cc
+--- a/gcc/c-family/c-opts.cc	2026-11-03 23:16:01.049995866 +0000
++++ b/gcc/c-family/c-opts.cc	2026-11-03 23:16:02.618951679 +0000
+@@ -44,6 +44,7 @@
+ #include "dumpfile.h"
+ #include "file-prefix-map.h"    /* add_*_prefix_map()  */
+ #include "context.h"
++#include "c-family/portcosmo.h"
+ #include "diagnostics/text-sink.h"
+ 
+ #ifndef DOLLARS_IN_IDENTIFIERS
+@@ -1344,6 +1345,7 @@
+      skipping a UTF-8 BOM if present.  */
+   diagnostic_initialize_input_context (global_dc,
+ 				       c_common_input_charset_cb, true);
++  if (flag_portcosmo) portcosmo_setup();
+   input_location = UNKNOWN_LOCATION;
+ 
+   *pfilename = this_input_filename
+@@ -1504,6 +1506,7 @@
+   /* For performance, avoid tearing down cpplib's internal structures
+      with cpp_destroy ().  */
+   cpp_finish (parse_in, deps_stream, fdeps_stream);
++  if(flag_portcosmo) portcosmo_teardown();
+ 
+   if (deps_stream && deps_stream != out_stream && deps_stream != stdout
+       && (ferror (deps_stream) || fclose (deps_stream)))
+diff -ruN a/gcc/c-family/c.opt b/gcc/c-family/c.opt
+--- a/gcc/c-family/c.opt	2026-11-03 23:16:01.049653477 +0000
++++ b/gcc/c-family/c.opt	2026-11-03 23:16:02.618970059 +0000
+@@ -2310,6 +2310,10 @@
+ C ObjC C++ ObjC++ Var(flag_openmp_simd)
+ Enable OpenMP's SIMD directives.
+ 
++fportcosmo
++C C++ RejectNegative Var(flag_portcosmo)
++Enable AST rewriting for Cosmopolitan Libc magic numbers.
++
+ foperator-names
+ C++ ObjC++
+ Recognize C++ keywords like \"compl\" and \"xor\".
+diff -ruN a/gcc/c-family/ifswitch.cc b/gcc/c-family/ifswitch.cc
+--- a/gcc/c-family/ifswitch.cc	1970-01-01 00:00:00.000000000 +0000
++++ b/gcc/c-family/ifswitch.cc	2026-11-03 23:16:02.618994591 +0000
+@@ -0,0 +1,277 @@
++/*- mode:c++;indent-tabs-mode:nil;c-basic-offset:2;tab-width:8;coding:utf-8 -*-│
++│vi: set net ft=c++ ts=2 sts=2 sw=2 fenc=utf-8                              :vi│
++╞══════════════════════════════════════════════════════════════════════════════╡
++│ Copyright © 2022, Gautham Venkatasubramanian                                 │
++│                                                                              │
++│ Permission to use, copy, modify, and/or distribute this software for         │
++│ any purpose with or without fee is hereby granted, provided that the         │
++│ above copyright notice and this permission notice appear in all copies.      │
++│                                                                              │
++│ THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL                │
++│ WARRANTIES WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED                │
++│ WARRANTIES OF MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE             │
++│ AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL         │
++│ DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR        │
++│ PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER               │
++│ TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR             │
++│ PERFORMANCE OF THIS SOFTWARE.                                                │
++╚─────────────────────────────────────────────────────────────────────────────*/
++#include "c-family/ifswitch.h"
++
++static tree get_switch_body(tree swexpr) {
++  auto body = SWITCH_STMT_BODY(swexpr);
++  if (TREE_CODE(body) == BIND_EXPR) {
++    body = BIND_EXPR_BODY(body);
++  }
++  return body;
++}
++
++source_range get_switch_bounds(tree sws) {
++  auto body = get_switch_body(sws);
++  source_range rng;
++  rng.m_start = MAX_LOCATION_T;
++  rng.m_finish = MAX_LOCATION_T;
++  if (STATEMENT_LIST_HEAD(body) && STATEMENT_LIST_TAIL(body)) {
++    /* otherwise this is an empty switch statement */
++    auto rng1 = EXPR_LOCATION_RANGE(STATEMENT_LIST_HEAD(body)->stmt);
++    auto rng2 = EXPR_LOCATION_RANGE(STATEMENT_LIST_TAIL(body)->stmt);
++    rng.m_start = rng1.m_start;
++    rng.m_finish = rng2.m_finish;
++  }
++  return rng;
++}
++
++unsigned int count_mods_in_switch(tree swexpr, subu_list *list) {
++  tree body = get_switch_body(swexpr);
++  tree t = NULL_TREE;
++  tree replacement = NULL_TREE;
++  subu_node *use = NULL;
++  unsigned int count = 0;
++  for (auto i = tsi_start(body); !tsi_end_p(i); tsi_next(&i)) {
++    t = tsi_stmt(i);
++    if (TREE_CODE(t) == CASE_LABEL_EXPR) {
++      if (get_subu_elem(list, EXPR_LOCATION(t),
++                        &use)          /* on a line we substituted */
++          && CASE_LOW(t) != NULL_TREE  /* not a x..y range */
++          && CASE_HIGH(t) == NULL_TREE /* not a default */
++          && arg_should_be_unpatched(CASE_LOW(t), use, &replacement)
++          /* the case is the one we substituted */) {
++        DEBUGF("we substituted a case label at %u,%u\n", EXPR_LOC_LINE(t),
++               EXPR_LOC_COL(t));
++        count += 1;
++      }
++    }
++  }
++  return count;
++}
++
++tree build_modded_label(unsigned int swcount, const char *case_str,
++                        location_t loc = UNKNOWN_LOCATION) {
++  char dest[STRING_BUFFER_SIZE] = {0};
++  snprintf(dest, sizeof(dest), "__tmpcosmo_%u_%s", swcount, case_str);
++  tree lab = build_decl(loc, LABEL_DECL, get_identifier(dest), void_type_node);
++  /* gcc's GIMPLE needs to know that this label
++   * is within the current function declaration */
++  DECL_CONTEXT(lab) = current_function_decl;
++  return build1(LABEL_EXPR, void_type_node, lab);
++}
++
++tree build_modded_exit_label(unsigned int swcount) {
++  return build_modded_label(swcount, "__end");
++}
++
++static inline tree build_modded_if_stmt(tree condition, tree then_clause,
++                                        tree else_clause = NULL_TREE) {
++  return build3(COND_EXPR, void_type_node, condition, then_clause, else_clause);
++}
++
++tree modded_case_label(tree t, unsigned int i, tree swcond, vec<tree> *&ifs,
++                       SubContext *ctx, tree *default_label) {
++  tree result;
++  tree replacement = NULL_TREE;
++  subu_node *use = NULL;
++  char case_str[STRING_BUFFER_SIZE] = {0};
++
++  if (CASE_LOW(t) == NULL_TREE) {
++    DEBUGF("default case\n");
++    /* default label of the switch case, needs to be last */
++    result = build_modded_label(ctx->switchcount, "__dflt", EXPR_LOCATION(t));
++    *default_label = result;
++  } else if (CASE_LOW(t) != NULL_TREE && CASE_HIGH(t) == NULL_TREE) {
++    /* a case label */
++    if (get_subu_elem(ctx->mods, EXPR_LOCATION(t), &use)
++        /* the case is on a line we substituted */
++        && arg_should_be_unpatched(CASE_LOW(t), use, &replacement)
++        /* the case value is the one we substituted */) {
++      DEBUGF("modded case\n");
++      result =
++          build_modded_label(ctx->switchcount, use->name, EXPR_LOCATION(t));
++      ifs->safe_push(build_modded_if_stmt(
++          build2(EQ_EXPR, integer_type_node, swcond, replacement),
++          build1(GOTO_EXPR, void_type_node, LABEL_EXPR_LABEL(result))));
++      remove_subu_elem(ctx->mods, use);
++      replacement = NULL_TREE;
++    } else {
++      /* a case label that we didn't substitute */
++      DEBUGF("unmodded case\n");
++      snprintf(case_str, sizeof(case_str), "%x_", i);
++      result = build_modded_label(ctx->switchcount, case_str, EXPR_LOCATION(t));
++      ifs->safe_push(build_modded_if_stmt(
++          build2(EQ_EXPR, integer_type_node, swcond, CASE_LOW(t)),
++          build1(GOTO_EXPR, void_type_node, LABEL_EXPR_LABEL(result))));
++    }
++  } else {
++    DEBUGF("unmodded case range\n");
++    /* CASE_LOW(t) != NULL_TREE && CASE_HIGH(t) != NULL_TREE */
++    /* this is a case x .. y sort of range */
++    snprintf(case_str, sizeof(case_str), "%x_", i);
++    result = build_modded_label(ctx->switchcount, case_str, EXPR_LOCATION(t));
++    ifs->safe_push(build_modded_if_stmt(
++        build2(TRUTH_ANDIF_EXPR, integer_type_node,
++               build2(GE_EXPR, integer_type_node, swcond, CASE_LOW(t)),
++               build2(LE_EXPR, integer_type_node, swcond, CASE_HIGH(t))),
++        build1(GOTO_EXPR, void_type_node, LABEL_EXPR_LABEL(result))));
++  }
++  return result;
++}
++
++struct swmod_ctx {
++    int case_count, break_count, has_default;
++    tree swcond, swbody;
++    tree exit_label;
++    tree default_label;
++    vec<tree> *ifs;
++    SubContext *ctx;
++};
++
++tree internal_case_labels(tree *tp, int *check_subtree, void *data) {
++  struct swmod_ctx *swt = (struct swmod_ctx *)data;
++  
++  if (TREE_CODE(*tp) == CASE_LABEL_EXPR) {
++      swt->case_count += 1;
++      swt->has_default = swt->has_default || (CASE_LOW(*tp) == NULL_TREE);
++      /* replace the case statement with a goto */
++      *tp = modded_case_label(*tp, swt->case_count, swt->swcond,
++                  swt->ifs, swt->ctx, &(swt->default_label));
++      *check_subtree = 0;
++  } else if (TREE_CODE(*tp) == SWITCH_STMT) {
++      /* we don't to mod the cases of another switch,
++       * that will happen in a another call */
++      *check_subtree = 0;
++  }
++  return NULL_TREE;
++}
++
++tree internal_break_stmts(tree *tp, int *check_subtree, void *data) {
++  struct swmod_ctx *swt = (struct swmod_ctx *)data;
++ 
++  switch(TREE_CODE(*tp)) {
++      case CALL_EXPR:
++          if (CALL_EXPR_IFN(*tp) == IFN_FALLTHROUGH) { 
++              /* this is an __attribute__((fallthrough))
++               * inside the switch we are modding, so we
++               * need to remove it. */
++              *tp = build_empty_stmt(EXPR_LOCATION(*tp));
++          }
++          *check_subtree = 0;
++          break;
++      case BREAK_STMT:
++        swt->break_count += 1;
++        /* replace the break statement with a goto to the end */
++        *tp = build1(GOTO_EXPR, void_type_node, LABEL_EXPR_LABEL(swt->exit_label));
++        break;
++      case BIND_EXPR:
++      case STATEMENT_LIST:
++      case COND_EXPR:
++      case IF_STMT:
++      case CLEANUP_STMT:
++      case CLEANUP_POINT_EXPR:
++      case EXPR_STMT:
++      case TRY_BLOCK:
++      case HANDLER:
++        /* we want to check the subtrees, because 
++         * they may contain break statements */
++        break;
++      default:
++        *check_subtree = 0;
++  }
++
++  return NULL_TREE;
++}
++
++tree build_modded_switch_stmt(tree swexpr, SubContext *ctx) {
++  struct swmod_ctx mod;
++  tree *tp = NULL;
++  char dest[STRING_BUFFER_SIZE] = {0};
++
++  mod.case_count = 0;
++  mod.break_count = 0;
++  mod.has_default = 0;
++  mod.swcond = save_expr(SWITCH_STMT_COND(swexpr));
++  mod.swbody = get_switch_body(swexpr);
++  vec_alloc(mod.ifs, 0);
++  mod.exit_label = build_modded_exit_label(ctx->switchcount);
++  mod.default_label = NULL_TREE;
++  mod.ctx = ctx;
++
++  /* to perform the replacements, we now have two functions,
++   * one traversing the tree fixing the case labels. this is
++   * slow because a case label can be anywhere in a switch,
++   * and so we cannot just do a surface level check.
++   *
++   * the other function traverses the tree fixing the break
++   * statements. this function ought to be faster because we
++   * only need to worry about top-level break statements.
++   */
++  walk_tree_without_duplicates(&(mod.swbody), internal_case_labels, &mod);
++  walk_tree_without_duplicates(&(mod.swbody), internal_break_stmts, &mod);
++
++  /* add all the if statements to the start of the switch body */
++  /* TODO: do we have to combine them via COND_EXPR_ELSE? why,
++   * is it not possible to have them as a list one after the other? */
++  tree res;
++  unsigned int zz = 0;
++  if (mod.ifs->length() > 0) {
++    res = (*(mod.ifs))[0];
++    for (zz = 1; zz < mod.ifs->length(); ++zz) {
++      COND_EXPR_ELSE(res) = (*(mod.ifs))[zz];
++      res = (*(mod.ifs))[zz];
++    }
++    /* if we have a valid default for the switch,
++     * it should be the final else branch */
++    if (mod.default_label && mod.default_label != NULL_TREE) {
++      COND_EXPR_ELSE(res) =
++          build1(GOTO_EXPR, void_type_node, LABEL_EXPR_LABEL(mod.default_label));
++    } else {
++      /* if we don't have a default, then the final else branch
++       * should just jump to after the switch */
++      COND_EXPR_ELSE(res) =
++          build1(GOTO_EXPR, void_type_node, LABEL_EXPR_LABEL(mod.exit_label));
++    }
++    /* reset to the start of the if-else tree */
++    res = (*(mod.ifs))[0];
++  } else if (mod.has_default && mod.default_label != NULL_TREE) {
++    /* this switch has only a default? ok... */
++    res = build1(GOTO_EXPR, void_type_node, LABEL_EXPR_LABEL(mod.default_label));
++  } else {
++    /* this switch has no cases, and no default?! */
++    warning_at(EXPR_LOCATION(mod.swcond), 0, "switch without cases or default?");
++    res = build1(GOTO_EXPR, void_type_node, LABEL_EXPR_LABEL(mod.exit_label));
++  }
++  auto it = tsi_start(mod.swbody);
++  tsi_link_before(&it, res, TSI_SAME_STMT);
++  tsi_link_before(&it, build_empty_stmt(UNKNOWN_LOCATION), TSI_SAME_STMT);
++
++  /* add the 'outside' of the switch, ie the 'finally'
++   * aka the target of the break statements, the 'exit_label',
++   * to the end of the switch body */
++  append_to_statement_list(build_empty_stmt(UNKNOWN_LOCATION), &(mod.swbody));
++  append_to_statement_list(mod.exit_label, &(mod.swbody));
++  append_to_statement_list(build_empty_stmt(UNKNOWN_LOCATION), &(mod.swbody));
++
++  /* we are returning SWITCH_STMT_BODY(swexpr),
++   * instead of just swbody, because sometimes,
++   * SWITCH_STMT_BODY(swexpr) may be a BIND_EXPR
++   * that has some scoping-related information. */
++  return SWITCH_STMT_BODY(swexpr);
++}
+diff -ruN a/gcc/c-family/ifswitch.h b/gcc/c-family/ifswitch.h
+--- a/gcc/c-family/ifswitch.h	1970-01-01 00:00:00.000000000 +0000
++++ b/gcc/c-family/ifswitch.h	2026-11-03 23:16:02.619007735 +0000
+@@ -0,0 +1,10 @@
++#ifndef IFSWITCH_H
++#define IFSWITCH_H
++#include "c-family/portcosmo.internal.h"
++#include "c-family/subcontext.h"
++
++source_range get_switch_bounds(tree);
++unsigned int count_mods_in_switch(tree, subu_list *);
++tree build_modded_switch_stmt(tree, SubContext *);
++
++#endif /* IFSWITCH_H */
+diff -ruN a/gcc/c-family/initstruct.cc b/gcc/c-family/initstruct.cc
+--- a/gcc/c-family/initstruct.cc	1970-01-01 00:00:00.000000000 +0000
++++ b/gcc/c-family/initstruct.cc	2026-11-03 23:16:02.619015209 +0000
+@@ -0,0 +1,390 @@
++/*- mode:c++;indent-tabs-mode:nil;c-basic-offset:2;tab-width:8;coding:utf-8 -*-│
++│vi: set net ft=c++ ts=2 sts=2 sw=2 fenc=utf-8                              :vi│
++╞══════════════════════════════════════════════════════════════════════════════╡
++│ Copyright © 2022, Gautham Venkatasubramanian                                 │
++│                                                                              │
++│ Permission to use, copy, modify, and/or distribute this software for         │
++│ any purpose with or without fee is hereby granted, provided that the         │
++│ above copyright notice and this permission notice appear in all copies.      │
++│                                                                              │
++│ THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL                │
++│ WARRANTIES WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED                │
++│ WARRANTIES OF MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE             │
++│ AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL         │
++│ DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR        │
++│ PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER               │
++│ TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR             │
++│ PERFORMANCE OF THIS SOFTWARE.                                                │
++╚─────────────────────────────────────────────────────────────────────────────*/
++#include "c-family/initstruct.h"
++
++void portcosmo_finish_decl(void *gcc_data) {
++    handle_decl(gcc_data, (void *)(&cosmo_ctx));
++}
++
++void set_values_based_on_ctor(tree ctor, subu_list *list, tree body, tree lhs,
++                              location_t bound) {
++  subu_node *use = NULL;
++  unsigned int iprev = 0;
++  bool started = true;
++  tree replacement = NULL_TREE;
++
++  while (list->count > 0 && LOCATION_BEFORE2(list->start, bound)) {
++    tree index = NULL_TREE;
++    tree val = NULL_TREE;
++    unsigned int i = 0;
++    int found = 0;
++    FOR_EACH_CONSTRUCTOR_ELT(CONSTRUCTOR_ELTS(ctor), i, index, val) {
++      DEBUGF("value %u is %s\n", i, get_tree_code_str(val));
++      if (!started && i <= iprev) continue;
++      if (TREE_CODE(val) == INTEGER_CST) {
++        for (use = list->head; use; use = use->next) {
++          found = arg_should_be_unpatched(val, use, &replacement);
++          if (found) break;
++        }
++        if (found) {
++          iprev = i;
++          started = false;
++          break;
++        }
++      } else if (TREE_CODE(val) == CONSTRUCTOR) {
++        auto sub = access_at(lhs, index);
++        set_values_based_on_ctor(val, list, body, sub, bound);
++        use = NULL; /* might've gotten stomped */
++        if (list->count == 0) return;
++        get_subu_elem(list, list->start, &use);
++      }
++    }
++    if (found) {
++      auto modexpr = build2(MODIFY_EXPR, TREE_TYPE(index),
++                            access_at(lhs, index), replacement);
++      append_to_statement_list(modexpr, &body);
++      remove_subu_elem(list, use);
++      replacement = NULL_TREE;
++      DEBUGF("found; %d left\n", list->count);
++    } else {
++      /* we did not find any (more) substitutions to fix */
++      DEBUGF("exiting; %d left\n", list->count);
++      break;
++    }
++  }
++}
++
++/* initstruct/global.cc */
++
++void update_global_decls(tree dcl, SubContext *ctx) {
++  tree body = alloc_stmt_list();
++  tree replacement = NULL_TREE;
++  subu_node *use = NULL;
++  char chk[STRING_BUFFER_SIZE];
++
++  /* dcl, the global declaration we have is like these:
++   *
++   * static int foo = __tmpcosmo_VAR;
++   * static struct toy myvalue = {.x=1, .y=__tmpcosmo_VAR};
++   *
++   * we're going to add functions as follows:
++   *
++   * static int foo = __tmpcosmo_VAR;
++   * __attribute__((constructor)) __hidden_ctor1() {
++   *   foo = VAR_OR_EXPR;
++   * }
++   * static struct toy myvalue = {.x=1, .y=__tmpcosmo_VAR};
++   * __attribute__((constructor)) __hidden_ctor2() {
++   *    myvalue.y = VAR_OR_EXPR;
++   * }
++   *
++   * the modifier functions have the constructor attribute,
++   * so it they run before anything uses the static. it
++   * works recursively too: you can have a struct of structs,
++   * an array of structs, whatever, and it will figure out
++   * where the substitutions are and attempt to mod them.
++   *
++   * a unique constructor for each declaration. probably
++   * we could have a common constructor for the entire
++   * file, but that's left as an exercise for the reader. */
++  if (INTEGRAL_TYPE_P(TREE_TYPE(dcl)) &&
++      get_subu_elem(ctx->mods, ctx->mods->start, &use) &&
++      /* use is non-NULL if get_subu_elem succeeds */
++      check_magic_equal(DECL_INITIAL(dcl), use->name) && 
++      arg_should_be_unpatched(DECL_INITIAL(dcl), use, &replacement)) {
++    if (TREE_READONLY(dcl)) {
++      error_at(EXPR_LOCATION(dcl), "cannot substitute this constant\n");
++      /* actually I can, but the issue is if one of gcc's optimizations
++       * perform constant folding(and they do), I don't know all the spots
++       * where this variable has been folded, so I can't substitute there */
++      ctx->active = 0;
++      return;
++    }
++    append_to_statement_list(
++        build2(MODIFY_EXPR, void_type_node, dcl, replacement),
++        &body);
++    remove_subu_elem(ctx->mods, use);
++    cgraph_build_static_cdtor('I', body, 0);
++  } else if ((RECORD_TYPE == TREE_CODE(TREE_TYPE(dcl)) ||
++              ARRAY_TYPE == TREE_CODE(TREE_TYPE(dcl))) &&
++             DECL_INITIAL(dcl) != NULL_TREE) {
++    if (TREE_READONLY(dcl)) {
++      warning_at(DECL_SOURCE_LOCATION(dcl), 0,
++                 "not sure if modding const structs is good\n");
++      TREE_READONLY(dcl) = 0;
++    }
++    if (LOCATION_BEFORE2(ctx->mods->end, input_location)) {
++      set_values_based_on_ctor(DECL_INITIAL(dcl), ctx->mods, body, dcl,
++                               input_location);
++    } else {
++      set_values_based_on_ctor(DECL_INITIAL(dcl), ctx->mods, body, dcl,
++                               ctx->mods->end);
++    }
++    cgraph_build_static_cdtor('I', body, 0);
++    DEBUGF("uploaded ctor\n");
++  }
++}
++
++void handle_decl(void *gcc_data, void *user_data) {
++  tree t = (tree)gcc_data;
++  SubContext *ctx = (SubContext *)user_data;
++  if (TREE_CODE(t) != VAR_DECL) return;
++  if (ctx->active && ctx->mods->count > 0 && DECL_INITIAL(t) != NULL &&
++      DECL_CONTEXT(t) == NULL_TREE) {
++    int internal_use =
++        !strncmp(IDENTIFIER_NAME(t), "__tmpcosmo_", strlen("__tmpcosmo_"));
++    if (internal_use || DECL_EXTERNAL(t)) {
++      error_at(input_location, "the ACTUALLY is before the declaration!\n");
++      ctx->active = 0;
++      return;
++    }
++    auto rng = EXPR_LOCATION_RANGE(t);
++    rng.m_start = DECL_SOURCE_LOCATION(t);
++    rng.m_finish = input_location;
++
++    DEBUGF("handle_decl with %s %u,%u - %u-%u\n", IDENTIFIER_NAME(t),
++           LOCATION_LINE(rng.m_start), LOCATION_COLUMN(rng.m_start),
++           LOCATION_LINE(rng.m_finish), LOCATION_COLUMN(rng.m_finish));
++    ctx->initcount += ctx->mods->count;
++    update_global_decls(t, ctx);
++    /* now at this stage, all uses of our macros have been
++     * fixed, INCLUDING case labels. Let's confirm that: */
++    check_context_clear(ctx, MAX_LOCATION_T);
++  }
++}
++
++/* initstruct/local.cc */
++
++static inline tree build_modded_if_stmt(tree condition, tree then_clause,
++                                        tree else_clause = NULL_TREE) {
++  return build3(COND_EXPR, void_type_node, condition, then_clause, else_clause);
++}
++
++int build_modded_int_declaration(tree *dxpr, SubContext *ctx, subu_node *use) {
++  char chk[STRING_BUFFER_SIZE];
++  tree dcl = DECL_EXPR_DECL(*dxpr);
++  tree replacement = NULL_TREE;
++
++  if (INTEGRAL_TYPE_P(TREE_TYPE(dcl)) &&
++      arg_should_be_unpatched(DECL_INITIAL(dcl), use, &replacement)) {
++    if (TREE_READONLY(dcl)) {
++      error_at(EXPR_LOCATION(dcl), "cannot substitute this constant\n");
++      /* actually I can, but the issue is if one of gcc's optimizations
++       * perform constant folding(and they do), I don't know all the spots
++       * where this variable has been folded, so I can't substitute there */
++      ctx->active = 0;
++      return 0;
++    }
++
++    if (!TREE_STATIC(dcl)) {
++      DECL_INITIAL(dcl) = replacement;
++      remove_subu_elem(ctx->mods, use);
++      replacement = NULL_TREE;
++      return 1;
++    }
++
++    DEBUGF("fixing decl for a static integer\n");
++    /* (*dxpr), the statement we have is this:
++     *
++     * static int myvalue = __tmpcosmo_VAR;
++     *
++     * we're going to modify it to this:
++     *
++     * static int myvalue = __tmpcosmo_VAR;
++     * static uint8 __chk_ifs_myvalue = 0;
++     * if(__chk_ifs_myvalue != 1) {
++     *   __chk_ifs_myvalue = 1;
++     *   myvalue = VAR;
++     * }
++     *
++     * so the modified statement runs exactly once,
++     * whenever the function is first called, right
++     * after the initialization of the variable we
++     * wanted to modify. */
++
++    /* build __chk_ifs_myvalue */
++    snprintf(chk, sizeof(chk), "__chk_ifs_%s", IDENTIFIER_NAME(dcl));
++    tree chknode = build_decl(DECL_SOURCE_LOCATION(dcl), VAR_DECL,
++                              get_identifier(chk), uint8_type_node);
++    DECL_INITIAL(chknode) = build_int_cst(uint8_type_node, 0);
++    TREE_STATIC(chknode) = TREE_STATIC(dcl);
++    TREE_USED(chknode) = TREE_USED(dcl);
++    DECL_READ_P(chknode) = DECL_READ_P(dcl);
++    DECL_CONTEXT(chknode) = DECL_CONTEXT(dcl);
++    DECL_CHAIN(chknode) = DECL_CHAIN(dcl);
++    DECL_CHAIN(dcl) = chknode;
++
++    /* create the then clause of the if statement */
++    tree then_clause = alloc_stmt_list();
++    append_to_statement_list(build2(MODIFY_EXPR, void_type_node, chknode,
++                                    build_int_cst(uint8_type_node, 1)),
++                             &then_clause);
++    append_to_statement_list(
++        build2(MODIFY_EXPR, void_type_node, dcl, replacement),
++        &then_clause);
++
++    /* create the if statement into the overall result mentioned above */
++    tree res = alloc_stmt_list();
++    append_to_statement_list(*dxpr, &res);
++    append_to_statement_list(build1(DECL_EXPR, void_type_node, chknode), &res);
++    append_to_statement_list(
++        build_modded_if_stmt(build2(NE_EXPR, void_type_node, chknode,
++                                    build_int_cst(uint8_type_node, 1)),
++                             then_clause),
++        &res);
++    /* overwrite the input tree with our new statements */
++    *dxpr = res;
++    remove_subu_elem(ctx->mods, use);
++    replacement = NULL_TREE;
++    return 1;
++  }
++  return 0;
++}
++
++void modify_local_struct_ctor(tree ctor, subu_list *list, location_t bound) {
++  subu_node *use = NULL;
++  unsigned int iprev = 0;
++  bool started = true;
++  tree replacement = NULL_TREE;
++
++  while (list->count > 0 && LOCATION_BEFORE2(list->start, bound)) {
++    tree val = NULL_TREE;
++    unsigned int i = 0;
++    int found = 0;
++    FOR_EACH_CONSTRUCTOR_VALUE(CONSTRUCTOR_ELTS(ctor), i, val) {
++      DEBUGF("value %u is %s\n", i, get_tree_code_str(val));
++      if (TREE_CODE(val) == INTEGER_CST) {
++        for (use = list->head; use; use = use->next) {
++          found = arg_should_be_unpatched(val, use, &replacement);
++          if (found) break;
++        }
++        if (found) {
++          iprev = i;
++          started = false;
++          break;
++        }
++      } else if (TREE_CODE(val) == CONSTRUCTOR) {
++        modify_local_struct_ctor(val, list, bound);
++        use = NULL; /* might've gotten stomped */
++        if (list->count == 0 || LOCATION_AFTER2(list->start, bound)) return;
++      }
++    }
++    if (found) {
++      DEBUGF("found\n");
++      CONSTRUCTOR_ELT(ctor, i)->value = replacement;
++      remove_subu_elem(list, use);
++      replacement = NULL_TREE;
++    } else {
++      /* we did not find any (more) substitutions to fix */
++      break;
++    }
++  }
++}
++
++void build_modded_declaration(tree *dxpr, SubContext *ctx, location_t bound) {
++  char chk[STRING_BUFFER_SIZE];
++  tree dcl = DECL_EXPR_DECL(*dxpr);
++  subu_node *use = NULL;
++  subu_list *list = ctx->mods;
++  unsigned int oldcount = list->count;
++
++  if (INTEGRAL_TYPE_P(TREE_TYPE(dcl))) {
++    get_subu_elem(list, list->start, &use);
++    if (build_modded_int_declaration(dxpr, ctx, use)) {
++      use = NULL;
++      ctx->initcount += 1;
++    }
++    return;
++  }
++
++  if ((RECORD_TYPE == TREE_CODE(TREE_TYPE(dcl)) ||
++       ARRAY_TYPE == TREE_CODE(TREE_TYPE(dcl))) &&
++      DECL_INITIAL(dcl) != NULL_TREE) {
++    if (TREE_READONLY(dcl)) {
++      warning_at(EXPR_LOCATION(*dxpr), 0,
++                 "not sure if modding const structs is good\n");
++      TREE_READONLY(dcl) = 0;
++      build_modded_declaration(dxpr, ctx, bound);
++      return;
++    } else if (TREE_STATIC(dcl)) {
++      DEBUGF("fixing decl for a static struct\n");
++      /* (*dxpr), the statement we have is this:
++       *
++       * static struct toy myvalue = {.x=1, .y=__tmpcosmo_VAR};
++       *
++       * we're going to modify it to this:
++       *
++       * static struct toy myvalue = {.x=1, .y=__tmpcosmo_VAR};
++       * static uint8 __chk_ifs_myvalue = 0;
++       * if(__chk_ifs_myvalue != 1) {
++       *   __chk_ifs_myvalue = 1;
++       *   myvalue.y = VAR;
++       * }
++       *
++       * so the modified statement runs exactly once,
++       * whenever the function is first called, right
++       * after the initialization of the variable we
++       * wanted to modify. */
++
++      /* build __chk_ifs_myvalue */
++      snprintf(chk, sizeof(chk), "__chk_ifs_%s", IDENTIFIER_NAME(dcl));
++      tree chknode = build_decl(DECL_SOURCE_LOCATION(dcl), VAR_DECL,
++                                get_identifier(chk), uint8_type_node);
++      DECL_INITIAL(chknode) = build_int_cst(uint8_type_node, 0);
++      TREE_STATIC(chknode) = TREE_STATIC(dcl);
++      TREE_USED(chknode) = TREE_USED(dcl);
++      DECL_READ_P(chknode) = DECL_READ_P(dcl);
++      DECL_CONTEXT(chknode) = DECL_CONTEXT(dcl);
++      DECL_CHAIN(chknode) = DECL_CHAIN(dcl);
++      DECL_CHAIN(dcl) = chknode;
++
++      /* build a scope block for the temporary value */
++      tree tmpscope = build0(BLOCK, void_type_node);
++      BLOCK_SUPERCONTEXT(tmpscope) = TREE_BLOCK(*dxpr);
++      // debug_tree(BLOCK_SUPERCONTEXT(tmpscope));
++
++      /* create the then clause of the if statement */
++      tree then_clause = alloc_stmt_list();
++      append_to_statement_list(build2(MODIFY_EXPR, void_type_node, chknode,
++                                      build_int_cst(uint8_type_node, 1)),
++                               &then_clause);
++      set_values_based_on_ctor(DECL_INITIAL(dcl), ctx->mods, then_clause, dcl,
++                               bound);
++
++      /* create the if statement into the overall result mentioned above */
++      tree res = alloc_stmt_list();
++      append_to_statement_list(*dxpr, &res);
++      append_to_statement_list(build1(DECL_EXPR, void_type_node, chknode),
++                               &res);
++      append_to_statement_list(
++          build_modded_if_stmt(build2(NE_EXPR, void_type_node, chknode,
++                                      build_int_cst(uint8_type_node, 1)),
++                               then_clause),
++          &res);
++      /* overwrite the input tree with our new statements */
++      *dxpr = res;
++    } else {
++      /* if it's a local struct, we can
++       * just mod the constructor itself */
++      auto ctor = DECL_INITIAL(dcl);
++      modify_local_struct_ctor(ctor, list, bound);
++    }
++  }
++  ctx->initcount += (oldcount - list->count);
++}
+diff -ruN a/gcc/c-family/initstruct.h b/gcc/c-family/initstruct.h
+--- a/gcc/c-family/initstruct.h	1970-01-01 00:00:00.000000000 +0000
++++ b/gcc/c-family/initstruct.h	2026-11-03 23:16:02.619025987 +0000
+@@ -0,0 +1,15 @@
++#ifndef INITSTRUCT_H
++#define INITSTRUCT_H
++#include "c-family/portcosmo.internal.h"
++/* gcc utils first */
++#include "c-family/subcontext.h"
++
++void build_modded_declaration(tree *, SubContext *, location_t);
++int build_modded_int_declaration(tree *, SubContext *, subu_node *);
++tree copy_struct_ctor(tree);
++void modify_local_struct_ctor(tree, subu_list *, location_t);
++
++void set_values_based_on_ctor(tree, subu_list *, tree, tree, location_t);
++void handle_decl(void *, void *);
++tree access_at(tree, tree);
++#endif /* INITSTRUCT_H */
+diff -ruN a/gcc/c-family/portcosmo.cc b/gcc/c-family/portcosmo.cc
+--- a/gcc/c-family/portcosmo.cc	1970-01-01 00:00:00.000000000 +0000
++++ b/gcc/c-family/portcosmo.cc	2026-11-03 23:16:02.619032920 +0000
+@@ -0,0 +1,256 @@
++/*- mode:c++;indent-tabs-mode:nil;c-basic-offset:2;tab-width:8;coding:utf-8 -*-│
++│vi: set net ft=c++ ts=2 sts=2 sw=2 fenc=utf-8                              :vi│
++╞══════════════════════════════════════════════════════════════════════════════╡
++│ Copyright © 2022, Gautham Venkatasubramanian                                 │
++│                                                                              │
++│ Permission to use, copy, modify, and/or distribute this software for         │
++│ any purpose with or without fee is hereby granted, provided that the         │
++│ above copyright notice and this permission notice appear in all copies.      │
++│                                                                              │
++│ THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL                │
++│ WARRANTIES WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED                │
++│ WARRANTIES OF MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE             │
++│ AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL         │
++│ DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR        │
++│ PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER               │
++│ TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR             │
++│ PERFORMANCE OF THIS SOFTWARE.                                                │
++╚─────────────────────────────────────────────────────────────────────────────*/
++#include "c-family/ifswitch.h"
++#include "c-family/initstruct.h"
++#include "c-family/portcosmo.internal.h"
++#include "c-family/subcontext.h"
++
++static tree patch_int_nonconst(location_t, tree, const char **);
++tmpconst *insert_tmpconst_pair(const char *s, tree, const char **);
++tree insert_tmpconst_value(const char *s, tree);
++
++struct SubContext cosmo_ctx;
++static int ctx_inited = 0;
++static long PATCH_START = 15840000;
++static long PATCH_INDEX = 0;
++static void (*other_define) (cpp_reader *, location_t, cpp_hashnode *) = NULL;
++
++void check_macro_define(cpp_reader *reader, location_t loc,
++                        cpp_hashnode *node) {
++  const char *defn = (const char *)cpp_macro_definition(reader, node);
++  if (cosmo_ctx.active && strstr(defn, "__tmpcosmo_") == defn)
++  {
++    const char *arg_start = defn + strlen("__tmpcosmo_");
++    const char *arg_end = strstr(arg_start, " ");
++    if (!arg_start || !arg_end || arg_end - arg_start < 1) return;
++    char* name = xstrndup(arg_start, arg_end - arg_start);
++    char* val = xstrdup(arg_end);
++    long long val2 = strtoll(arg_end, NULL, 0);
++    if (val2 == 0) {
++        cpp_error_at(parse_in, CPP_DL_ERROR, loc,
++                "cannot parse portcosmo temporary constant\n");
++        cosmo_ctx.active = 0;
++    } else {
++        if (cosmo_ctx.map->get(name)) {
++            cpp_error_at(parse_in, CPP_DL_ERROR, loc,
++                    "duplicate portcosmo temporary constant\n");
++            cosmo_ctx.active = 0;
++        } else {
++            tmpconst z;
++            z.raw = val2; 
++            z.t = NULL_TREE;
++            if (maybe_get_identifier(name)) {
++                z.t = VAR_NAME_AS_TREE(name);
++            } else {
++                cpp_error_at(parse_in, CPP_DL_ERROR, loc,
++                    "cannot find %s, is __tmpcosmo_%s before the declaration of %s?\n",
++                    name, name, name);
++            }
++            cosmo_ctx.map->put(name, z);
++        }
++    }
++    /* not freeing name because it's in the hashmap */
++    free(val);
++  }
++  else if(other_define) {
++     // DEBUGF("we should just let this be %s\n", defn);
++     other_define(reader, loc, node);
++  }
++}
++
++void portcosmo_setup() {
++    cpp_callbacks *cbs = cpp_get_callbacks(parse_in);
++    if (flag_portcosmo && 0 == ctx_inited) {
++        construct_context(&cosmo_ctx);
++        ctx_inited = 1;
++        if (cbs) {
++            if (cbs->define) {
++                other_define = cbs->define;
++                /* TODO: do we need for cbs->undef as well? */
++            }
++            cbs->define = check_macro_define;
++        }
++    }
++}
++
++void portcosmo_teardown() {
++    if (flag_portcosmo && 1 == ctx_inited) {
++        cleanup_context(&cosmo_ctx);
++        ctx_inited = 0;
++    }
++}
++
++void portcosmo_show_tree(location_t loc, tree t) {
++    INFORM(loc, "attempting substitution at: line %u, col %u\n",
++           LOCATION_LINE(loc), LOCATION_COLUMN(loc));
++    debug_tree(t);
++}
++
++tree portcosmo_patch_nonconst(location_t loc, tree t) {
++    INFORM(loc, "attempting substitution at: line %u, col %u\n",
++           LOCATION_LINE(loc), LOCATION_COLUMN(loc));
++    tree subs = NULL_TREE;
++    const char *name = NULL;
++    if (cosmo_ctx.active) {
++        subs = patch_int_nonconst(loc, t, &name);
++        if (subs != NULL_TREE) {
++            DEBUGF("folding...\n");
++            subs = c_fully_fold(subs, false, NULL, false);
++            /* this substitution was successful, so record
++             * the location for rewriting the thing later */
++            add_context_subu(&cosmo_ctx, loc, name, strlen(name));
++            DEBUGF("done %s\n", name);
++        }
++    }
++    if (subs == NULL_TREE) {
++        inform(loc, "unable to find __tmpcosmo_ temporary");
++    }
++    return subs;
++}
++
++/* internal functions */
++
++static tree patch_int_nonconst(location_t loc, tree t, const char **res) {
++    /* t may be an integer inside a case label, or
++     * t may be an integer inside an initializer */
++    tree subs = NULL_TREE;
++    switch (TREE_CODE(t)) {
++        case VAR_DECL:
++            subs = insert_tmpconst_value(IDENTIFIER_NAME(t), t);
++            if (subs != NULL_TREE) {
++                *res = IDENTIFIER_NAME(t);
++                DEBUGF("substitution exists %s\n", *res);
++            }
++            break;
++        case CONVERT_EXPR:
++            subs = patch_int_nonconst(loc, TREE_OPERAND(t, 0), res);
++            if (subs != NULL_TREE) {
++                subs = build1(CONVERT_EXPR, integer_type_node, subs);
++            }
++            break;
++        case NOP_EXPR:
++            subs = patch_int_nonconst(loc, TREE_OPERAND(t, 0), res);
++            if (subs != NULL_TREE) {
++                subs = build1(NOP_EXPR, integer_type_node, subs);
++            }
++            break;
++        case NEGATE_EXPR:
++            subs = patch_int_nonconst(loc, TREE_OPERAND(t, 0), res);
++            if (subs != NULL_TREE) {
++                subs = build1(NEGATE_EXPR, integer_type_node, subs);
++            }
++            break;
++        case BIT_NOT_EXPR:
++            subs = patch_int_nonconst(loc, TREE_OPERAND(t, 0), res);
++            if (subs != NULL_TREE) {
++                subs = build1(BIT_NOT_EXPR, integer_type_node, subs);
++            }
++            break;
++        default:
++            tmpconst *s2 = insert_tmpconst_pair(NULL, t, res);
++            subs = s2 ? build_int_cst(long_long_integer_type_node, s2->raw) : NULL_TREE;
++            warning_at(loc, 0, "attempting to patch an arbitrary expression\n");
++    }
++    return subs;
++}
++
++const char *get_tree_code_str(tree expr) {
++#define END_OF_BASE_TREE_CODES
++#define DEFTREECODE(a, b, c, d) \
++    case a:                     \
++        return b;
++    switch (TREE_CODE(expr)) {
++#include "all-tree.def"
++        default:
++            return "<unknown>";
++    }
++#undef DEFTREECODE
++#undef END_OF_BASE_TREE_CODES
++}
++
++tree insert_tmpconst_value(const char *s, tree later) {
++    tmpconst *z = insert_tmpconst_pair(s, later, NULL);
++    if (!z) return NULL_TREE;
++    if (z->t == NULL_TREE) {
++        z->t = later;
++        DEBUGF("found temporary without a tree %s %d\n", s, z->raw);
++        return build_int_cst(long_long_integer_type_node, z->raw);
++    }
++    if (TREE_CODE(z->t) == VAR_DECL) {
++        if (s && TREE_CODE(later) == VAR_DECL &&
++            strcmp(IDENTIFIER_NAME(z->t), s) == 0) {
++            DEBUGF("returning existing entry for VAR_DECL %s\n", s);
++            /* TODO: maybe use DECL_SIZE here to handle shorts */
++            return build_int_cst(long_long_integer_type_node, z->raw);
++        } else {
++            return NULL_TREE;
++        }
++    } else {
++        DEBUGF("returning existing entry for unknown expression\n");
++        return build_int_cst(long_long_integer_type_node, z->raw);
++    }
++}
++
++tmpconst *insert_tmpconst_pair(const char *s, tree later, const char **newname) {
++    if (PATCH_INDEX >= MAXIMUM_PATCHES) {
++        error_at(UNKNOWN_LOCATION,
++                 "sorry, too many unknown constants to keep track\n");
++        cosmo_ctx.active = 0;
++        return NULL;
++    }
++    char *key = NULL;
++    tmpconst *z = NULL;
++    tmpconst value;
++
++    if (s) {
++        key = xstrdup(s);
++        if (newname) *newname = s;
++    } else {
++        const int maxlen = strlen("__tmpcalc_1234678900 ");
++        key = (char*)xmalloc((sizeof(char)) * maxlen);
++        snprintf(key, maxlen, "__tmpcalc_%ld", PATCH_INDEX);
++        if (newname) *newname = key;
++    }
++
++    z = cosmo_ctx.map->get(key);
++    if (!z) {
++        value.raw = PATCH_START + PATCH_INDEX;
++        value.t = later;
++        cosmo_ctx.map->put(key, value);
++        DEBUGF("creating new entry for %s\n", key);
++        PATCH_INDEX += 4;
++        /* not freeing key because it's in the hashmap */
++        return cosmo_ctx.map->get(key);
++    } else {
++        free(key);
++        return z;
++    }
++}
++
++tree maybe_get_tmpconst_value(const char *s) {
++    char *result = xstrdup(s);
++    tmpconst *z = cosmo_ctx.map->get(result);
++    free(result);
++    return z ? build_int_cst(long_long_integer_type_node, z->raw) : NULL_TREE;
++}
++
++int check_magic_equal(tree value, char *varname) {
++    tree vx = maybe_get_tmpconst_value(varname);
++    return vx != NULL_TREE && tree_int_cst_equal(value, vx);
++}
+diff -ruN a/gcc/c-family/portcosmo.h b/gcc/c-family/portcosmo.h
+--- a/gcc/c-family/portcosmo.h	1970-01-01 00:00:00.000000000 +0000
++++ b/gcc/c-family/portcosmo.h	2026-11-03 23:16:02.619041803 +0000
+@@ -0,0 +1,12 @@
++#ifndef PORTCOSMO_H
++#define PORTCOSMO_H
++#include <tree.h>
++
++void portcosmo_setup();
++void portcosmo_teardown();
++void portcosmo_pre_genericize(void*);
++void portcosmo_finish_decl(void*);
++void portcosmo_show_tree(location_t, tree);
++tree portcosmo_patch_nonconst(location_t, tree);
++
++#endif /* PORTCOSMO_H */
+diff -ruN a/gcc/c-family/portcosmo.internal.h b/gcc/c-family/portcosmo.internal.h
+--- a/gcc/c-family/portcosmo.internal.h	1970-01-01 00:00:00.000000000 +0000
++++ b/gcc/c-family/portcosmo.internal.h	2026-11-03 23:16:02.619050535 +0000
+@@ -0,0 +1,56 @@
++#ifndef PORTCOSMO_INTERNAL_H
++#define PORTCOSMO_INTERNAL_H
++/* first stdlib headers */
++#include <stdio.h>
++/* now all the plugin headers */
++#include <gcc-plugin.h>
++/* first gcc-plugin, then the others */
++#include <c-family/c-common.h>
++#include <c-family/c-pragma.h>
++#include <c/c-tree.h>
++#include <cgraph.h>
++#include <cpplib.h>
++#include <diagnostic.h>
++#include <print-tree.h>
++#include <stringpool.h>
++#include <tree-iterator.h>
++#include <tree.h>
++
++const char *get_tree_code_str(tree);
++tree maybe_get_tmpconst_value(const char *);
++int check_magic_equal(tree, char *);
++
++#define EXPR_LOC_LINE(x)      LOCATION_LINE(EXPR_LOCATION((x)))
++#define EXPR_LOC_COL(x)       LOCATION_COLUMN(EXPR_LOCATION((x)))
++#define LOCATION_APPROX(x, y) (LOCATION_LINE((x)) == LOCATION_LINE((y)))
++#define LOCATION_BEFORE(x, y) (LOCATION_LINE((x)) <= LOCATION_LINE((y)))
++#define LOCATION_AFTER(x, y)  (LOCATION_LINE((x)) >= LOCATION_LINE((y)))
++
++#define LOCATION_BEFORE2(x, y)                  \
++  (LOCATION_LINE((x)) < LOCATION_LINE((y)) ||   \
++   (LOCATION_LINE((x)) == LOCATION_LINE((y)) && \
++    LOCATION_COLUMN((x)) <= LOCATION_COLUMN((y))))
++#define LOCATION_AFTER2(x, y)                   \
++  (LOCATION_LINE((x)) > LOCATION_LINE((y)) ||   \
++   (LOCATION_LINE((x)) == LOCATION_LINE((y)) && \
++    LOCATION_COLUMN((x)) >= LOCATION_COLUMN((y))))
++
++#define VAR_NAME_AS_TREE(fname)   lookup_name(get_identifier((fname)))
++#define IDENTIFIER_NAME(z)        IDENTIFIER_POINTER(DECL_NAME((z)))
++#define BUILD_STRING_AS_TREE(str) build_string_literal(strlen((str)) + 1, (str))
++
++#if 0
++#define DEBUGF(...) fprintf(stderr, "<DEBUG> " __VA_ARGS__)
++#define INFORM(...) inform(__VA_ARGS__)
++#else
++#define DEBUGF(...)
++#define INFORM(...)
++#endif
++
++#define STRING_BUFFER_SIZE 192
++
++#define MAXIMUM_PATCHES 65536
++
++void handle_pre_genericize(void *, void *);
++
++#endif /* PORTCOSMO.INTERNAL_H */
+diff -ruN a/gcc/c-family/subcontext.cc b/gcc/c-family/subcontext.cc
+--- a/gcc/c-family/subcontext.cc	1970-01-01 00:00:00.000000000 +0000
++++ b/gcc/c-family/subcontext.cc	2026-11-03 23:16:02.619058202 +0000
+@@ -0,0 +1,243 @@
++/*- mode:c++;indent-tabs-mode:nil;c-basic-offset:2;tab-width:8;coding:utf-8 -*-│
++│vi: set net ft=c++ ts=2 sts=2 sw=2 fenc=utf-8                              :vi│
++╞══════════════════════════════════════════════════════════════════════════════╡
++│ Copyright © 2022, Gautham Venkatasubramanian                                 │
++│                                                                              │
++│ Permission to use, copy, modify, and/or distribute this software for         │
++│ any purpose with or without fee is hereby granted, provided that the         │
++│ above copyright notice and this permission notice appear in all copies.      │
++│                                                                              │
++│ THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL                │
++│ WARRANTIES WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED                │
++│ WARRANTIES OF MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE             │
++│ AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL         │
++│ DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR        │
++│ PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER               │
++│ TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR             │
++│ PERFORMANCE OF THIS SOFTWARE.                                                │
++╚─────────────────────────────────────────────────────────────────────────────*/
++#include "c-family/subcontext.h"
++
++subu_node *build_subu(const location_t loc, const char *name,
++                      unsigned int namelen) {
++  /* xmalloc because malloc is poisoned by gcc-plugin's system.h */
++  subu_node *res = (subu_node *)xmalloc(sizeof(subu_node));
++  res->next = NULL;
++  res->loc = loc;
++  res->name = xstrndup(name, namelen);
++  DEBUGF("allocated subu_node at %p\n", res);
++  return res;
++};
++
++void delete_subu(subu_node *node) {
++  DEBUGF("freeing subu_node at %p, %u,%u\n", node, LOCATION_LINE(node->loc),
++         LOCATION_COLUMN(node->loc));
++  node->loc = 0x0;
++  free(node->name);
++  node->next = NULL;
++  free(node);
++}
++
++subu_list *init_subu_list() {
++  subu_list *res = (subu_list *)xmalloc(sizeof(subu_list));
++  res->head = NULL;
++  res->count = 0;
++  res->start = 0;
++  res->end = 0;
++  DEBUGF("allocated subu_list at %p\n", res);
++  return res;
++}
++
++static void recount_subu_list(subu_list *list) {
++  int i = 0;
++  location_t s = MAX_LOCATION_T;
++  location_t e = 0;
++  subu_node *it;
++  for (it = list->head; it != NULL; it = it->next) {
++    i += 1;
++    /* is it possible to compare for s and e? */
++    if (s == MAX_LOCATION_T || LOCATION_BEFORE2(it->loc, s)) s = it->loc;
++    if (LOCATION_AFTER2(it->loc, e)) e = it->loc;
++  }
++  if (LOCATION_AFTER2(s, e)) {
++    s = e;
++  }
++  list->start = s;
++  list->end = e;
++  list->count = i;
++  DEBUGF("list with %d subus, start = %u,%u end = %u,%u\n", list->count,
++         LOCATION_LINE(list->start), LOCATION_COLUMN(list->start),
++         LOCATION_LINE(list->end), LOCATION_COLUMN(list->end));
++}
++
++void add_subu_elem(subu_list *list, subu_node *node) {
++  subu_node *tmp;
++  if (list->head == NULL) {
++    list->head = node;
++  } else {
++    for (tmp = list->head; tmp->next != NULL; tmp = tmp->next)
++      ;
++    tmp->next = node;
++    node->next = NULL;
++  }
++  recount_subu_list(list);
++}
++
++void pop_subu_list(subu_list *list) {
++  if (list->head != NULL) {
++    subu_node *tmp = list->head;
++    list->head = list->head->next;
++    delete_subu(tmp);
++  }
++  recount_subu_list(list);
++}
++
++int valid_subu_bounds(subu_list *list, location_t start, location_t end) {
++  /* return 1 if the bounds of list and provided bounds overlap */
++  if (LOCATION_BEFORE(list->start, end) && LOCATION_AFTER(list->start, start))
++    return 1;
++  if (LOCATION_BEFORE(start, list->end) && LOCATION_AFTER(start, list->start))
++    return 1;
++  return 0;
++}
++
++int check_loc_in_bound(subu_list *list, location_t loc) {
++  /* return 1 if loc is within the bounds */
++  if (LOCATION_BEFORE(list->start, loc) && LOCATION_AFTER(list->end, loc)) {
++    return 1;
++  } else {
++    return 0;
++  }
++}
++
++int get_subu_elem(subu_list *list, location_t loc, subu_node **node) {
++  /* *node is overwritten on returning 1 ie success */
++  subu_node *it = list->head;
++  for (; it != NULL; it = it->next) {
++    if (LOCATION_APPROX(it->loc, loc)) {
++      *node = it;
++      return 1;
++    }
++  }
++  return 0;
++}
++
++int get_subu_elem2(subu_list *list, source_range rng, subu_node **node) {
++  /* *node is overwritten on returning 1 ie success */
++  /* returns the first node found within rng's bounds */
++  subu_node *it = list->head;
++  for (; it != NULL; it = it->next) {
++    if (LOCATION_BEFORE(rng.m_start, it->loc) &&
++        LOCATION_AFTER(rng.m_finish, it->loc)) {
++      *node = it;
++      return 1;
++    }
++  }
++  return 0;
++}
++
++void remove_subu_elem(subu_list *list, subu_node *node) {
++  subu_node *cur, *prev;
++  if (list->head != NULL) {
++    if (list->head == node) {
++      cur = list->head;
++      list->head = list->head->next;
++      delete_subu(cur);
++    } else {
++      prev = list->head;
++      cur = list->head->next;
++      for (; cur != NULL; prev = cur, cur = cur->next) {
++        if (cur == node) {
++          prev->next = cur->next;
++          delete_subu(cur);
++          break;
++        }
++      }
++    }
++    recount_subu_list(list);
++  }
++}
++
++void clear_subu_list(subu_list *list) {
++  subu_node *it, *tmp;
++  for (it = list->head; it != NULL;) {
++    tmp = it;
++    it = it->next;
++    delete_subu(tmp);
++  }
++  list->head = NULL;
++  list->count = 0;
++  list->start = 0;
++  list->end = 0;
++}
++
++void delete_subu_list(subu_list *list) {
++  clear_subu_list(list);
++  free(list);
++  DEBUGF("freeing subu_list at %p\n", list);
++}
++
++int check_empty_subu_list(subu_list *list, location_t start) {
++  /* we should have modded all locations before start, and so
++   * list should not contain any entries which have a location
++   * before start */
++  int errcount = 0;
++  for (auto it = list->head; it; it = it->next) {
++    if (start == MAX_LOCATION_T || LOCATION_BEFORE2(it->loc, start)) {
++      error_at(it->loc, "unable to substitute constant\n");
++      errcount += 1;
++    }
++  }
++  if (errcount != 0) {
++    /* DON'T DELETE! */
++    clear_subu_list(list);
++  }
++  return errcount == 0;
++}
++
++void construct_context(SubContext *ctx) {
++  ctx->active = 1;
++  ctx->mods = init_subu_list();
++  ctx->prev = NULL;
++  ctx->switchcount = 0;
++  ctx->initcount = 0;
++  ctx->subcount = 0;
++  ctx->map = NULL;
++  ctx->map = hash_map_maybe_create<false, char, tmpconst, tmpmap_traits>(ctx->map);
++}
++
++void add_context_subu(SubContext *ctx, const location_t loc, const char *defn,
++                      unsigned int at) {
++  if (ctx->mods == NULL) return;
++  add_subu_elem(ctx->mods, build_subu(loc, defn, at));
++}
++
++void check_context_clear(SubContext *ctx, location_t start) {
++  if (ctx->mods) {
++    ctx->active = check_empty_subu_list(ctx->mods, start);
++  }
++}
++
++void cleanup_context(SubContext *ctx) {
++  check_context_clear(ctx, MAX_LOCATION_T);
++  if (ctx->mods) {
++    delete_subu_list(ctx->mods);
++    ctx->mods = NULL;
++  }
++  ctx->prev = NULL;
++  if (ctx->switchcount > 0) {
++    inform(UNKNOWN_LOCATION, "rewrote %u switch statements", ctx->switchcount);
++  }
++  ctx->switchcount = 0;
++  if (ctx->initcount > 0) {
++    inform(UNKNOWN_LOCATION, "modified %u initializations", ctx->initcount);
++  }
++  ctx->initcount = 0;
++  if (ctx->subcount > 0) {
++    inform(UNKNOWN_LOCATION, "modified %u other macro uses", ctx->subcount);
++  }
++  ctx->subcount = 0;
++  ctx->active = 0;
++  delete ctx->map;
++  ctx->map = NULL;
++}
+diff -ruN a/gcc/c-family/subcontext.h b/gcc/c-family/subcontext.h
+--- a/gcc/c-family/subcontext.h	1970-01-01 00:00:00.000000000 +0000
++++ b/gcc/c-family/subcontext.h	2026-11-03 23:16:02.619067033 +0000
+@@ -0,0 +1,74 @@
++#ifndef SUBCONTEXT_H
++#define SUBCONTEXT_H
++#include "c-family/portcosmo.internal.h"
++#include "hash-map-traits.h"
++#include "hash-map.h"
++#include "hash-traits.h"
++
++struct subu_node {
++    location_t loc;
++    char *name;
++    struct subu_node *next;
++};
++
++typedef struct subu_node subu_node;
++
++struct subu_list {
++    subu_node *head;
++    /* inclusive bounds, range containing all recorded substitutions */
++    location_t start, end;
++    /* number of substitutions */
++    int count;
++};
++typedef struct subu_list subu_list;
++
++int check_loc_in_bound(subu_list *, location_t);
++int valid_subu_bounds(subu_list *, location_t, location_t);
++int get_subu_elem(subu_list *, location_t, subu_node **);
++int get_subu_elem2(subu_list *, source_range, subu_node **);
++void remove_subu_elem(subu_list *, subu_node *);
++
++struct tmpconst {
++    long long raw;
++    tree t;
++};
++typedef struct tmpconst tmpconst;
++
++struct free_string_hash2 : pointer_hash<char>, typed_free_remove<char> {
++    static inline hashval_t hash(char *id) { return htab_hash_string(id); };
++    static inline bool equal(char *a, char *b) { return strcmp(a, b) == 0; };
++};
++using tmpmap_traits = simple_hashmap_traits<free_string_hash2, tmpconst>;
++using tmpmap = hash_map<char, tmpconst, tmpmap_traits>;
++
++/* Substitution Context */
++struct SubContext {
++    /* record all macro uses */
++    subu_list *mods;
++    /* address of the previous statement we walked through,
++     * in case we missed modding it and have to retry */
++    tree *prev;
++    /* count number of switch statements rewritten */
++    unsigned int switchcount;
++    /* count number of initializations rewritten */
++    unsigned int initcount;
++    /* count number of other substitutions rewritten */
++    unsigned int subcount;
++    /* if zero, it means we haven't started or something
++     * went wrong somewhere */
++    int active;
++    /* store values of all temporary constants */
++    tmpmap *map;
++};
++
++void add_context_subu(SubContext *, const location_t, const char *,
++                      unsigned int);
++void construct_context(SubContext *);
++void check_context_clear(SubContext *, location_t);
++void cleanup_context(SubContext *);
++int arg_should_be_unpatched(tree, const subu_node *, tree *);
++
++/* declaring cosmo_ctx here so initstruct knows it exists */
++extern struct SubContext cosmo_ctx;
++
++#endif /* SUBCONTEXT_H */
+diff -ruN a/gcc/c-family/unpatch_ast.cc b/gcc/c-family/unpatch_ast.cc
+--- a/gcc/c-family/unpatch_ast.cc	1970-01-01 00:00:00.000000000 +0000
++++ b/gcc/c-family/unpatch_ast.cc	2026-11-03 23:16:02.619074572 +0000
+@@ -0,0 +1,115 @@
++/*- mode:c++;indent-tabs-mode:nil;c-basic-offset:2;tab-width:8;coding:utf-8 -*-│
++│vi: set net ft=c++ ts=2 sts=2 sw=2 fenc=utf-8                              :vi│
++╞══════════════════════════════════════════════════════════════════════════════╡
++│ Copyright © 2022, Gautham Venkatasubramanian                                 │
++│                                                                              │
++│ Permission to use, copy, modify, and/or distribute this software for         │
++│ any purpose with or without fee is hereby granted, provided that the         │
++│ above copyright notice and this permission notice appear in all copies.      │
++│                                                                              │
++│ THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL                │
++│ WARRANTIES WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED                │
++│ WARRANTIES OF MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE             │
++│ AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL         │
++│ DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR        │
++│ PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER               │
++│ TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR             │
++│ PERFORMANCE OF THIS SOFTWARE.                                                │
++╚─────────────────────────────────────────────────────────────────────────────*/
++#include "c-family/ifswitch.h"
++#include "c-family/initstruct.h"
++
++tree check_usage(tree *tp, int *check_subtree, void *data) {
++    SubContext *ctx = (SubContext *)(data);
++    tree t = *tp;
++    tree z;
++    subu_node *use = NULL;
++    location_t loc = EXPR_LOCATION(t);
++    source_range rng = EXPR_LOCATION_RANGE(t);
++
++    if (ctx->active == 0 || ctx->mods->count == 0) {
++        /* DEBUGF("substitutions complete\n"); */
++        *check_subtree = 0;
++        return *tp;
++    }
++
++    if (LOCATION_AFTER2(loc, rng.m_start)) {
++        loc = rng.m_start;
++    } else {
++        rng.m_start = loc;
++    }
++
++    if (ctx->prev && LOCATION_BEFORE2(ctx->mods->start, rng.m_start)) {
++        auto vloc = DECL_SOURCE_LOCATION(DECL_EXPR_DECL(*(ctx->prev)));
++        /* below inequality holds inside this if condition:
++         *    vloc <= ctx->mods->start <= rng.m_start
++         * this means that there was a macro substitution
++         * between vloc and rng.m_start, which was not
++         * eliminated when we went through the other parts
++         * of the parse tree earlier. thus, the decl_expr
++         * that we have stored in ctx->prev needs to be
++         * checked for possible macro substitutions */
++        DEBUGF(
++            "did we miss a decl? vloc=%u,%u, loc=%u,%u, rng.mstart=%u,%u, "
++            "start=%u,%u\n",
++            LOCATION_LINE(vloc), LOCATION_COLUMN(vloc),  //
++            LOCATION_LINE(loc), LOCATION_COLUMN(loc),    //
++            LOCATION_LINE(rng.m_start), LOCATION_COLUMN(rng.m_start),
++            LOCATION_LINE(ctx->mods->start), LOCATION_COLUMN(ctx->mods->start));
++        auto z = ctx->initcount;
++        build_modded_declaration(ctx->prev, ctx, rng.m_start);
++        if (z != ctx->initcount) {
++            ctx->prev = NULL;
++            check_context_clear(ctx, loc);
++        }
++    }
++
++    if (TREE_CODE(t) == DECL_EXPR && TREE_STATIC(DECL_EXPR_DECL(t))) {
++        INFORM(loc, "should we mod this?\n");
++        ctx->prev = tp;
++    }
++
++    if (TREE_CODE(t) == SWITCH_STMT) {
++        rng = get_switch_bounds(t);
++        if (valid_subu_bounds(ctx->mods, rng.m_start, rng.m_finish) &&
++            count_mods_in_switch(t, ctx->mods) > 0) {
++            /* this is one of the switch statements
++             * where we modified a case label */
++            DEBUGF("modding the switch \n");
++            *tp = build_modded_switch_stmt(t, ctx);
++            DEBUGF("we modded it??\n");
++            walk_tree_without_duplicates(tp, check_usage, ctx);
++            /* due to the above call, I don't need to check
++             * any subtrees from this current location */
++            *check_subtree = 0;
++            ctx->switchcount += 1;
++            return NULL_TREE;
++        }
++    }
++
++    return NULL_TREE;
++}
++
++void handle_pre_genericize(void *gcc_data, void *user_data) {
++    tree t = (tree)gcc_data;
++    SubContext *ctx = (SubContext *)user_data;
++    tree t2;
++    if (ctx->active && TREE_CODE(t) == FUNCTION_DECL &&
++        DECL_INITIAL(t) != NULL && TREE_STATIC(t)) {
++        /* this function is defined within the file I'm processing */
++        if (ctx->mods->count == 0) {
++            // DEBUGF("no substitutions were made in %s\n", IDENTIFIER_NAME(t));
++            return;
++        }
++        t2 = DECL_SAVED_TREE(t);
++        ctx->prev = NULL;
++        walk_tree_without_duplicates(&t2, check_usage, ctx);
++        /* now at this stage, all uses of our macros have been
++         * fixed, INCLUDING case labels. Let's confirm that: */
++        check_context_clear(ctx, MAX_LOCATION_T);
++    }
++}
++
++void portcosmo_pre_genericize(void *gcc_data) {
++    handle_pre_genericize(gcc_data, (void *)(&cosmo_ctx));
++}
+diff -ruN a/gcc/c-family/unpatch_int.cc b/gcc/c-family/unpatch_int.cc
+--- a/gcc/c-family/unpatch_int.cc	1970-01-01 00:00:00.000000000 +0000
++++ b/gcc/c-family/unpatch_int.cc	2026-11-03 23:16:02.619083278 +0000
+@@ -0,0 +1,69 @@
++/*- mode:c++;indent-tabs-mode:nil;c-basic-offset:2;tab-width:8;coding:utf-8 -*-│
++│vi: set net ft=c++ ts=2 sts=2 sw=2 fenc=utf-8                              :vi│
++╞══════════════════════════════════════════════════════════════════════════════╡
++│ Copyright © 2022, Gautham Venkatasubramanian                                 │
++│                                                                              │
++│ Permission to use, copy, modify, and/or distribute this software for         │
++│ any purpose with or without fee is hereby granted, provided that the         │
++│ above copyright notice and this permission notice appear in all copies.      │
++│                                                                              │
++│ THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL                │
++│ WARRANTIES WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED                │
++│ WARRANTIES OF MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE             │
++│ AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL         │
++│ DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR        │
++│ PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER               │
++│ TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR             │
++│ PERFORMANCE OF THIS SOFTWARE.                                                │
++╚─────────────────────────────────────────────────────────────────────────────*/
++#include "c-family/subcontext.h"
++
++int arg_should_be_unpatched(tree arg, const subu_node *use, tree *rep_ptr) {
++  /* if we are returning 1, rep_ptr has been set.
++   * if we are returning 0, rep_ptr is unchanged.
++   * use is not affected! */
++  DEBUGF("attempting to match %s\n", use->name);
++  if (TREE_CODE(arg) == INTEGER_CST) {
++    tmpconst *c0 = cosmo_ctx.map->get(use->name);
++    tree vx = NULL_TREE;
++    if (!c0 || c0->t == NULL_TREE) {
++        return 0;
++    }
++    vx = build_int_cst(long_long_integer_type_node, c0->raw);
++    if (tree_int_cst_equal(arg, vx)) {
++      /* if this is an integer constant, AND its
++       * value is equal to the macro we substituted,
++       * then we replace the correct variable here */
++      *rep_ptr =
++          build1(NOP_EXPR, integer_type_node, c0->t);
++      INFORM(use->loc, "unpatched an integer here with %s\n", use->name);
++      return 1;
++    }
++    /* here you might want to handle some
++     * minimal constant folding algebra,
++     * like -VAR or ~VAR */
++    if (tree_fits_poly_int64_p(vx) && tree_fits_poly_int64_p(arg)) {
++      auto v1 = tree_to_poly_int64(vx);
++      auto v2 = tree_to_poly_int64(arg);
++
++      /* handle the -VAR case */
++      if (known_eq(v1, -v2)) {
++        INFORM(use->loc, "unpatched an integer here with -%s\n", use->name);
++        *rep_ptr =
++            build1(NEGATE_EXPR, integer_type_node, c0->t);
++        return 1;
++      }
++
++      /* handle the ~VAR case */
++      if (known_eq(v1, ~v2)) {
++        INFORM(use->loc, "unpatched an integer here with ~%s\n", use->name);
++        *rep_ptr = build1(BIT_NOT_EXPR, integer_type_node,
++                          c0->t);
++        return 1;
++      }
++    }
++    return 0;
++  }
++
++  return 0;
++}
+diff -ruN a/gcc/config/linux.h b/gcc/config/linux.h
+--- a/gcc/config/linux.h	2026-11-03 23:15:59.938553762 +0000
++++ b/gcc/config/linux.h	2026-11-03 23:16:01.394724446 +0000
+@@ -29,13 +29,13 @@
+ 
+ /* C libraries supported on Linux.  */
+ #ifdef SINGLE_LIBC
+-#define OPTION_GLIBC_P(opts)	(DEFAULT_LIBC == LIBC_GLIBC)
++#define OPTION_GLIBC_P(opts)	(DEFAULT_LIBC == LIBC_GLIBC || DEFAULT_LIBC == LIBC_COSMO)
+ #define OPTION_UCLIBC_P(opts)	(DEFAULT_LIBC == LIBC_UCLIBC)
+ #define OPTION_BIONIC_P(opts)	(DEFAULT_LIBC == LIBC_BIONIC)
+ #undef OPTION_MUSL_P
+ #define OPTION_MUSL_P(opts)	(DEFAULT_LIBC == LIBC_MUSL)
+ #else
+-#define OPTION_GLIBC_P(opts)	((opts)->x_linux_libc == LIBC_GLIBC)
++#define OPTION_GLIBC_P(opts)	((opts)->x_linux_libc == LIBC_GLIBC || (opts)->x_linux_libc == LIBC_COSMO)
+ #define OPTION_UCLIBC_P(opts)	((opts)->x_linux_libc == LIBC_UCLIBC)
+ #define OPTION_BIONIC_P(opts)	((opts)->x_linux_libc == LIBC_BIONIC)
+ #undef OPTION_MUSL_P
+@@ -78,6 +78,9 @@
+ #elif DEFAULT_LIBC == LIBC_MUSL
+ #define CHOOSE_DYNAMIC_LINKER(G, U, B, M) \
+   CHOOSE_DYNAMIC_LINKER1 ("mmusl", "mglibc", "muclibc", "mbionic", M, G, U, B)
++#elif DEFAULT_LIBC == LIBC_COSMO
++#define CHOOSE_DYNAMIC_LINKER(G, U, B, M) \
++  CHOOSE_DYNAMIC_LINKER1 ("mmusl", "mglibc", "muclibc", "mbionic", M, G, U, B)
+ #else
+ #error "Unsupported DEFAULT_LIBC"
+ #endif /* DEFAULT_LIBC */
+diff -ruN a/gcc/config/t-cosmo b/gcc/config/t-cosmo
+--- a/gcc/config/t-cosmo	1970-01-01 00:00:00.000000000 +0000
++++ b/gcc/config/t-cosmo	2026-11-03 23:16:01.394736118 +0000
+@@ -0,0 +1,2 @@
++MULTIARCH_DIRNAME := $(subst -linux-gnu,-linux-cosmo,$(MULTIARCH_DIRNAME))
++MULTILIB_OSDIRNAMES := $(subst -linux-gnu,-linux-cosmo,$(MULTILIB_OSDIRNAMES))
+diff -ruN a/gcc/config.gcc b/gcc/config.gcc
+--- a/gcc/config.gcc	2026-11-03 23:16:00.991979492 +0000
++++ b/gcc/config.gcc	2026-11-03 23:16:02.557971130 +0000
+@@ -746,7 +746,7 @@
+ esac
+ 
+ # Common C libraries.
+-tm_defines="$tm_defines LIBC_GLIBC=1 LIBC_UCLIBC=2 LIBC_BIONIC=3 LIBC_MUSL=4"
++tm_defines="$tm_defines LIBC_GLIBC=1 LIBC_UCLIBC=2 LIBC_BIONIC=3 LIBC_MUSL=4 LIBC_COSMO=5"
+ 
+ # 32-bit x86 processors supported by --with-arch=.  Each processor
+ # MUST be separated by exactly one space.
+@@ -973,6 +973,9 @@
+     *-*-*musl*)
+       tm_defines="$tm_defines DEFAULT_LIBC=LIBC_MUSL"
+       ;;
++    *-*-*cosmo*)
++      tm_defines="$tm_defines DEFAULT_LIBC=LIBC_COSMO"
++      ;;
+     *)
+       tm_defines="$tm_defines DEFAULT_LIBC=LIBC_GLIBC"
+       ;;
+@@ -3192,6 +3195,10 @@
+ 	    *-linux*-musl*)
+ 		enable_secureplt=yes ;;
+ 	esac
++	case ${target} in
++	    *-linux*-cosmo*)
++		enable_secureplt=yes ;;
++	esac
+ 	if test x${enable_secureplt} = xyes; then
+ 		tm_file="rs6000/secureplt.h ${tm_file}"
+ 	fi
+@@ -3731,6 +3738,9 @@
+ *-linux-musl*)
+ 	tmake_file="${tmake_file} t-musl"
+ 	;;
++*-linux-cosmo*)
++	tmake_file="${tmake_file} t-cosmo"
++	;;
+ *-linux-uclibc*)
+ 	tmake_file="${tmake_file} t-uclibc"
+ 	;;
+@@ -3757,7 +3767,7 @@
+ # Assume the existence of indirect function support and allow the use of the
+ # resolver attribute.
+ case ${target} in
+-*-*-linux*android*|*-*-linux*uclibc*|*-*-linux*musl*)
++*-*-linux*android*|*-*-linux*uclibc*|*-*-linux*cosmo*|*-*-linux*musl*)
+         ;;
+ *-*-kfreebsd*-gnu | *-*-kopensolaris*-gnu)
+         ;;
+diff -ruN a/gcc/cp/Make-lang.in b/gcc/cp/Make-lang.in
+--- a/gcc/cp/Make-lang.in	2026-11-03 23:16:01.047899899 +0000
++++ b/gcc/cp/Make-lang.in	2026-11-03 23:16:02.617945522 +0000
+@@ -93,6 +93,10 @@
+ CXX_C_OBJS = attribs.o \
+ 	$(C_COMMON_OBJS) $(CXX_TARGET_OBJS)
+ 
++# initstruct has some issues building with cc1plus,
++# so we provide nothing for now
++PORTCOSMO_CXX_OBJS = cp/portcosmo_bcref_cp.o
++
+ # Language-specific object files for C++ and Objective C++.
+ CXX_AND_OBJCXX_OBJS = \
+ 	cp/call.o cp/class.o cp/constexpr.o cp/constraint.o \
+@@ -110,7 +114,7 @@
+ 	cp/reflect.o cp/rtti.o \
+ 	cp/search.o cp/semantics.o \
+ 	cp/tree.o cp/typeck.o cp/typeck2.o \
+-	cp/vtable-class-hierarchy.o $(CXX_C_OBJS)
++	cp/vtable-class-hierarchy.o $(CXX_C_OBJS) $(PORTCOSMO_CXX_OBJS)
+ 
+ ifeq ($(if $(wildcard ../stage_current),$(shell cat \
+   ../stage_current)),stageautofeedback)
+diff -ruN a/gcc/cp/constexpr.cc b/gcc/cp/constexpr.cc
+--- a/gcc/cp/constexpr.cc	2026-11-03 23:16:01.046405749 +0000
++++ b/gcc/cp/constexpr.cc	2026-11-03 23:16:02.617963822 +0000
+@@ -41,6 +41,7 @@
+ #include "fold-const.h"
+ #include "intl.h"
+ #include "toplev.h"
++#include "c-family/portcosmo.h"
+ #include "contracts.h"
+ 
+ static bool verify_constant (tree, bool, bool *, bool *);
+@@ -9323,8 +9324,18 @@
+ 	  /* P2280 allows references to unknown.  */
+ 	  && !(p2280_active_p (ctx) && VAR_P (t) && TYPE_REF_P (TREE_TYPE (t))))
+ 	{
+-	  if (!ctx->quiet)
+-	    non_const_var_error (loc, r, /*fundef_p*/false);
++	  if (!ctx->quiet) {
++         if (flag_portcosmo) {
++           tree subs = portcosmo_patch_nonconst(loc, r);
++           if (subs == NULL_TREE) {
++                 non_const_var_error(loc, r, /*fundef_p*/false);
++           } else {
++                 return subs;
++           }
++         } else {
++           non_const_var_error(loc, r, /*fundef_p*/false);
++         }
++       }
+ 	  *non_constant_p = true;
+ 	}
+       break;
+diff -ruN a/gcc/cp/decl.cc b/gcc/cp/decl.cc
+--- a/gcc/cp/decl.cc	2026-11-03 23:16:01.047107366 +0000
++++ b/gcc/cp/decl.cc	2026-11-03 23:16:02.618039254 +0000
+@@ -59,6 +59,7 @@
+ #include "omp-offload.h"  /* For offload_vars.  */
+ #include "opts.h"
+ #include "langhooks-def.h"  /* For lhd_simulate_record_decl  */
++#include "c-family/portcosmo.h"
+ #include "coroutines.h"
+ #include "contracts.h"
+ #include "gcc-urlifier.h"
+@@ -10299,6 +10300,7 @@
+       && !DECL_HARD_REGISTER (decl))
+     targetm.lower_local_decl_alignment (decl);
+ 
++  if (flag_portcosmo) portcosmo_finish_decl(decl);
+   invoke_plugin_callbacks (PLUGIN_FINISH_DECL, decl);
+ }
+ 
+@@ -20726,8 +20728,10 @@
+ 	 && potential_constant_expression (DECL_SAVED_TREE (fndecl)));
+ 
+   /* Invoke the pre-genericize plugin before we start munging things.  */
+-  if (!processing_template_decl)
++  if (!processing_template_decl) {
++    if (flag_portcosmo) portcosmo_pre_genericize(fndecl); 
+     invoke_plugin_callbacks (PLUGIN_PRE_GENERICIZE, fndecl);
++  }
+ 
+   /* Fold away non-ODR usages of constants so that we don't need to
+      try and stream them in modules if they're internal.  */
+diff -ruN a/gcc/cp/mapper-client.cc b/gcc/cp/mapper-client.cc
+--- a/gcc/cp/mapper-client.cc	2026-11-03 23:16:01.046744887 +0000
++++ b/gcc/cp/mapper-client.cc	2026-11-03 23:16:02.618170466 +0000
+@@ -24,7 +24,6 @@
+ // will include it later under the above check
+ #include <sys/socket.h>
+ #endif
+-#define INCLUDE_STRING
+ #define INCLUDE_VECTOR
+ #define INCLUDE_MAP
+ #include "system.h"
+diff -ruN a/gcc/cp/mapper-resolver.cc b/gcc/cp/mapper-resolver.cc
+--- a/gcc/cp/mapper-resolver.cc	2026-11-03 23:16:01.049277031 +0000
++++ b/gcc/cp/mapper-resolver.cc	2026-11-03 23:16:02.618187981 +0000
+@@ -21,7 +21,6 @@
+ /* Forward to the resolver in c++tools.  */
+ 
+ #include "config.h"
+-#define INCLUDE_STRING
+ #define INCLUDE_VECTOR
+ #define INCLUDE_ALGORITHM
+ #define INCLUDE_MAP
+diff -ruN a/gcc/cp/module.cc b/gcc/cp/module.cc
+--- a/gcc/cp/module.cc	2026-11-03 23:16:01.048636507 +0000
++++ b/gcc/cp/module.cc	2026-11-03 23:16:02.617025191 +0000
+@@ -208,7 +208,6 @@
+ 
+ #define _DEFAULT_SOURCE 1 /* To get TZ field of struct tm, if available.  */
+ #include "config.h"
+-#define INCLUDE_STRING
+ #define INCLUDE_VECTOR
+ #include "system.h"
+ #include "coretypes.h"
+diff -ruN a/gcc/cp/portcosmo_bcref_cp.cc b/gcc/cp/portcosmo_bcref_cp.cc
+--- a/gcc/cp/portcosmo_bcref_cp.cc	1970-01-01 00:00:00.000000000 +0000
++++ b/gcc/cp/portcosmo_bcref_cp.cc	2026-11-03 23:16:02.618204411 +0000
+@@ -0,0 +1,42 @@
++/*- mode:c++;indent-tabs-mode:nil;c-basic-offset:2;tab-width:8;coding:utf-8 -*-│
++│vi: set net ft=c++ ts=2 sts=2 sw=2 fenc=utf-8                              :vi│
++╞══════════════════════════════════════════════════════════════════════════════╡
++│ Copyright © 2022, Gautham Venkatasubramanian                                 │
++│                                                                              │
++│ Permission to use, copy, modify, and/or distribute this software for         │
++│ any purpose with or without fee is hereby granted, provided that the         │
++│ above copyright notice and this permission notice appear in all copies.      │
++│                                                                              │
++│ THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL                │
++│ WARRANTIES WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED                │
++│ WARRANTIES OF MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE             │
++│ AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL         │
++│ DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR        │
++│ PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER               │
++│ TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR             │
++│ PERFORMANCE OF THIS SOFTWARE.                                                │
++╚─────────────────────────────────────────────────────────────────────────────*/
++#include "config.h"
++#include "system.h"
++#include "coretypes.h"
++#include "target.h"
++#include "c-family/c-target.h"
++#include "cp-tree.h"
++#include "tree.h"
++#include "stringpool.h"
++
++#define IDENTIFIER_NAME(z)        IDENTIFIER_POINTER(DECL_NAME((z)))
++
++/* initstruct/common.cc */
++
++tree access_at(tree obj, tree ind) {
++  return cp_build_addr_expr(ind, 0);
++  /*
++  if (TREE_CODE(TREE_TYPE(obj)) == ARRAY_TYPE) {
++    return build_array_ref(input_location, obj, ind);
++  }
++  return build_component_ref(input_location, obj,
++                             get_identifier(IDENTIFIER_NAME(ind)),
++                             DECL_SOURCE_LOCATION(ind));
++  */
++}
+diff -ruN a/gcc/ipa-modref.cc b/gcc/ipa-modref.cc
+--- a/gcc/ipa-modref.cc	2026-11-03 23:15:59.916653839 +0000
++++ b/gcc/ipa-modref.cc	2026-11-03 23:16:02.558019888 +0000
+@@ -91,6 +91,10 @@
+ #include "tree-cfg.h"
+ #include "tree-eh.h"
+ 
++#ifdef pureconst
++#undef pureconst
++#endif
++
+ 
+ namespace {
+ 

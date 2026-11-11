@@ -23,16 +23,16 @@ var-run removal); both orders were verified with --dry-run.
 
 --- a/src/core/taint.c
 +++ b/src/core/taint.c
-@@ -33,7 +33,7 @@
+@@ -34,7 +34,7 @@
  }
  
  char** taint_strv(void) {
 -        const char *stage[11] = {};
 +        const char *stage[12] = {};
          size_t n = 0;
+         int r;
  
-         /* Returns a "taint string", e.g. "local-hwclock:var-run-bad". Only things that are detected at
-@@ -41,6 +41,11 @@
+@@ -43,6 +43,11 @@
           * configuration phase. */
  
          _cleanup_free_ char *bin = NULL, *usr_sbin = NULL;
@@ -42,8 +42,8 @@ var-run removal); both orders were verified with --dry-run.
 +         * anomaly, so the status line names whose layout this is. */
 +        stage[n++] = "saphira-unmerged";
  
-         if (readlink_malloc("/bin", &bin) < 0 || !PATH_IN_SET(bin, "usr/bin", "/usr/bin"))
-                 stage[n++] = "unmerged-usr";
+         r = readlink_malloc("/bin", &bin);
+         if (r != -ENOENT && (r < 0 || !PATH_IN_SET(bin, "usr/bin", "/usr/bin")))
 --- a/src/libsystemd/sd-bus/bus-internal.h
 +++ b/src/libsystemd/sd-bus/bus-internal.h
 @@ -12,9 +12,12 @@

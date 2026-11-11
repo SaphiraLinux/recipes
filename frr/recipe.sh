@@ -20,6 +20,7 @@ sha256=6aaf9d89deb94eeda6acceaa6fe48d8cd365d0908231e58f628538ff49696fc4
 
 depends="
     json-c
+    libcap
     libyang
     openssl
     readline
@@ -32,16 +33,21 @@ makedepends="
     elfutils-dev
     gcc
     json-c-dev
+    libcap-dev
     libtool
     libyang-dev
     make
     openssl-dev
+    pcre2-dev
     pkgconf
     python3
     python3-dev
     readline-dev
 "
 # python3-dev: configure probes the python-3.14 pkg-config module.
+# pcre2-dev: libyang.pc Requires libpcre2-8 (config.log evidence).
+# libcap/libcap-dev: hard Linux requirement, no skip flag (configure.ac:
+# missing libcap is AC_MSG_ERROR; daemons link -lcap).
 
 recipe_build()
 {

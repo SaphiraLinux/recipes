@@ -1571,7 +1571,17 @@ run_signer_live r0mix > "$test_root/r0mix1.out" 2> "$test_root/r0mix1.err"
 live_has r0mix-1-r0.apk r0mix-1-r1.apk
 fixture_pkg r0trig r0trig 1-r1 usr/bin/r0trig trig ""
 stage_txn "$incoming/r0trig-ready" r0trig r0trig r0trig-1-r1.apk
-run_signer_dual r0trig > "$test_root/r0trig.out" 2> "$test_root/r0trig.err"
+# The pending retholdme-1-r1 prune (expired one-shot hold) is unrelated to
+# this publication, so the run must fail closed listing it; the operator
+# then approves it explicitly. r0 purges stay exempt (admissibility).
+if run_signer_dual r0trig > "$test_root/r0trig.out" 2> "$test_root/r0trig.err"; then
+	printf '%s\n' 'unrelated retirement was not refused' >&2
+	exit 1
+fi
+grep 'retire set touches families absent from the staged set' "$test_root/r0trig.err" >/dev/null
+grep 'retholdme: retholdme-1-r1.apk' "$test_root/r0trig.err" >/dev/null
+test ! -e "$test_root/repository/hatched/.retired/retholdme-1-r1.apk"
+run_signer_dual --approve-unrelated-retirement r0trig > "$test_root/r0trig.out" 2> "$test_root/r0trig.err"
 grep 'r0mix-1-r0.apk' "$test_root/r0trig.out" >/dev/null
 live_has r0mix-1-r1.apk r0trig-1-r1.apk nofile:r0mix-1-r0.apk
 python3 - "$hatched_repo/repository.db" <<'PY'

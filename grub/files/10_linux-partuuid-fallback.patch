@@ -1,0 +1,24 @@
+diff -u -r a/util/grub.d/10_linux.in b/util/grub.d/10_linux.in
+--- a/util/grub.d/10_linux.in
++++ b/util/grub.d/10_linux.in
+@@ -60,7 +60,19 @@
+   LINUX_ROOT_DEVICE=${GRUB_DEVICE}
+ elif [ "x${GRUB_DEVICE_UUID}" = "x" ] \
+     || [ "x${GRUB_DISABLE_LINUX_UUID}" = "xtrue" ]; then
+-  LINUX_ROOT_DEVICE=PARTUUID=${GRUB_DEVICE_PARTUUID}
++  # Saphira no-initramfs guard: a bare PARTUUID= (nothing after the
++  # '=') is exactly as unbootable as UUID= is here - the running
++  # kernel's early_lookup_bdev resolves device paths, PARTUUID= and
++  # PARTLABEL= only, with no initramfs blkid to fall back on (proven
++  # on Minimer 2026-11-07: every UUID= entry failed, the device path
++  # booted). Grub-probe finds no PARTUUID on MBR layouts, so fall
++  # back to the device path instead of emitting PARTUUID= bare.
++  if [ "x${GRUB_DEVICE_PARTUUID}" != "x" ] \
++      && [ "x${GRUB_DISABLE_LINUX_PARTUUID}" != "xtrue" ]; then
++    LINUX_ROOT_DEVICE=PARTUUID=${GRUB_DEVICE_PARTUUID}
++  else
++    LINUX_ROOT_DEVICE=${GRUB_DEVICE}
++  fi
+ else
+   LINUX_ROOT_DEVICE=UUID=${GRUB_DEVICE_UUID}
+ fi

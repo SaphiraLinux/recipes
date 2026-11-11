@@ -139,6 +139,24 @@ cleanup()
 }
 trap cleanup EXIT HUP INT TERM
 
+# Arch-split repository layout: an indexed NVR lives in the arch
+# directory or the noarch sibling, never anywhere else (other arch
+# subtrees carry their own indexes and are never consulted here).
+# This mirrors the publisher's (arch, noarch) enumeration; a flat
+# os.listdir/repo_dir join misses every noarch file and reports
+# false disk/database skew.
+locate_nvr()
+{
+	_nvr=$1
+	if [ -f "$repo_dir/$_nvr.apk" ]; then
+		printf '%s' "$repo_dir/$_nvr.apk"
+	elif [ -f "$repo_base/noarch/$_nvr.apk" ]; then
+		printf '%s' "$repo_base/noarch/$_nvr.apk"
+	else
+		return 1
+	fi
+}
+
 # recovery_check db: inspect a leftover withdrawal_pending marker.
 # Prints NONE (fresh), RETRY (nothing happened, marker cleared, restart),
 # and exits non-zero for FOREIGN/STRANDED/GHOST (fail closed, no guessing).
@@ -150,9 +168,9 @@ recovery_check()
 {
 	db_file=$1
 	"$SAPHIRA_PYTHON" - "$repo_db_lib" "$SAPHIRA_APK" "$db_file" "$fam" "$verspec" "$marker_expected" \
-		"$repo_dir" <<'PY' || return $?
+		"$repo_dir" "$repo_base" <<'PY' || return $?
 import sys
-(lib_path, apk, db_file, fam, verspec, expected, repo_dir) = sys.argv[1:8]
+(lib_path, apk, db_file, fam, verspec, expected, repo_dir, repo_base) = sys.argv[1:9]
 sys.path.insert(0, __import__("os").path.dirname(lib_path))
 import os
 import repo_db as rdb
@@ -173,8 +191,10 @@ else:
         "SELECT nvr FROM packages WHERE name=?", (fam,)).fetchall()
     if verspec:
         rows = [r for r in rows if rdb.match_nvr(fam, verspec, r["nvr"])]
-    present = [r["nvr"] for r in rows
-               if os.path.exists(os.path.join(repo_dir, r["nvr"] + ".apk"))]
+    def _present(nvr):
+        return any(os.path.exists(os.path.join(d, nvr + ".apk"))
+                   for d in (repo_dir, os.path.join(repo_base, "noarch")))
+    present = [r["nvr"] for r in rows if _present(r["nvr"])]
     if rows and len(present) == len(rows):
         conn.execute("BEGIN IMMEDIATE")
         try:
@@ -206,9 +226,9 @@ preflight()
 {
 	db_file=$1 index_path=$2 plan_file=$3
 	"$SAPHIRA_PYTHON" - "$repo_db_lib" "$SAPHIRA_APK" "$db_file" "$fam" "$verspec" \
-		"$repo_dir" "$index_path" "$plan_file" <<'PY'
+		"$repo_dir" "$repo_base" "$index_path" "$plan_file" <<'PY'
 import sys
-(lib_path, apk, db_file, fam, verspec, repo_dir, index_path, plan_file) = sys.argv[1:9]
+(lib_path, apk, db_file, fam, verspec, repo_dir, repo_base, index_path, plan_file) = sys.argv[1:10]
 sys.path.insert(0, __import__("os").path.dirname(lib_path))
 import hashlib
 import os
@@ -265,11 +285,18 @@ if bad:
           file=sys.stderr)
     raise SystemExit(12)
 lines = []
+def _locate(nvr):
+    for _d in (repo_dir, os.path.join(repo_base, "noarch")):
+        _p = os.path.join(_d, nvr + ".apk")
+        if os.path.isfile(_p):
+            return _p
+    return None
 for row in rows:
-    path = os.path.join(repo_dir, row["nvr"] + ".apk")
-    if not os.path.isfile(path):
+    path = _locate(row["nvr"])
+    if path is None:
         print(f"withdraw-package: indexed file missing on disk:"
-              f" {path} (heal first)", file=sys.stderr)
+              f" {row['nvr']}.apk (checked arch dir and noarch sibling; heal first)",
+              file=sys.stderr)
         raise SystemExit(3)
     digest = hashlib.sha256()
     with open(path, "rb") as stream:
@@ -363,9 +390,9 @@ verify_gen()
 {
 	db_file=$1
 	"$SAPHIRA_PYTHON" - "$repo_db_lib" "$SAPHIRA_APK" "$db_file" "$fam" "$verspec" \
-		"$repo_dir" <<'PY'
+		"$repo_dir" "$repo_base" <<'PY'
 import sys
-(lib_path, apk, db_file, fam, verspec, repo_dir) = sys.argv[1:7]
+(lib_path, apk, db_file, fam, verspec, repo_dir, repo_base) = sys.argv[1:8]
 sys.path.insert(0, __import__("os").path.dirname(lib_path))
 import os
 import repo_db as rdb
@@ -397,13 +424,16 @@ for (dname, dver) in dep_map:
         print(f"withdraw-package: verify failed: {nvr} still indexed",
               file=sys.stderr)
         raise SystemExit(1)
-for entry in os.listdir(repo_dir):
-    if not entry.endswith(".apk") or not entry.startswith(fam + "-"):
+for _archdir in (repo_dir, os.path.join(repo_base, "noarch")):
+    if not os.path.isdir(_archdir):
         continue
-    if selected(entry[:-len(".apk")]):
-        print(f"withdraw-package: verify failed: file left behind: {entry}",
-              file=sys.stderr)
-        raise SystemExit(1)
+    for entry in os.listdir(_archdir):
+        if not entry.endswith(".apk") or not entry.startswith(fam + "-"):
+            continue
+        if selected(entry[:-len(".apk")]):
+            print(f"withdraw-package: verify failed: file left behind: {entry}",
+                  file=sys.stderr)
+            raise SystemExit(1)
 print(f"withdraw-package: verified: selection absent,"
       f" {len(hit)} audit row(s) kept")
 PY
@@ -411,6 +441,7 @@ PY
 
 for repo_name in "${repo_names[@]}"; do
 	repo_dir=$SAPHIRA_REPO_DIR/$repo_name/$SAPHIRA_ARCH
+	repo_base=$SAPHIRA_REPO_DIR/$repo_name
 	db_file=$repo_dir/repository.db
 	[ -f "$db_file" ] || die "repository database missing: $db_file"
 	[ -f "$repo_dir/Packages.adb" ] || die "repository index missing: $repo_dir/Packages.adb (heal first)"
@@ -458,7 +489,9 @@ for repo_name in "${repo_names[@]}"; do
 	mkdir -p -- "$archive_pkg_dir"
 	while IFS='|' read -r nvr sha256 size count; do
 		[ -n "$nvr" ] || continue
-		mv -- "$repo_dir/$nvr.apk" "$archive_pkg_dir/$nvr.apk" \
+		src_apk=$(locate_nvr "$nvr") ||
+			die "$repo_name: archived source missing for $nvr (marker set; restore and heal)"
+		mv -- "$src_apk" "$archive_pkg_dir/$nvr.apk" \
 			|| die "$repo_name: archive move failed for $nvr (marker set; restore and heal)"
 		actual=$(sha256sum -- "$archive_pkg_dir/$nvr.apk" | awk '{ print $1 }')
 		[ "$actual" = "$sha256" ] || die "$repo_name: archived hash mismatch for $nvr (marker set; investigate)"
@@ -471,10 +504,10 @@ for repo_name in "${repo_names[@]}"; do
 	# hash, and no extra APK may ride along. The normal signed
 	# generation path runs on exactly that set.
 	dblist=$workspace/$repo_name-dblist.txt
-	"$SAPHIRA_PYTHON" - "$repo_db_lib" "$db_file" "$repo_dir" "$dblist" "$plan_file" <<'PY' \
+	"$SAPHIRA_PYTHON" - "$repo_db_lib" "$db_file" "$repo_dir" "$repo_base" "$dblist" "$plan_file" <<'PY' \
 		|| die "$repo_name: database package set unreadable"
 import sys
-(lib_path, db_file, repo_dir, out_path, plan_path) = sys.argv[1:6]
+(lib_path, db_file, repo_dir, repo_base, out_path, plan_path) = sys.argv[1:7]
 sys.path.insert(0, __import__("os").path.dirname(lib_path))
 import hashlib
 import os
@@ -488,7 +521,21 @@ with open(plan_path, encoding="utf-8") as stream:
             gone.add(line.split("|")[0] + ".apk")
 expected = sorted(r["nvr"] + ".apk" for r in conn.execute("SELECT nvr FROM packages")
                   if r["nvr"] + ".apk" not in gone)
-ondisk = sorted(e for e in os.listdir(repo_dir) if e.endswith(".apk"))
+arch_dirs = [repo_dir]
+_noarch = os.path.join(repo_base, "noarch")
+if os.path.isdir(_noarch):
+    arch_dirs.append(_noarch)
+located = {}
+for _d in arch_dirs:
+    for e in os.listdir(_d):
+        if not e.endswith(".apk"):
+            continue
+        if e in located:
+            print(f"withdraw-package: filename claimed in two arch directories:"
+                  f" {e} (heal first)", file=sys.stderr)
+            raise SystemExit(3)
+        located[e] = _d
+ondisk = sorted(located)
 if ondisk != expected:
     only_disk = sorted(set(ondisk) - set(expected))
     only_db = sorted(set(expected) - set(ondisk))
@@ -500,7 +547,7 @@ for entry in expected:
     want = conn.execute(
         "SELECT apk_sha256 FROM packages WHERE nvr=?", (nvr,)).fetchone()["apk_sha256"]
     digest = hashlib.sha256()
-    with open(os.path.join(repo_dir, entry), "rb") as stream:
+    with open(os.path.join(located[entry], entry), "rb") as stream:
         for chunk in iter(lambda: stream.read(1048576), b""):
             digest.update(chunk)
     if digest.hexdigest() != want:
@@ -509,7 +556,7 @@ for entry in expected:
         raise SystemExit(3)
 with open(out_path, "w", encoding="utf-8") as stream:
     for entry in expected:
-        stream.write(os.path.join(repo_dir, entry) + "\n")
+        stream.write(os.path.join(located[entry], entry) + "\n")
 PY
 	mapfile -t index_inputs < "$dblist"
 	[ "${#index_inputs[@]}" -gt 0 ] || die "$repo_name: refusing to sign an empty index"

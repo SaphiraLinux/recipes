@@ -1,8 +1,25 @@
 #!/bin/sh
 
 pkgname=udev
-pkgver=261.2
-pkgrel=8
+pkgver=262.2
+pkgrel=1
+# 262.2: port 261.2 to the shared v262.2 tag tarball (the same revision
+# the systemd package builds; Saphira patches rebased and verified
+# fuzz-free against pristine 262.2). Upstream removed sysvinit-path
+# (flag dropped: meson fails closed on unknown options), and the kmod
+# assertion no longer greps -q through a pipe (builder pipefail plus an
+# early grep exit SIGPIPEs strings on a good binary: proven 141s on two
+# r9 builds whose artifact carried the builtin; count form is exact).
+# Previous 261.2-r9 state preserved in git history.
+# r9: -Dkmod=enabled plus a build-time assertion that the built udevd
+# carries the kmod builtin. Without it udevd logs "Unknown builtin
+# command 'kmod ...'" for every modalias and no driver ever autoloads
+# (proven on Minimer 2026-11-07: new disk booted, i915 present but
+# never bound; Egg's own udevadm confirms the builtin missing
+# fleet-wide). Silent meson autodetection is never trusted for this:
+# the flag fails closed at configure time (which immediately exposed
+# the incomplete closure: libkmod needs zlib-dev + zstd-dev, now
+# declared), the strings check fails closed at build time.
 # r8: SEV1 init contract (2026-10-22): the meson path patch pinned kmod at
 # /bin/kmod, which does not exist - the kmod recipe installs /usr/bin/kmod,
 # so the shipped udevd carried a dead hotplug-modprobe path. Pinned to the
@@ -35,8 +52,8 @@ license="LGPL-2.1-or-later"
 origin=udev
 repo=main
 url=https://systemd.io/
-source=https://github.com/systemd/systemd/archive/refs/tags/v261.2.tar.gz
-sha256=ed1059ff964f5df35b6056434cc17cc83f86dc913f10489948a0b19b6081c5ec
+source=https://github.com/systemd/systemd/archive/refs/tags/v262.2.tar.gz
+sha256=116432ee9dce9bfef4c7da7963c6de41899ab44197f2876ee99545707a5c7c1f
 
 depends="
     kmod
@@ -59,6 +76,8 @@ makedepends="
     pkgconf
     python-jinja2
     util-linux-dev
+    zlib-dev
+    zstd-dev
 "
 
 subpackages="
@@ -93,6 +112,7 @@ recipe_build()
 		-Dgnutls=disabled \
 		-Dhostnamed=false \
 		-Dkernel-install=false \
+		-Dkmod=enabled \
 		-Dlibcryptsetup=disabled \
 		-Dlibcurl=disabled \
 		-Dlibfido2=disabled \
@@ -121,10 +141,40 @@ recipe_build()
 		-Dtests=false \
 		-Dlink-udev-shared=false \
 		-Dsplit-bin=false \
-		-Dsysvinit-path= \
 		-Drpmmacrosdir=no \
 		-Dpamconfdir=no
 	ninja -C "$BUILDDIR"
+	# The kmod builtin is load-bearing: without it udevd logs
+	# "Unknown builtin command 'kmod ...'" for every modalias and no
+	# driver ever autoloads (proven on Minimer 2026-11-07: i915
+	# present but never bound). -Dkmod=enabled above already fails
+	# closed at configure time if libkmod is truly absent; this
+	# asserts the built daemon actually carries the builtin, so a
+	# silent meson fallback can never ship again.
+	# The daemon is the udevadm multicall binary (packaged as
+	# /usr/bin/udevadm; /lib/systemd/systemd-udevd is a symlink
+	# selecting daemon behaviour by argv[0]). There is no separate
+	# systemd-udevd file to find.
+	udevd_bin=$(find "$BUILDDIR" -maxdepth 1 -type f -name udevadm | head -1)
+	[ -n "$udevd_bin" ] || {
+		printf 'udev: built udevadm not found\n' >&2
+		return 1
+	}
+	printf 'udev: asserting kmod builtin in %s\n' "$udevd_bin" >&2
+	# Builder shells run with pipefail: grep -q exits on the first
+	# match, SIGPIPEs strings mid-stream, and the pipeline fails 141 on
+	# a binary that carries the builtin (proven twice on r9). Count
+	# instead: grep -c drains the pipe, and the count is exact.
+	if command -v strings >/dev/null 2>&1; then
+		kmod_count=$(strings "$udevd_bin" | grep -c -x 'kmod' || true)
+		[ "$kmod_count" -ge 1 ] || {
+			printf 'udev: built udevd lacks the kmod builtin (strings matches: %s)\n' "$kmod_count" >&2
+			return 1
+		}
+	else
+		printf 'udev: strings unavailable, kmod builtin unasserted\n' >&2
+		return 1
+	fi
 }
 
 recipe_install()

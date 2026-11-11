@@ -1,0 +1,30 @@
+From 249a86c1f37314d903227a99e7e07ea45f37c826 Mon Sep 17 00:00:00 2001
+From: Rich Felker <dalias@aerifal.cx>
+Date: Tue, 6 Oct 2026 15:13:38 -0400
+Subject: [PATCH] swprintf: properly set errno when output is truncated
+
+unlike snprintf, swprintf is required to discard the computed length
+and return -1 if the output does not fit. this was done correctly, but
+POSIX also requires errno be set to EOVERFLOW for this condition.
+---
+ src/stdio/vswprintf.c | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/src/stdio/vswprintf.c b/src/stdio/vswprintf.c
+index 5e9a4dad..b2fcd789 100644
+--- a/src/stdio/vswprintf.c
++++ b/src/stdio/vswprintf.c
+@@ -54,5 +54,9 @@ int vswprintf(wchar_t *restrict s, size_t n, const wchar_t *restrict fmt, va_lis
+ 	}
+ 	r = vfwprintf(&f, fmt, ap);
+ 	sw_write(&f, 0, 0);
+-	return r>=n ? -1 : r;
++	if (r>=n) {
++		errno = EOVERFLOW;
++		return -1;
++	}
++	return r;
+ }
+-- 
+2.55.0
+

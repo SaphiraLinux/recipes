@@ -15,7 +15,12 @@ pkgver=1.2.6
 # CONF_* overrides are dead whenever the macros exist -- the header
 # is the single source of truth, so it carries the real paths too).
 # Headers only, no code, no ABI.
-pkgrel=6
+# r8: integrate validated Saphira arch optimisations onto the r7
+# RC-69 base (reconcile/musl-r7-sinew): 0004 rint/rintf + F3
+# floor/ceil/trunc/nearbyint (0008-0012) + F8 strstr (0014).
+# New arch files + two modified files (rint.c/rintf.c from 0004,
+# strstr.c wiring); RC-69 untouched and applied first.
+pkgrel=8
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='musl libc 1.2.6 with the Saphira 1MiB pthread stack patch - the installable base libc'
 license='MIT'
@@ -42,6 +47,20 @@ in6_patch_sha256=28ea1e653d0b4e242065714c2018aed67d68ce06dc5cd8526ef735a1a5a06d0
 # coreutils who/uptime keep using their fallbacks, which is exactly
 # what makes uptime correct once no stale seed shadows the lookup.
 utmp_patch_sha256=e8eab82e03d975af6d0dbd33af878e85dbe5909059c8871248868bd7fc7b11a6
+# Saphira arch optimisations (validated on exp/musl-f8-strstr @93f0d39b,
+# byte-identical files replayed here; 0004 from exp/musl-r8 @d465def8
+# lineage, required base for 0011). SSE4.1 roundsd/roundss (floor/ceil/
+# trunc/rint/nearbyint, MXCSR-mode, DAZ-gated cold paths, flag parity)
+# + SSE2 strstr 2/3/4-byte helpers (hidden syms, generic kept).
+# Rejected F6 (0013 AVX2 mbsrtowcs: correct but slower) and unapproved
+# F5 are deliberately NOT carried.
+rint_patch_sha256=f5b27c7dac830a02985685337cbca2ddb32ffcbdb7eccf79b0e7a070d17da5c5
+floor_patch_sha256=7bbc00ffae9ef528872e0e4caf507574e5b5a00cd558ee03d9e46d09d4f0ad8e
+ceil_patch_sha256=0373f2d97238b1a99841b2778a6ee7bb0a6d2350a22fb7dfe436c9ef8ab80501
+trunc_patch_sha256=27205918544f6aa6fae2ec1ba4c7c325fa5da2a0173a8c351ccdc46702fe0285
+rint_realop_patch_sha256=24b768fb16cb26ca9d032b32e65c35d107b2254cc732293097bc46b11d662147
+nearbyint_patch_sha256=d7331d5f7259f85e24915160c78209d95f4d4f26afee4367e840fdb92b68946c
+strstr_sse2_patch_sha256=7e1345773f9fe05519d3b09b31f9e89e8e51e9ba703555be66d590a8e382a563
 
 depends=""
 makedepends="
@@ -66,6 +85,40 @@ recipe_build()
 	P7="$RECIPE_DIR/files/0003-utmp-wtmp-real-paths.patch"
 	echo "$utmp_patch_sha256  $P7" | sha256sum -c -
 	patch -d "$SRC" -Np1 -i "$P7"
+	# Upstream corrective backports 0101..0170 (minus deferred 0130),
+	# pinned by files/UPSTREAM-SHA256SUMS, applied in filename order
+	# (topological). See files/PATCHES.md for per-patch rationale and
+	# files/AUDIT-SERIES.md for the audit evidence behind each one.
+	(cd "$RECIPE_DIR/files" && sha256sum -c UPSTREAM-SHA256SUMS) || return 1
+	for up in "$RECIPE_DIR"/files/01[0-9][0-9]-upstream-*.patch; do
+		patch -d "$SRC" -Np1 -i "$up"
+	done
+	# Saphira arch optimisations 0004 + 0008-0012 + 0014 (pins above).
+	# Applied after RC-69; file sets are disjoint from RC-69 (verified:
+	# no RC-69 patch touches these paths), so the result matches the
+	# validated exp tree. 0011 modifies the 0004 files: order matters.
+	# Drop this block to restore pure r7 behaviour.
+	PS="$RECIPE_DIR/files/0004-x86_64-rint-roundsd.patch"
+	echo "$rint_patch_sha256  $PS" | sha256sum -c -
+	patch -d "$SRC" -Np1 -i "$PS"
+	P12="$RECIPE_DIR/files/0008-x86_64-floor-roundsd.patch"
+	echo "$floor_patch_sha256  $P12" | sha256sum -c -
+	patch -d "$SRC" -Np1 -i "$P12"
+	P13="$RECIPE_DIR/files/0009-x86_64-ceil-roundsd.patch"
+	echo "$ceil_patch_sha256  $P13" | sha256sum -c -
+	patch -d "$SRC" -Np1 -i "$P13"
+	P14="$RECIPE_DIR/files/0010-x86_64-trunc-roundsd.patch"
+	echo "$trunc_patch_sha256  $P14" | sha256sum -c -
+	patch -d "$SRC" -Np1 -i "$P14"
+	P15="$RECIPE_DIR/files/0011-x86_64-rint-realop-denormal.patch"
+	echo "$rint_realop_patch_sha256  $P15" | sha256sum -c -
+	patch -d "$SRC" -Np1 -i "$P15"
+	P16="$RECIPE_DIR/files/0012-x86_64-nearbyint-roundsd.patch"
+	echo "$nearbyint_patch_sha256  $P16" | sha256sum -c -
+	patch -d "$SRC" -Np1 -i "$P16"
+	P17="$RECIPE_DIR/files/0014-x86_64-strstr-sse2-short-needle.patch"
+	echo "$strstr_sse2_patch_sha256  $P17" | sha256sum -c -
+	patch -d "$SRC" -Np1 -i "$P17"
 	cd "$SRC"
 	# Built against the repository musl-dev headers installed in the
 	# clean root from the package seed: same-ABI rebuild, no cross

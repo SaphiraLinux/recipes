@@ -615,15 +615,18 @@ for path_flag in \
 		exit 1
 	}
 done
-# Feature-policy pins (audit 2026-10-09): gnutls/bzip2 are type=feature
-# (auto) and must stay explicitly disabled so no future transitive -dev
-# can flip them on by detection. utmp needs no pin (upstream forces it
-# off under -Dlibc=musl); the recipe comment records that decision.
+# Feature-policy backends (authorial decision 2026-11-07, supersedes
+# the 2026-10-09 audit): gnutls/bzip2 are type=feature (auto) and must
+# stay explicitly declared so no transitive -dev can flip them by
+# silent detection. The decision is enabled: a public distribution
+# does not drop capabilities whose dependencies exist. utmp needs no
+# pin (upstream forces it off under -Dlibc=musl); the recipe comment
+# records that decision.
 for feature_flag in \
-	'-Dgnutls=disabled' \
-	'-Dbzip2=disabled'; do
+	'-Dgnutls=enabled' \
+	'-Dbzip2=enabled'; do
 	grep -Fq -- "$feature_flag" "$systemd_recipe" || {
-		printf '%s\n' "systemd recipe lost feature-policy pin: $feature_flag" >&2
+		printf '%s\n' "systemd recipe lost feature-policy backend: $feature_flag" >&2
 		exit 1
 	}
 done

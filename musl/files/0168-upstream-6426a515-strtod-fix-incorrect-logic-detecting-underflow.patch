@@ -1,0 +1,62 @@
+From 6426a515e042f32cb9f1d82ec9d0905e0c500d6c Mon Sep 17 00:00:00 2001
+From: Rich Felker <dalias@aerifal.cx>
+Date: Mon, 12 Oct 2026 16:26:45 -0400
+Subject: [PATCH] strtod: fix incorrect logic detecting underflow
+
+underflow should be reported (via ERANGE) on any inexact denormal
+result, which is expressed in the logic as (denormal && frac). the
+denormal boolean is set above based on the magnitude of the exponent
+relative to the target type's exponent range after normalizing the
+working mantissa to occupy LDBL_MANT_DIG bits directly above the radix
+point. but, since rounding up can raise the exponent out of the
+denormal range, there is additional logic to clear the denormal flag
+when that happens, and it was wrong.
+
+the logic clearing denormal triggered when:
+
+    bits==LDBL_MANT_DIG+e2-emin
+
+here e2+LDBL_MANT_DIG is the actual place of the highest bit, and
+initially, bits+emin was equal to -emax+3. however, at the point the
+condition is evaluated, bits no longer represents the full mantissa
+width of the target type. it has already been replaced with a reduced
+width corresponding to the precision of the denormal. as a consequence
+of the replacement, the condition was basically always true (except
+when bits gets clamped non-negative), and so the denormal flag got
+cleared when rounding up with carry.
+
+the logic is fixed by using the value -emax+3 which is constant for
+the duration of the function, and by moving evaluation from before the
+exponent adjust to after, since the denormal flag should be cleared
+based on the new exponent, not the old exponent.
+
+with this change, behavior has been confirmed to be correct for
+rounding both up and down around the minimum normal and maximum
+denormal double, expressed both as 21 decimal digits and the full
+exact value.
+
+this patch does not address missing underflow logic when parsing hex
+floats, which is a separate issue.
+---
+ src/internal/floatscan.c | 3 +--
+ 1 file changed, 1 insertion(+), 2 deletions(-)
+
+diff --git a/src/internal/floatscan.c b/src/internal/floatscan.c
+index 2bc6830f..d1d388a2 100644
+--- a/src/internal/floatscan.c
++++ b/src/internal/floatscan.c
+@@ -299,10 +299,9 @@ static long double decfloat(FILE *f, int c, int bits, int emin, int sign, int po
+ 
+ 	if ((e2+LDBL_MANT_DIG & INT_MAX) > emax-5) {
+ 		if (fabsl(y) >= 2/LDBL_EPSILON) {
+-			if (denormal && bits==LDBL_MANT_DIG+e2-emin)
+-				denormal = 0;
+ 			y *= 0.5;
+ 			e2++;
++			if (e2+LDBL_MANT_DIG >= -emax+3) denormal = 0;
+ 		}
+ 		if (e2+LDBL_MANT_DIG>emax || (denormal && frac))
+ 			errno = ERANGE;
+-- 
+2.55.0
+

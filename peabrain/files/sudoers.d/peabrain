@@ -1,0 +1,12 @@
+# PeaBrain MCP privilege boundary (installed to /etc/sudoers.d/peabrain).
+#
+# MCP clients spawn the server non-interactively, so no password
+# prompt can ever be answered: members of wheel may run exactly this
+# command as the unprivileged peabrain service account, and nothing
+# else. The env assignment is part of the match (sudo would otherwise
+# scrub it): only this state directory, only this binary. The
+# packaged binary is deliberately NOT setuid: a setuid transition
+# blinds the process's own /proc/self/environ reads (verified on
+# Egg), while a full user switch via sudo carries a complete
+# environment.
+%wheel ALL=(peabrain) NOPASSWD: /usr/bin/env PEABRAIN_STATE_DIR=/var/saphira/PeaBrain /usr/bin/peabrain

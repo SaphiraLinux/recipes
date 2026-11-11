@@ -1,0 +1,69 @@
+From c5e2f7e7ad36ea839fce45af8370cb3e9ddf0cda Mon Sep 17 00:00:00 2001
+From: Luca Kellermann <mailto.luca.kellermann@gmail.com>
+Date: Sun, 10 May 2026 06:34:20 +0200
+Subject: [PATCH] fix integer overflow in gai_strerror, hstrerror and regerror
+
+at least gai_strerror() and regerror() are specified to accept any int
+value. if the value was close to INT_MAX (for gai_strerror()) or
+INT_MIN (for hstrerror() and regerror()) a signed integer overflow
+would occur.
+
+fix this by converting the int argument to unsigned before doing
+arithmetic.
+---
+ src/network/gai_strerror.c | 3 ++-
+ src/network/hstrerror.c    | 3 ++-
+ src/regex/regerror.c       | 3 ++-
+ 3 files changed, 6 insertions(+), 3 deletions(-)
+
+diff --git a/src/network/gai_strerror.c b/src/network/gai_strerror.c
+index 56b71503..78e49f92 100644
+--- a/src/network/gai_strerror.c
++++ b/src/network/gai_strerror.c
+@@ -16,9 +16,10 @@ static const char msgs[] =
+ 	"Overflow\0"
+ 	"\0Unknown error";
+ 
+-const char *gai_strerror(int ecode)
++const char *gai_strerror(int e)
+ {
+ 	const char *s;
++	unsigned ecode=e;
+ 	for (s=msgs, ecode++; ecode && *s; ecode++, s++) for (; *s; s++);
+ 	if (!*s) s++;
+ 	return LCTRANS_CUR(s);
+diff --git a/src/network/hstrerror.c b/src/network/hstrerror.c
+index a4d001c5..a17a8e0a 100644
+--- a/src/network/hstrerror.c
++++ b/src/network/hstrerror.c
+@@ -9,9 +9,10 @@ static const char msgs[] =
+ 	"Address not available\0"
+ 	"\0Unknown error";
+ 
+-const char *hstrerror(int ecode)
++const char *hstrerror(int e)
+ {
+ 	const char *s;
++	unsigned ecode=e;
+ 	for (s=msgs, ecode--; ecode && *s; ecode--, s++) for (; *s; s++);
+ 	if (!*s) s++;
+ 	return LCTRANS_CUR(s);
+diff --git a/src/regex/regerror.c b/src/regex/regerror.c
+index 5b347cc7..5e35870f 100644
+--- a/src/regex/regerror.c
++++ b/src/regex/regerror.c
+@@ -27,9 +27,10 @@ static const char messages[] = {
+   "\0Unknown error"
+ };
+ 
+-size_t regerror(int e, const regex_t *restrict preg, char *restrict buf, size_t size)
++size_t regerror(int c, const regex_t *restrict preg, char *restrict buf, size_t size)
+ {
+ 	const char *s;
++	unsigned e=c;
+ 	for (s=messages; e && *s; e--, s+=strlen(s)+1);
+ 	if (!*s) s++;
+ 	s = LCTRANS_CUR(s);
+-- 
+2.55.0
+

@@ -46,6 +46,9 @@
 #                       systemd-logind is the single power-event owner
 #                       on SaphiraD targets.
 #   vim                 the base editor.
+#   sudo                privilege escalation for the wheel administrator
+#                       firstboot creates. The admin account joins wheel;
+#                       without sudo the wheel membership grants nothing.
 #   iputils             ping and friends. A base host with no ping is not
 #                       administrable; proposed explicitly, kept deliberately.
 #   tzdata              a server with no timezone cannot reason about
@@ -55,19 +58,26 @@
 #                       without it the CPU runs factory microcode).
 #   linux-firmware-i915 Intel GPU blobs (GuC/HuC/DMC). Built-in i915
 #                       initializes before the root mount; without these
-#                       in the early boot image it wedges (proven on
-#                       Alder Lake). ~30MB.
-#   linux-firmware-intel
-#                       Intel Wi-Fi/Bluetooth blobs.
-#   linux-firmware-network
-#                       NIC blobs (incl. common physical NICs). ~600MB:
-#                       the price of unknown target hardware; trim for
-#                       known NICs.
+#                       it wedges (proven on Alder Lake). ~28MB. The only
+#                       firmware a base product carries by default,
+#                       because the console is boot-critical.
+#   (no other firmware families: Wi-Fi/Bluetooth (-intel, ~377MB) and
+#   the NIC/WLAN menagerie (-network, ~600MB of Mellanox, Marvell,
+#   Qualcomm, Broadcom, Realtek and the rest) are optional per known
+#   hardware, never base. A machine that needs them names the family,
+#   or takes linux-firmware-full for unknown hardware (as the
+#   usb-installer does). Removed 2026-11-06: ~1GB of switch-ASIC,
+#   wifi and camera blobs no server asked for.)
 #   saphira-initramfs-tools
 #                       the early-firmware generator (saphira-earlyfw).
 #                       REQUIRED in-target: kernel/firmware hooks run
 #                       chrooted here, so without this package no boot
 #                       image is ever generated or refreshed.
+#   kbd                 loadkeys/dumpkeys/kbd_mode: vconsole-setup execs
+#                       /usr/bin/loadkeys at boot; without it the first
+#                       console keeps the kernel keymap (proven Minimer
+#                       2026-11-08). An image intention, not a systemd
+#                       dependency.
 #
 # Deliberately absent, each a decision rather than an oversight:
 #   - saphira-network + dhcpcd: the OpenRC network framework and its
@@ -102,6 +112,5 @@ iputils
 tzdata
 intel-ucode
 linux-firmware-i915
-linux-firmware-intel
-linux-firmware-network
 saphira-initramfs-tools
+kbd

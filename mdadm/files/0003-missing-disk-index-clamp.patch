@@ -1,0 +1,25 @@
+From: Saphira packaging <recipes@saphira.vm2.uk>
+Subject: [PATCH] super-intel: bound missing-disk index for provable sprintf
+
+du->disk.serial is the 16-byte on-disk field holding " MISSING_<n>".
+du->index is (2*i+1), tiny in practice, but int-typed so gcc assumes
+the full int range (both signs) and trips -Werror=format-overflow.
+Bound both sides (unreachable: bounded by num_members); output is
+then at most 15+NUL and gcc proves safety. Braces, because this file
+mixes tab depths and a bare if trips -Wmisleading-indentation.
+snprintf is not used: with a 16-byte destination gcc cannot prove no
+truncation and -Wformat-truncation would error instead.
+
+--- a/super-intel.c
++++ b/super-intel.c
+@@ -10070,2 +10070,10 @@
+ 		du->index = (i * 2) + 1;
++		/* 16-byte on-disk serial[] holds " MISSING_<n>"; the int
++		 * index is tiny in practice but gcc assumes the full int
++		 * range, so bound both sides (unreachable: num_members).
++		 * (snprintf would trade this for -Wformat-truncation.)
++		 */
++		if (du->index < 0 || du->index > 999999) {
++			du->index = 0;
++		}
+ 		sprintf((char *)du->disk.serial,

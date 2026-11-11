@@ -1316,15 +1316,53 @@ class Transaction:
                 "chmod 0600 /etc/shadow",
             ], label="account seed /etc/shadow")
         # Explicit fhs.d convergence for the seed set: the install above
-        # runs --no-scripts, so reproduce the one script effect seed
-        # packages may carry (today: only saphira-baselayout's global
-        # fragment; the guard above fails closed on anything else).
+        # runs --no-scripts, so reproduce the script effects seed
+        # packages may carry. The base root is assembled rootless, so
+        # non-root ownership can neither be created nor converged here
+        # (any chown past UID 0 fails closed under the single-UID
+        # namespace): for each staged fragment, die on owners the
+        # sibling accounts.d fragment does not declare (typo trap, the
+        # same rule makepkg enforces at build time), converge
+        # all-root fragments exactly as before, and defer fragments
+        # with declared-but-non-root owners LOUDLY to the privileged
+        # live install/upgrade path, which owns real convergence.
+        # (Proven: curl r4 pulled openldap into the seed and the old
+        # converge-everything loop died on ldap-owned /var/run/slapd.)
         # The root is complete here (shell, helpers, account database),
         # which is exactly what inline script execution could not assume.
         fhs_dir = self.root / "usr/share/saphira/fhs.d"
+        accounts_dir = self.root / "usr/share/saphira/accounts.d"
         if fhs_dir.is_dir():
             for fragment in sorted(fhs_dir.iterdir()):
                 if not fragment.is_file():
+                    continue
+                declared = set()
+                sibling = accounts_dir / fragment.name
+                if sibling.is_file():
+                    for raw in sibling.read_text(encoding="utf-8").splitlines():
+                        parts = raw.split()
+                        if len(parts) >= 2 and parts[0] in ("user", "group"):
+                            declared.add(parts[1])
+                nonroot = set()
+                for raw in fragment.read_text(encoding="utf-8").splitlines():
+                    parts = raw.split()
+                    if not parts or parts[0].startswith("#"):
+                        continue
+                    if parts[0] == "dir" and len(parts) == 5:
+                        owners = parts[3:5]
+                    elif parts[0] == "replace-symlink-dir" and len(parts) == 6:
+                        owners = parts[4:6]
+                    elif parts[0] in ("rmdir-if-empty", "rmtree-if-empty",
+                                      "rmdir-or-fail", "rmtree-or-fail") and len(parts) == 2:
+                        continue
+                    else:
+                        die(f"buildpkg: malformed fhs.d stanza in base seed: {fragment.name}: {raw.strip()}")
+                    nonroot.update(p for p in owners if p not in ("root", "0"))
+                unknown = sorted(n for n in nonroot if n not in declared)
+                if unknown:
+                    die(f"buildpkg: base seed fhs.d/{fragment.name} names undeclared identity: {', '.join(unknown)}")
+                if nonroot:
+                    print(f"buildpkg: base root is rootless; deferring fhs.d/{fragment.name} (owner {', '.join(sorted(nonroot))}) to live install/upgrade", file=sys.stderr)
                     continue
                 self.run([
                     self.config["SAPHIRA_BWRAP"], "--die-with-parent", "--new-session",

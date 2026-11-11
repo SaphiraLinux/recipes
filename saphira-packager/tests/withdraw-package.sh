@@ -110,6 +110,23 @@ mkpkg()
 	SAPHIRA_BOOTSTRAP_TARGET=fakeroot "$makepkg" "$name" >/dev/null
 }
 
+# mkpkg_noarch: identical payload, but the manifest claims the noarch
+# arch so the publisher files it under the noarch sibling (the
+# arch-split layout). Anything else would leave the fixture flat and
+# the whole-generation check untested.
+mkpkg_noarch()
+{
+	name=$1 version=$2
+	rm -rf "$stage/$name"
+	mkdir -p "$stage/$name/pkg/usr/bin"
+	printf '%s\n' "$name" > "$stage/$name/pkg/usr/bin/$name"
+	printf '%s\n' '{"arch":"noarch","build_time":21,"license":"MIT","name":"'$name'","origin":"'$name'","outputs":[{"dependencies":[],"description":"'$name'","name":"'$name'","payload":"pkg"}],"schema":"saphira-stage-manifest/v1","url":"https://example.invalid/","version":"'$version'"}' > "$stage/$name/manifest.json"
+	SAPHIRA_CONFIG_FILE=$source_root/saphira-packager/files/package_builder.sh \
+	SAPHIRA_BUILD_ROOT=$stage SAPHIRA_INCOMING_DIR=$artifacts \
+	SAPHIRA_PACKAGE_TMP=$test_root/makepkg-tmp SAPHIRA_FAKEROOT_BOOTSTRAP=1 \
+	SAPHIRA_BOOTSTRAP_TARGET=fakeroot "$makepkg" "$name" >/dev/null
+}
+
 stage_auth_txn()
 {
 	txn=$1 target=$2 producer=$3
@@ -352,5 +369,26 @@ run_withdraw fam-nvr=1.0-r1 --reason 'retire line' --archive-dir "$test_root/arc
 [ "$(db_query "SELECT status FROM reservations WHERE kind='group' AND name='nvrgrp'")" = TOMBSTONED ]
 grep -E 'tombstoned' "$test_root/nvrlast.out" >/dev/null
 printf '%s\n' 'last-NVR withdrawal tombstones owned identities: OK'
+
+# --- 15. arch-split layout: the noarch sibling is consulted ---
+# A noarch-arch package is published into <gen>/noarch/ (the publisher
+# routes by package arch; the generation DB stays in <gen>/x86_64/). Withdrawing it must resolve the sibling
+# path at every step (preflight lookup, archive move, generation
+# census, leftover check) instead of reporting false skew.
+mkpkg_noarch noarch-pkg 1-r1
+stage_auth_txn "$incoming/noarch-ready" noarch-pkg noarch-pkg noarch-pkg-1-r1.apk
+run_signer noarch-pkg >/dev/null 2>&1
+test -f "$test_root/repo/hatchling/noarch/noarch-pkg-1-r1.apk"
+test ! -e "$repo/noarch-pkg-1-r1.apk"
+[ "$(db_query "SELECT COUNT(*) FROM packages WHERE name='noarch-pkg'")" = 1 ]
+run_withdraw noarch-pkg --reason 'retire line' --archive-dir "$test_root/archive" \
+	> "$test_root/noarch.out" 2> "$test_root/noarch.err"
+test ! -e "$test_root/repo/hatchling/noarch/noarch-pkg-1-r1.apk"
+[ "$(db_query "SELECT COUNT(*) FROM packages WHERE name='noarch-pkg'")" = 0 ]
+[ "$(db_query "SELECT COUNT(*) FROM withdrawals WHERE name='noarch-pkg'")" = 1 ]
+test -f "$test_root/archive/noarch-pkg/noarch-pkg-1-r1.apk"
+[ "$(db_query "SELECT COUNT(*) FROM metadata WHERE key='withdrawal_pending'")" = 0 ]
+apk verify --keys-dir "$keys" "$repo/Packages.adb" >/dev/null
+printf '%s\n' 'noarch sibling withdrawal: OK'
 
 printf '%s\n' 'withdraw-package: all cases OK'

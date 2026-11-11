@@ -1,0 +1,14 @@
+# BIOS firmware layer: intentions for machines that boot via BIOS.
+#
+# Intentions ONLY. The package manager owns dependency closure; never
+# enumerate resolved dependencies here (saphira-profiles(5)).
+#
+# BIOS needs nothing beyond the common set: GRUB covers the i386-pc
+# target from the same package that covers x86_64-efi, there is no
+# NVRAM to manage and no FAT system partition to maintain, so there
+# is deliberately no package list here. This file exists so the
+# firmware dimension is explicit and reviewable: saphira-image appends
+# base-bios to bios-* targets and base-efi to uefi-* targets, and a
+# future BIOS-specific need has a home that is not a generic profile.
+# An empty layer resolves to nothing, which for BIOS is the correct
+# closure, not an oversight.

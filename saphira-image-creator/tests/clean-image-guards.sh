@@ -145,11 +145,12 @@ else
 	ok 'the packaged GRUB_CMDLINE_LINUX is init-neutral'
 fi
 
-# ...and the image adds them per target instead.
-if /usr/bin/grep -q 'INIT.*=.*systemd.*getty_opt=.*systemd.imds=no' "$image"; then
-	ok 'systemd kernel arguments are added for systemd targets only'
+# ...and the image adds none per target either: the kernel line is
+# init-neutral, so no INIT-conditional kernel argument may exist.
+if /usr/bin/grep -q 'getty_opt' "$image"; then
+	bad 'the image tool carries init-conditional kernel arguments (grub must not differ by init)'
 else
-	bad 'the image tool must add systemd.imds=no for systemd targets'
+	ok 'the image tool carries no init-conditional kernel arguments'
 fi
 
 printf '%s\n' '# boot-time accounting is enabled, never baked'

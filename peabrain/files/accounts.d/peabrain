@@ -1,0 +1,17 @@
+# PeaBrain MCP server identity (canonical, fixed): user and group
+# peabrain, UID/GID 181. First free ID above the highest claimed
+# identity (180 lpadmin) - verified against accounts.tsv and every
+# tree-wide fragment; never reuse it for another identity.
+#
+# The binary itself is deliberately NOT setuid; privilege
+# transition happens through the packaged sudoers fragment
+# (files/sudoers.d/peabrain): a setuid transition blinds the
+# process's own /proc/self/environ reads (verified on Egg), while
+# a full user switch via sudo carries a complete environment.
+#
+# State dir /var/saphira/PeaBrain is 0700: the binary refuses to run
+# against any state directory that is not 0700 and owner-only
+# (proven on Egg), so the declaration matches the enforcement.
+user peabrain 181 peabrain /var/empty /sbin/nologin
+group peabrain 181
+dir /var/saphira/PeaBrain 0700 peabrain peabrain

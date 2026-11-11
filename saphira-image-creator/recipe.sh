@@ -1,5 +1,40 @@
 #!/bin/sh
 
+# r46: serialize console login against the firstboot wizard (the
+# multi-user completion gate never held the gettys: upstream
+# getty.target carries no ordering vs multi-user, and a Before edge on
+# a getty does not delay its start - Minimer 2026-11-07). The tool now
+# writes After-firstboot drop-ins for console-getty, getty@tty1 and
+# the serial-getty@ template; verify_firstboot asserts all three.
+# Payload change (tool + tests). Anti-loop guard overridden
+# deliberately: operator-confirmed boot defect fix.
+# r45: fail-closed firstboot completion gate (marker, gate drop-in,
+# enabled unit asserted on both build paths before success; a silent
+# miss ships an unconfigurable machine, Minimer 2026-11-07).
+# Payload change (tool + tests). Anti-loop guard overridden
+# deliberately: operator-blocked install work, real defect fix.
+# r44: runtime depends on python3 (the embedded GRUB_CMDLINE_LINUX
+# and grub.cfg rewrites are python3 heredocs; minimer 2026-11-07:
+# command not found mid-install on a python-less host). Payload
+# change (metadata only). Anti-loop guard overridden deliberately:
+# operator-blocked install work, real defect fix.
+# r43: tool scratch falls back to host tmp when SAPHIRA_TMPDIR
+# names no usable directory (installed machines have no /build tree;
+# minimer 2026-11-08: install-to-disk died creating its plan file
+# under the Egg-only default).
+# Same contract as earlyfw stage_base. Payload change (tool) plus
+# tmpdir-fallback.sh regression tests. Anti-loop guard overridden
+# deliberately: operator-blocked install work, real defect fix.
+# r42: stop writing the nftables firstboot drop-in (it closed a
+# transaction cycle: nftables -> network-pre -> networkd ->
+# firstboot -> nftables; systemd-analyze verify calls it unfixable
+# and boots break ordering by deleting the networkd job, proven on
+# Minimer 2026-11-07). The multi-user gate is retained. Payload
+# change (tool) plus firstboot-ordering.sh regression tests.
+# r41: the kernel cmdline is init-neutral (2026-11-06): drop the
+# systemd.getty_auto=0/systemd.imds=no injection (grub must not differ
+# by init; the operator is right and the r12/r22 mechanism is removed).
+# Generator concerns stay init-side. Payload change (tool + tests).
 # r40: swap partition type GUID (2026-10-31, proven file-backed on
 # identical geometry): emit the canonical Linux-swap GPT GUID
 # 0657FD6D-A4AB-43C4-84E5-0933C84B4F4F. The retired DPS GUID
@@ -23,7 +58,7 @@
 # only package intentions, per saphira-profiles(5)) and is optional.
 pkgname=saphira-image-creator
 pkgver=0.1
-pkgrel=40
+pkgrel=46
 # r39: layout options (--boot-size honored on ext4 with a separate
 # /boot, --swap-size with swap-last partitioning and fstab, --earlyfw
 # strict opt-in with a persistent marker), computed partition
@@ -226,13 +261,16 @@ url=https://saphira.vm2.uk/
 # util-linux supplies sfdisk and losetup on the HOST that builds the image.
 # e2fsprogs supplies mkfs.ext4. dosfstools supplies mkfs.vfat, which a
 # uefi-* target cannot be built without. grub supplies grub-install and
-# grub-mkconfig. qemu is optional: it is needed only for a .qcow2 output.
+# grub-mkconfig. python3 runs the embedded GRUB_CMDLINE_LINUX and
+# grub.cfg rewrites (minimer 2026-11-07: command not found mid-install).
+# qemu is optional: it is needed only for a .qcow2 output.
 depends="
 	saphira-install-tools
 	util-linux
 	e2fsprogs
 	dosfstools
 	grub
+	python3
 "
 makedepends=""
 

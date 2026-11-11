@@ -39,6 +39,7 @@ test "$(id -u)" -eq 0 || {
 
 marker=${SAPHIRA_FIRSTBOOT_MARKER:-/etc/saphira-firstboot-required}
 network_apply=${SAPHIRA_FIRSTBOOT_NETWORK_APPLY:-/usr/libexec/saphira/apply-network.sh}
+locale_apply=${SAPHIRA_FIRSTBOOT_LOCALE_APPLY:-/usr/libexec/saphira/apply-locale.sh}
 state_dir=${SAPHIRA_FIRSTBOOT_STATE_DIR:-/var/lib/saphira-firstboot}
 root_dir=${SAPHIRA_FIRSTBOOT_ROOT:-}
 root_dir=${root_dir%/}
@@ -52,6 +53,11 @@ iface_index_tmp=
 
 test -x "$network_apply" || {
 	printf 'saphira-firstboot: network helper is absent: %s\n' "$network_apply" >&2
+	exit 1
+}
+
+test -x "$locale_apply" || {
+	printf 'saphira-firstboot: locale helper is absent: %s\n' "$locale_apply" >&2
 	exit 1
 }
 
@@ -212,6 +218,7 @@ base_name=$( { sed -n 's/^NAME="\(.*\)"$/\1/p' \
 test -n "$base_name" || base_name='Saphira Linux'
 network_state=$(mktemp "$state_dir/.network.XXXXXX")
 chmod 0600 "$network_state"
+locale_state=$state_dir/.locale
 repository_file=${SAPHIRA_FIRSTBOOT_REPOSITORIES_FILE:-/etc/apk/repositories}
 cleanup()
 {
@@ -360,6 +367,7 @@ welcome()
 	printf 'Before %s can be used, a few initial settings are needed:\n\n' "$base_name"
 	printf '  \342\200\242 Set the local root password\n'
 	printf '  \342\200\242 Create the first administrator account\n'
+	printf '  \342\200\242 Configure language, keyboard and time zone\n'
 	printf '  \342\200\242 Configure network connectivity\n'
 	printf '  \342\200\242 Configure DNS\n'
 	printf '  \342\200\242 Confirm the package repository\n\n'
@@ -440,6 +448,9 @@ ensure_ssh_host_keys()
 
 IPV4_MODE=off IPV4_CIDR= IPV4_GATEWAY=
 IPV6_MODE=off IPV6_CIDR= IPV6_GATEWAY=
+LOCALE_LANG=en_GB.UTF-8 LOCALE_KEYMAP=uk LOCALE_TIMEZONE=Europe/London
+LOCALE_COUNTRY= LOCALE_REGION= LOCALE_CITY=
+LOCALE_LATITUDE= LOCALE_LONGITUDE=
 DNS_SERVERS=9.9.9.9 DNS_SEARCH=
 REPOSITORY_URL=https://packages.saphira.vm2.uk/hatched
 
@@ -516,7 +527,21 @@ apply_interface_now()
 		local unit_dir=$root_dir/etc/systemd/network
 		install -d -m 0755 "$unit_dir"
 		{
-			printf '[Match]\nName=%s\n\n[Network]\n' "$INTERFACE"
+			# Match by MAC address, never by interface name:
+			# predictable names (enp2s0, enp1s0, ...) change with
+			# kernel enumeration and slot order, so a Name= match
+			# written on one boot may never match on the next
+			# (Minimer 2026-11-07: a renamed NIC left the fresh
+			# install without a matching network). The MAC is read
+			# from sysfs at apply time; if it cannot be read, fall
+			# back to the name rather than writing a file that
+			# matches nothing.
+			nic_mac=$(cat "${SYSFS_NET_DIR:-$root_dir/sys/class/net}/$INTERFACE/address" 2>/dev/null || true)
+			if [ -n "$nic_mac" ]; then
+				printf '[Match]\nMACAddress=%s\n\n[Network]\n' "$nic_mac"
+			else
+				printf '[Match]\nName=%s\n\n[Network]\n' "$INTERFACE"
+			fi
 			if test "$IPV4_MODE" = dhcp && test "$IPV6_MODE" = dhcp; then
 				printf 'DHCP=yes\n'
 			elif test "$IPV4_MODE" = dhcp; then
@@ -716,6 +741,151 @@ write_repository()
 	trap - RETURN
 }
 
+# Locale, keymap, timezone and location. All four are post-commit
+# best-effort steps: they can fail, be skipped and be recorded, exactly
+# like the network steps. Empty answers accept the shown default (these
+# are operator preferences, not address modes, so the no-default rule
+# does not apply); q or Ctrl-C steps back within this block.
+choose_locale()
+{
+	local choice
+	while :; do
+		printf 'System language (musl honours C.UTF-8 natively; anything else is best-effort) [%s] (q to go back): ' "$LOCALE_LANG"
+		read_setup choice || return 1
+		choice=${choice:-$LOCALE_LANG}
+		if "$locale_apply" validate-locale "$choice"; then
+			LOCALE_LANG=$choice
+			return 0
+		fi
+		printf 'Enter a valid locale name (e.g. en_GB.UTF-8).\n' >&2
+	done
+}
+
+choose_keymap()
+{
+	local choice
+	while :; do
+		printf 'Console keyboard map [%s] (q to go back): ' "$LOCALE_KEYMAP"
+		read_setup choice || return 1
+		choice=${choice:-$LOCALE_KEYMAP}
+		if "$locale_apply" validate-keymap "$choice"; then
+			LOCALE_KEYMAP=$choice
+			return 0
+		fi
+		printf 'Unknown keymap; kbd ships them under /usr/share/keymaps.\n' >&2
+	done
+}
+
+choose_timezone()
+{
+	local choice
+	while :; do
+		printf 'Timezone (a zoneinfo name, e.g. Europe/London) [%s] (q to go back): ' "$LOCALE_TIMEZONE"
+		read_setup choice || return 1
+		choice=${choice:-$LOCALE_TIMEZONE}
+		if "$locale_apply" validate-timezone "$choice"; then
+			LOCALE_TIMEZONE=$choice
+			return 0
+		fi
+		printf 'Unknown timezone; tzdata ships them under /usr/share/zoneinfo.\n' >&2
+	done
+}
+
+choose_location()
+{
+	# Physical location is metadata, never configuration: strictly
+	# opt-in (the default is to record nothing), and every field
+	# re-confirms its proposed value. Nothing here affects timekeeping;
+	# timezone authority stays with /etc/localtime.
+	local answer
+	while :; do
+		printf 'Record physical location (country/city/coordinates)? [y/N] (q to go back): '
+		read_setup answer || return 1
+		case ${answer:-n} in
+		[Yy]) break ;;
+		[Nn]) LOCALE_COUNTRY= LOCALE_REGION= LOCALE_CITY=
+			LOCALE_LATITUDE= LOCALE_LONGITUDE=
+			return 0 ;;
+		'') LOCALE_COUNTRY= LOCALE_REGION= LOCALE_CITY=
+			LOCALE_LATITUDE= LOCALE_LONGITUDE=
+			return 0 ;;
+		*) printf 'Answer y or n.\n' >&2 ;;
+		esac
+	done
+	while :; do
+		printf 'Country (ISO alpha-2) [%s] (q to go back): ' "${LOCALE_COUNTRY:-GB}"
+		read_setup answer || return 1
+		answer=${answer:-${LOCALE_COUNTRY:-GB}}
+		if "$locale_apply" validate-country "$answer"; then
+			LOCALE_COUNTRY=$answer
+			break
+		fi
+		printf 'Enter a two-letter country code (e.g. GB).\n' >&2
+	done
+	while :; do
+		printf 'Region [%s] (q to go back): ' "${LOCALE_REGION:-England}"
+		read_setup answer || return 1
+		answer=${answer:-${LOCALE_REGION:-England}}
+		if "$locale_apply" validate-place "$answer"; then
+			LOCALE_REGION=$answer
+			break
+		fi
+		printf 'Enter a printable region name (max 64 characters).\n' >&2
+	done
+	while :; do
+		printf 'City [%s] (q to go back): ' "${LOCALE_CITY:-Portsmouth}"
+		read_setup answer || return 1
+		answer=${answer:-${LOCALE_CITY:-Portsmouth}}
+		if "$locale_apply" validate-place "$answer"; then
+			LOCALE_CITY=$answer
+			break
+		fi
+		printf 'Enter a printable city name (max 64 characters).\n' >&2
+	done
+	while :; do
+		printf 'Latitude in degrees (blank to skip) (q to go back): '
+		read_setup answer || return 1
+		if test -z "$answer"; then
+			LOCALE_LATITUDE=
+			break
+		fi
+		if "$locale_apply" validate-latitude "$answer"; then
+			LOCALE_LATITUDE=$answer
+			break
+		fi
+		printf 'Enter a latitude between -90 and 90, or leave it blank.\n' >&2
+	done
+	while :; do
+		printf 'Longitude in degrees (blank to skip) (q to go back): '
+		read_setup answer || return 1
+		if test -z "$answer"; then
+			LOCALE_LONGITUDE=
+			break
+		fi
+		if "$locale_apply" validate-longitude "$answer"; then
+			LOCALE_LONGITUDE=$answer
+			break
+		fi
+		printf 'Enter a longitude between -180 and 180, or leave it blank.\n' >&2
+	done
+	return 0
+}
+
+write_locale_state()
+{
+	{
+		printf 'LANG=%s\n' "$LOCALE_LANG"
+		printf 'KEYMAP=%s\n' "$LOCALE_KEYMAP"
+		printf 'TIMEZONE=%s\n' "$LOCALE_TIMEZONE"
+		printf 'COUNTRY=%s\n' "$LOCALE_COUNTRY"
+		printf 'REGION=%s\n' "$LOCALE_REGION"
+		printf 'CITY=%s\n' "$LOCALE_CITY"
+		printf 'LATITUDE=%s\n' "$LOCALE_LATITUDE"
+		printf 'LONGITUDE=%s\n' "$LOCALE_LONGITUDE"
+	} > "$locale_state"
+	chmod 0600 "$locale_state"
+}
+
 print_dns_provider()
 {
 	local number=$1 name=$2 provider_data dns4 dns6
@@ -870,6 +1040,20 @@ run_step "Administrator password ($username)" set_password "$username" || true
 # Clearing it here - not at the commit point - keeps the resume check
 # above reachable for a previous partial run.
 rm -f -- "$pending_user"
+
+heading 'Locale, keyboard and time'
+printf 'Language, console keyboard, timezone and (optionally) physical location.\n\n'
+# q steps back within this block; q at the first step stays (the
+# administrator account is already done and is never revisited).
+locale_step=0
+while :; do
+	case $locale_step in
+	0) if choose_locale; then locale_step=1; fi ;;
+	1) if choose_keymap; then locale_step=2; else locale_step=0; fi ;;
+	2) if choose_timezone; then locale_step=3; else locale_step=1; fi ;;
+	3) if choose_location; then break; else locale_step=2; fi ;;
+	esac
+done
 
 heading 'Network configuration'
 printf 'Configure the wired network interfaces of this system.\n\n'
@@ -1053,6 +1237,14 @@ done
 test -n "$all_ifaces" || printf '  Interfaces:         none detected\n'
 printf '  DNS servers:        %s\n' "$DNS_SERVERS"
 printf '  Search domain:      %s\n' "${DNS_SEARCH:-none}"
+printf '  Language:           %s\n' "$LOCALE_LANG"
+printf '  Console keyboard:   %s\n' "$LOCALE_KEYMAP"
+printf '  Timezone:           %s\n' "$LOCALE_TIMEZONE"
+if test -n "$LOCALE_COUNTRY$LOCALE_CITY"; then
+	printf '  Location:           %s%s\n' "$LOCALE_COUNTRY" "${LOCALE_CITY:+, $LOCALE_CITY}"
+else
+	printf '  Location:           not recorded\n'
+fi
 printf '  Package repository: %s\n' "$REPOSITORY_URL"
 printf '\nApply this configuration and continue? [Y/n] '
 read_setup answer
@@ -1109,6 +1301,15 @@ if test "$apply_configuration" = 1; then
 		run_step "Network ($INTERFACE)" apply_interface_now || true
 	done
 
+	if write_locale_state; then
+		run_step "Locale ($LOCALE_LANG, $LOCALE_KEYMAP, $LOCALE_TIMEZONE)" \
+			"$locale_apply" apply "$locale_state" || true
+		run_step "Console keymap ($LOCALE_KEYMAP)" \
+			"$locale_apply" load-keymap-live "$LOCALE_KEYMAP" || true
+	else
+		record_unfinished 'Locale' 'staged answers could not be written'
+	fi
+
 fi # apply_configuration
 
 # Everything from here on is best-effort: the root password is set and
@@ -1132,6 +1333,7 @@ else
 	done
 	printf '\nSetup will not run again. Finish the items above by hand; on this system:\n'
 	printf '  rc-service saphira-network restart   # network\n'
+	printf '  /usr/libexec/saphira/apply-locale.sh apply-answers LANG KEYMAP TIMEZONE [COUNTRY REGION CITY LAT LONG]  # locale/timezone/keymap\n'
 	printf '  passwd <user>                        # a password that was skipped\n'
 	printf '  saphira-firstboot cannot be re-armed: the root password is already set.\n'
 fi

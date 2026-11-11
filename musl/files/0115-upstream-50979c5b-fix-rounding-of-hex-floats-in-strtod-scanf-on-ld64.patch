@@ -1,0 +1,49 @@
+From 50979c5bc89a7b02023e5c0a5ea1ca4da8616a91 Mon Sep 17 00:00:00 2001
+From: Rich Felker <dalias@aerifal.cx>
+Date: Thu, 21 May 2026 09:37:18 -0400
+Subject: [PATCH] fix rounding of hex floats in strtod/scanf on ld64 and ld128
+ archs
+
+the expression LDBL_MANT_DIG/4+1 was intended to represent the number
+of hex digits which can be significant, after which all that matters
+to the result, regardless of rounding mode, is whether any part of the
+tail is nonzero.
+
+however, the expression LDBL_MANT_DIG/4 is only exact for ld80 archs.
+for ld64 and ld128, the truncation of the remainder caused one too few
+digits to be processed, producing incorrect rounding.
+
+for ld128 archs, only strtold and scanf's %La conversion specifier
+were affected; doubles and floats still had plenty of trailing digits
+to yield a correct final rounding. but for ld64 archs, the number of
+digits processed were insufficient for double, and could affect any
+code using strtod or scanf's %a.
+
+for ld64 archs, 0x1.111111111111281 produces an incorrect rounding
+down, and 0x1.11111111111111 produces an incorrect rounding up.
+
+for ld128 archs, the inputs 0x1.111111111111111111111111111281 and
+0x1.11111111111111111111111111111 behave respectively.
+
+rounding up in the expression for the number of hex digits needed
+produces correct results.
+---
+ src/internal/floatscan.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/internal/floatscan.c b/src/internal/floatscan.c
+index 8c0828fc..b15366b6 100644
+--- a/src/internal/floatscan.c
++++ b/src/internal/floatscan.c
+@@ -347,7 +347,7 @@ static long double hexfloat(FILE *f, int bits, int emin, int sign, int pok)
+ 			else d = c-'0';
+ 			if (dc<8) {
+ 				x = x*16 + d;
+-			} else if (dc < LDBL_MANT_DIG/4+1) {
++			} else if (dc < (LDBL_MANT_DIG+3)/4+1) {
+ 				y += d*(scale/=16);
+ 			} else if (d && !gottail) {
+ 				y += 0.5*scale;
+-- 
+2.55.0
+

@@ -1,0 +1,13 @@
+From: Saphira packaging <recipes@saphira.vm2.uk>
+Subject: [PATCH] Makefile: resolve install via PATH, not /usr/bin
+
+Saphira is non-usrmerged and coreutils is --bindir=/bin, so there is
+no /usr/bin/install; a hardcoded absolute path fails the install
+phase with Error 127. Plain `install` resolves through PATH to
+/bin/install, like every other recipe's install step.
+
+--- a/Makefile
++++ b/Makefile
+@@ -158,1 +158,1 @@
+-INSTALL = /usr/bin/install
++INSTALL = install

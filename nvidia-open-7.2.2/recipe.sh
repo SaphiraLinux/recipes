@@ -2,8 +2,11 @@
 
 pkgname=nvidia-open-7.2.2
 pkgver=610.57.04
-pkgrel=2
+pkgrel=3
 # r2: blacklist nouveau on install (driver handover). Payload change.
+# r3: nouveau blacklist moved to nvidia-open-firmware (sole owner;
+# the signer refuses usr/lib/modprobe.d/nvidia-open.conf multi-owned
+# by all five kmod variants). Payload change.
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='NVIDIA open kernel modules 610.57.04 for kernel 7.2.2 (kmods only; firmware is nvidia-open-firmware)'
 license='MIT OR GPL-2.0'

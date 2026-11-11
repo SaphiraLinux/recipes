@@ -1,0 +1,33 @@
+From e9ac48d226aa1fa7a0176f1946b277e70fbd783a Mon Sep 17 00:00:00 2001
+From: Matthias Goergens <matthias.goergens@gmail.com>
+Date: Wed, 5 Aug 2026 15:51:49 +0800
+Subject: [PATCH] stdio: avoid invalid pointer arithmetic in fputwc
+
+Fresh writable streams use null wpos and wend pointers until output is
+initialized. The non-ASCII path adds MB_LEN_MAX to wpos before comparing
+it with wend, which is invalid for a null pointer. The addition can also
+form a pointer beyond one past the buffer when little space remains.
+
+First require an active output buffer. Then compare the defined
+difference between its pointers. Preserve the existing strict capacity
+test and use the normal write fallback otherwise.
+---
+ src/stdio/fputwc.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/stdio/fputwc.c b/src/stdio/fputwc.c
+index 789fe9c9..1559bca4 100644
+--- a/src/stdio/fputwc.c
++++ b/src/stdio/fputwc.c
+@@ -15,7 +15,7 @@ wint_t __fputwc_unlocked(wchar_t c, FILE *f)
+ 
+ 	if (isascii(c)) {
+ 		c = putc_unlocked(c, f);
+-	} else if (f->wpos + MB_LEN_MAX < f->wend) {
++	} else if (f->wpos && f->wend - f->wpos > MB_LEN_MAX) {
+ 		l = wctomb((void *)f->wpos, c);
+ 		if (l < 0) c = WEOF;
+ 		else f->wpos += l;
+-- 
+2.55.0
+

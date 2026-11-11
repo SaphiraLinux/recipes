@@ -1,0 +1,26 @@
+From af839d4381156d480203448e17d1275c4a512bd6 Mon Sep 17 00:00:00 2001
+From: Szabolcs Nagy <nsz@port70.net>
+Date: Mon, 1 Jun 2026 15:21:09 +0200
+Subject: [PATCH] math: include missing float.h in logbl
+
+LDBL_* macros were not defined in logbl.
+
+the code happens to be correct without them, but when the long double
+format matches double the intention was to tail call logb.
+---
+ src/math/logbl.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/src/math/logbl.c b/src/math/logbl.c
+index 962973a7..82dba942 100644
+--- a/src/math/logbl.c
++++ b/src/math/logbl.c
+@@ -1,4 +1,5 @@
+ #include <math.h>
++#include <float.h>
+ #if LDBL_MANT_DIG == 53 && LDBL_MAX_EXP == 1024
+ long double logbl(long double x)
+ {
+-- 
+2.55.0
+

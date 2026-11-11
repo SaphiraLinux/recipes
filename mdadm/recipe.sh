@@ -3,7 +3,7 @@
 # Software RAID management tooling.
 
 pkgname=mdadm
-pkgver=4.4
+pkgver=4.6
 pkgrel=1
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="Software RAID management"
@@ -11,8 +11,8 @@ license="GPL-2.0-or-later"
 origin=mdadm
 repo=saphira
 url=https://raid.wiki.kernel.org/
-source=https://kernel.org/pub/linux/utils/raid/mdadm/mdadm-4.4.tar.xz
-sha256=9b488f35ed153df99924b5fe41eed380e8512de8f18a118628cacdd681b1d573
+source=https://github.com/md-raid-utilities/mdadm/archive/refs/tags/mdadm-4.6.tar.gz
+sha256=202a7525e6f2b44395a9ef2c561082c7d6d8204e9addfe3f6268bfb141efc093
 
 depends="udev"
 
@@ -26,11 +26,17 @@ makedepends="
 
 recipe_build()
 {
-	# files/ patch: Makefile assigns CFLAGS unconditionally, so env
+	# files/ patches: Makefile assigns CFLAGS unconditionally, so env
 	# flags never reach the compiler; the -Werror carve-out ships
-	# as a patch instead (see PATCHES.md).
+	# as a patch instead, plus gcc15+ -Werror source fixes
+	# (see PATCHES.md). 0002 is kept for the 4.4 record but not
+	# applied: upstream 4.6 carries the nonstring attribute itself.
 	patch -d "$SRC" -Np1 \
 		-i "$RECIPE_DIR/files/0001-gcc16-unused-but-set-variable.patch"
+	patch -d "$SRC" -Np1 \
+		-i "$RECIPE_DIR/files/0003-missing-disk-index-clamp.patch"
+	patch -d "$SRC" -Np1 \
+		-i "$RECIPE_DIR/files/0004-install-via-path.patch"
 	make -j${JOBS:-$(nproc)} CC=gcc
 }
 

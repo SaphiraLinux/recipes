@@ -2,7 +2,12 @@
 
 pkgname=saphira-install-tools
 pkgver=0.1
-pkgrel=42
+pkgrel=45
+# r44: installer scratch falls back to /tmp when SAPHIRA_TMPDIR names
+# no usable directory (installed machines have no /build tree;
+# minimer 2026-11-08: install-to-disk died in saphira-bootstrap on
+# the missing default). Same contract as earlyfw stage_base (r5).
+# Payload change (3 tools) plus tmpdir-fallback.sh regression tests.
 # r42: minimal-openrc/minimal-systemd gain procps-ng (minimer live gap:
 # nothing owned /bin/ps in the installer profiles). Manifest refreshed.
 # r41: same mount-aware target acceptance in saphira-bootstrap

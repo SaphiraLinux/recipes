@@ -1,0 +1,27 @@
+# Role layer: wireless networking (client).
+#
+# A role layer is an ADDITIONAL intention list, composed on top of a
+# minimal or product profile. Roles are profile data, not
+# meta-packages: the package manager still owns the closure and no new
+# package name is invented for a role.
+#
+# Scope: wireless client operation - scanning, regulatory compliance
+# and open-network association. WPA/WPA2 association needs an
+# associator, which this role deliberately does NOT pull in:
+# wpa_supplicant (dual-init wpa_supplicant@.service plus OpenRC
+# init script, unix-socket control, no D-Bus) is the supported one -
+# add it explicitly on machines that join protected networks. iwd is
+# not packaged. wireless-tools is legacy and stays optional (iw
+# covers modern nl80211). hostapd belongs to a separate access-point
+# capability, never to generic client networking.
+#
+# Firmware is hardware-selected, never universal: wireless-tools or
+# full firmware families are per-machine additions for known
+# hardware, not base intentions.
+#
+#   wireless-regdb   regulatory database: without it the kernel logs
+#                    a regulatory.db load failure and stays on the
+#                    world roaming domain (proven Minimer 2026-11-08).
+#   iw               nl80211 configuration and scanning.
+wireless-regdb
+iw

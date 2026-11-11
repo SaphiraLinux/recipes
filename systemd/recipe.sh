@@ -1,7 +1,12 @@
 #!/bin/sh
 
 pkgname=systemd
-pkgver=262
+pkgver=262.2
+# 262.2 series: shared v262.2 tag tarball with the udev package (both
+# build the same revision; Saphira patches rebased and verified
+# fuzz-free against pristine 262.2; the 262 pin was a detached commit
+# whose option set is identical, so this is strictly the maintenance
+# delta). Previous 262-r8 state preserved in git history.
 # 262 series: pinned to the v262 release commit (branch tip carried an
 # accidental docs/CNAME file), rebased Saphira patches, -Dldconfig=false
 # retained. Previous 261.2-r17 state preserved in git tag systemd-261.2-r17.
@@ -39,7 +44,17 @@ pkgver=262
 # Also makedepends linux-pam -> linux-pam-dev (the pam r4 -dev split
 # moved the headers; same breakage shadow already hit).
 # And -Dsystemd-network-uid 127 -> 147: REVERTED (see r6 above).
-pkgrel=6
+pkgrel=2
+# r7: runtime depends on libseccomp: shipped units set
+# SystemCallFilter=bpf/perf_event_open/... and without the library
+# those filters are silently ignored ("libseccomp is not available",
+# proven on Minimer 2026-11-07) - a quiet sandbox weakening. Payload
+# change (metadata only, no binaries).
+# r8: runtime depends on libbpf: the build enables -Dbpf-framework
+# (libbpf-dev in makedepends links it in) but nothing declared the
+# runtime library, so every boot warned "Neither libbpf.so.1 nor
+# libbpf.so.0 are installed" and cgroup BPF features stayed disabled
+# (Minimer 2026-11-07). Payload change (metadata only, no binaries).
 # r17: ldconfig disabled (musl has no ldconfig workflow): -Dldconfig=false
 # so neither units/ldconfig.service nor its sysinit.target.wants link is
 # installed. Payload change, bumps.
@@ -61,24 +76,36 @@ license="LGPL-2.1-or-later"
 origin=systemd
 repo=main
 url=https://systemd.io/
-source=https://github.com/systemd/systemd/archive/8cc40e0c5e9234bf45084751ac53b1fbfe70b492.tar.gz
-sha256=a8d72c03431860cefaafaa2f8cf6f68bcba817184c3708896e4b65471ab0f9ef
+source=https://github.com/systemd/systemd/archive/refs/tags/v262.2.tar.gz
+sha256=116432ee9dce9bfef4c7da7963c6de41899ab44197f2876ee99545707a5c7c1f
 
 # Init-coupling invariant (dbus dragged PID-1 systemd onto OpenRC Egg
 # via a runtime depends): reusable libsystemd ships as systemd-libs
 # (+ systemd-dev for the headers/.pc), so library consumers never
 # resolve the init package. The libs splits carry no /sbin/init, no
 # units, and no accounts fragment - those stay in main only.
+# Manual pages ship as systemd-doc (optional at install time, present
+# in the repository): no rebuilding a distribution to read them.
 subpackages="
     systemd-libs
     systemd-dev
+    systemd-doc
 "
 
 # udev owns the shared device-manager payload; this package is its strict
 # complement and always runs alongside it.
+# cryptsetup-libs: systemd-cryptsetup links libcryptsetup.so.12 (built
+# with libcryptsetup=enabled deliberately); without the dep the helper
+# dies at exec on cryptsetup-less systems (proven Minimer 2026-11-08).
+# kbd is deliberately NOT here: loadkeys is an image intention (it
+# belongs in the systemd image profiles), not a dependency of the
+# init system itself.
 depends="
+    cryptsetup-libs
     dbus
     kmod
+    libbpf
+    libseccomp
     libucontext
     linux-pam
     saphira-base-accounts
@@ -86,40 +113,72 @@ depends="
     xz
 "
 
+# libucontext: libsystemd.so.0 links it directly (per-object DT_NEEDED,
+# proven Minimer 2026-11-08); a standalone systemd-libs install without
+# it breaks every libsystemd consumer (dbus links it). Declared on the
+# -libs split itself via depends_libs, never on main.
+depends_libs="libucontext"
+
 makedepends="
     acl-dev
     binutils
     bpftool
+    bzip2-dev
     clang
+    cryptsetup-dev
     curl-dev
+    docbook-xml
+    docbook-xsl-nons
     elfutils-dev
     gcc
     gawk
     gperf
+    gnutls-dev
     kmod-dev
     libarchive-dev
     libbpf-dev
     libseccomp-dev
+    libtasn1-dev
     libucontext-dev
+    libxml2
+    libxslt
     linux-pam-dev
+    lvm2-dev
     saphira-linux-uapi-headers
     lz4-dev
     make
     meson
+    musl-fts
+    musl-obstack
+    nettle-dev
     ninja
     openssl-dev
     pcre2-dev
     pkgconf
     python-jinja2
+    python-lxml
     python-pefile
+    python3
+    tzdata
     util-linux-dev
     xz-dev
+    zlib
     zlib-dev
     zstd-dev
 "
 
 recipe_build()
 {
+	# Catalog bridge (strace-proven 2026-11-07): this tree's libxml2
+	# looks for its DEFAULT catalog at /usr/etc/xml/catalog (a path
+	# that cannot exist - /usr/etc is forbidden in payloads), while
+	# the distribution keeps the real chain at /etc/xml/catalog.
+	# Every explicit-path probe (xmlcatalog CLI, test -f) passes
+	# while xsltproc --nonet fails, because only the default path
+	# is consulted. Point it at the real chain for the whole build.
+	# (Whether the compiled default deserves a libxml2 rebuild of
+	# its own is a separate core-library decision, not this port.)
+	export XML_CATALOG_FILES=/etc/xml/catalog
 	# Feature policy: intended features are enabled explicitly with their
 	# dependencies declared in makedepends, never left to environment-
 	# dependent auto-detection.
@@ -141,6 +200,30 @@ recipe_build()
 	# real /var/run/dbus address (logind restart-loops otherwise),
 	# and an always-on saphira-unmerged taint names the layout.
 	patch -d "$SRC" -Np1 -i "$RECIPE_DIR/files/saphira-unmerged.patch"
+	# musl DT_NEEDED is a bare "libc.so" (readelf-proven), which the
+	# ABI gate's allowlist misses (it knows libc.so.* and the
+	# libc.musl- loader name only): without this every object fails
+	# the gate. Test-harness-only change, nothing shipped.
+	patch -d "$SRC" -Np1 -i "$RECIPE_DIR/files/saphira-test-link-abi-musl-libc.patch"
+	# Sandbox test exclusions live in the harness, not on the command
+	# line: seven tests need privilege/devices/identity the rootless
+	# namespace cannot provide (see the test-env comment below for
+	# each reason). Registration skipped, executables still built;
+	# positional test selection is avoided entirely (it trips an
+	# unreproducible matcher error at this scale).
+	patch -d "$SRC" -Np1 -i "$RECIPE_DIR/files/saphira-test-sandbox-exclusions.patch"
+	# Non-usrmerged default PATH: /sbin and /bin are real directories
+	# holding half the toolset (coreutils --bindir=/bin), but the
+	# split-/usr default omits them, blinding find_executable() to
+	# every /bin|/sbin helper. Payload change; fails closed on drift.
+	patch -d "$SRC" -Np1 -i "$RECIPE_DIR/files/saphira-default-path-split-bin.patch"
+	# No-cryptsetup guards (interim accommodation from the port,
+	# now TRANSPARENT: libcryptsetup is present, HAVE_LIBCRYPTSETUP
+	# compiles the real helpers and the guards are inert pass-throughs.
+	# Kept because the #if structure is still the correct shape for
+	# the option, and removal would churn the patch for zero payload
+	# change. Fails closed on upstream drift like the rest).
+	patch -d "$SRC" -Np1 -i "$RECIPE_DIR/files/saphira-repart-no-cryptsetup.patch"
 	# The vendored vmlinux.h is a build input like any other pinned
 	# payload: verify it before meson reads it. A header silently altered
 	# here would change what the BPF programs bind to at runtime, which is
@@ -155,16 +238,57 @@ recipe_build()
 	# emergency, and emergency itself could not run /usr/sbin/sulogin).
 	# Pin every helper Saphira ships; kexec/loadkeys/setfont/quota* are
 	# not shipped, so their defaults stay dead paths exactly as on 261.
-	# Feature-policy pins (audit 2026-10-09): gnutls/bzip2 are
-	# type=feature (auto) and Saphira carries neither in makedepends, so
-	# today they resolve off by absence; pin disabled so a future
-	# transitive -dev can never flip them on silently. utmp needs no
-	# pin: upstream forces it off whenever -Dlibc=musl (feature table,
-	# 'musl does not support it'). (Option names are lowercase upstream;
-	# meson fails closed on unknown options, so a miscased pin breaks
-	# the build instead of silently doing nothing.)
+	# Feature-policy pins: type=feature (auto) options are never left
+	# to environment-dependent auto-detection. Backends Saphira ships
+	# are enabled explicitly with their dependencies declared in
+	# makedepends: gnutls (journal-gateway HTTPS alongside openssl's
+	# general crypto), bzip2 (blob codec beside xz/zstd/lz4 - journal,
+	# repart, sysext and import paths handle .bz2 either way).
+	# libcryptsetup is enabled explicitly: encrypted partitions
+	# (repart LUKS/integrity, a legitimate Image Creator capability)
+	# are intended Saphira functionality. cryptsetup 2.8.8 is now
+	# ported (cryptsetup-dev in makedepends above); before the port
+	# this failed closed at configure, naming the missing
+	# dependency - which was the trigger for the port, never a
+	# reason to drop the flag. Nothing here is disabled to get the
+	# build through; a future transitive -dev flipping an unpinned
+	# auto option on is a packaging event to declare explicitly,
+	# not a silent default. utmp needs no pin:
+	# upstream forces it off whenever -Dlibc=musl (feature table,
+	# 'musl does not support it'). (Option names are lowercase
+	# upstream; meson fails closed on unknown options, so a miscased
+	# pin breaks the build instead of silently doing nothing.)
 	# (Comment lives here, not inside the invocation: a comment line
 	# breaks backslash continuation and turns flags into commands.)
+	# Man pages resolve their stylesheet import through the XML catalog
+	# chain offline (xsltproc runs --nonet): a missing rewrite fails
+	# thousands of targets deep with a bare external-entity error.
+	# Resolve the exact import up front with the same libxml2 machinery;
+	# a gap fails here, naming the URI, while the fix belongs to the
+	# catalog owner (docbook-xsl-nons' installed catalog.xml), never
+	# to a network fetch or a vendored stylesheet copy here.
+	man_uri='http://docbook.sourceforge.net/release/xsl/current/manpages/docbook.xsl'
+	man_resolved=$(xmlcatalog /etc/xml/catalog "$man_uri" 2>/dev/null || true)
+	case $man_resolved in
+	*/manpages/docbook.xsl) ;;
+	*)
+		printf 'ERROR: man stylesheet does not resolve offline: %s (got: %s)\n' "$man_uri" "$man_resolved" >&2
+		return 1
+		;;
+	esac
+	# Resolution alone is not proof: a catalog rewrite to a relative
+	# or otherwise unopenable location passes the textual match while
+	# xsltproc fails thousands of targets deep (proven 2026-11-07:
+	# rewritePrefix "./" resolved textually but never opened). The
+	# rewritten target must exist in this build root.
+	man_file=$man_resolved
+	case $man_file in
+	file://*) man_file=${man_file#file://} ;;
+	esac
+	[ -f "$man_file" ] || {
+		printf 'ERROR: man stylesheet resolves to a missing file: %s (from: %s)\n' "$man_file" "$man_resolved" >&2
+		return 1
+	}
 	meson setup "$BUILDDIR" "$SRC" \
 		--prefix=/usr \
 		--sysconfdir=/etc \
@@ -182,12 +306,13 @@ recipe_build()
 		-Dseccomp=enabled \
 		-Dxz=enabled \
 		-Dzstd=enabled \
-		-Dtests=false \
-		-Dman=disabled \
+		-Dtests=true \
+		-Dman=enabled \
 		-Dpam=enabled \
 		-Dldconfig=false \
-		-Dgnutls=disabled \
-		-Dbzip2=disabled \
+		-Dgnutls=enabled \
+		-Dbzip2=enabled \
+		-Dlibcryptsetup=enabled \
 		-Dmount-path=/bin/mount \
 		-Dumount-path=/bin/umount \
 		-Dsulogin-path=/sbin/sulogin \
@@ -196,6 +321,7 @@ recipe_build()
 		-Dswapoff-path=/sbin/swapoff \
 		-Dnologin-path=/sbin/nologin \
 		-Dkmod-path=/usr/bin/kmod \
+		-Dfallback-default-target=multi-user.target \
 		-Dbpf-framework=enabled \
 		-Dbpf-compiler=clang \
 		-Dvmlinux-h=provided \
@@ -207,8 +333,11 @@ recipe_build()
 		-Dsystemd-imds-uid=145
 
 	# Explicit non-default states and their recorded reasons:
-	#   man=disabled  queued: no python-lxml recipe; chain is
-	#                 python3-dev -> python-lxml -> re-enable man and docs.
+	#   man=enabled     manual pages build (xsltproc + docbook chain +
+	#                 python-lxml for the indices, all declared above)
+	#                 and ship as systemd-doc: documentation stays
+	#                 optional at install time without being absent
+	#                 from the repository. Upstream default is disabled.
 	#   pam=enabled   linux-pam 1.7.2 landed: logind/homed get real
 	#                 PAM session handling (no pam.d configs shipped
 	#                 yet - that is a follow-up, not this flag).
@@ -219,8 +348,20 @@ recipe_build()
 	#                 statically enables it (sysinit.target.wants/) unless
 	#                 this flag is false, and recipe_install fails closed
 	#                 if either path ever reappears.
-	#   tests=false   payload-only build: the test suite pulls additional
-	#                 introspection dependencies and ships nothing.
+	#   fallback-default-target=multi-user.target
+	#                 Upstream default is graphical.target, which cannot
+	#                 exist on headless Saphira; a missing default.target
+	#                 would fall through a dead link before rescue.
+	#                 multi-user always exists and keeps rescue as the
+	#                 final endpoint, as on 262.
+	#   tests=true    explicit per feature policy (never leave a
+	#                 tri-state to silent default): unit tests are
+	#                 load-bearing validation for a musl + split-layout
+	#                 port, exactly where upstream tests earn their keep.
+	#                 slow-tests and dlopen-tests stay at their upstream
+	#                 defaults (off); fuzz regression tests run at
+	#                 theirs (on). install-tests stays off so no test
+	#                 binary can ship (payload invariant, not trust).
 	#   bpf-framework=enabled
 	#                 REQUIRED, not optional: systemd-nsresourced refuses to
 	#                 hand out a managed user namespace without a BPF LSM
@@ -258,6 +399,47 @@ recipe_build()
 	# initrd/hibernate are intentional Saphira states (true): both are
 	# dependency-free upstream booleans kept on deliberately.
 	ninja -C "$BUILDDIR"
+	# Validation is part of the build, not a separate chore: Saphira
+	# builds systemd against musl with its own layout, which is
+	# precisely where upstream tests earn their keep.
+	# Test environment the sandbox does not provide (upstream CI has
+	# all of it; the build root is a minimal dependency closure):
+	# /var/tmp is created here (seven tests mkdtemp under it; the
+	# seed is the right long-term home for that directory, noted
+	# separately). TZ is deliberately NOT exported: meson builds a
+	# fixed per-test env that drops the parent (TZ= appeared zero
+	# times in a full-suite log), and every timezone test sets TZ
+	# itself - tzdata in makedepends supplies the zoneinfo it reads.
+	# Named exclusions, one by one with reasons - never a blanket skip
+	# (integration tests join this list by suite; a name the suite
+	# flag would also drop is a hard error, so one filter owns all):
+	#   test-mount-util   bind-remount of /run needs privilege the
+	#                     userns build cannot grant (EPERM, proven).
+	#   test-loop-util    loop-device setup needs privilege/dev nodes
+	#                     the sandbox cannot provide (proven).
+	#   test-namespace    idmapping support absent in the sandbox
+	#                     userns (proven).
+	#   test-data-fd-util PR_SET_MM_ARG_START denied by the sandbox
+	#                     seccomp profile (EOPNOTSUPP, proven).
+	#   test-chase        needs /etc/os-release, which no build root
+	#                     carries (product identity ships at image
+	#                     time via saphira-release, never in a build
+	#                     closure; proven ENOENT).
+	#   test-os-util      same os-release absence (proven).
+	#   test-specifier    same os-release absence (%B os build ID
+	#                     dies at test-specifier.c:148; excluding now
+	#                     avoids whack-a-mole over every other
+	#                     identity-derived specifier).
+	mkdir -p /var/tmp
+	# Integration tests spawn full VMs (TEST-xx images) and cannot run
+	# in a package build namespace; the seven sandbox-bound tests above
+	# are excluded by name in files/saphira-test-sandbox-exclusions.patch
+	# (registration skipped, executables still built). Plain suite
+	# exclusion plus no positional args: positional selection trips an
+	# unreproducible matcher error at this scale, so names are never
+	# passed on the command line.
+	meson test -C "$BUILDDIR" --print-errorlogs --no-stdsplit --quiet \
+		--no-suite integration-tests --timeout-multiplier 3
 }
 
 recipe_install()
@@ -279,7 +461,7 @@ recipe_install()
 		usr/lib/libudev.a \
 		usr/lib/libudev.so \
 		usr/lib/libudev.so.1 \
-		usr/lib/libudev.so.1.7.14 \
+		usr/lib/libudev.so.1.7.15 \
 		usr/lib/pkgconfig/libudev.pc \
 		usr/share/pkgconfig/udev.pc; do
 		rm -rf -- "$PKGDEST"/$path

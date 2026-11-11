@@ -66,8 +66,63 @@ workspace=$(mktemp -d "$SAPHIRA_PACKAGE_TMP/sign-apk-repo-XXXXXXXX")
 packages_dir=$workspace/packages
 mkdir "$packages_dir"
 
+retire_manifest=""
+retire_committed=""
+
+# Rollback for a failed publication: when retirement files were moved
+# into the archive but the database transaction never committed, move
+# them back to their live locations (hash-verified against the manifest)
+# so a failed run restores bytes as well as rows. Best effort with loud
+# reporting; never deletes, never overwrites. Runs at the top of
+# cleanup, before the workspace (which holds the manifest) is removed.
+retire_restore_uncommitted()
+{
+	[ -n "${retire_manifest:-}" ] || return 0
+	[ -z "${retire_committed:-}" ] || return 0
+	[ -f "$retire_manifest" ] || return 0
+	[ -s "$retire_manifest" ] || return 0
+	_restored=0
+	_failed=0
+	while IFS= read -r _line || [ -n "$_line" ]; do
+		[ -n "$_line" ] || continue
+		_filename=$(printf '%s' "$_line" | cut -f1)
+		_sum=$(printf '%s' "$_line" | cut -f2)
+		_fdir=$(printf '%s' "$_line" | cut -f3)
+		[ -n "$_filename" ] || continue
+		_arch=$repo_base/.retired/$_filename
+		_dest=$repo_base/$_fdir/$_filename
+		if [ ! -f "$_arch" ]; then
+			printf 'sign-apk-repo: rollback: archived file missing: %s\n' "$_arch" >&2
+			_failed=1
+			continue
+		fi
+		actual=$(sha256sum -- "$_arch" | awk '{ print $1 }')
+		if [ "$actual" != "$_sum" ]; then
+			printf 'sign-apk-repo: rollback: archived hash drift: %s\n' "$_arch" >&2
+			_failed=1
+			continue
+		fi
+		if [ -e "$_dest" ]; then
+			printf 'sign-apk-repo: rollback: live destination already present: %s\n' "$_dest" >&2
+			_failed=1
+			continue
+		fi
+		if mv -- "$_arch" "$_dest"; then
+			_restored=$((_restored+1))
+		else
+			printf 'sign-apk-repo: rollback: move back failed: %s\n' "$_arch" >&2
+			_failed=1
+		fi
+	done < "$retire_manifest"
+	printf 'sign-apk-repo: rollback: restored %s retired APK(s) to the live repository\n' "$_restored" >&2
+	if [ "$_failed" -ne 0 ]; then
+		printf 'sign-apk-repo: rollback: INCOMPLETE (see errors above); remaining archived files stay in %s/.retired/\n' "$repo_base" >&2
+	fi
+}
+
 cleanup()
 {
+	retire_restore_uncommitted
 	if [ -n "${db_lock_held-}" ]; then
 		rmdir -- "$db_lock_held/repository.db.lock" 2>/dev/null || true
 	fi
@@ -89,9 +144,182 @@ ready_transactions=("$incoming_dir"/*-ready)
 # exact-match flag below cannot collide with a filter.
 force_full=0
 heal_mode=0
-if [ "${1:-}" = "--full-audit" ]; then
+approve_unrelated=0
+rollback_request=
+reap_retired=0
+reap_older_than=
+approve_reap=0
+while [ $# -gt 0 ]; do
+	case ${1:-} in
+		--full-audit) force_full=1; shift ;;
+		--approve-unrelated-retirement) approve_unrelated=1; shift ;;
+		--rollback-publish) rollback_request=${2:-}; [ -n "$rollback_request" ] || die "usage: sign-apk-repo --rollback-publish <publication-id>"; shift 2 ;;
+		--rollback-last) rollback_request=LAST; shift ;;
+		--reap-retired) reap_retired=1; shift ;;
+		--older-than) reap_older_than=${2:-}; case $reap_older_than in ''|*[!0-9]*) die "usage: sign-apk-repo --reap-retired --older-than DAYS --approve-retired-removal" ;; esac; shift 2 ;;
+		--approve-retired-removal) approve_reap=1; shift ;;
+		--) shift; break ;;
+		-*) die "unknown flag: $1" ;;
+		*) break ;;
+	esac
+done
+
+# Retirement journal (append-only): every publication that moves live APKs
+# into the retirement archive records the exact bytes there, so a later
+# rollback restores them without rebuilding anything. Mirrors the
+# promote-journal.jsonl convention beside the generation repositories.
+retire_journal=$SAPHIRA_REPO_DIR/retire-journal.jsonl
+
+# --reap-retired: the ONLY sanctioned deletion of retired APKs. Lists
+# every archived retirement first; deletes nothing without
+# --approve-retired-removal (plus --older-than DAYS when given). Never
+# touches live repository directories: the glob below is confined to
+# the per-generation .retired archive.
+if [ "$reap_retired" -eq 1 ]; then
+	candidates=$workspace/reap-candidates.txt
+	: > "$candidates"
+	for _gen in "${repo_names[@]}"; do
+		_archdir=$SAPHIRA_REPO_DIR/$_gen/.retired
+		[ -d "$_archdir" ] || continue
+		find "$_archdir" -maxdepth 1 -type f -name '*.apk' -printf '%T@ %p\n' 2>/dev/null \
+			| sort -n | cut -d' ' -f2- >> "$candidates" || true
+	done
+	if [ ! -s "$candidates" ]; then
+		printf 'sign-apk-repo: reap: retirement archive is empty (nothing to remove)\n'
+		trap - EXIT HUP INT TERM
+		cleanup
+		exit 0
+	fi
+	printf 'sign-apk-repo: reap: candidate archived APKs:\n'
+	cat "$candidates"
+	if [ "$approve_reap" -ne 1 ]; then
+		die "reap refused: list-only without --approve-retired-removal (no deletion performed)"
+	fi
+	now=$(date +%s)
+	reaped=$workspace/reaped.txt
+	: > "$reaped"
+	while IFS= read -r _f || [ -n "$_f" ]; do
+		[ -n "$_f" ] || continue
+		if [ -n "$reap_older_than" ]; then
+			_mtime=$(stat -c %Y -- "$_f")
+			_age_days=$(( (now - _mtime) / 86400 ))
+			[ "$_age_days" -ge "$reap_older_than" ] || continue
+		fi
+		rm -f -- "$_f" && printf '%s\n' "$_f" >> "$reaped"
+	done < "$candidates"
+	printf '{"ts":"%s","action":"reaped","files":%s}\n' \
+		"$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$("$SAPHIRA_PYTHON" - "$reaped" <<'PY'
+import json
+import sys
+with open(sys.argv[1], encoding="utf-8") as stream:
+    files = [line.strip() for line in stream if line.strip()]
+print(json.dumps(files))
+PY
+)" >> "$retire_journal"
+	normalize_ownership "$retire_journal"
+	printf 'sign-apk-repo: reap: removed %s archived APK(s) (live repository untouched)\n' "$(wc -l < "$reaped")"
+	trap - EXIT HUP INT TERM
+	cleanup
+	exit 0
+fi
+
+# --rollback-publish/--rollback-last: restore one publication exactly:
+# move its retired APKs back from the retirement archive (hash-verified
+# against the journal) and remove the files it added (hash-verified, so
+# never the wrong bytes), then fall through to the heal reconcile below
+# with no staged work, so indexes and repository.db converge on the
+# restored bytes. Only the most recent publication of a repository can
+# be rolled back (anything else refuses with guidance). Fails closed
+# when staged transactions exist, when the journal entry is missing,
+# when newer publications exist for the same repository, or when any
+# archived file is absent or hash-drifted.
+if [ -n "$rollback_request" ]; then
+	for _t in "$incoming_dir"/*-ready; do
+		[ -d "$_t" ] || continue
+		die "rollback refused: staged transaction present: ${_t##*/} (publish or retire it first)"
+	done
+	[ -f "$retire_journal" ] || die "rollback refused: no retirement journal: $retire_journal"
+	"$SAPHIRA_PYTHON" - "$retire_journal" "$rollback_request" "$SAPHIRA_REPO_DIR" <<'PY' || die "rollback refused or failed (see above; live index/db unchanged)"
+import datetime
+import hashlib
+import json
+import os
+import sys
+journal_path, request, repo_root = sys.argv[1:4]
+lines = []
+with open(journal_path, encoding="utf-8") as stream:
+    for line in stream:
+        line = line.strip()
+        if line:
+            lines.append(line)
+pubs = []
+for line in lines:
+    try:
+        entry = json.loads(line)
+    except ValueError:
+        continue
+    if entry.get("action") == "published":
+        pubs.append(entry)
+if not pubs:
+    print("sign-apk-repo: rollback refused: journal holds no publications", file=sys.stderr)
+    raise SystemExit(1)
+if request == "LAST":
+    target = pubs[-1]
+else:
+    match = [e for e in pubs if e.get("publication_id") == request]
+    if not match:
+        print(f"sign-apk-repo: rollback refused: no journal entry for {request}", file=sys.stderr)
+        raise SystemExit(1)
+    target = match[-1]
+repo = target["repo"]
+later = [e["publication_id"] for e in pubs if e.get("repo") == repo and e["ts"] > target["ts"]]
+if later:
+    print(f"sign-apk-repo: rollback refused: newer publication(s) exist for {repo}: "
+          + ", ".join(later) + " (roll back newest-first, or restore NVRs individually)", file=sys.stderr)
+    raise SystemExit(1)
+restored = []
+for item in target.get("retired", []):
+    src, dest, sha = item["archive_path"], item["live_path"], item["sha256"]
+    if not os.path.isfile(src):
+        print(f"sign-apk-repo: rollback: archived file missing: {src} (cannot restore {item['nvr']})", file=sys.stderr)
+        raise SystemExit(1)
+    digest = hashlib.sha256()
+    with open(src, "rb") as stream:
+        for chunk in iter(lambda: stream.read(1048576), b""):
+            digest.update(chunk)
+    if digest.hexdigest() != sha:
+        print(f"sign-apk-repo: rollback: archived hash drift: {src} (refusing to restore {item['nvr']})", file=sys.stderr)
+        raise SystemExit(1)
+    if os.path.exists(dest):
+        print(f"sign-apk-repo: rollback: live destination already present: {dest} (refusing to overwrite)", file=sys.stderr)
+        raise SystemExit(1)
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    os.rename(src, dest)
+    restored.append(item["nvr"])
+removed = []
+for item in target.get("added", []):
+    dest, sha = item["live_path"], item["sha256"]
+    if not os.path.isfile(dest):
+        print(f"sign-apk-repo: rollback: added file already absent: {dest} (nothing to remove for {item['filename']})", file=sys.stderr)
+        raise SystemExit(1)
+    digest = hashlib.sha256()
+    with open(dest, "rb") as stream:
+        for chunk in iter(lambda: stream.read(1048576), b""):
+            digest.update(chunk)
+    if digest.hexdigest() != sha:
+        print(f"sign-apk-repo: rollback: added file changed since publication: {dest} (refusing to remove)", file=sys.stderr)
+        raise SystemExit(1)
+    os.remove(dest)
+    removed.append(item["filename"])
+record = {"ts": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+          "action": "rollback", "of_publication_id": target["publication_id"],
+          "repo": repo, "restored": restored, "removed_added": removed}
+with open(journal_path, "a", encoding="utf-8") as stream:
+    stream.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
+print(f"sign-apk-repo: rollback: restored {len(restored)} retired APK(s), removed {len(removed)} added file(s)")
+PY
+	normalize_ownership "$retire_journal"
 	force_full=1
-	shift
 fi
 
 # Target filters only: when package names are given as arguments, only
@@ -870,6 +1098,9 @@ PY
 for repo_name in "${repo_names[@]}"; do
 	repo_base=$SAPHIRA_REPO_DIR/$repo_name
 	repo_dir=$repo_base/$SAPHIRA_ARCH
+	retire_manifest=""
+	retire_committed=""
+	retire_moved=0
 	# Arch-split layout resolver: apk fetches each package from
 	# <repo>/<package-arch>/, so every file lookup and placement
 	# must resolve the file's own arch directory. The strict form
@@ -939,6 +1170,21 @@ identities=$workspace/package-identities.json
 		fi
 	fi
 	if [ "$gate_mode" = full ]; then
+		_gate_before=$workspace/$repo_name-audit-before.txt
+		_gate_after=$workspace/$repo_name-audit-after.txt
+		: > "$_gate_before"
+		if [ -f "$db_file" ]; then
+			"$SAPHIRA_PYTHON" - "$repo_db_lib" "$db_file" "$_gate_before" <<'PY'
+import os
+import sys
+sys.path.insert(0, os.path.dirname(sys.argv[1]))
+import repo_db
+conn = repo_db.connect_readonly(sys.argv[2])
+rows = sorted(r["nvr"] for r in conn.execute("SELECT nvr FROM packages"))
+with open(sys.argv[3], "w", encoding="utf-8") as stream:
+    stream.write("\n".join(rows) + "\n")
+PY
+		fi
 		for _vdir in "$repo_dir" "$repo_base/noarch"; do
 			[ -d "$_vdir" ] || continue
 			for package in "$_vdir"/*.apk; do
@@ -948,6 +1194,33 @@ identities=$workspace/package-identities.json
 		done
 		db_gate full "$db_file" "$staged_info" "$repo_dir/Packages.adb" "${staged_paths[@]}" \
 			|| die "full audit failed for $repo_name (see above)"
+		# Census reconciliation is never silent: list exactly which
+		# rows the audit added (files without rows) and removed
+		# (rows without files), so a missing-file drop can never pass
+		# unnoticed the way the apk-tools r5 row did.
+		if [ -s "$_gate_before" ]; then
+			"$SAPHIRA_PYTHON" - "$repo_db_lib" "$db_file" "$_gate_after" <<'PY'
+import os
+import sys
+sys.path.insert(0, os.path.dirname(sys.argv[1]))
+import repo_db
+conn = repo_db.connect_readonly(sys.argv[2])
+rows = sorted(r["nvr"] for r in conn.execute("SELECT nvr FROM packages"))
+with open(sys.argv[3], "w", encoding="utf-8") as stream:
+    stream.write("\n".join(rows) + "\n")
+PY
+			_added=$(comm -13 "$_gate_before" "$_gate_after" | wc -l)
+			_removed=$(comm -23 "$_gate_before" "$_gate_after" | wc -l)
+			printf 'sign-apk-repo: audit: ledger rows added: %s, removed: %s\n' "$_added" "$_removed"
+			if [ "$_added" -gt 0 ]; then
+				printf 'sign-apk-repo: audit: added rows:\n'
+				comm -13 "$_gate_before" "$_gate_after" | sed 's/^/  + /'
+			fi
+			if [ "$_removed" -gt 0 ]; then
+				printf 'sign-apk-repo: audit: removed rows:\n'
+				comm -23 "$_gate_before" "$_gate_after" | sed 's/^/  - /'
+			fi
+		fi
 	fi
 
 # Hatched retention + r0 inadmissibility: the live generation keeps the
@@ -972,7 +1245,7 @@ if [ "$heal_mode" -eq 0 ] && [ "${#repo_names[@]}" -gt 1 ] && [ "$repo_name" = "
 	case ${SAPHIRA_RETAIN_GENERATIONS:-2} in
 		''|*[!0-9]*|0) die "invalid SAPHIRA_RETAIN_GENERATIONS: ${SAPHIRA_RETAIN_GENERATIONS:-2} (positive integer required)" ;;
 	esac
-	"$SAPHIRA_PYTHON" - "$repo_db_lib" "$SAPHIRA_APK" "$db_file" "$repo_dir/Packages.adb" \
+	SAPHIRA_APPROVE_UNRELATED=$approve_unrelated "$SAPHIRA_PYTHON" - "$repo_db_lib" "$SAPHIRA_APK" "$db_file" "$repo_dir/Packages.adb" \
 		"${SAPHIRA_RETAIN_GENERATIONS:-2}" "$SAPHIRA_RETAIN_NVR" "$retire_file" "$identities" \
 		"${staged_paths[@]}" <<'PY' || die "retention planning failed for $repo_name (see above)"
 import json
@@ -1005,6 +1278,39 @@ try:
 except rdb.RepoDbError as exc:
     print(f"sign-apk-repo: retention refused: {exc}", file=sys.stderr)
     raise SystemExit(1)
+if retired:
+    # Fail closed on unrelated mass retirement: a publication may only
+    # retire NVRs of families it stages. Anything else is announced
+    # explicitly and needs --approve-unrelated-retirement; without it
+    # the run stops before any file moves. Staged-family pruning
+    # proceeds silently exactly as before.
+    staged_names = {name for (name, _version) in staged}
+    retired_names = {}
+    for filename in sorted(retired):
+        nvr = filename[:-4] if filename.endswith(".apk") else filename
+        row = conn.execute("SELECT name, version FROM packages WHERE nvr=?", (nvr,)).fetchone()
+        if row is None:
+            retired_names.setdefault("UNKNOWN", []).append(filename)
+            continue
+        # r0 purges are admissibility enforcement, not retention: r0 is
+        # inadmissible in the live view on every publish by absolute
+        # policy, so an r0 leaving as a side effect is intended, never
+        # an unexpected mass retirement.
+        if rdb.pkgrel_of(row["version"]) == 0:
+            continue
+        retired_names.setdefault(row["name"], []).append(filename)
+    unrelated = {name: files for name, files in retired_names.items() if name not in staged_names}
+    if unrelated and os.environ.get("SAPHIRA_APPROVE_UNRELATED") != "1":
+        print("sign-apk-repo: retention refused: retire set touches families"
+              " absent from the staged set (unexpected mass retirement):", file=sys.stderr)
+        for name in sorted(unrelated):
+            print(f"  {name}: " + ", ".join(unrelated[name]), file=sys.stderr)
+        print("sign-apk-repo: re-run with --approve-unrelated-retirement to proceed,"
+              " or narrow the set (bumppkg/holds)", file=sys.stderr)
+        raise SystemExit(1)
+    if unrelated:
+        print("sign-apk-repo: retention: operator-approved unrelated retirement of "
+              + ", ".join(f"{name} ({len(files)})" for name, files in sorted(unrelated.items())))
 conn.close()
 with open(retire_path, "w", encoding="utf-8") as stream:
     for filename in sorted(retired):
@@ -1023,11 +1329,40 @@ if retired:
 else:
     print("sign-apk-repo: retention: nothing to retire")
 PY
+	# Reversible retirement: retired APKs move (never rm) into the
+	# per-generation retirement archive, hash-verified on arrival. If
+	# the publication transaction below fails, the EXIT trap moves them
+	# back (hash-verified) before the workspace is cleaned, so a failed
+	# run restores bytes as well as rows. Archive contents are never
+	# reaped automatically; removal needs the explicit --reap-retired
+	# operation with --approve-retired-removal.
+	retired_archive=$repo_base/.retired
+	retire_manifest=$workspace/$repo_name-retire-manifest.txt
+	: > "$retire_manifest"
+	retire_moved=0
+	retire_committed=""
+	mkdir -p -- "$retired_archive"
 	while IFS= read -r filename || [ -n "$filename" ]; do
 		[ -n "$filename" ] || continue
 		_fdir=$(repo_file_dir "$repo_base" "$filename")
-		rm -f -- "$repo_base/$_fdir/$filename"
+		_src=$repo_base/$_fdir/$filename
+		[ -f "$_src" ] || die "$repo_name: retirement source missing: $_src (heal first)"
+		_sum=$(sha256sum -- "$_src" | awk '{ print $1 }')
+		_size=$(stat -c %s -- "$_src")
+		mv -- "$_src" "$retired_archive/$filename" \
+			|| die "$repo_name: retirement archive move failed for $filename (restore from $retired_archive/$filename)"
+		actual=$(sha256sum -- "$retired_archive/$filename" | awk '{ print $1 }')
+		[ "$actual" = "$_sum" ] || die "$repo_name: retired hash mismatch for $filename (investigate before retrying)"
+		normalize_ownership "$retired_archive/$filename"
+		printf '%s\t%s\t%s\t%s\n' "$filename" "$_sum" "$_fdir" "$_size" >> "$retire_manifest"
+		retire_moved=1
 	done < "$retire_file"
+	normalize_ownership "$retired_archive"
+	# Test hook (never set in production): fail after retirement moves
+	# so the EXIT-trap rollback path is exercised hermetically by the
+	# retire-rollback test. The trap moves the files back and the run
+	# dies here with rows untouched.
+	[ -z "${SAPHIRA_TEST_FAIL_AFTER_RETIRE:-}" ] || die "test hook: failing after retirement moves as requested"
 fi
 all_packages=()
 for _pdir in "$repo_dir" "$repo_base/noarch"; do
@@ -1098,6 +1433,58 @@ done
 # only and is never written here.
 db_apply "$db_file" "$staged_info" "$retire_file" || die "repository.db transaction failed for $repo_name (see above)"
 normalize_ownership "$repo_dir/repository.db"
+retire_committed=1
+# Journal the publication's file movements for rollback: retired APKs
+# (with archive locations and hashes) and staged-added files. A later
+# --rollback-publish replays this entry in reverse, then heals.
+if [ "${retire_moved:-0}" -ne 0 ]; then
+	"$SAPHIRA_PYTHON" - "$retire_journal" "$publication_id" "$repo_name" "$retire_manifest" "$staged_list" "$repo_base" <<'PY' || die "$repo_name: retirement journal failed (rows committed; record the entry manually before any rollback)"
+import datetime
+import hashlib
+import json
+import os
+import sys
+journal_path, pub_id, repo, manifest_path, staged_path, repo_base = sys.argv[1:7]
+arch_default = os.environ.get("SAPHIRA_ARCH", "x86_64")
+retired = []
+with open(manifest_path, encoding="utf-8") as stream:
+    for line in stream:
+        line = line.rstrip("\n")
+        if not line:
+            continue
+        filename, sha, archdir, size = line.split("\t")
+        retired.append({"nvr": filename[:-4] if filename.endswith(".apk") else filename,
+                        "sha256": sha, "size": int(size),
+                        "live_path": os.path.join(repo_base, archdir, filename),
+                        "archive_path": os.path.join(repo_base, ".retired", filename)})
+added = []
+with open(staged_path, encoding="utf-8") as stream:
+    staged_files = [entry.strip() for entry in stream if entry.strip()]
+for filename in staged_files:
+    path = None
+    for cand in (os.path.join(repo_base, arch_default, filename),
+                 os.path.join(repo_base, "noarch", filename)):
+        if os.path.isfile(cand):
+            path = cand
+            break
+    if path is None:
+        print(f"sign-apk-repo: journal: staged file not installed: {filename}", file=sys.stderr)
+        raise SystemExit(1)
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        for chunk in iter(lambda: stream.read(1048576), b""):
+            digest.update(chunk)
+    added.append({"filename": filename, "arch": os.path.basename(os.path.dirname(path)),
+                  "sha256": digest.hexdigest(), "live_path": path})
+record = {"ts": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+          "action": "published", "publication_id": pub_id, "repo": repo,
+          "added": added, "retired": retired}
+with open(journal_path, "a", encoding="utf-8") as stream:
+    stream.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
+print(f"sign-apk-repo: journal: recorded publication {pub_id} ({len(added)} added, {len(retired)} retired)")
+PY
+	normalize_ownership "$retire_journal"
+fi
 rmdir -- "$repo_dir/repository.db.lock" 2>/dev/null || true
 db_lock_held=""
 chmod g+rws -- "$repo_dir" 2>/dev/null || true

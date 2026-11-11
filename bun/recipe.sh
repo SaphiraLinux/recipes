@@ -14,7 +14,7 @@
 # stack workarounds exist unless a build genuinely proves them needed.
 
 pkgname=bun
-pkgver=1.4.2
+pkgver=1.4.4
 pkgrel=1
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc="Bun JavaScript runtime, bundler and package manager"
@@ -22,8 +22,8 @@ license="MIT"
 origin=bun
 repo=saphira
 url=https://bun.sh/
-source=https://github.com/oven-sh/bun/archive/refs/tags/bun-v1.4.2.tar.gz
-sha256=e14670b117d69012d828514d657f0a3133d1c25d13d69461184d05b6a8e9a876
+source=https://github.com/oven-sh/bun/archive/refs/tags/bun-v1.4.4.tar.gz
+sha256=00ce37fa5ac393a7d225bcf847365982fceb818b56a19b6884fefd67918468ff
 
 depends=""
 
@@ -60,7 +60,7 @@ recipe_build()
 		"$RECIPE_DIR/bootstrap.lock")
 	test -n "$expected" || fatal "bootstrap archive is not locked"
 	curl -fsSL --retry 3 --output "$BUILDDIR/stage0.zip" \
-		"https://github.com/oven-sh/bun/releases/download/bun-v1.4.2/bun-linux-x64-musl-baseline.zip" ||
+		"https://github.com/oven-sh/bun/releases/download/bun-v${pkgver}/bun-linux-x64-musl-baseline.zip" ||
 		fatal "failed to download bootstrap archive"
 	printf '%s  %s\n' "$expected" "$BUILDDIR/stage0.zip" | sha256sum -c - ||
 		fatal "bootstrap archive checksum mismatch"
@@ -69,8 +69,8 @@ recipe_build()
 		fatal "failed to unpack bootstrap archive"
 	stage0_bin=$(find "$stage0" -name bun -type f | head -1)
 	test -n "$stage0_bin" || fatal "bootstrap archive has no bun binary"
-	"$stage0_bin" --version | grep -q "^1.4.2" || fatal "unexpected bootstrap version"
-	git clone --recursive --branch bun-v1.4.2 --depth 1 \
+	"$stage0_bin" --version | grep -q "^${pkgver}" || fatal "unexpected bootstrap version"
+	git clone --recursive --branch bun-v${pkgver} --depth 1 \
 		https://github.com/oven-sh/bun.git "$BUILDDIR/bun-src" ||
 		fatal "failed to clone bun source (submodules required)"
 	cd "$BUILDDIR/bun-src"
@@ -88,7 +88,7 @@ recipe_install()
 	# run exercising JSC JIT plus threads, and a file roundtrip. No
 	# stack workarounds exist; if these ever fail on thread-stack
 	# grounds, that failure is the required proof before adding any.
-	"$PKGDEST/usr/bin/bun" --version | grep -q "^1.4.2"
+	"$PKGDEST/usr/bin/bun" --version | grep -q "^${pkgver}"
 	printf 'console.log("saphira-bun-ok");\n' > "$BUILDDIR/stage0-hello.js"
 	"$PKGDEST/usr/bin/bun" "$BUILDDIR/stage0-hello.js" | grep -q saphira-bun-ok
 	printf 'hello' > "$BUILDDIR/stage0-in.txt"

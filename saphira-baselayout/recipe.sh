@@ -2,7 +2,25 @@
 
 pkgname=saphira-baselayout
 pkgver=0.1
-pkgrel=65
+pkgrel=70
+# r69: default-grub menu on native console only (GRUB_TERMINAL_*="console",
+# no unconditional GRUB_SERIAL_COMMAND; serial stays as a commented
+# opt-in). The old unconditional `serial --unit=0` looks up port com0,
+# which fails loudly on machines with no UART and no ACPI SPCR (`serial
+# port `com0' isn't found' at every boot). Payload change
+# (default-grub conffile; existing machines merge .apk-new by hand;
+# serial-dependent installs must set the three vars explicitly).
+# r67: firstboot network matches MACAddress, never interface names
+# (predictable enpNs0 names change with kernel enumeration; a Name=
+# written at setup may never match again. Minimer 2026-11-07: renamed
+# NIC left the fresh install without a matching network). Falls back
+# to Name= only when sysfs has no readable address. Payload change.
+# Anti-loop guard overridden: operator-ordered broken-install fix.
+# r66: default-grub disables fs-UUID root generation
+# (GRUB_DISABLE_LINUX_UUID=true; PARTUUID stays enabled). A generated
+# root=UUID= never resolves without an initramfs (Minimer 2026-11-07:
+# every UUID= entry failed, the device path booted). Payload change
+# (default-grub conffile; existing machines merge .apk-new by hand).
 # r62: backfilled identity registry (86 packaged/systemd rows; existing
 # rows byte-identical) plus firstboot arming on the apk skeleton's empty
 # root hash (0.2.2 images shipped locked-root with no marker and no
@@ -161,9 +179,10 @@ pkgrel=65
 # install_shell_defaults tolerates their absence rather than aborting the
 # transaction over a dotfile.
 # Kernel arguments: systemd.imds=no is gone from the packaged
-# GRUB_CMDLINE_LINUX, which is init-neutral; saphira-image adds it for
-# SaphiraD targets only, next to systemd.getty_auto=0. An OpenRC kernel
-# line carries no systemd-only arguments.
+# GRUB_CMDLINE_LINUX, which is init-neutral; saphira-image no longer
+# adds it (or systemd.getty_auto=0) for any target either (removed
+# 2026-11-06: grub must not differ by init). No kernel line carries
+# systemd-only arguments.
 # r46: network policy for a server, and firstboot in the right place.
 # saphira-firstboot must never infer DHCP from an empty answer. The
 # per-interface prompt used to offer (d)HCP/(s)tatic/(k)eep with D as
@@ -515,6 +534,8 @@ install -m 0644 "$RECIPE_DIR/files/libexec/permissions-override.sh" \
 		"$PKGDEST/usr/lib/systemd/system/saphira-firstboot.service"
 	install -m 0755 "$RECIPE_DIR/files/libexec/apply-network.sh" \
 		"$PKGDEST/usr/libexec/saphira/apply-network.sh"
+	install -m 0755 "$RECIPE_DIR/files/libexec/apply-locale.sh" \
+		"$PKGDEST/usr/libexec/saphira/apply-locale.sh"
 	install -m 0644 "$RECIPE_DIR/files/accounts.tsv" \
 		"$PKGDEST/usr/share/saphira/accounts.tsv"
 	# Seeds consumed by apply-accounts.sh when the historical

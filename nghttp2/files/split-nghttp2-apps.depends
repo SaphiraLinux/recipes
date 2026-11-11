@@ -1,0 +1,6 @@
+# nghttp2-apps runtime edges: the tools link c-ares (async DNS) and
+# libev (event loop). The base library links neither (see the
+# split-correctness assert in recipe_install).
+# Base pin nghttp2=<NVR> is added automatically by the splitter.
+c-ares
+libev

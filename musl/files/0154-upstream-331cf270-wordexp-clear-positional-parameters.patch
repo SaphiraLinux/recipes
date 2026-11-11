@@ -1,0 +1,31 @@
+From 331cf27023e20813a5c634be47f55c1a490aa827 Mon Sep 17 00:00:00 2001
+From: Szabolcs Nagy <nsz@port70.net>
+Date: Sun, 21 Jun 2026 12:18:51 +0000
+Subject: [PATCH] wordexp: clear positional parameters
+
+added 'set --' so $@, $*, $#, $1, $2 are cleared
+(does not seem to be in the spec, but cleaner)
+
+  wordexp("$*", p, 0)
+
+was "$*","2>/dev/stderr", now empty list.
+---
+ src/misc/wordexp.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/misc/wordexp.c b/src/misc/wordexp.c
+index 5f9bc1d5..76595b88 100644
+--- a/src/misc/wordexp.c
++++ b/src/misc/wordexp.c
+@@ -116,7 +116,7 @@ static int do_wordexp(const char *s, wordexp_t *we, int flags)
+ 		if (null == 2) fcntl(2, F_SETFD, 0);
+ 		else dup2(null, 2);
+ 		execl("/bin/sh", "sh", "-c",
+-			"eval \"printf %s\\\\\\\\0 x $1\"",
++			"eval \"set --;printf %s\\\\\\\\0 x $1\"",
+ 			"sh", s, (char *)0);
+ 		_exit(1);
+ 	}
+-- 
+2.55.0
+

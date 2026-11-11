@@ -227,7 +227,20 @@ say_absent_amd() {
 cmd_all() {
 	[ -d "$SYSROOT/lib/modules" ] ||
 		die "no kernel modules under $SYSROOT/lib/modules"
-	dirs=$(selected_dirs "$INCLUDE" | unique_lines)
+	# NOTE: selected_dirs must NOT be piped inside the substitution:
+	# its die() would exit only the subshell and the pipeline status
+	# would be unique_lines' 0, so a required-but-missing firmware
+	# directory would print a fatal message yet still build an image
+	# without it. Fail the real shell first, then deduplicate.
+	selected_list=$(mktemp "$(stage_base)/earlyfw-dirs.XXXXXX") ||
+		die 'cannot stage firmware list'
+	trap 'rm -f -- "$selected_list"' EXIT HUP INT TERM
+	selected_dirs "$INCLUDE" >"$selected_list" || {
+		rm -f -- "$selected_list"
+		die 'firmware selection failed (see above)'
+	}
+	dirs=$(unique_lines <"$selected_list")
+	rm -f -- "$selected_list"
 	[ -n "$dirs" ] || die 'empty firmware selection (no hardware matched and no baseline?)'
 	nrels=0
 	for moddir in "$SYSROOT"/lib/modules/*; do

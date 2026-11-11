@@ -65,6 +65,30 @@ installed machine carries, and no init system at all. Compose it with
 .B init-openrc
 or
 .B init-systemd .
+Firmware tooling is not here: UEFI-only intentions live in
+.BR base-efi ,
+BIOS needs nothing beyond the common set
+.RB ( base-bios ).
+.TP
+.B base-bios
+BIOS firmware layer: intentionally empty. GRUB covers the i386-pc
+target from the same package that covers x86_64-efi, there is no NVRAM
+to manage and no FAT system partition to maintain. The file exists so
+the firmware dimension is explicit: saphira-image appends it to bios-*
+targets automatically.
+.TP
+.B base-efi
+UEFI firmware layer: NVRAM boot-entry management
+.RB ( efibootmgr )
+and ESP tooling
+.RB ( dosfstools ).
+saphira-image appends it to uefi-* targets automatically, so a UEFI
+installation carries its ESP and NVRAM tooling while a BIOS
+installation never sees EFI-specific utilities. Installer profiles
+keep both toolchains explicitly instead: the firmware booted is not
+necessarily the firmware targeted. A machine that boots only a
+removable EFI binary needs no NVRAM state; NVRAM management is for
+kernel upgrades that re-point the boot entry.
 .TP
 .B init-openrc
 .TQ
@@ -101,6 +125,13 @@ the running system).
 Role layers: additional intention lists composed on top of a minimal
 profile. Roles are profile data, not meta-packages: no new package
 name is invented for a role.
+.TP
+.B role-wireless
+Wireless client networking: the regulatory database and nl80211
+configuration tooling. WPA association needs wpa_supplicant, added
+explicitly where required; wireless-tools stays legacy-optional and
+hostapd belongs to a separate access-point capability. Wireless
+firmware is hardware-selected, never universal.
 .TP
 .B role-zfs
 ZFS kernel module and userspace for a flavor whose root lives on a

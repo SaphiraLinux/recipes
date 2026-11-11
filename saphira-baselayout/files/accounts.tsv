@@ -205,3 +205,5 @@ vchkpw	group	141	-	-	-	-
 vpopmail	user	140	vchkpw	/home/vpopmail	/sbin/nologin	-
 lp	user	179	lp	/var/empty	/sbin/nologin	-
 lpadmin	group	180	-	-	-	-
+peabrain	user	181	peabrain	/var/empty	/sbin/nologin	-
+peabrain	group	181	-	-	-	-

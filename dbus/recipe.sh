@@ -4,6 +4,16 @@ pkgver=1.16.0
 # r8: messagebus home /var/run/dbus -> /var/empty (platform no-home
 # idiom; the old home made installs chown a live socket dir, failing
 # closed in unprivileged install-test roots).
+# Expected boot noise (proven Minimer 2026-11-08, dbus 1.16.0):
+# dbus-daemon logs "Failed to drop supplementary groups: Operation
+# not permitted" once per boot and runs correctly as
+# messagebus:messagebus. The unit demotes via User=/Group= keeping
+# only CAP_AUDIT_WRITE, then upstream system.conf's <user>messagebus
+# makes the daemon attempt its own setgroups while unprivileged.
+# The confinement it wants already holds via the supervisor. Do NOT
+# "fix" this by removing <user> (loses root-fallback protection
+# outside systemd) or by granting CAP_SETGID (privilege for log
+# cosmetics). Accept and keep this note.
 pkgrel=8
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='D-Bus message bus system'

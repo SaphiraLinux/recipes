@@ -1,0 +1,30 @@
+From c0c6e62a93682b88bce8018dde6401e486d77190 Mon Sep 17 00:00:00 2001
+From: Matthias Goergens <matthias.goergens@gmail.com>
+Date: Wed, 5 Aug 2026 15:57:51 +0800
+Subject: [PATCH] time: fix TZif version parsing
+
+TZif v1 encodes its version as NUL, but do_tzset treats only the byte
+'1' as v1. It consequently reads a valid v1 file as if it contained a
+second header.
+
+Use zero and nonzero version bytes to distinguish v1 from later files.
+---
+ src/time/__tz.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/time/__tz.c b/src/time/__tz.c
+index cfce268e..df57fec1 100644
+--- a/src/time/__tz.c
++++ b/src/time/__tz.c
+@@ -196,7 +196,7 @@ static void do_tzset()
+ 	zi = map;
+ 	if (map) {
+ 		int scale = 2;
+-		if (map[4]!='1') {
++		if (map[4]) {
+ 			size_t skip = zi_dotprod(zi+20, VEC(1,1,8,5,6,1), 6);
+ 			trans = zi+skip+44+44;
+ 			scale++;
+-- 
+2.55.0
+

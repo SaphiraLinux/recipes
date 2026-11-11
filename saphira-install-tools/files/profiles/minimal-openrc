@@ -17,9 +17,6 @@
 #                       intention: a bootable image carries its own
 #                       bootloader, and later kernel upgrades need it.
 #   e2fsprogs           mkfs.ext4 for the root filesystem.
-#   dosfstools          mkfs.vfat for the EFI System Partition. Required
-#                       for any uefi-* target; harmless on bios-* (the
-#                       creator refuses to use it there).
 #   openssh             login/access. A server with no remote access is
 #                       not manageable.
 #   saphira-network     the supported network-configuration framework
@@ -32,6 +29,13 @@
 #                       is not administrable.
 #   procps-ng           process tools (ps, free, top): a working system
 #                       needs a way to inspect processes and memory.
+#   acpid               ACPI power-button handling (virsh shutdown and
+#                       the physical button power the machine off
+#                       cleanly; without it the guest only halts).
+#                       Installed, never auto-enabled by the profile.
+#   iputils             ping and friends. A base host with no ping is not
+#                       administrable; kept deliberately, matching the
+#                       systemd twin and the saphira-openrc product.
 #   tzdata              a server with no timezone cannot reason about
 #                       logs, certificates or scheduling.
 #
@@ -47,10 +51,11 @@ saphira-kernel-7.2.3
 openrc
 grub
 e2fsprogs
-dosfstools
 openssh
 saphira-network
 dhcpcd
 vim
 procps-ng
+acpid
+iputils
 tzdata

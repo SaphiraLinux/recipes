@@ -51,6 +51,9 @@
 #                       the physical button power the machine off
 #                       cleanly; without it the guest only halts).
 #   vim                 the base editor.
+#   sudo                privilege escalation for the wheel administrator
+#                       firstboot creates. The admin account joins wheel;
+#                       without sudo the wheel membership grants nothing.
 #   iputils             ping and friends. A base host with no ping is not
 #                       administrable; proposed explicitly, kept deliberately.
 #   tzdata              a server with no timezone cannot reason about

@@ -110,6 +110,19 @@ kmod_prepare_tree()
 	fi
 	cp "$_kconfig" "$_kdir/.config" ||
 		{ echo "ERROR: cannot seed tree .config" >&2; return 1; }
+	# Module signing key into the tree: the vendored config names
+	# CONFIG_MODULE_SIG_KEY="certs/module-signing.pem" (relative to
+	# the tree root), and a full make descends into certs/ to build
+	# signing_key.x509 from it. Same copy the kernel recipe and the
+	# andrews helper perform; without it the build dies with "No
+	# rule to make target 'certs/module-signing.pem'" (proven
+	# 2026-11-06). The key itself stays out of /recipes (builder
+	# exposed /keys/module-signing.pem only).
+	[ -r /keys/module-signing.pem ] ||
+		{ echo "ERROR: module signing key not exposed at /keys/module-signing.pem" >&2; return 1; }
+	cp /keys/module-signing.pem "$_kdir/certs/module-signing.pem" &&
+	chmod 600 "$_kdir/certs/module-signing.pem" ||
+		{ echo "ERROR: cannot stage module signing key into tree" >&2; return 1; }
 	# Same merge the kernel build runs: the vendored config is the
 	# pre-merge input, olddefconfig resolves it against the patched
 	# Kconfig. Deterministic given the same tree and config.
@@ -124,16 +137,22 @@ kmod_prepare_tree()
 		{ echo "ERROR: no-initramfs-builtins gate failed on prepared tree" >&2; return 1; }
 	(cd "$_kdir" && make modules_prepare -j${JOBS:-$(nproc)}) ||
 		{ echo "ERROR: kernel modules_prepare failed" >&2; return 1; }
-	# Full in-tree modules build, discarded afterwards: modpost writes
-	# Module.symvers, which external Kbuild sanity-checks (NVIDIA
-	# refuses a symvers-less tree). modules_prepare alone never
-	# generates it. Same price the andrews contract pays; the old
-	# shipped prepared tree carried symvers, so this restores that
-	# contract instead of waiving the vendor check.
-	(cd "$_kdir" && make modules -j${JOBS:-$(nproc)}) ||
-		{ echo "ERROR: kernel modules build failed (Module.symvers)" >&2; return 1; }
+	# FULL kernel build, discarded afterwards: modpost writes
+	# Module.symvers, which the NVIDIA build sanity-checks (it
+	# refuses a symvers-less tree). `make modules` alone never
+	# generates it on our lines: without CONFIG_DEBUG_INFO_BTF_MODULES
+	# the modules target skips vmlinux, and modpost without vmlinux
+	# fails on every builtin symbol (proven 2026-11-06: 10k+
+	# undefined symbols, "vmlinux.o is missing", on a tree whose
+	# modules all compiled). Same price the andrews contract pays
+	# (~one full kernel compile per kmod package, all under /build
+	# with ccache hits there); the old shipped prepared tree carried
+	# symvers, so this restores that contract instead of waiving the
+	# vendor check.
+	(cd "$_kdir" && make -j${JOBS:-$(nproc)}) ||
+		{ echo "ERROR: kernel tree build failed" >&2; return 1; }
 	[ -s "$_kdir/Module.symvers" ] ||
-		{ echo "ERROR: Module.symvers missing after modules build" >&2; return 1; }
+		{ echo "ERROR: Module.symvers missing after kernel build" >&2; return 1; }
 	if [ ! -x "$_kdir/scripts/sign-file" ]; then
 		(cd "$_kdir" && make scripts -j${JOBS:-$(nproc)}) ||
 			{ echo "ERROR: kernel scripts build failed" >&2; return 1; }
@@ -198,12 +217,12 @@ kmod_nvidia_install()
 		[ -f "$ko" ] || { echo "ERROR: expected module missing: $ko" >&2; return 1; }
 		install -m 0644 "$ko" "$PKGDEST/lib/modules/$_kfull/extra/" || return 1
 	done
-	# nouveau and nvidia-open bind the same hardware and must never
-	# compete: installing the NVIDIA driver blacklists nouveau, the
-	# standard driver-handover pattern. (Saphira kernels no longer
-	# build nouveau at all; this covers foreign/older trees.)
-	install -d "$PKGDEST/usr/lib/modprobe.d"
-	printf 'blacklist nouveau\n' > "$PKGDEST/usr/lib/modprobe.d/nvidia-open.conf" || return 1
+	# NOTE: the nouveau blacklist (usr/lib/modprobe.d/nvidia-open.conf)
+	# is owned SOLELY by nvidia-open-firmware (installed there). It
+	# must NOT be installed here: all five per-kernel outputs share
+	# that path and the signer refuses multi-owned paths. Every
+	# nvidia-open-<kver> already depends on nvidia-open-firmware, so
+	# the handover is always present when any driver is installed.
 	install -d "$PKGDEST/usr/share/doc/nvidia-open-$_kshort"
 	cat > "$PKGDEST/usr/share/doc/nvidia-open-$_kshort/README.Saphira" <<EOF
 NVIDIA open kernel modules $2 for kernel $_kfull (host side only).

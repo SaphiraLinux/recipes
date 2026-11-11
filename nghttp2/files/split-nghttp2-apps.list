@@ -1,0 +1,17 @@
+# nghttp2-apps named split: the nghttp/nghttpd/nghttpx/h2load client,
+# server, proxy and load-testing tools plus their man pages. The
+# protocol library stays in the base package for HTTP/2 clients
+# (curl). The apps need c-ares (async DNS) and libev (event loop);
+# the library needs neither (pure protocol codec), so base images
+# stop dragging them in. inflatehd/deflatehd are deliberately
+# disabled at configure time (HPACK debug tools, would need jansson).
+# Every path below must exist after install (the splitter fails
+# closed on missing paths).
+usr/bin/nghttp
+usr/bin/nghttpd
+usr/bin/nghttpx
+usr/bin/h2load
+usr/share/man/man1/nghttp.1
+usr/share/man/man1/nghttpd.1
+usr/share/man/man1/nghttpx.1
+usr/share/man/man1/h2load.1

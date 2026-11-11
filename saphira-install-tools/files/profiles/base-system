@@ -27,11 +27,14 @@ saphira-kernel-7.2.3
 # carries its own bootloader, both to boot now and to survive a later
 # kernel upgrade.
 grub
-# Filesystem and boot-partition tooling. A machine has to be able to make
-# and check the filesystems it lives on.
+# Filesystem tooling. A machine has to be able to make and check the
+# filesystems it lives on. Partition-boot firmware tooling is NOT
+# here: efibootmgr and dosfstools are UEFI-only (NVRAM entries and the
+# ESP), so they live in the base-efi firmware layer that uefi targets
+# gain automatically. A BIOS system must never acquire them, and a bare
+# base that named them would force every caller to restate firmware it
+# does not use.
 e2fsprogs
-dosfstools
-efibootmgr
 # Access: a machine with no remote access is not manageable, and a
 # headless server with no editor is not Saphira. openssh is ONE package
 # here, carrying both the client and sshd; there is no openssh-server.

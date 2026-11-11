@@ -17,7 +17,14 @@ pkgname=saphira-kernel-7.3
 # (T7), never an automatic replacement.
 kernel_version=7.3
 pkgver=1
-pkgrel=7
+pkgrel=8
+# r8: i915 as module (was built in): firmware loads from
+# /lib/firmware post-root via normal request_firmware; early console
+# stays covered (SIMPLEDRM on UEFI, VGA text on BIOS), so the
+# no-initramfs gate drops its DRM_I915 requirement in the same
+# change. EXTRA_FIRMWARE stays empty, FW_LOADER stays y. Payload
+# change (kernel image + modules; vermagic unchanged, no kmod
+# rebuilds required).
 # r6: earlyfw refresh hook honors the opt-in marker (generation only
 # on opted machines; grub regen stays unconditional). Payload change.
 # r4: framebuffer console capability completion (2026-10-23):

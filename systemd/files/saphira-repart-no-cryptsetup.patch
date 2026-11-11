@@ -1,0 +1,62 @@
+From saphira@vm2.uk Thu Sep 17 00:00:00 2026
+Subject: [PATCH] repart: guard cryptsetup-only helpers
+
+Interim accommodation while libcryptsetup is unported (BLOCKED on the
+cryptsetup package, which is intended Saphira functionality - NOT a
+decision to drop encrypted-partition support): helpers used only
+behind HAVE_LIBCRYPTSETUP must not be compiled unconditionally, or
+gcc -Wunused-function fires on the dead definitions (proven 262.2:
+dmcrypt_integrity_alg_name, dmcrypt_proper_key_size, volume_label,
+integrity_alg_to_string). The integrity_alg from_string half stays
+outside the guard: partition config parsing uses it unconditionally.
+
+Fails closed on upstream drift like the other patches. With
+-Dlibcryptsetup=enabled the guards turn the code back on with no
+change to this patch.
+
+--- a/src/repart/repart.c
++++ b/src/repart/repart.c
+@@ -694,7 +694,10 @@
+ DEFINE_PRIVATE_STRING_TABLE_LOOKUP(append_mode, AppendMode);
+ DEFINE_PRIVATE_STRING_TABLE_LOOKUP_FROM_STRING_WITH_BOOLEAN(encrypt_mode, EncryptMode, ENCRYPT_KEY_FILE);
+ DEFINE_PRIVATE_STRING_TABLE_LOOKUP_FROM_STRING_WITH_BOOLEAN(integrity_mode, IntegrityMode, INTEGRITY_INLINE);
+-DEFINE_PRIVATE_STRING_TABLE_LOOKUP(integrity_alg, IntegrityAlg);
++DEFINE_PRIVATE_STRING_TABLE_LOOKUP_FROM_STRING(integrity_alg, IntegrityAlg);
++#if HAVE_LIBCRYPTSETUP
++DEFINE_PRIVATE_STRING_TABLE_LOOKUP_TO_STRING(integrity_alg, IntegrityAlg);
++#endif
+ DEFINE_PRIVATE_STRING_TABLE_LOOKUP_FROM_STRING(encrypt_kdf, EncryptKDF);
+ DEFINE_PRIVATE_STRING_TABLE_LOOKUP(verity_mode, VerityMode);
+ DEFINE_PRIVATE_STRING_TABLE_LOOKUP_FROM_STRING_WITH_BOOLEAN(minimize_mode, MinimizeMode, MINIMIZE_BEST);
+@@ -4321,6 +4324,7 @@
+         return gpt_partition_type_uuid_to_string(p->type.uuid);
+ }
+ 
++#if HAVE_LIBCRYPTSETUP
+ static int volume_label(const Partition *p, char **ret) {
+         assert(p);
+         assert(ret);
+@@ -4352,6 +4356,7 @@
+         *ret = TAKE_PTR(j);
+         return 0;
+ }
++#endif
+ 
+ static int context_dump_partitions(Context *context) {
+         _cleanup_(table_unrefp) Table *t = NULL;
+@@ -5467,6 +5472,7 @@
+         return 0;
+ }
+ 
++#if HAVE_LIBCRYPTSETUP
+ /* libcryptsetup uses its own names for integrity algorithms, e.g. 'hmac(sha1)' but systemd
+  * prefers more standardized 'hmac-sha1', do the conversion here. Default to hmac(sha256). */
+ static const char* dmcrypt_integrity_alg_name(Partition *p) {
+@@ -5499,6 +5505,7 @@
+                 return 768/8;
+         }
+ }
++#endif
+ 
+ static int partition_encrypt(Context *context, Partition *p, PartitionTarget *target, bool offline, bool temporary) {
+ #if HAVE_LIBCRYPTSETUP

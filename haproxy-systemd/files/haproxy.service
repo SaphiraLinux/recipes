@@ -1,0 +1,15 @@
+[Unit]
+Description=HAProxy load balancer (systemd notify)
+Documentation=man:haproxy(1)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+ExecStartPre=/usr/sbin/haproxy -f /etc/haproxy/haproxy.cfg -c -q
+ExecStart=/usr/sbin/haproxy -Ws -f /etc/haproxy/haproxy.cfg
+ExecReload=/bin/kill -USR2 $MAINPID
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

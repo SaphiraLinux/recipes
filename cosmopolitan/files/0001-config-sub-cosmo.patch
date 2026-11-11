@@ -1,0 +1,39 @@
+# Binutils-side counterpart of the portcosmo config.sub change.
+#
+# Upstream portcosmo (ahgamut/gcc branch portcosmo-14.1, pinned commit
+# 58ccca83) teaches GCC 14.1's config.sub to accept *-cosmo OS names.
+# Our binutils 2.42 tree ships a NEWER config.sub (restructured
+# case $kernel-$os-$obj), so the GCC hunk does not apply here; this
+# patch makes the identical semantic change against binutils' layout.
+# Machine-generated against binutils-2.42/config.sub (exact context,
+# zero fuzz); verified: ./config.sub x86_64-linux-cosmo and
+# aarch64-linux-cosmo canonicalize after patching, unpatched rejects.
+--- a/config.sub
++++ b/config.sub
+@@ -1721,7 +1721,7 @@
+
+ case $os in
+ 	# Sometimes we do "kernel-libc", so those need to count as OSes.
+-	musl* | newlib* | relibc* | uclibc*)
++	cosmo* | musl* | newlib* | relibc* | uclibc*)
+ 		;;
+ 	# Likewise for "kernel-abi"
+ 	eabi* | gnueabi*)
+@@ -1819,7 +1819,7 @@
+ # (given a valid OS), if there is a kernel.
+ case $kernel-$os-$obj in
+ 	linux-gnu*- | linux-dietlibc*- | linux-android*- | linux-newlib*- \
+-		   | linux-musl*- | linux-relibc*- | linux-uclibc*- | linux-mlibc*- )
++		   | linux-cosmo*- | linux-musl*- | linux-relibc*- | linux-uclibc*- | linux-mlibc*- )
+ 		;;
+ 	uclinux-uclibc*- )
+ 		;;
+@@ -1827,7 +1827,7 @@
+ 		;;
+ 	windows*-msvc*-)
+ 		;;
+-	-dietlibc*- | -newlib*- | -musl*- | -relibc*- | -uclibc*- | -mlibc*- )
++	-dietlibc*- | -newlib*- | -cosmo*- | -musl*- | -relibc*- | -uclibc*- | -mlibc*- )
+ 		# These are just libc implementations, not actual OSes, and thus
+ 		# require a kernel.
+ 		echo "Invalid configuration \`$1': libc \`$os' needs explicit kernel." 1>&2

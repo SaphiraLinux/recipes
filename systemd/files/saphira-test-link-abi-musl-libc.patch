@@ -1,0 +1,16 @@
+--- a/test/test-link-abi.py
++++ b/test/test-link-abi.py
+@@ -22,9 +22,12 @@
+ # Shared libraries that ship as part of the C library itself; always allowed.
+ # Matched by prefix so the soversion is not hardcoded. glibc splits libc/libm/etc.;
+ # musl bundles everything into a single libc whose soname encodes the architecture
+-# (e.g. libc.musl-x86_64.so.1, libc.musl-aarch64.so.1).
++# (e.g. libc.musl-x86_64.so.1, libc.musl-aarch64.so.1). musl-linked objects
++# record a bare "libc.so" DT_NEEDED (readelf-proven), which matches neither
++# 'libc.so.' nor 'libc.musl-', so it is listed explicitly.
+ LIBC_LIB_PREFIXES: tuple[str, ...] = (
+     'libc.so.',
++    'libc.so',
+     'libm.so.',
+     'libresolv.so.',
+     'libc.musl-',

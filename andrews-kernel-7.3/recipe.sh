@@ -38,7 +38,14 @@ pkgname=andrews-kernel-7.3
 # No prebuilt combined kernel ships merely because this recipe exists.
 kernel_version=7.3
 pkgver=1
-pkgrel=2
+pkgrel=6
+# r3: i915 as module (was built in): firmware loads from
+# /lib/firmware post-root via normal request_firmware; early console
+# stays covered (SIMPLEDRM on UEFI, VGA text on BIOS), so the
+# no-initramfs gate drops its DRM_I915 requirement in the same
+# change. EXTRA_FIRMWARE stays empty, FW_LOADER stays y. Payload
+# change (kernel image + modules; vermagic unchanged, no kmod
+# rebuilds required).
 # r1: first andrews-kernel 7.3 revision. Mirrors saphira-kernel-7.3
 # (config, patches, gates, hooks, size policy) plus OpenZFS 2.4.4
 # integrated via copy-builtin with CONFIG_ZFS=y. 7.3 needs the five

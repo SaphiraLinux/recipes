@@ -1,0 +1,21 @@
+# UEFI firmware layer: intentions for machines that boot via UEFI.
+#
+# Intentions ONLY. The package manager owns dependency closure; never
+# enumerate resolved dependencies here (saphira-profiles(5)).
+#
+# saphira-image appends this layer to every uefi-* target (and to
+# nothing else), so a UEFI installation carries its ESP and NVRAM
+# tooling while a BIOS installation never sees EFI-specific utilities.
+# Installer environments are exempt by design: the firmware a USB
+# stick boots from is not necessarily the firmware of the image it
+# writes, so installer profiles (saphira-installer, usb-installer)
+# keep both toolchains explicitly instead of through this layer.
+#
+# Removable fallback versus NVRAM entries, deliberately distinguished:
+# a removable EFI binary (BOOTX64.EFI) boots with no NVRAM state at
+# all, so a machine that boots only that way never invokes efibootmgr
+# and it sits inert. NVRAM boot-entry management - what a kernel
+# upgrade that re-points the boot entry needs - is the reason
+# efibootmgr is here rather than only in installer payloads.
+efibootmgr
+dosfstools

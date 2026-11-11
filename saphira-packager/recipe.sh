@@ -1,5 +1,9 @@
 pkgname=saphira-packager
-pkgver=1.0
+pkgver=1.1
+# r1 (1.1 line): withdraw-package resolves NVRs through the arch-split
+# layout (arch dir + noarch sibling) instead of flat top-level
+# listing; hermetic noarch withdrawal case in the test suite.
+# New upstream version: pkgrel resets to 1.
 # r50: provider selection matches exact package names (a -dev/-doc NVR
 # must never satisfy a base-name dependency during declaration
 # extraction); viewer conflicts output names its legacy-pair semantics.
@@ -29,7 +33,7 @@ pkgver=1.0
 # identity-less fragments) plus the legacy-gate namespace fix: a
 # legacy user's primary GID is a reference, not a group-namespace
 # history claim, so paired user+group sidecars publish.
-pkgrel=96
+pkgrel=1
 # r90: identity authority chain (GO-2; builder-infra change with
 # explicit author approval): TSV-enforced packaging (makepkg/buildpkg/
 # signer) plus surfaced stage diagnostics.

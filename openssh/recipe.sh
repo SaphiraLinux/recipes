@@ -1,8 +1,16 @@
 #!/bin/sh
 
 pkgname=openssh
-pkgver=10.6_p1
-pkgrel=7
+pkgver=10.6_p2
+pkgrel=1
+# r8: upstream 10.6p2 (2026-11-05). Critical sshd workaround for a
+# password-authentication bypass affecting musl-linux builds with PAM
+# disabled (Saphira builds AND runs with PAM, so not directly
+# exposed - but the stable-branch bugfixes ride along regardless:
+# mldsa44-ed25519 as allowed CA signature type, ChannelTimeout
+# sub-second spin fix, restart_syscall in the seccomp sandbox).
+# pkgrel resets to 1 per convention. Configure flags unchanged from
+# the 10.6p1 revalidation (stable-branch patch release).
 # r6: sshd -t gates the start (2026-10-23: a corrupt mldsa44 host-key
 # pair, broken since 2026-10-17 while the type was never served, failed
 # validation while sshd started degraded -- the check logged but did not
@@ -64,8 +72,8 @@ license="BSD-2-Clause"
 origin=openssh
 repo=main
 url=https://www.openssh.com/
-source=https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable/openssh-10.6p1.tar.gz
-sha256=a9dc9565dffe8640f64d863cd29a32bc4a3dbdec0566a7fc44c5d6ee767d5f39
+source=https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable/openssh-10.6p2.tar.gz
+sha256=9ae44872090cf2f06b3cf9ff147e7f16f309671340763ed2f99248398ae29d5b
 
 # libmd is a runtime requirement on musl builds and was historically
 # missing from the inherited packaging's dependency list.

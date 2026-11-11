@@ -16,7 +16,7 @@
 
 pkgname=lvm2
 pkgver=2.03.39
-pkgrel=4
+pkgrel=5
 # r4: three-way split (main tools, lvm2-libs runtime, lvm2-dev headers);
 # headers no longer force tool installs, main takes lvm2-libs for its
 # linked binaries. Payload change.
@@ -71,7 +71,14 @@ recipe_build()
 	patch -p1 -d "$SRC" < "$RECIPE_DIR/files/musl-stdio-assign.patch"
 	cd "$SRC"
 	./configure --prefix=/usr --sysconfdir=/etc --localstatedir=/var \
-		--disable-udev_sync
+		--disable-udev_sync \
+		--enable-pkgconfig
+	# --enable-pkgconfig (NOT upstream default): installs
+	# devmapper.pc (plus the event .pc) to pkgconfigdir. Without
+	# it, consumers that resolve Requires.private strictly via
+	# pkgconfig fail closed - proven by systemd 262.2, whose
+	# libcryptsetup Requires devmapper with no autoconf fallback.
+	# The .pc files land in lvm2-dev via the -dev auto-split.
 	make -j${JOBS:-$(nproc)}
 }
 

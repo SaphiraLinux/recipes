@@ -12,6 +12,20 @@ GRUB_DISTRIBUTOR="Saphira"
 # deployment that genuinely has a serial console adds console=ttyS0 to its
 # own kernel line.
 GRUB_CMDLINE_LINUX="rootfstype=ext4 rw rootwait console=tty0 raid=noautodetect"
+# root= must name something the kernel resolves WITHOUT an initramfs:
+# Saphira ships no initrd and no builtin initramfs, and the running
+# kernel's early_lookup_bdev resolves device paths, PARTUUID= and
+# PARTLABEL= only (verified against vendored sources). The filesystem
+# UUID= and LABEL= forms are parsed by initrd/initramfs userspace
+# (blkid), so a generated root=UUID= entry boots nowhere here - proven
+# on Minimer 2026-11-07, where every UUID entry failed with an
+# unmountable root and the device path booted. GRUB_DISABLE_LINUX_UUID
+# removes the unbootable form tree-wide. PARTUUID stays enabled: GPT
+# partition UUIDs are stable across disk reorder AND resolve in-kernel,
+# with a device-path fallback when unprobable (see the 10_linux guard
+# in the grub recipe, which must never emit a bare PARTUUID=).
+GRUB_DISABLE_LINUX_UUID=true
+GRUB_DISABLE_LINUX_PARTUUID=false
 # No nomodeset: Saphira needs kernel modesetting and the EFI framebuffer
 # for console (nomodeset blinds UEFI boxes: no efifb, and i915 ships as
 # a module with no initramfs to load it early). A machine that genuinely
@@ -32,13 +46,22 @@ GRUB_CMDLINE_LINUX="rootfstype=ext4 rw rootwait console=tty0 raid=noautodetect"
 # It is NOT in the line above. The packaged default is init-neutral, and
 # a systemd-only kernel argument on an OpenRC target is target leakage:
 # meaningless there, and misleading to anyone reading /proc/cmdline.
-# saphira-image adds it for SaphiraD targets only, alongside
-# systemd.getty_auto=0, and OpenRC targets carry neither.
-# The boot MENU still offers serial alongside the VGA console, and that is
-# deliberately independent of the kernel console above: grub ignores a
-# terminal it cannot open, so the menu always appears on the VGA (proven)
-# while a deployment that does have a serial port can watch the boot.
-GRUB_TERMINAL_INPUT="console serial"
-GRUB_TERMINAL_OUTPUT="console serial"
-GRUB_SERIAL_COMMAND="serial --speed=115200 --unit=0 --word=8 --parity=no --stop=1"
+# Nothing adds init-specific arguments anywhere: saphira-image used to
+# inject systemd.getty_auto=0/systemd.imds=no for SaphiraD targets, but
+# that made grub differ by init, so it was removed (2026-11-06) -
+# generator concerns stay init-side, never bootloader tokens.
+# The boot MENU is offered on the native console only. Serial used to be
+# offered alongside the VGA on the theory that grub ignores a terminal it
+# cannot open - but the explicit `serial' command is NOT ignored: with
+# --unit=0 it looks up port com0, and on machines with no UART and no ACPI
+# SPCR that lookup fails, printing `serial port `com0' isn't found' at
+# every boot. A deployment that genuinely has a serial console opts back
+# in by uncommenting the three lines below (and, separately, adds its own
+# console=ttyS0 kernel line - see the console= note above, which this file
+# deliberately does not do for you).
+GRUB_TERMINAL_INPUT="console"
+GRUB_TERMINAL_OUTPUT="console"
+#GRUB_TERMINAL_INPUT="console serial"
+#GRUB_TERMINAL_OUTPUT="console serial"
+#GRUB_SERIAL_COMMAND="serial --speed=115200 --unit=0 --word=8 --parity=no --stop=1"
 GRUB_DISABLE_OS_PROBER=true
