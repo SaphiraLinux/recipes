@@ -1,0 +1,85 @@
+From de5536d827114ebc6b6db7800216610385663ad2 Mon Sep 17 00:00:00 2001
+From: Szabolcs Nagy <nsz@port70.net>
+Date: Thu, 18 Jun 2026 21:12:56 +0200
+Subject: [PATCH] or1k: fix local-exec tls with large alignment
+
+or1k uses an unusual variant of the TLS_ABOVE_TP layout:
+
+powerpc, mips, m68k:
+   pthread  | tls
+ +----------+-----------------+--
+ |          |<     tpoff     >|
+ self       a = e = m         tp
+
+arm, aarch64, sh:
+   pthread   <    gap    >| tls
+ +----------+-------------+------
+ |          |             |
+ self       a = e = tp    m
+
+or1k:
+   pthread   <    gap    >| tls
+ +----------+-------------+------
+ |          |<   tpoff   >|
+ self       a = e         m = tp
+
+tp: thread pointer
+a: address aligned to tls_align
+e: end of the libc internal pthread self struct
+m: min user tls address
+
+the layout variant only matters for local-exec tls access, but then
+ld and libc have to match how tp-relative tls addresses are computed.
+
+or1k is tpoff=gap=16 in bfd ld, but it was gap=tpoff=0 in musl. this
+works if tls_align <= 16, but an exe with larger tls_align fails.
+
+TP_OFFSET (tpoff) and GAP_ABOVE_TP (gap) are now defined as
+
+tpoff: tp - a
+gap: m - a (so it is not really "gap above tp")
+
+TPOFF_K = -tpoff is needed for relocs as the tls_module->offset is
+internally computed relative to a, not tp.
+
+this changes tp - e on or1k which in general may affect internal abi
+(e.g. tlsdesc asm uses self->dtv) or toolchain abi (the layout below
+m is not visible to the elf abi, but e.g. ssp uses self->canary on
+some targets with fixed tp offset), but or1k seems unaffected. it is
+possible to place the pthread struct such that tp = m = e on or1k,
+to aviod this abi change, but that looks uglier (e.g. a != e then).
+
+found and tested on user qemu-or1k.
+---
+ arch/or1k/pthread_arch.h | 3 ++-
+ arch/or1k/reloc.h        | 2 +-
+ 2 files changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/arch/or1k/pthread_arch.h b/arch/or1k/pthread_arch.h
+index f75ea7e4..97197c8e 100644
+--- a/arch/or1k/pthread_arch.h
++++ b/arch/or1k/pthread_arch.h
+@@ -11,6 +11,7 @@ static inline uintptr_t __get_tp()
+ }
+ 
+ #define TLS_ABOVE_TP
+-#define GAP_ABOVE_TP 0
++#define GAP_ABOVE_TP 16
++#define TP_OFFSET 16
+ 
+ #define MC_PC regs.pc
+diff --git a/arch/or1k/reloc.h b/arch/or1k/reloc.h
+index 128089ca..20d407b6 100644
+--- a/arch/or1k/reloc.h
++++ b/arch/or1k/reloc.h
+@@ -1,6 +1,6 @@
+ #define LDSO_ARCH "or1k"
+ 
+-#define TPOFF_K 0
++#define TPOFF_K (-16)
+ 
+ #define REL_SYMBOLIC    R_OR1K_32
+ #define REL_GOT         R_OR1K_GLOB_DAT
+-- 
+2.55.0
+

@@ -1,0 +1,62 @@
+--- a/src/time/strptime.c
++++ b/src/time/strptime.c
+@@ -6,10 +6,13 @@
+ #include <string.h>
+ #include <strings.h>
+ #include "time_impl.h"
++#include <limits.h>
+
+ char *strptime(const char *restrict s, const char *restrict f, struct tm *restrict tm)
+ {
+ 	int i, w, neg, adj, min, range, *dest, dummy;
++	long long secs;
++	time_t t;
+ 	const char *ex;
+ 	size_t len;
+ 	int want_century = 0, century = 0, relyear = 0;
+@@ -132,11 +135,40 @@
+ 			if (!s) return 0;
+ 			break;
+ 		case 's':
+-			/* Parse only. Effect on tm is unspecified
+-			 * and presently no effect is implemented.. */
+-			if (*s == '-') s++;
+-			if (!isdigit(*s)) return 0;
+-			while (isdigit(*s)) s++;
++			/* Sinew compatibility extension: convert Unix
++			 * epoch seconds to calendar fields, matching
++			 * glibc, which populates struct tm via
++			 * localtime_r (local-time semantics). POSIX
++			 * leaves the effect on tm unspecified.
++			 * Unlike glibc, a leading '-' is accepted so
++			 * pre-epoch timestamps convert; glibc rejects
++			 * any sign. Inputs that overflow long long,
++			 * cannot fit in time_t, or whose year would
++			 * overflow int fail closed. */
++			neg = 0;
++			if (*s == '-') {
++				neg = 1;
++				s++;
++			}
++			if (!isdigit(*s)) {
++				return 0;
++			}
++			for (secs = 0; isdigit(*s); s++) {
++				if (secs > (LLONG_MAX - (*s - '0')) / 10) {
++					return 0;
++				}
++				secs = secs * 10 + *s - '0';
++			}
++			if (neg) {
++				secs = -secs;
++			}
++			t = (time_t)secs;
++			if ((long long)t != secs) {
++				return 0;
++			}
++			if (!__localtime_r(&t, tm)) {
++				return 0;
++			}
+ 			break;
+ 		case 'S':
+ 			dest = &tm->tm_sec;

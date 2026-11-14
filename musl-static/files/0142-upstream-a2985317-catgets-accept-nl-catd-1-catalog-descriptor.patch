@@ -1,0 +1,35 @@
+From a2985317e94bc6d31ac3cf201f2c8d4972837b2c Mon Sep 17 00:00:00 2001
+From: Ismael Luceno <ismael@iodev.co.uk>
+Date: Fri, 28 Aug 2026 18:38:55 +0200
+Subject: [PATCH] catgets: accept (nl_catd)-1 catalog descriptor
+
+the standard allows but does not require detecting bad catalog
+descriptors and reporting the as EBADF. detection is only possible in
+the general case if nl_catd is its own resource identifier namespace
+not shaed with address space or file descriptors or anything else;
+however, (nl_catd)-1 is always detectable since it's reserved as an
+error value, and reportedly all other implementations detect this
+condition and just return the untranslated string. users of catgets,
+including tcsh, rely on this.
+---
+ src/locale/catgets.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/src/locale/catgets.c b/src/locale/catgets.c
+index 71c31c1d..01a41215 100644
+--- a/src/locale/catgets.c
++++ b/src/locale/catgets.c
+@@ -15,6 +15,10 @@ static int cmp(const void *a, const void *b)
+ 
+ char *catgets (nl_catd catd, int set_id, int msg_id, const char *s)
+ {
++	if (catd == (nl_catd)-1) {
++		errno = EBADF;
++		return (char *)s;
++	}
+ 	const char *map = (const char *)catd;
+ 	uint32_t nsets = V(map+4);
+ 	const char *sets = map+20;
+-- 
+2.55.0
+

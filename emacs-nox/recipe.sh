@@ -1,6 +1,6 @@
 pkgname=emacs-nox
 pkgver=30.2
-pkgrel=2
+pkgrel=4
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='GNU Emacs terminal (non-X) build'
 license='GPL-3.0-or-later'
@@ -34,4 +34,10 @@ recipe_install() {
 	make DESTDIR="$PKGDEST" install
 	# game score helper must not be suid in a rootless-built package
 	chmod 0755 "$PKGDEST/usr/lib/emacs/$pkgver/x86_64-akadata-linux-musl/update-game-score" 2>/dev/null || true
+	# /usr/bin/ctags is incidental to the Emacs build (lib-src/ctags)
+	# and collides with the dedicated universal-ctags package, which
+	# owns the name (its -e flag covers the Emacs TAGS use case).
+	# Single owner per path: Emacs keeps etags, ctags goes to
+	# universal-ctags.
+	rm -f "$PKGDEST/usr/bin/ctags"
 }

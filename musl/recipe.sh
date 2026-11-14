@@ -7,7 +7,7 @@
 # musl 1.2.6 (vendored ball files/musl-1.2.6.tar.gz, sha256
 # e9db8b70b0cba3db43b27e84ccd8a0c0958b40029a1c36c9f13817b93787b4d6,
 # verified against upstream v1.2.6 tag) plus Saphira patches 0001-0003,
-# upstream corrective backports 0101..0170 (minus deferred 0130, pinned
+# upstream corrective backports 0101..0171 (minus deferred 0130, pinned
 # by files/UPSTREAM-SHA256SUMS), the validated arch rint/rintf
 # optimisation as 0004 (promoted from exp/musl-r8 @9fd47a9; evidence:
 # 2.16M differential + 1M MPFR, 0 fails; F2 catalog in sinew tests),
@@ -45,7 +45,7 @@ pkgver=1.2.6_p1
 _sinew_version=0.1.0
 # New _p1 line, so pkgrel restarts at 1 (it must still sort above
 # every 1.2.6-rN: verified > r8 via apk version -t).
-pkgrel=5
+pkgrel=21
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='Sinew libc — Saphira'"'"'s musl-compatible C library'
 license='MIT'
@@ -102,6 +102,109 @@ nearbyint_patch_sha256=d7331d5f7259f85e24915160c78209d95f4d4f26afee4367e840fdb92
 # equality-mask windows, page-bounded loads; 1B path and >=5B two-way
 # untouched. Drop file + block to revert to generic strstr.
 strstr_sse2_patch_sha256=7e1345773f9fe05519d3b09b31f9e89e8e51e9ba703555be66d590a8e382a563
+# Sinew clone3 raw primitive (sinew/foundation step 7): new
+# src/linux/clone3.c, internal __clone3 only (hidden, no public
+# declaration). Drop file + block to remove it entirely.
+clone3_patch_sha256=9fd33f5edff7e7af60b4551034fe0748539cb5bf8591a018ce6821956f586542
+# Saphira wordexp WRDE_NOCMD hardening (bugs/wordexp-nocmd-bypass.md):
+# comment-awareness, ANSI-C quote tracking, $(( )) arithmetic
+# validation, ${...} opaque skipping. Drop file + block to revert.
+wordexp_nocmd_patch_sha256=d56eacb6f49e442de554cc0491c6b67fb55bd86ffec87b1159d4b36b57f27af0
+# powf y==1 exact fast path (bugs/powf-y1-spurious-flags.md):
+# exact result, no spurious flags; sNaN still signals via x+y.
+powf_y1_patch_sha256=af7884a0f21a02561525f5fc8cfa615c04b3a33a424fad6792c253c5f2e6b695
+# strptime %z hours-only form (bugs/strptime-z-hours-only.md):
+# accept ±HH in addition to ±HHMM (no colon form).
+strptime_z_patch_sha256=208f8d3320cc1cbd9d0331ea72dfecf35f9c714c162ddca163bbd7263ef6ba9a
+# strptime %s epoch conversion: convert signed Unix epoch seconds to
+# calendar fields via __localtime_r (glibc local-time semantics; POSIX
+# leaves the effect unspecified). Deliberate Sinew deltas vs glibc:
+# '-' accepted for pre-epoch values; overflow/time_t-range/year-range
+# fail closed instead of wrapping.
+strptime_s_patch_sha256=8cf061f7e2d31129d1da1a96c8439f5ce61cf64031ec930c028a063672634491
+# wordexp WRDE_UNDEF: forkless pre-expansion check for attempts to
+# expand unset variables (BADVAL without forking, hence zero command
+# side effects). Preserves NOCMD-scanner precedence; passes through
+# anything ambiguous (fail-open provisional, not conformance proof).
+undef_check_patch_sha256=995b1eef5f3d5cae736459e9d1e8540cf4353f4a8b2a6d636d625db88e47878e
+# wordexp Class-B parameter parser: quoted-context brace words
+# re-tokenize with a fresh quote state and distinguish quote-first
+# "$" (transparent, exposes the following token) from dollar-first
+# $" (locale string, content still expands). Fixes the 64-65
+# false negative without flagging legitimate locale expressions;
+# arithmetic digit-led tokens are numbers, never variables.
+classb_quotes_patch_sha256=192bb04789b23b81e2fa926ca9a7da265e7ae087491effbe826684a07082cec3
+# wordexp NOCMD nested-brace hardening (Sinew 0022): brace_unit takes
+# the enclosing double-quote context (top-level scan passes its dq,
+# nested braces pass current dq, arithmetic passes 0); a
+# single-quoted region opened under outer dq does NOT suppress
+# $(...) or backquote detection; blocked arithmetic (ar==1)
+# propagates CMDSUB instead of being scanned as literal text;
+# a bare } inside arithmetic is malformed, not blocked.
+nocmd_nested_patch_sha256=525a5f0d3eabd4001c30123ff8f24133a6f172a2e14d663d8c10311cb87403be
+# wordexp arithmetic close + quotes (Sinew 0023): arithmetic is only
+# valid when the two closing parens are adjacent (a spaced close is
+# parsed as $(...) command substitution by the shell, verified
+# 2026-11-12); double-quoted spans inside arithmetic expand (their
+# content is still scanned: $(...)/backquote blocks, ${...} recurses
+# in quoted context); a bare { in a brace word is literal (the shell
+# expands ${X-{}} to {}). Closes a missed NOCMD execution (spaced
+# close) with zero regressions.
+arith_close_quotes_patch_sha256=2fe500c65ac48cda52c38f05bfaba48bb770fc25596fb5b4f6d98faaea7051d4
+# fmal subnormal underflow (Sinew 0024): the TONEAREST denormal path
+# scales exactly, so it never raises underflow itself; when the result
+# is tiny and inexactness was observed, underflow is due (mirrors the
+# directed-mode tail). Fixes the suite fmal.h:46 missing UNDERFLOW
+# with zero other flag/value changes across the full fmal tables.
+fmal_underflow_patch_sha256=209bdd517e516352c65f6d7c63040995be86f530f67e7e7e36fa7949ce0e3715
+# wordexp ANSI-C quoting context (Sinew 0025): $'...' is genuine ANSI
+# only outside arithmetic and double quotes (the shell reads $ and '
+# literally inside either, so embedded $(...)/backquote runs there).
+# Genuine-position spans with cmdsubst text no longer block (corpus
+# vec-23 now expands like the shell and glibc); dq/arith positions
+# still block exactly as before.
+ansi_quoting_patch_sha256=c8f7533a51a3d9916ba8c14364a0a0745608094de2bba46e04394ef71f59b3ab
+# regex backref multibyte resync (Sinew 0026): the backtracking matcher
+# assumed one-byte positions in five places (retry advance, pop restore,
+# backref compare base/advance, EOS check used the stale read head).
+# Multibyte input silently skipped start positions, compared inside
+# characters and desynchronised pos/str_byte. Fixes both suite backref
+# failures with zero changes on single-byte behaviour (differentially
+# proven identical) and glibc-identical verdicts on all fuzz deltas.
+regex_backref_mb_patch_sha256=bef68736877448ba2202cc3b46ad92584bb4bf0c93bd606e254ec11fd65eca0a
+# fnmatch audit residuals (Sinew 0027): hyphen after a consumed range is
+# literal (POSIX XBD 9.3.5 partial-range rule; fixes [a-c-e] chaining
+# false positive/negative), PATHNAME splitter returns NOMATCH on
+# uninterpretable pattern bytes (fixes UTF-8-locale unbounded loop).
+fnmatch_audit_patch_sha256=70f64aecbb2ba04a73eba5bc71719d6d908cf44075fb99c0b2b963d9d7a365f2
+# scanf multi-digit positional (Sinew 0028): %n$ accepts multi-digit N
+# (POSIX requires decimal integer; single-digit-only was fmt_fail).
+scanf_positional_patch_sha256=356df39d26e268374d1c4af25beeb812b94727f2d6b244cacb175270a3a899ba
+# scanf short-%c input failure (Sinew 0029): EOF before width completes
+# is input failure, not matching failure (POSIX return-value rule).
+scanf_short_input_patch_sha256=0dfcae7e6795060a498cb8fc38b015de9f1bea5e077701920c0d364439294338
+# scanf wide-%c character counting (Sinew 0030): wide %c counts
+# complete characters, not bytes (POSIX sequence-of-characters rule).
+scanf_wide_count_patch_sha256=7a04202990fa1926ac5b8620553eed5d9a876fb7ad0bfcda1e57e97fdb3a57fd
+# swscanf wide-input adapter (Sinew 0031 WN4): locale-independent
+# UTF-8 encoder plus C.UTF-8 stream pin (POSIX wide-input rule).
+swscanf_wide_adapter_patch_sha256=7a585d183953bb616fe90871b451dd96f03ff23b0b9ac25c336f1f8a9f6e40fb
+# floatscan nan sign (Sinew 0032): __floatscan returns sign-applied
+# quiet NaN (POSIX "negated" rule; INFINITY path already applies sign).
+# sign*NAN is a proven no-op (NaN arithmetic keeps the operand sign),
+# so the ternary folds -NAN correctly. Touches NaN paths only.
+nan_sign_patch_sha256=a8ea20789e36555a818ae4fb0092c5b6d156a472a5eb5d6e7f030082de0aab0e
+# wordexp NOCMD close-quote (Sinew 0033): brace_unit treats "$(" as
+# live command substitution when the quote may close (in_dq or
+# arithmetic context), validating ((...)) via arith_ok; S6q bypass
+# executed despite WRDE_NOCMD. Touches the NOCMD pre-scan only.
+nocmd_close_quote_patch_sha256=c21ddf3b81e5217b439be6465227a6d733e019e930e03a4140110e221f501f31
+# mallocng huge-overalignment (Sinew 0034): aligned_alloc returns the
+# unneeded tail pages when headroom over 2GB would truncate set_size's
+# int reservation and the u32 tail field (2^34 SIGSEGV, layout
+# dependent). Complements upstream 0114 (get_meta offset width).
+# Touches aligned_alloc only; size-class paths cannot reach it.
+huge_align_patch_sha256=7d08bf676ec0791a3185716f31a2ce83008a59cb742c9d7f8022d79415b4f6ff
 
 depends=""
 makedepends="
@@ -166,7 +269,25 @@ recipe_build()
 	P17="$RECIPE_DIR/files/0014-x86_64-strstr-sse2-short-needle.patch"
 	echo "$strstr_sse2_patch_sha256  $P17" | sha256sum -c -
 	patch -d "$SRC" -Np1 -i "$P17"
-	# Upstream corrective backports 0101..0170 (minus deferred 0130),
+	# Sinew clone3 raw primitive (sinew/foundation step 7): new
+	# src/linux/clone3.c only; no existing files touched.
+	P18="$RECIPE_DIR/files/0015-sinew-clone3-raw-primitive.patch"
+	echo "$clone3_patch_sha256  $P18" | sha256sum -c -
+	patch -d "$SRC" -Np1 -i "$P18"
+	# Saphira wordexp WRDE_NOCMD hardening: comment-awareness,
+	# ANSI-C quote tracking, arithmetic validation, ${...} skipping.
+	P19="$RECIPE_DIR/files/0016-saphira-wordexp-nocmd-scan.patch"
+	echo "$wordexp_nocmd_patch_sha256  $P19" | sha256sum -c -
+	patch -d "$SRC" -Np1 -i "$P19"
+	# powf y==1 exact fast path (bugs/powf-y1-spurious-flags.md).
+	P20="$RECIPE_DIR/files/0017-saphira-powf-y1-exact.patch"
+	echo "$powf_y1_patch_sha256  $P20" | sha256sum -c -
+	patch -d "$SRC" -Np1 -i "$P20"
+	# strptime %z hours-only form (bugs/strptime-z-hours-only.md).
+	P21="$RECIPE_DIR/files/0018-saphira-strptime-z-hours.patch"
+	echo "$strptime_z_patch_sha256  $P21" | sha256sum -c -
+	patch -d "$SRC" -Np1 -i "$P21"
+	# Upstream corrective backports 0101..0171 (minus deferred 0130),
 	# pinned by files/UPSTREAM-SHA256SUMS, applied in filename order
 	# (topological). Same RC-69 series as r7; see PATCHES.md for
 	# per-patch rationale and provenance.
@@ -174,6 +295,97 @@ recipe_build()
 	for up in "$RECIPE_DIR"/files/01[0-9][0-9]-upstream-*.patch; do
 		patch -d "$SRC" -Np1 -i "$up"
 	done
+	# strptime %s epoch conversion. Applied after upstream so its
+	# context matches 0104 (which adds the time_impl.h include).
+	P22="$RECIPE_DIR/files/0019-saphira-strptime-s-epoch.patch"
+	echo "$strptime_s_patch_sha256  $P22" | sha256sum -c -
+	patch -d "$SRC" -Np1 -i "$P22"
+	# WRDE_UNDEF forkless check. Applied after upstream so its
+	# context matches 0138/0153/0154 (same files it was verified on).
+	P23="$RECIPE_DIR/files/0020-saphira-wordexp-undef-forkless.patch"
+	echo "$undef_check_patch_sha256  $P23" | sha256sum -c -
+	patch -d "$SRC" -Np1 -i "$P23"
+	# Class-B parameter parser (quoted-context brace words, quote-first
+	# vs dollar-first $" rule, arithmetic numbers). Applied after 0020
+	# (extends its undef_* functions).
+	P24="$RECIPE_DIR/files/0021-saphira-wordexp-classb-quotes.patch"
+	echo "$classb_quotes_patch_sha256  $P24" | sha256sum -c -
+	patch -d "$SRC" -Np1 -i "$P24"
+	# NOCMD nested-brace hardening (Sinew 0022): entry-dq threading
+	# plus blocked-arithmetic propagation. Applied after 0021.
+	P25="$RECIPE_DIR/files/0022-saphira-wordexp-nocmd-nested.patch"
+	echo "$nocmd_nested_patch_sha256  $P25" | sha256sum -c -
+	patch -d "$SRC" -Np1 -i "$P25"
+	# Arithmetic close + quotes (Sinew 0023): spaced-close blocking,
+	# dq-spans in arithmetic, literal '{'. Applied after 0022.
+	P26="$RECIPE_DIR/files/0023-saphira-wordexp-arith-close-quotes.patch"
+	echo "$arith_close_quotes_patch_sha256  $P26" | sha256sum -c -
+	patch -d "$SRC" -Np1 -i "$P26"
+	# fmal subnormal underflow (Sinew 0024): tiny+inexact implies
+	# underflow in the TONEAREST denormal tail. Applied after 0023
+	# (independent file, order is documentary).
+	P27="$RECIPE_DIR/files/0024-saphira-fmal-underflow.patch"
+	echo "$fmal_underflow_patch_sha256  $P27" | sha256sum -c -
+	patch -d "$SRC" -Np1 -i "$P27"
+	# wordexp ANSI-C quoting context (Sinew 0025): context-sensitive
+	# cmdsubst detection inside $'...' spans. Applied after 0024
+	# (independent function, order is documentary).
+	P28="$RECIPE_DIR/files/0025-saphira-wordexp-ansi-quoting.patch"
+	echo "$ansi_quoting_patch_sha256  $P28" | sha256sum -c -
+	patch -d "$SRC" -Np1 -i "$P28"
+	# regex backref multibyte resync (Sinew 0026): byte-correct
+	# positions in retry advance, pop restore, backref compare and
+	# advance, and EOS check. Applied after 0025 (independent file,
+	# order is documentary).
+	P29="$RECIPE_DIR/files/0026-saphira-regex-backref-multibyte.patch"
+	echo "$regex_backref_mb_patch_sha256  $P29" | sha256sum -c -
+	patch -d "$SRC" -Np1 -i "$P29"
+	# fnmatch audit residuals (Sinew 0027): chained-range literal
+	# hyphen plus PATHNAME-splitter invalid-byte guard. Applied after
+	# 0026 (independent file, order is documentary).
+	P30="$RECIPE_DIR/files/0027-saphira-fnmatch-audit-residuals.patch"
+	echo "$fnmatch_audit_patch_sha256  $P30" | sha256sum -c -
+	patch -d "$SRC" -Np1 -i "$P30"
+	# scanf multi-digit positional (Sinew 0028): parse full decimal N
+	# before '$' in both vfscanf and vfwscanf. Applied after 0027.
+	P31="$RECIPE_DIR/files/0028-saphira-scanf-multidigit-positional.patch"
+	echo "$scanf_positional_patch_sha256  $P31" | sha256sum -c -
+	patch -d "$SRC" -Np1 -i "$P31"
+	# scanf short-%c input failure (Sinew 0029): EOF before width
+	# completes is input failure in vfscanf and vfwscanf. After 0028.
+	P32="$RECIPE_DIR/files/0029-saphira-scanf-short-input-fail.patch"
+	echo "$scanf_short_input_patch_sha256  $P32" | sha256sum -c -
+	patch -d "$SRC" -Np1 -i "$P32"
+	# scanf wide-%c character counting (Sinew 0030): wide %c stops
+	# after width complete characters, not bytes. After 0029.
+	P33="$RECIPE_DIR/files/0030-saphira-scanf-wide-char-count.patch"
+	echo "$scanf_wide_count_patch_sha256  $P33" | sha256sum -c -
+	patch -d "$SRC" -Np1 -i "$P33"
+	# swscanf wide-input adapter (Sinew 0031 WN4): locale-independent
+	# UTF-8 encoding plus C.UTF-8 stream pin; engine reused untouched.
+	# Applied after 0030 (independent file, order is documentary).
+	P34="$RECIPE_DIR/files/0031-saphira-swscanf-wide-adapter.patch"
+	echo "$swscanf_wide_adapter_patch_sha256  $P34" | sha256sum -c -
+	patch -d "$SRC" -Np1 -i "$P34"
+	# floatscan nan sign (Sinew 0032): sign-preserving NaN returns in
+	# __floatscan. Applied after 0031 (independent file, order is
+	# documentary).
+	P35="$RECIPE_DIR/files/0032-saphira-floatscan-nan-sign.patch"
+	echo "$nan_sign_patch_sha256  $P35" | sha256sum -c -
+	patch -d "$SRC" -Np1 -i "$P35"
+	# wordexp NOCMD close-quote (Sinew 0033): "$(" treated as live
+	# command substitution when a dq context may close (or inside
+	# arithmetic); validated ((...)) still passes via arith_ok.
+	# Applied after 0032 (independent file, order is documentary).
+	P36="$RECIPE_DIR/files/0033-saphira-wordexp-nocmd-close-quote.patch"
+	echo "$nocmd_close_quote_patch_sha256  $P36" | sha256sum -c -
+	patch -d "$SRC" -Np1 -i "$P36"
+	# mallocng huge-overalignment (Sinew 0034): munmap the tail when
+	# headroom exceeds INT_MAX, keeping slot metadata exact.
+	# Applied after 0033 (independent file, order is documentary).
+	P37="$RECIPE_DIR/files/0034-saphira-alloc-huge-align.patch"
+	echo "$huge_align_patch_sha256  $P37" | sha256sum -c -
+	patch -d "$SRC" -Np1 -i "$P37"
 	cd "$SRC"
 	# Same configure baseline as r7: non-usrmerged layout,
 	# syslibdir /lib keeps the loader at /lib/ld-musl-x86_64.so.1.

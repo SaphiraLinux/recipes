@@ -1,0 +1,105 @@
+--- a/src/misc/wordexp.c
++++ b/src/misc/wordexp.c
+@@ -31,9 +31,15 @@
+ 
+ /* ANSI-C $'...' unit at s (s[0]=='$', s[1]=='\'').
+  * *len set past the closing quote.
+- * Returns 1 if the content holds "$(" or backquote, 2 if empty,
++ * in_arith/in_dq describe the enclosing scan: inside arithmetic or
++ * double quotes $'...' is NOT an ANSI span (the shell treats $ and '
++ * literally there), so an embedded $(...) or backquote executes and
++ * must report dirty. In a genuine ANSI position the span content is
++ * literal and never executes: report clean (unterminated stays -1,
++ * empty stays 2). Callers guarantee sq==0 ($ is suppressed there).
++ * Returns 1 dirty (executable cmdsubst inside), 2 if empty,
+  * 0 if clean, -1 if unterminated. */
+-static int ansi_unit(const char *s, size_t *len)
++static int ansi_unit(const char *s, size_t *len, int in_arith, int in_dq)
+ {
+ 	size_t i = 2;
+ 	int dirty = 0, empty = 1;
+@@ -51,8 +57,8 @@
+ 		}
+ 		if (!s[i]) return -1;
+ 		empty = 0;
+-		if (s[i] == '$' && s[i+1] == '(') dirty = 1;
+-		if (s[i] == '`') dirty = 1;
++		if ((in_arith || in_dq) && s[i] == '$' && s[i+1] == '(') dirty = 1;
++		if ((in_arith || in_dq) && s[i] == '`') dirty = 1;
+ 		i++;
+ 	}
+ }
+@@ -110,7 +116,12 @@
+ 		}
+ 		if (c == '$' && s[i+1] == '\'' && !sq) {
+ 			size_t al = 0;
+-			int a = ansi_unit(s+i, &al);
++			/* $'...' is genuine ANSI only when neither the
++			 * enclosing context (in_dq) nor the quotes opened
++			 * so far in this unit (dq) put it inside double
++			 * quotes; in either dq case the shell reads $ and '
++			 * literally and an embedded $(...)/backquote runs. */
++			int a = ansi_unit(s+i, &al, in_arith, (in_dq || dq));
+ 			if (a < 0) return -2;
+ 			if (a == 2) return 2;
+ 			if (a) return 1;
+@@ -293,7 +304,7 @@
+ 		if (c == '$') {
+ 			if (p[i+1] == '\'') {
+ 				size_t al = 0;
+-				int a = ansi_unit(p+i, &al);
++				int a = ansi_unit(p+i, &al, 1, 0);
+ 				if (a) return a == 2 ? 2 : 1;
+ 				if (last == 1) return 1;
+ 				last = 1;
+@@ -540,7 +551,7 @@
+ 		}
+ 		if (c == '$' && s + i + 1 < end && s[i+1] == '\'' && !sq) {
+ 			size_t al = 0;
+-			if (ansi_unit(s+i, &al) < 0) {
++			if (ansi_unit(s+i, &al, 0, 0) < 0) {
+ 				return NULL;
+ 			}
+ 			i += al;
+@@ -622,7 +633,7 @@
+ 		if (!sq && !dq) {
+ 			if (c == '$' && s + i + 1 < end && s[i+1] == '\'') {
+ 				size_t al = 0;
+-				if (ansi_unit(s+i, &al) < 0) {
++				if (ansi_unit(s+i, &al, 0, 0) < 0) {
+ 					return NULL;
+ 				}
+ 				i += al;
+@@ -808,7 +819,7 @@
+ 				continue;
+ 			}
+ 			if (s[1] == '\'') {
+-				if (ansi_unit(s, &nl) < 0) {
++				if (ansi_unit(s, &nl, 0, 0) < 0) {
+ 					return NULL;
+ 				}
+ 				s += nl;
+@@ -1401,7 +1412,7 @@
+ 				return NULL;
+ 			}
+ 			if (p[1] == '\'') {
+-				if (ansi_unit(p, &nl) < 0) {
++				if (ansi_unit(p, &nl, 0, 0) < 0) {
+ 					return NULL;
+ 				}
+ 				p += nl;
+@@ -1580,9 +1591,12 @@
+ 		if (sq) break;
+ 		if (s[i+1] == '\'') {
+ 			/* ANSI-C $'...' quote: consume literally (escapes
+-			 * honoured); flag embedded command substitution. */
++			 * honoured). An embedded $(...) or backquote blocks
++			 * only where the span is not genuine ANSI (inside
++			 * double quotes; inside arithmetic it always does):
++			 * at top level the content is literal. */
+ 			size_t al = 0;
+-			int a = ansi_unit(s+i, &al);
++			int a = ansi_unit(s+i, &al, 0, dq);
+ 			if (a < 0 || a == 2) return WRDE_SYNTAX;
+ 			if (a) return WRDE_CMDSUB;
+ 			i += al-1;

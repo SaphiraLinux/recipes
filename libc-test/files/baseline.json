@@ -1,0 +1,2866 @@
+{
+ "functional/argv:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/argv:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/basename:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/basename:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/clocale_mbfuncs:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/clocale_mbfuncs:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/clock_gettime:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/clock_gettime:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/crypt:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/crypt:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/dirname:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/dirname:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/dlopen:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/dlopen:static": {
+  "expected": "SKIP",
+  "note": "no static variant by design"
+ },
+ "functional/dlopen_dso:dynamic": {
+  "expected": "SKIP",
+  "note": "binary not built"
+ },
+ "functional/dlopen_dso:static": {
+  "expected": "SKIP",
+  "note": "no static variant by design"
+ },
+ "functional/env:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/env:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/fcntl:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/fcntl:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/fdopen:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/fdopen:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/fnmatch:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/fnmatch:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/fscanf:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/fscanf:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/fwscanf:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/fwscanf:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/iconv_open:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/iconv_open:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/inet_pton:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/inet_pton:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/ipc_msg:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/ipc_msg:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/ipc_sem:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/ipc_sem:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/ipc_shm:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/ipc_shm:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/mbc:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/mbc:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/memstream:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/memstream:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/mntent:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/mntent:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/popen:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/popen:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/pthread_cancel-points:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/pthread_cancel-points:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/pthread_cancel:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/pthread_cancel:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/pthread_cond:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/pthread_cond:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/pthread_mutex:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/pthread_mutex:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/pthread_mutex_pi:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/pthread_mutex_pi:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/pthread_robust:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/pthread_robust:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/pthread_tsd:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/pthread_tsd:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/qsort:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/qsort:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/random:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/random:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/search_hsearch:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/search_hsearch:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/search_insque:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/search_insque:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/search_lsearch:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/search_lsearch:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/search_tsearch:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/search_tsearch:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/sem_init:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/sem_init:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/sem_open:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/sem_open:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/setjmp:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/setjmp:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/snprintf:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/snprintf:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/socket:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/socket:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/spawn:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/spawn:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/sscanf:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/sscanf:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/sscanf_long:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/sscanf_long:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/stat:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/stat:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/strftime:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/strftime:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/string:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/string:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/string_memcpy:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/string_memcpy:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/string_memmem:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/string_memmem:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/string_memset:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/string_memset:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/string_strchr:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/string_strchr:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/string_strcspn:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/string_strcspn:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/string_strstr:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/string_strstr:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/strptime:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/strptime:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/strtod:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/strtod:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/strtod_long:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/strtod_long:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/strtod_simple:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/strtod_simple:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/strtof:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/strtof:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/strtol:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/strtol:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/strtold:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/strtold:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/swprintf:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/swprintf:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/tgmath:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/tgmath:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/time:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/time:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/tls_align:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/tls_align:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/tls_align_dlopen:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/tls_align_dlopen:static": {
+  "expected": "SKIP",
+  "note": "no static variant by design"
+ },
+ "functional/tls_align_dso:dynamic": {
+  "expected": "SKIP",
+  "note": "binary not built"
+ },
+ "functional/tls_align_dso:static": {
+  "expected": "SKIP",
+  "note": "no static variant by design"
+ },
+ "functional/tls_init:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/tls_init:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/tls_init_dlopen:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/tls_init_dlopen:static": {
+  "expected": "SKIP",
+  "note": "no static variant by design"
+ },
+ "functional/tls_init_dso:dynamic": {
+  "expected": "SKIP",
+  "note": "binary not built"
+ },
+ "functional/tls_init_dso:static": {
+  "expected": "SKIP",
+  "note": "no static variant by design"
+ },
+ "functional/tls_local_exec:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/tls_local_exec:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/udiv:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/udiv:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/ungetc:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/ungetc:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/utime:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/utime:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/vfork:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/vfork:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/wcsstr:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/wcsstr:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/wcstol:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/wcstol:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "functional/wordexp:dynamic": {
+  "expected": "FAIL",
+  "note": "known musl wordexp WRDE_NOCMD divergences"
+ },
+ "functional/wordexp:static": {
+  "expected": "FAIL",
+  "note": "known musl wordexp WRDE_NOCMD divergences"
+ },
+ "math/acos:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/acos:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/acosf:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/acosf:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/acosh:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/acosh:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/acoshf:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/acoshf:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/acoshl:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/acoshl:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/acosl:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/acosl:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/asin:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/asin:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/asinf:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/asinf:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/asinh:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/asinh:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/asinhf:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/asinhf:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/asinhl:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/asinhl:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/asinl:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/asinl:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/atan2:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/atan2:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/atan2f:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/atan2f:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/atan2l:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/atan2l:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/atan:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/atan:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/atanf:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/atanf:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/atanh:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/atanh:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/atanhf:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/atanhf:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/atanhl:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/atanhl:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/atanl:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/atanl:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/cbrt:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/cbrt:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/cbrtf:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/cbrtf:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/cbrtl:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/cbrtl:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/ceil:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/ceil:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/ceilf:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/ceilf:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/ceill:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/ceill:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/copysign:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/copysign:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/copysignf:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/copysignf:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/copysignl:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/copysignl:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/cos:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/cos:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/cosf:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/cosf:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/cosh:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/cosh:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/coshf:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/coshf:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/coshl:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/coshl:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/cosl:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/cosl:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/drem:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/drem:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/dremf:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/dremf:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/erf:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/erf:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/erfc:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/erfc:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/erfcf:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/erfcf:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/erfcl:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/erfcl:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/erff:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/erff:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/erfl:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/erfl:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/exp10:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/exp10:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/exp10f:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/exp10f:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/exp10l:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/exp10l:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/exp2:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/exp2:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/exp2f:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/exp2f:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/exp2l:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/exp2l:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/exp:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/exp:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/expf:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/expf:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/expl:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/expl:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/expm1:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/expm1:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/expm1f:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/expm1f:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/expm1l:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/expm1l:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/fabs:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/fabs:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/fabsf:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/fabsf:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/fabsl:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/fabsl:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/fdim:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/fdim:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/fdimf:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/fdimf:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/fdiml:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/fdiml:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/fenv:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/fenv:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/floor:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/floor:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/floorf:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/floorf:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/floorl:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/floorl:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/fma:dynamic": {
+  "expected": "FAIL",
+  "note": "qNaN-addend case is implementation-defined per IEEE 754-2019 7.2(c); musl matches x86 hardware and glibc, which do not signal INVALID"
+ },
+ "math/fma:static": {
+  "expected": "FAIL",
+  "note": "qNaN-addend case is implementation-defined per IEEE 754-2019 7.2(c); musl matches x86 hardware and glibc, which do not signal INVALID"
+ },
+ "math/fmaf:dynamic": {
+  "expected": "FAIL",
+  "note": "qNaN-addend case is implementation-defined per IEEE 754-2019 7.2(c); musl matches x86 hardware and glibc, which do not signal INVALID"
+ },
+ "math/fmaf:static": {
+  "expected": "FAIL",
+  "note": "qNaN-addend case is implementation-defined per IEEE 754-2019 7.2(c); musl matches x86 hardware and glibc, which do not signal INVALID"
+ },
+ "math/fmal:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/fmal:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/fmax:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/fmax:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/fmaxf:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/fmaxf:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/fmaxl:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/fmaxl:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/fmin:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/fmin:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/fminf:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/fminf:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/fminl:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/fminl:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/fmod:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/fmod:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/fmodf:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/fmodf:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/fmodl:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/fmodl:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/fpclassify:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/fpclassify:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/frexp:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/frexp:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/frexpf:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/frexpf:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/frexpl:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/frexpl:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/hypot:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/hypot:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/hypotf:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/hypotf:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/hypotl:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/hypotl:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/ilogb:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/ilogb:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/ilogbf:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/ilogbf:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/ilogbl:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/ilogbl:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/isless:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/isless:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/j0:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/j0:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/j0f:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/j0f:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/j1:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/j1:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/j1f:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/j1f:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/jn:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/jn:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/jnf:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/jnf:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/ldexp:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/ldexp:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/ldexpf:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/ldexpf:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/ldexpl:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/ldexpl:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/lgamma:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/lgamma:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/lgamma_r:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/lgamma_r:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/lgammaf:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/lgammaf:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/lgammaf_r:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/lgammaf_r:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/lgammal:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/lgammal:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/lgammal_r:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/lgammal_r:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/llrint:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/llrint:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/llrintf:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/llrintf:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/llrintl:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/llrintl:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/llround:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/llround:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/llroundf:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/llroundf:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/llroundl:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/llroundl:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/log10:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/log10:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/log10f:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/log10f:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/log10l:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/log10l:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/log1p:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/log1p:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/log1pf:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/log1pf:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/log1pl:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/log1pl:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/log2:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/log2:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/log2f:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/log2f:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/log2l:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/log2l:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/log:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/log:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/logb:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/logb:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/logbf:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/logbf:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/logbl:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/logbl:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/logf:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/logf:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/logl:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/logl:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/lrint:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/lrint:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/lrintf:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/lrintf:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/lrintl:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/lrintl:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/lround:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/lround:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/lroundf:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/lroundf:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/lroundl:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/lroundl:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/modf:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/modf:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/modff:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/modff:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/modfl:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/modfl:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/nearbyint:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/nearbyint:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/nearbyintf:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/nearbyintf:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/nearbyintl:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/nearbyintl:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/nextafter:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/nextafter:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/nextafterf:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/nextafterf:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/nextafterl:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/nextafterl:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/nexttoward:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/nexttoward:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/nexttowardf:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/nexttowardf:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/nexttowardl:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/nexttowardl:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/pow10:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/pow10:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/pow10f:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/pow10f:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/pow10l:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/pow10l:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/pow:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/pow:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/powf:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/powf:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/powl:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/powl:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/remainder:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/remainder:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/remainderf:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/remainderf:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/remainderl:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/remainderl:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/remquo:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/remquo:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/remquof:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/remquof:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/remquol:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/remquol:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/rint:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/rint:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/rintf:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/rintf:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/rintl:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/rintl:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/round:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/round:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/roundf:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/roundf:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/roundl:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/roundl:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/scalb:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/scalb:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/scalbf:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/scalbf:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/scalbln:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/scalbln:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/scalblnf:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/scalblnf:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/scalblnl:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/scalblnl:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/scalbn:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/scalbn:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/scalbnf:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/scalbnf:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/scalbnl:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/scalbnl:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/sin:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/sin:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/sincos:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/sincos:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/sincosf:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/sincosf:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/sincosl:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/sincosl:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/sinf:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/sinf:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/sinh:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/sinh:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/sinhf:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/sinhf:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/sinhl:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/sinhl:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/sinl:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/sinl:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/sqrt:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/sqrt:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/sqrtf:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/sqrtf:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/sqrtl:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/sqrtl:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/tan:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/tan:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/tanf:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/tanf:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/tanh:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/tanh:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/tanhf:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/tanhf:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/tanhl:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/tanhl:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/tanl:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/tanl:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/tgamma:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/tgamma:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/tgammaf:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/tgammaf:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/tgammal:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/tgammal:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/trunc:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/trunc:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/truncf:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/truncf:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/truncl:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/truncl:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/y0:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/y0:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/y0f:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/y0f:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/y1:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/y1:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/y1f:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/y1f:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/yn:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/yn:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/ynf:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "math/ynf:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/daemon-failure:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/daemon-failure:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/dn_expand-empty:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/dn_expand-empty:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/dn_expand-ptr-0:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/dn_expand-ptr-0:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/execle-env:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/execle-env:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/fflush-exit:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/fflush-exit:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/fgets-eof:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/fgets-eof:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/fgetwc-buffering:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/fgetwc-buffering:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/flockfile-list:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/flockfile-list:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/fpclassify-invalid-ld80:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/fpclassify-invalid-ld80:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/ftello-unflushed-append:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/ftello-unflushed-append:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/getpwnam_r-crash:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/getpwnam_r-crash:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/getpwnam_r-errno:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/getpwnam_r-errno:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/iconv-roundtrips:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/iconv-roundtrips:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/inet_ntop-v4mapped:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/inet_ntop-v4mapped:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/inet_pton-empty-last-field:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/inet_pton-empty-last-field:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/iswspace-null:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/iswspace-null:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/lrand48-signextend:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/lrand48-signextend:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/lseek-large:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/lseek-large:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/malloc-0:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/malloc-0:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/malloc-brk-fail:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/malloc-brk-fail:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/malloc-oom:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/malloc-oom:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/mbsrtowcs-overflow:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/mbsrtowcs-overflow:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/memmem-oob-read:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/memmem-oob-read:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/memmem-oob:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/memmem-oob:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/mkdtemp-failure:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/mkdtemp-failure:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/mkstemp-failure:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/mkstemp-failure:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/printf-1e9-oob:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/printf-1e9-oob:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/printf-fmt-g-round:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/printf-fmt-g-round:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/printf-fmt-g-zeros:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/printf-fmt-g-zeros:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/printf-fmt-n:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/printf-fmt-n:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/pthread-robust-detach:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/pthread-robust-detach:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+  "regression/pthread_atfork-errno-clobber:dynamic": {
+    "expected": "PASS",
+    "note": "fails when run as root: kernel bypasses RLIMIT_NPROC for privileged users (fork succeeds)"
+  },
+  "regression/pthread_atfork-errno-clobber:static": {
+    "expected": "PASS",
+    "note": "fails when run as root: kernel bypasses RLIMIT_NPROC for privileged users (fork succeeds)"
+  },
+ "regression/pthread_cancel-sem_wait:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/pthread_cancel-sem_wait:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/pthread_cond-smasher:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/pthread_cond-smasher:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/pthread_cond_wait-cancel_ignored:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/pthread_cond_wait-cancel_ignored:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/pthread_condattr_setclock:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/pthread_condattr_setclock:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/pthread_create-oom:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/pthread_create-oom:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/pthread_exit-cancel:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/pthread_exit-cancel:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/pthread_exit-dtor:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/pthread_exit-dtor:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/pthread_once-deadlock:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/pthread_once-deadlock:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/pthread_rwlock-ebusy:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/pthread_rwlock-ebusy:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/putenv-doublefree:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/putenv-doublefree:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/raise-race:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/raise-race:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/regex-backref-0:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/regex-backref-0:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/regex-backref-oob:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/regex-backref-oob:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/regex-bracket-icase:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/regex-bracket-icase:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/regex-ere-backref:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/regex-ere-backref:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/regex-escaped-high-byte:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/regex-escaped-high-byte:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/regex-negated-range:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/regex-negated-range:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/regexec-backref:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/regexec-backref:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/regexec-nosub:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/regexec-nosub:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/rewind-clear-error:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/rewind-clear-error:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/rlimit-open-files:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/rlimit-open-files:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/scanf-bytes-consumed:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/scanf-bytes-consumed:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/scanf-match-literal-eof:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/scanf-match-literal-eof:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/scanf-nullbyte-char:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/scanf-nullbyte-char:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/sem_close-unmap:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/sem_close-unmap:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/setenv-oom:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/setenv-oom:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/setvbuf-unget:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/setvbuf-unget:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/sigaltstack:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/sigaltstack:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/sigprocmask-internal:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/sigprocmask-internal:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/sigreturn:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/sigreturn:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/sscanf-eof:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/sscanf-eof:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/statvfs:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/statvfs:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/strverscmp:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/strverscmp:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/syscall-sign-extend:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/syscall-sign-extend:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/tls_get_new-dtv:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/tls_get_new-dtv:static": {
+  "expected": "SKIP",
+  "note": "no static variant by design"
+ },
+ "regression/tls_get_new-dtv_dso:dynamic": {
+  "expected": "SKIP",
+  "note": "binary not built"
+ },
+ "regression/tls_get_new-dtv_dso:static": {
+  "expected": "SKIP",
+  "note": "no static variant by design"
+ },
+ "regression/uselocale-0:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/uselocale-0:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/wcsncpy-read-overflow:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/wcsncpy-read-overflow:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/wcsstr-false-negative:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "regression/wcsstr-false-negative:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "saphira/saphira_abi:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "saphira/saphira_abi:static": {
+  "expected": "SKIP",
+  "note": "no static variant by design"
+ },
+ "saphira/saphira_alloc:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "saphira/saphira_alloc:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "saphira/saphira_dns:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "saphira/saphira_dns:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "saphira/saphira_fileio:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "saphira/saphira_fileio:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "saphira/saphira_fp:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "saphira/saphira_fp:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "saphira/saphira_glob:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "saphira/saphira_glob:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "saphira/saphira_guards:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "saphira/saphira_guards:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "saphira/saphira_proc:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "saphira/saphira_proc:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "saphira/saphira_sinew:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "saphira/saphira_sinew:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "saphira/saphira_threads:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "saphira/saphira_threads:static": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "saphira/saphira_tls:dynamic": {
+  "expected": "PASS",
+  "note": ""
+ },
+ "saphira/saphira_tls:static": {
+  "expected": "PASS",
+  "note": ""
+ }
+}

@@ -1,0 +1,31 @@
+From c2021b7795c72848712218356556a62a49037206 Mon Sep 17 00:00:00 2001
+From: Matthias Goergens <matthias.goergens@gmail.com>
+Date: Wed, 5 Aug 2026 15:57:48 +0800
+Subject: [PATCH] time: avoid overflow normalizing extreme tm_mday
+
+mktime is required to accept and normalize out-of-range members of
+struct tm. When tm_mday is INT_MIN, subtracting one from it overflows
+before the existing long long multiplication takes effect.
+
+Perform the subtraction in long long so the complete int range can be
+normalized as intended.
+---
+ src/time/__tm_to_secs.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/time/__tm_to_secs.c b/src/time/__tm_to_secs.c
+index c29fa985..4957953c 100644
+--- a/src/time/__tm_to_secs.c
++++ b/src/time/__tm_to_secs.c
+@@ -16,7 +16,7 @@ long long __tm_to_secs(const struct tm *tm)
+ 	}
+ 	long long t = __year_to_secs(year, &is_leap);
+ 	t += __month_to_secs(month, is_leap);
+-	t += 86400LL * (tm->tm_mday-1);
++	t += 86400LL * (tm->tm_mday-1LL);
+ 	t += 3600LL * tm->tm_hour;
+ 	t += 60LL * tm->tm_min;
+ 	t += tm->tm_sec;
+-- 
+2.55.0
+

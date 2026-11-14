@@ -1,0 +1,139 @@
+--- a/src/misc/wordexp.c
++++ b/src/misc/wordexp.c
+@@ -57,7 +57,8 @@
+ 	}
+ }
+ 
+-static int brace_unit(const char *s, size_t *len, int in_arith, int depth);
++static int brace_unit(const char *s, size_t *len, int in_arith, int depth,
++	int in_dq);
+ static int arith_ok(const char *p, size_t *len);
+ 
+ /* Bound on nested ${...} recursion: the scanner recurses per nesting
+@@ -66,15 +67,25 @@
+  * as too complex to verify safe (fail closed, like upstream). */
+ #define BRACE_MAXDEPTH 64
+ 
+-/* ${...} unit at s (s[0]=='$', s[1]=='{'), with fresh quote state
+- * (globs/words inside are parsed as their own context).
++/* ${...} unit at s (s[0]=='$', s[1]=='{').
+  * in_arith: single-quote does not suppress cmdsub detection.
+- * *len set past the closing '}'.
++ * in_dq: the double-quote state enclosing this brace word (the
++ * top-level scan's dq at '${', or the enclosing word's current
++ * dq for nested braces; 0 inside arithmetic, which aborts on any
++ * quote). Pairing stays nested (a fresh sq/dq pair per unit, as
++ * the shell pairs quotes when finding the closing brace). A
++ * single-quoted region opened under outer double quotes does NOT
++ * suppress $(...) or backquote detection ("${X:-'$(touch M)'}"
++ * executes in the shell despite the quotes, because ' is literal
++ * inside "..."; the pre-check must see through it). Everything
++ * else behaves exactly as the old scan. *len set past the
++ * closing '}'.
+  * Returns 0 clean, 1 dirty (command substitution inside),
+  * 2 malformed or too deeply nested, -1 to fall back to legacy
+  * handling (bare brace or unbalanced: the caller reverts to
+  * historical behaviour). */
+-static int brace_unit(const char *s, size_t *len, int in_arith, int depth)
++static int brace_unit(const char *s, size_t *len, int in_arith, int depth,
++	int in_dq)
+ {
+ 	size_t i = 2;
+ 	int brdepth = 1, sq = 0, dq = 0;
+@@ -109,7 +120,7 @@
+ 		if (c == '{' && !sq) return -1;
+ 		if (c == '$' && s[i+1] == '{' && !sq) {
+ 			size_t nl = 0;
+-			int n = brace_unit(s+i, &nl, in_arith, depth+1);
++			int n = brace_unit(s+i, &nl, in_arith, depth+1, dq);
+ 			if (n < 0) return n;
+ 			if (n == 2) return 2;
+ 			if (n) return 1;
+@@ -123,21 +134,32 @@
+ 				i += 1 + al;
+ 				continue;
+ 			}
+-			/* Invalid arithmetic reads as literal text here;
+-			 * keep scanning it (an inner $( or backquote still
+-			 * trips the rules below, so nothing executable
+-			 * slips through). */
++			if (ar == 1) return 1;
++			/* Malformed arithmetic (ar==2) falls through to
++			 * the literal scan below: it cannot execute.
++			 * Every construct the shell could execute as a
++			 * command -- $(...), backquotes, quotes, ; and
++			 * newlines, adjacent names -- already reports 1
++			 * above, so reaching here means no executable
++			 * content. The literal scan still trips on an
++			 * inner $( or backquote, and the shell itself
++			 * rejects what remains (case 34's shape, with
++			 * command words and ;, reports 1 and is blocked).
++			 * Treating malformed arithmetic as literal keeps
++			 * lazily-skipped defaults working: ${X-$((}))}
++			 * expands fine when X is set, exactly as the
++			 * shell does. */
+ 			i++;
+ 			continue;
+ 		}
+ 		if (c == '$' && s[i+1] == '(') {
+ 			if (s[i+2] != '(') {
+-				if (in_arith || !sq) return 1;
++				if (in_arith || !sq || (sq && in_dq)) return 1;
+ 				i += 2;
+ 				continue;
+ 			}
+ 		}
+-		if (c == '`' && (in_arith || !sq)) return 1;
++		if (c == '`' && (in_arith || !sq || (sq && in_dq))) return 1;
+ 		if (c == '}' && !sq) {
+ 			if (--brdepth == 0) {
+ 				*len = i+1;
+@@ -223,7 +245,9 @@
+ 				size_t bl = 0;
+ 				int b;
+ 				if (last == 1) return 1;
+-				b = brace_unit(p+i, &bl, 1, 0);
++				/* in_dq=0: arithmetic aborts on any quote,
++				 * so no quoted context can be live here. */
++				b = brace_unit(p+i, &bl, 1, 0, 0);
+ 				if (b < 0) return 2;
+ 				if (b) return 1;
+ 				last = 1;
+@@ -260,6 +284,20 @@
+ 			i = j;
+ 			continue;
+ 		}
++		if (c == '}') {
++			/* A bare } has no meaning inside arithmetic
++			 * (nested ${...} is consumed by the $ case
++			 * above, so anything reaching here is
++			 * unbalanced): malformed, not blocked. The
++			 * shell cannot execute through it either --
++			 * a } closes nothing here -- so failing
++			 * closed as SYNTAX-equivalent is safe, and
++			 * falling through lets lazily-skipped
++			 * defaults (${X-$((}))}) expand exactly as
++			 * the shell expands them. (A bare { stays
++			 * blocked: it can open an executable group.) */
++			return 2;
++		}
+ 		{
+ 			size_t j = i;
+ 			while (p[j] == '+' || p[j] == '-' || p[j] == '*' ||
+@@ -1495,10 +1533,13 @@
+ 			/* ${...} is parsed as its own word: braces must
+ 			 * balance and no command substitution may hide
+ 			 * inside (single-quotes suppress outside
+-			 * arithmetic). Unbalanced or bare-brace input
+-			 * keeps the historical verdicts below. */
++			 * arithmetic). The word is scanned in the current
++			 * (outer) quote context: sq is always 0 here ($ is
++			 * suppressed inside sq), dq is passed through.
++			 * Unbalanced or bare-brace input keeps the
++			 * historical verdicts below. */
+ 			size_t bl = 0;
+-			int b = brace_unit(s+i, &bl, 0, 0);
++			int b = brace_unit(s+i, &bl, 0, 0, dq);
+ 			if (b == 1) return WRDE_CMDSUB;
+ 			if (b == 2 || b == -2) return WRDE_SYNTAX;
+ 			if (b == 0) {

@@ -1,0 +1,36 @@
+From 15a1155eafd1d8c13bc1b5ed360cec0b6610dfdd Mon Sep 17 00:00:00 2001
+From: Matthias Goergens <matthias.goergens@gmail.com>
+Date: Wed, 5 Aug 2026 15:57:55 +0800
+Subject: [PATCH] fix undefined pointer arithmetic in wcsrchr
+
+On an unsuccessful search, the backwards loop decrements the pointer
+past the beginning of the string and then compares that invalid pointer
+with the string pointer.
+
+Check for the beginning of the string before decrementing instead. This
+preserves the existing results without forming a pointer outside the
+array.
+---
+ src/string/wcsrchr.c | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/src/string/wcsrchr.c b/src/string/wcsrchr.c
+index 8961b9e2..aef344b4 100644
+--- a/src/string/wcsrchr.c
++++ b/src/string/wcsrchr.c
+@@ -3,6 +3,10 @@
+ wchar_t *wcsrchr(const wchar_t *s, wchar_t c)
+ {
+ 	const wchar_t *p;
+-	for (p=s+wcslen(s); p>=s && *p!=c; p--);
+-	return p>=s ? (wchar_t *)p : 0;
++	p = s+wcslen(s);
++	while (*p != c) {
++		if (p == s) return 0;
++		p--;
++	}
++	return (wchar_t *)p;
+ }
+-- 
+2.55.0
+

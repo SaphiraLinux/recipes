@@ -1,0 +1,161 @@
+#!/bin/sh
+# libc-test-musl-check: static-vs-dynamic musl agreement check.
+#
+# Part of the libc-test test suite. Proves the installed dynamic musl
+# (/lib, exercised via the system compiler) and the isolated static
+# musl (/opt/saphira/musl-static, exercised via musl-static-gcc) agree
+# on behaviour. Four embedded probes (smoke, math including the Saphira
+# arch paths, threads/TLS, strings including short-needle search) are
+# each compiled twice — once dynamic, once static — run, and compared
+# byte-for-byte (stdout and exit status).
+#
+# usage: libc-test-musl-check
+#   Needs a dynamic C compiler (CC_DYN, default cc) and the static
+#   toolchain (CC_STATIC, default
+#   /opt/saphira/musl-static/bin/musl-static-gcc from musl-static).
+#   Per-probe lines go to stdout, the summary to stderr.
+#   Exit 0 = agree, 1 = divergence, 2 = toolchain missing.
+
+set -u
+
+CC_DYN=${CC_DYN:-cc}
+CC_STATIC=${CC_STATIC:-/opt/saphira/musl-static/bin/musl-static-gcc}
+
+if [ $# -gt 0 ]; then
+	echo "usage: $0" >&2
+	exit 2
+fi
+
+dcmd=${CC_DYN%% *}
+command -v "$dcmd" >/dev/null 2>&1 || {
+	echo "libc-test-musl-check: no dynamic compiler ($dcmd); install gcc or set CC_DYN" >&2
+	exit 2
+}
+[ -x "$CC_STATIC" ] || {
+	echo "libc-test-musl-check: no static toolchain ($CC_STATIC); install musl-static or set CC_STATIC" >&2
+	exit 2
+}
+
+work=$(mktemp -d "${TMPDIR:-/tmp}/musl-check.XXXXXX") || exit 2
+trap 'rm -rf "$work"' EXIT HUP INT TERM
+
+cat >"$work/hello.c" <<'EOF'
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+int main(void) {
+	char *p = malloc(64);
+	unsigned long h = 0;
+	size_t i;
+	if (!p)
+		return 1;
+	strcpy(p, "saphira-musl");
+	for (i = 0; i < strlen(p); i++)
+		h = h * 31 + (unsigned char)p[i];
+	printf("str=%s len=%zu hash=%lu ok=%d\n", p, strlen(p), h,
+		strcmp(p, "saphira-musl") == 0 && memcmp(p, "saphira-musl", 12) == 0);
+	free(p);
+	return 0;
+}
+EOF
+
+cat >"$work/math.c" <<'EOF'
+#include <stdio.h>
+#include <stdlib.h>
+#include <math.h>
+#include <stdint.h>
+#include <string.h>
+static void bits(const char *n, double v) {
+	uint64_t b;
+	memcpy(&b, &v, 8);
+	printf("%s=%a:%016lx\n", n, v, (unsigned long)b);
+}
+int main(void) {
+	static const char *in[] = {"0.5", "-0.5", "1.5", "-2.5",
+		"0x1p-1074", "-0x1p-1074", "0.0", "-0.0", "inf", "-inf", "nan"};
+	size_t i, n = sizeof in / sizeof in[0];
+	for (i = 0; i < n; i++) {
+		double v = strtod(in[i], 0);
+		char nb[32];
+		snprintf(nb, sizeof nb, "in%zu", i);
+		bits(nb, v);
+		bits("rint", rint(v));
+		bits("floor", floor(v));
+		bits("ceil", ceil(v));
+		bits("nearbyint", nearbyint(v));
+		bits("fmin", fmin(v, 1.0));
+		bits("fmax", fmax(v, -1.0));
+	}
+	return 0;
+}
+EOF
+
+cat >"$work/threads.c" <<'EOF'
+#include <stdio.h>
+#include <pthread.h>
+static __thread int tls;
+static int sum;
+static pthread_mutex_t m = PTHREAD_MUTEX_INITIALIZER;
+static void *w(void *a) {
+	tls = (int)(long)a;
+	pthread_mutex_lock(&m);
+	sum += tls;
+	pthread_mutex_unlock(&m);
+	return 0;
+}
+int main(void) {
+	pthread_t t[4];
+	int i;
+	for (i = 0; i < 4; i++)
+		pthread_create(&t[i], 0, w, (void *)(long)(i + 1));
+	for (i = 0; i < 4; i++)
+		pthread_join(t[i], 0);
+	printf("sum=%d\n", sum);
+	return sum == 10 ? 0 : 1;
+}
+EOF
+
+cat >"$work/strings.c" <<'EOF'
+#include <stdio.h>
+#include <string.h>
+int main(void) {
+	const char *h = "abcXXdefYYabc";
+	const char *p2 = strstr(h, "XX"), *p3 = strstr(h, "def"), *p4 = strstr(h, "YYab");
+	char b[16] = "0123456789abcde";
+	printf("2=%ld 3=%ld 4=%ld\n", p2 ? p2 - h : -1, p3 ? p3 - h : -1, p4 ? p4 - h : -1);
+	printf("n=%d m=%d\n", strncmp("abc", "abd", 3), memcmp("abc", "abd", 3) < 0);
+	memmove(b, b + 5, 10);
+	printf("mm=%s\n", b);
+	return 0;
+}
+EOF
+
+pass=0; fail=0
+for p in hello math threads strings; do
+	if ! $CC_DYN -O2 -fno-builtin -o "$work/$p-dyn" "$work/$p.c" -lm -lpthread 2>"$work/$p-dyn.cc.err"; then
+		echo "FAIL $p dynamic-compile:"
+		head -5 "$work/$p-dyn.cc.err"
+		fail=$((fail + 1)); continue
+	fi
+	if ! $CC_STATIC -O2 -fno-builtin -o "$work/$p-static" "$work/$p.c" -lm -lpthread 2>"$work/$p-static.cc.err"; then
+		echo "FAIL $p static-compile:"
+		head -5 "$work/$p-static.cc.err"
+		fail=$((fail + 1)); continue
+	fi
+	"$work/$p-dyn" >"$work/$p-dyn.out" 2>&1; drc=$?
+	"$work/$p-static" >"$work/$p-static.out" 2>&1; src=$?
+	if [ "$drc" -eq "$src" ] && cmp -s "$work/$p-dyn.out" "$work/$p-static.out"; then
+		echo "ok $p"
+		pass=$((pass + 1))
+	else
+		echo "FAIL $p dynamic-rc=$drc static-rc=$src"
+		diff "$work/$p-dyn.out" "$work/$p-static.out" | head -10
+		fail=$((fail + 1))
+	fi
+done
+
+{
+echo "=== musl-check summary ==="
+echo "probes PASS=$pass FAIL=$fail (dynamic: $CC_DYN, static: $CC_STATIC)"
+} >&2
+[ "$fail" -eq 0 ]

@@ -1,0 +1,33 @@
+From cb037c4630ddb87b48ad732bff04ebaa3d42148b Mon Sep 17 00:00:00 2001
+From: Rich Felker <dalias@aerifal.cx>
+Date: Mon, 5 Oct 2026 17:44:14 -0400
+Subject: [PATCH] fnmatch: fix processing bracket range with multibyte endpoint
+
+the advancement logic was off-by-one, accounting for the p++ in the
+for clause but not the '-' character. this resulted in attempting to
+process the last byte of the range endpoint on the next iteration of
+the loop.
+
+for a single-byte endpoint this was harmless, but for a multi-byte
+character, mbtowc would fail on the next iteration, preventing
+matching of any subsequent part of the bracket.
+---
+ src/regex/fnmatch.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/regex/fnmatch.c b/src/regex/fnmatch.c
+index ae3c1c24..c537ad20 100644
+--- a/src/regex/fnmatch.c
++++ b/src/regex/fnmatch.c
+@@ -124,7 +124,7 @@ static int match_bracket(const char *p, int k, int kfold)
+ 	for (; *p != ']'; p++) {
+ 		if (p[0]=='-' && p[1]!=']') {
+ 			wchar_t wc2;
+-			int l = mbtowc(&wc2, p+1, 4);
++			int l = mbtowc(&wc2, ++p, 4);
+ 			if (l < 0) return 0;
+ 			if (wc <= wc2)
+ 				if ((unsigned)k-wc <= wc2-wc ||
+-- 
+2.55.0
+

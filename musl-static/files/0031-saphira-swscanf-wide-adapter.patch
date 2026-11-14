@@ -1,0 +1,98 @@
+--- a/src/stdio/vswscanf.c
++++ b/src/stdio/vswscanf.c
+@@ -1,6 +1,72 @@
+ #include "stdio_impl.h"
++#include "locale_impl.h"
+ #include <wchar.h>
+
++/* Locale-independent UTF-8 encoder for the swscanf input adapter.
++ *
++ * wcsrtombs cannot be used here: it fails for any wchar not encodable
++ * in the current locale (every non-ASCII character in the C locale),
++ * which manufactures an encoding error where the standard defines none
++ * (swscanf input is wide characters; EILSEQ applies to byte sequences).
++ * UTF-8 is total over all Unicode scalar values, so the byte engine
++ * below always sees a faithful image of the input; the stream is pinned
++ * to the internal C.UTF-8 locale so decoding never depends on the
++ * thread locale either.
++ *
++ * Returns the bytes emitted; advances *src past exactly the characters
++ * emitted. Stops before the terminating NUL (end of string), before
++ * buffer exhaustion (never splits a character), and at the first wchar
++ * with no UTF-8 encoding (lone surrogate or out-of-range value), which
++ * the engine then observes as end-of-file.
++ */
++static size_t wcs_to_utf8(char *s, const wchar_t **src, size_t n)
++{
++	const wchar_t *p = *src;
++	size_t k = 0;
++	wchar_t wc;
++
++	while ((wc = *p)) {
++		unsigned c = wc;
++		int l;
++
++		if (c < 0x80) l = 1;
++		else if (c < 0x800) l = 2;
++		else if (c < 0x10000) {
++			if (c >= 0xD800 && c < 0xE000) break;
++			l = 3;
++		} else if (c < 0x110000) l = 4;
++		else break;
++
++		if (k + (size_t)l > n) break;
++
++		switch (l) {
++		case 1:
++			s[k] = c;
++			break;
++		case 2:
++			s[k] = 0xC0 | (c >> 6);
++			s[k+1] = 0x80 | (c & 0x3F);
++			break;
++		case 3:
++			s[k] = 0xE0 | (c >> 12);
++			s[k+1] = 0x80 | ((c >> 6) & 0x3F);
++			s[k+2] = 0x80 | (c & 0x3F);
++			break;
++		default:
++			s[k] = 0xF0 | (c >> 18);
++			s[k+1] = 0x80 | ((c >> 12) & 0x3F);
++			s[k+2] = 0x80 | ((c >> 6) & 0x3F);
++			s[k+3] = 0x80 | (c & 0x3F);
++			break;
++		}
++		k += l;
++		p++;
++	}
++
++	*src = p;
++	return k;
++}
++
+ static size_t wstring_read(FILE *f, unsigned char *buf, size_t len)
+ {
+ 	const wchar_t *src = f->cookie;
+@@ -8,11 +74,7 @@
+
+ 	if (!src) return 0;
+
+-	k = wcsrtombs((void *)f->buf, &src, f->buf_size, 0);
+-	if (k==(size_t)-1) {
+-		f->rpos = f->rend = 0;
+-		return 0;
+-	}
++	k = wcs_to_utf8((void *)f->buf, &src, f->buf_size);
+
+ 	f->rpos = f->buf;
+ 	f->rend = f->buf + k;
+@@ -30,7 +92,8 @@
+ 	FILE f = {
+ 		.buf = buf, .buf_size = sizeof buf,
+ 		.cookie = (void *)s,
+-		.read = wstring_read, .lock = -1
++		.read = wstring_read, .lock = -1,
++		.locale = UTF8_LOCALE,
+ 	};
+ 	return vfwscanf(&f, fmt, ap);
+ }

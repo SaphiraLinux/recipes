@@ -1,0 +1,28 @@
+--- a/misc/packcc/src/packcc.c
++++ b/misc/packcc/src/packcc.c
+@@ -2838,12 +2838,20 @@
+             stream__puts(gen->stream, "const size_t n0 = chunk->thunks.len;\n");
+         }
+         stream__write_characters(gen->stream, ' ', indent);
+-        stream__puts(gen->stream, "int i;\n");
+-        stream__write_characters(gen->stream, ' ', indent);
+-        if (max < 0)
+-            stream__puts(gen->stream, "for (i = 0;; i++) {\n");
++        /* The counter is only read when it bounds the loop (max > 0) or
++         * enforces a minimum afterwards (min > 0, checked below). Emitting
++         * it unconditionally leaves `int i` set-but-unused in every
++         * zero-or-more repetition of every grammar. */
++        if (min > 0 || max > 0) {
++            stream__puts(gen->stream, "int i;\n");
++            stream__write_characters(gen->stream, ' ', indent);
++            if (max < 0)
++                stream__puts(gen->stream, "for (i = 0;; i++) {\n");
++            else
++                stream__printf(gen->stream, "for (i = 0; i < %d; i++) {\n", max);
++        }
+         else
+-            stream__printf(gen->stream, "for (i = 0; i < %d; i++) {\n", max);
++            stream__puts(gen->stream, "for (;;) {\n");
+         stream__write_characters(gen->stream, ' ', indent + 4);
+         stream__puts(gen->stream, "const size_t p = ctx->cur;\n");
+         stream__write_characters(gen->stream, ' ', indent + 4);

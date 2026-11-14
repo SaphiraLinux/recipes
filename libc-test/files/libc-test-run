@@ -1,0 +1,287 @@
+#!/bin/sh
+# libc-test-run: run the installed Saphira libc-test suite against both
+# musl implementations and report.
+#
+# One invocation exercises every prebuilt test binary twice:
+#   dynamic executables -> the INSTALLED libc (via /lib/ld-musl-*.so.1)
+#   static executables  -> the musl-static archive linked in at build time
+# A static/dynamic divergence on the same test is itself a finding.
+#
+# Terminal output is human-readable: one progress line per test while
+# running, then a concise Dynamic/Static summary. Machine-readable JSONL
+# is written only with --jsonl FILE, to that file, never to the terminal.
+# Every temp file lives under TMPDIR; the installed tree is never written.
+#
+# A FAIL is a finding, not something to conceal: known failures are listed
+# alongside new regressions. Unexpectedly missing binaries, an empty run,
+# and coverage failures all yield INCOMPLETE, never a clean PASS.
+#
+# Exit status: 0 = Overall PASS (complete, no FAIL/ERROR),
+# 1 = Overall FAIL (complete, at least one FAIL or ERROR),
+# 2 = Overall INCOMPLETE (binaries unexpectedly missing, nothing
+# executed, unbaselined passes, or coverage failed) or usage error.
+#
+# usage: libc-test-run [--jsonl FILE] [--baseline FILE] [--timeout SEC]
+
+set -u
+
+TESTDIR=${TESTDIR:-/usr/share/libc-test}
+BINDIR=$TESTDIR/bin
+LIST=$TESTDIR/test-list.txt
+TIMEOUT_SEC=30
+JSONL=""
+BASELINE="$TESTDIR/baseline.json"
+
+while [ $# -gt 0 ]; do
+	case $1 in
+	--jsonl) JSONL=$2; shift 2;;
+	--baseline) BASELINE=$2; shift 2;;
+	--timeout) TIMEOUT_SEC=$2; shift 2;;
+	-*) echo "usage: $0 [--jsonl FILE] [--baseline FILE] [--timeout SEC]" >&2; exit 2;;
+	*) echo "usage: $0 [--jsonl FILE] [--baseline FILE] [--timeout SEC]" >&2; exit 2;;
+	esac
+done
+
+# JSONL goes to a file only. Piping records to the terminal would both
+# spam the operator and corrupt the result capture below, which is how
+# an all-green summary once hid hundreds of uncounted tests.
+case "$JSONL" in -) echo "libc-test-run: --jsonl needs a FILE, not -" >&2; exit 2;; esac
+if [ -n "$JSONL" ]; then
+	: >"$JSONL" || { echo "libc-test-run: cannot write $JSONL" >&2; exit 2; }
+fi
+
+[ -d "$BINDIR" ] || { echo "libc-test-run: no test dir $BINDIR" >&2; exit 2; }
+[ -f "$BASELINE" ] || { echo "libc-test-run: baseline missing: $BASELINE" >&2; exit 2; }
+[ -f "$LIST" ] || { echo "libc-test-run: test list missing: $LIST" >&2; exit 2; }
+
+ARCH=$(uname -m)
+KERNEL=$(uname -r)
+command -v timeout >/dev/null 2>&1 && HAVE_TIMEOUT=1 || HAVE_TIMEOUT=0
+LIBC_VER=$(apk info -v musl 2>/dev/null | sed -n '1p')
+[ -z "$LIBC_VER" ] && LIBC_VER="unknown"
+SUITE_REV=$(grep -o '"suite_commit": "[0-9a-f]*"' "$TESTDIR/build-info.json" 2>/dev/null | cut -d'"' -f4)
+[ -z "$SUITE_REV" ] && SUITE_REV="unknown"
+CCINFO=$(grep -o '"cc": "[^"]*"' "$TESTDIR/build-info.json" 2>/dev/null | cut -d'"' -f4)
+[ -z "$CCINFO" ] && CCINFO="unknown"
+
+RAN=$(mktemp "${TMPDIR:-/tmp}/libc-test-ran.XXXXXX") || exit 2
+FAILS=$(mktemp "${TMPDIR:-/tmp}/libc-test-fails.XXXXXX") || exit 2
+MISSING=$(mktemp "${TMPDIR:-/tmp}/libc-test-missing.XXXXXX") || exit 2
+trap 'rm -f "$RAN" "$FAILS" "$MISSING" "$RAN.sym" "$RAN.cov-err" "$RAN.coverage.json"' EXIT HUP INT TERM
+
+# JSON string fields must not contain raw quotes/backslashes.
+san() { printf '%s' "$1" | tr -d '"\\'; }
+
+now_ms() {
+	if date +%s%N >/dev/null 2>&1; then
+		echo $(( $(date +%s%N) / 1000000 ))
+	else
+		echo $(( $(date +%s) * 1000 ))
+	fi
+}
+
+bump_linkage() { # linkage result
+	case $1:$2 in
+	dynamic:PASS) dpass=$((dpass+1));; dynamic:FAIL) dfail=$((dfail+1));;
+	dynamic:SKIP) dskip=$((dskip+1));; dynamic:ERROR) derror=$((derror+1));;
+	static:PASS) spass=$((spass+1));; static:FAIL) sfail=$((sfail+1));;
+	static:SKIP) sskip=$((sskip+1));; static:ERROR) serror=$((serror+1));;
+	esac
+}
+
+# baseline lookup: key "test:linkage" -> "expected|note"
+base_expected() {
+	python3 - "$BASELINE" "$1" 2>/dev/null <<'PY' || echo "NONE|"
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    e = d.get(sys.argv[2], {})
+    print(e.get("expected", "NONE") + "|" + e.get("note", ""))
+except Exception:
+    print("NONE|")
+PY
+}
+
+# Append one machine-readable record. File only, never the terminal:
+# the caller's result capture shares this shell's stdout.
+record_json() { # test category linkage result rc sig dur expected verdict note stdout_json
+	[ -n "$JSONL" ] || return 0
+	ntest=$(san "$1"); ncat=$(san "$2"); nnote=$(san "${10}")
+	printf '{"test":"%s","category":"%s","linkage":"%s","result":"%s","exit":%d,"signal":%d,"duration_ms":%d,"expected":"%s","verdict":"%s","note":"%s","arch":"%s","kernel":"%s","libc":"%s","suite_rev":"%s","cc":"%s","stdout_tail":%s}\n' \
+		"$ntest" "$ncat" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "$nnote" \
+		"$(san "$ARCH")" "$(san "$KERNEL")" "$(san "$LIBC_VER")" "$(san "$SUITE_REV")" "$(san "$CCINFO")" "${11}" >>"$JSONL"
+}
+
+run_one() { # test category binary linkage -- stdout: "RESULT VERDICT DUR_MS"
+	test=$1; category=$2; bin=$3; linkage=$4
+	# Mirror the build-tree layout under a temp dir so both DSO lookup
+	# styles work (argv[0]-relative and DT_NEEDED with src/ prefix)
+	# while test file writes stay out of the installed tree.
+	work=$(mktemp -d "${TMPDIR:-/tmp}/libc-test.XXXXXX") || { echo "ERROR SETUP 0"; return 0; }
+	bdir=$(dirname "$bin"); bname=$(basename "$bin")
+	mkdir -p "$work/src/$category" || { rm -rf "$work"; echo "ERROR SETUP 0"; return 0; }
+	ln -s "$bin" "$work/src/$category/$bname" || { rm -rf "$work"; echo "ERROR SETUP 0"; return 0; }
+	for so in "$bdir"/*.so; do
+		[ -e "$so" ] || continue
+		ln -s "$so" "$work/src/$category/" 2>/dev/null || true
+	done
+	start=$(now_ms)
+	if [ "$HAVE_TIMEOUT" -eq 1 ]; then
+		(cd "$work" && timeout "$TIMEOUT_SEC" "./src/$category/$bname" >"$work/out" 2>&1)
+		rc=$?
+	else
+		(cd "$work" && "./src/$category/$bname" >"$work/out" 2>&1)
+		rc=$?
+	fi
+	end=$(now_ms)
+	dur=$((end - start))
+	out=$(tail -c 8192 "$work/out")
+	rm -rf "$work"
+	if [ $rc -eq 0 ]; then result=PASS; sig=0; detail="";
+	elif [ $rc -eq 124 ]; then result=ERROR; sig=0; detail="timeout after ${TIMEOUT_SEC}s";
+	elif [ $rc -gt 128 ]; then result=ERROR; sig=$((rc - 128)); detail="signal $sig";
+	else result=FAIL; sig=0; detail="exit $rc"; fi
+	be=$(base_expected "$test:$linkage")
+	exp=${be%%|*}; note=${be#*|}
+	# NOTE: compare with [ ] tests, never with a case pattern built
+	# from the subject values themselves ("$exp:$result)" as a pattern
+	# matches its own subject unconditionally, marking every verdict
+	# ok and leaving FIXED/REGRESSION dead code).
+	if [ "$exp" = NONE ]; then
+		verdict=UNBASELINED; printf '%s [%s] — %s, no baseline entry\n' "$test" "$linkage" "$result" >>"$FAILS"
+	elif [ "$exp" = "$result" ]; then verdict=ok
+	elif [ "$result" = PASS ]; then
+		verdict=FIXED; printf '%s [%s] — FIXED (was expected %s, now PASS)\n' "$test" "$linkage" "$exp" >>"$FAILS"
+	else verdict=REGRESSION; fi
+	case "$result:$verdict" in
+	FAIL:ok) printf '%s [%s] — FAIL (%s), known: %s\n' "$test" "$linkage" "$detail" "$note" >>"$FAILS";;
+	FAIL:*) printf '%s [%s] — FAIL (%s), expected %s — NEW REGRESSION\n' "$test" "$linkage" "$detail" "$exp" >>"$FAILS";;
+	ERROR:*) printf '%s [%s] — ERROR (%s), expected %s\n' "$test" "$linkage" "$detail" "$exp" >>"$FAILS";;
+	esac
+	json=$(printf '%s' "$out" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')
+	record_json "$test" "$category" "$linkage" "$result" "$rc" "$sig" "$dur" "$exp" "$verdict" "$note" "$json"
+	echo "$result $verdict $dur"
+}
+
+skip_one() { # test category linkage reason -- stdout: "SKIP VERDICT 0"
+	# A missing binary is only a clean SKIP when the baseline expects
+	# SKIP (dynamic-only tests, helper DSOs). Anything else is an
+	# unexpected gap: never hide it behind SKIP.
+	be=$(base_expected "$1:$3")
+	exp=${be%%|*}; note="not built: $4; ${be#*|}"
+	case "$exp" in
+		SKIP) v=ok;;
+		*) v=REGRESSION; printf '%s [%s] — binary missing (%s), expected %s\n' "$1" "$3" "$4" "$exp" >>"$FAILS"; printf '%s [%s] — binary missing, expected %s\n' "$1" "$3" "$exp" >>"$MISSING";;
+	esac
+	record_json "$1" "$2" "$3" SKIP 0 0 0 "$exp" "$v" "$note" '""'
+	echo "SKIP $v 0"
+}
+
+pass=0; fail=0; skip=0; error=0
+dpass=0; dfail=0; dskip=0; derror=0
+spass=0; sfail=0; sskip=0; serror=0
+expected_rows=0; missing_unexpected=0; unbaselined=0; fixed=0
+# NOTE: the list is read on fd 3, and every test runs with stdin
+# from /dev/null. Test binaries inherit our fds across fork and share
+# the file offset; a test that rewinds, closes or consumes fd 0 (e.g.
+# the rewind-clear-error test) would otherwise corrupt or rewind this
+# loop and repeat the suite forever.
+while IFS= read -r -u 3 tname || [ -n "$tname" ]; do
+	case $tname in ""|\#*) continue;; esac
+	name=${tname##*/}; category=${tname%%/*}
+	echo "$tname" >>"$RAN"
+	for linkage in dynamic static; do
+		expected_rows=$((expected_rows+1))
+		case $linkage in dynamic) b="$BINDIR/$tname.exe";; static) b="$BINDIR/$tname-static.exe";; esac
+		if [ ! -e "$b" ]; then
+			line=$(skip_one "$tname" "$category" "$linkage" "binary missing")
+		elif [ ! -x "$b" ]; then
+			line=$(skip_one "$tname" "$category" "$linkage" "not executable")
+		else
+			line=$(run_one "$tname" "$category" "$b" "$linkage" </dev/null)
+		fi
+		set -- $line; r=$1; v=$2; dur=$3
+		case $r in PASS) pass=$((pass+1));; FAIL) fail=$((fail+1));; SKIP) skip=$((skip+1));; ERROR) error=$((error+1));; esac
+		bump_linkage "$linkage" "$r"
+		case "$v" in
+		REGRESSION) [ "$r" = SKIP ] && missing_unexpected=$((missing_unexpected+1));;
+		UNBASELINED) [ "$r" = PASS ] && unbaselined=$((unbaselined+1));;
+		FIXED) fixed=$((fixed+1));;
+		esac
+		if [ "${dur:-0}" -gt 0 ] 2>/dev/null; then
+			printf '%s [%s] %s (%sms)\n' "$r" "$linkage" "$tname" "$dur"
+		else
+			printf '%s [%s] %s\n' "$r" "$linkage" "$tname"
+		fi
+	done
+done 3<"$LIST"
+ran_total=$((pass+fail+error))
+
+# Coverage inventory: call-graph only (which libc symbols each ATTEMPTED
+# test references), never a semantic claim. Untested = shipped symbol
+# list minus referenced. Symbol universe is build-time; see build-info.
+# Detail goes next to --jsonl when given, else a temp file; a failure
+# here is a coverage ERROR, reported, never a silent skip.
+COV_TMP="$RAN.coverage.json"
+cov_error=0; cov_note=""; universe_n=0; tested_n=0
+if [ -f "$TESTDIR/symbols.txt" ] && [ -f "$TESTDIR/coverage.map" ]; then
+	: >"$RAN.sym"
+	while IFS= read -r tname || [ -n "$tname" ]; do
+		case $tname in ""|\#*) continue;; esac
+		grep -F -h "$tname: " "$TESTDIR/coverage.map" 2>/dev/null | cut -d: -f2- | tr ' ' '\n'
+	done <"$RAN" | grep -v '^$' | sort -u >"$RAN.sym"
+	if cov_counts=$(python3 - "$TESTDIR/symbols.txt" "$RAN.sym" "$COV_TMP" "$LIBC_VER" 2>"$RAN.cov-err" <<'PY'
+import json, sys
+syms = sorted({l.split()[0] for l in open(sys.argv[1]) if l.split()})
+tested = sorted({l.strip() for l in open(sys.argv[2]) if l.strip()})
+testedset, symset = set(tested), set(syms)
+untested = sorted(symset - testedset)
+out = {"libc": sys.argv[4], "universe": len(symset),
+       "tested": len(testedset & symset), "untested_count": len(untested),
+       "untested": untested}
+json.dump(out, open(sys.argv[3], "w"), indent=1)
+print(f"{len(symset)} {len(testedset & symset)}")
+PY
+); then
+		set -- $cov_counts; universe_n=$1; tested_n=${2:-0}
+		if [ -n "$JSONL" ]; then
+			case "$JSONL" in *.jsonl) COV_SIDE="${JSONL%.jsonl}.coverage.json";; *) COV_SIDE="$JSONL.coverage.json";; esac
+			cp "$COV_TMP" "$COV_SIDE" 2>/dev/null || { cov_error=1; cov_note="cannot write $COV_SIDE"; }
+		fi
+	else
+		cov_error=1; cov_note=$(head -c 300 "$RAN.cov-err" | tr '\n' ' ')
+	fi
+else
+	cov_error=1; cov_note="no shipped symbol universe"
+fi
+
+if [ "$ran_total" -eq 0 ] || [ "$missing_unexpected" -gt 0 ] || [ "$cov_error" = 1 ] || [ "$unbaselined" -gt 0 ]; then
+	overall=INCOMPLETE; rc=2
+elif [ "$fail" -gt 0 ] || [ "$error" -gt 0 ]; then
+	overall=FAIL; rc=1
+else
+	overall=PASS; rc=0
+fi
+
+printf 'Saphira libc-test\n=================\n\nDynamic musl\n'
+printf '  PASS: %03d\n  FAIL: %03d\n  SKIP: %03d\n  ERROR: %03d\n\n' "$dpass" "$dfail" "$dskip" "$derror"
+printf 'Static musl\n'
+printf '  PASS: %03d\n  FAIL: %03d\n  SKIP: %03d\n  ERROR: %03d\n\n' "$spass" "$sfail" "$sskip" "$serror"
+printf 'Failures:\n'
+if [ -s "$FAILS" ]; then
+	cat "$FAILS"
+else
+	printf '  (none)\n'
+fi
+printf '\nCoverage:\n'
+if [ "$cov_error" = 0 ]; then
+	printf '  Executed: %03d\n  Expected: %03d\n' "$ran_total" "$expected_rows"
+	printf '  Missing binaries: %03d\n' "$missing_unexpected"
+	[ -s "$MISSING" ] && sed 's/^/    /' "$MISSING"
+	printf '  Symbols: %s/%s libc symbols referenced\n' "$tested_n" "$universe_n"
+else
+	printf '  ERROR: %s\n' "$cov_note"
+fi
+printf '\nOverall: %s\n' "$overall"
+
+exit $rc

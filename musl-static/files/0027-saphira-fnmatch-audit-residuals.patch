@@ -1,0 +1,35 @@
+--- a/src/regex/fnmatch.c
++++ b/src/regex/fnmatch.c
+@@ -121,8 +121,9 @@
+ 		p++;
+ 	}
+ 	wc = p[-1];
++	int ranged = 0;
+ 	for (; *p != ']'; p++) {
+-		if (p[0]=='-' && p[1]!=']') {
++		if (p[0]=='-' && p[1]!=']' && !ranged) {
+ 			wchar_t wc2;
+ 			int l = mbtowc(&wc2, ++p, 4);
+ 			if (l < 0) return 0;
+@@ -130,9 +131,11 @@
+ 				if ((unsigned)k-wc <= wc2-wc ||
+ 				    (unsigned)kfold-wc <= wc2-wc)
+ 					return !inv;
++			ranged = 1;
+ 			p += l-1;
+ 			continue;
+ 		}
++		ranged = 0;
+ 		if (p[0]=='[' && (p[1]==':' || p[1]=='.' || p[1]=='=')) {
+ 			const char *p0 = p+2;
+ 			int z = p[1];
+@@ -303,7 +306,8 @@
+ 	int c;
+ 	if (flags & FNM_PATHNAME) for (;;) {
+ 		for (s=str; *s && *s!='/'; s++);
+-		for (p=pat; (c=pat_next(p, -1, &inc, flags))!=END && c!='/'; p+=inc);
++		for (p=pat; (c=pat_next(p, -1, &inc, flags))!=END && c!='/'; p+=inc)
++			if (c == UNMATCHABLE) return FNM_NOMATCH;
+ 		if (c!=*s && (!*s || !(flags & FNM_LEADING_DIR)))
+ 			return FNM_NOMATCH;
+ 		if (fnmatch_internal(pat, p-pat, str, s-str, flags))

@@ -1,0 +1,42 @@
+From ba6961dd5053874d2e4ae05ce4c8685ba0131e0a Mon Sep 17 00:00:00 2001
+From: Matthias Goergens <matthias.goergens@gmail.com>
+Date: Wed, 5 Aug 2026 16:03:25 +0800
+Subject: [PATCH] mntent: avoid undefined behavior on long lines
+
+The continue for lines longer than INT_MAX reaches the do-while
+condition without initializing n. On the first such line, the condition
+reads indeterminate values. After an earlier line, it reuses stale
+offsets from that line.
+
+Jump directly to the start of the loop instead. This is the minimal form
+requested in the previous review and preserves the intended behavior of
+skipping an overlong line.
+---
+ src/misc/mntent.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/src/misc/mntent.c b/src/misc/mntent.c
+index 76f9c162..fe36ae16 100644
+--- a/src/misc/mntent.c
++++ b/src/misc/mntent.c
+@@ -64,7 +64,7 @@ struct mntent *getmntent_r(FILE *f, struct mntent *mnt, char *linebuf, int bufle
+ 	mnt->mnt_freq = 0;
+ 	mnt->mnt_passno = 0;
+ 
+-	do {
++again:	do {
+ 		if (use_internal) {
+ 			getline(&internal_buf, &internal_bufsize, f);
+ 			linebuf = internal_buf;
+@@ -79,7 +79,7 @@ struct mntent *getmntent_r(FILE *f, struct mntent *mnt, char *linebuf, int bufle
+ 		}
+ 
+ 		len = strlen(linebuf);
+-		if (len > INT_MAX) continue;
++		if (len > INT_MAX) goto again;
+ 		for (i = 0; i < sizeof n / sizeof *n; i++) n[i] = len;
+ 		sscanf(linebuf, " %n%*[^ \t\n]%n %n%*[^ \t\n]%n %n%*[^ \t\n]%n %n%*[^ \t\n]%n %d %d",
+ 			n, n+1, n+2, n+3, n+4, n+5, n+6, n+7,
+-- 
+2.55.0
+

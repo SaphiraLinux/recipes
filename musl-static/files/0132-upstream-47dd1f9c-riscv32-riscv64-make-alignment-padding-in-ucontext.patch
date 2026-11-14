@@ -1,0 +1,41 @@
+From 47dd1f9c2b0c01d901d098bd95b64edae3b9ea85 Mon Sep 17 00:00:00 2001
+From: Michael Forney <mforney@mforney.org>
+Date: Wed, 29 Apr 2026 23:26:25 -0700
+Subject: [PATCH] riscv32, riscv64: make alignment padding in ucontext_t
+ explicit
+
+Add explicit padding between struct fields with alignment attributes.
+This ensures that the struct layout is the same with and without the
+attribute.
+---
+ arch/riscv32/bits/signal.h | 1 +
+ arch/riscv64/bits/signal.h | 1 +
+ 2 files changed, 2 insertions(+)
+
+diff --git a/arch/riscv32/bits/signal.h b/arch/riscv32/bits/signal.h
+index 50b66ec9..8d0ee610 100644
+--- a/arch/riscv32/bits/signal.h
++++ b/arch/riscv32/bits/signal.h
+@@ -68,6 +68,7 @@ typedef struct __ucontext
+ 	struct __ucontext *uc_link;
+ 	stack_t uc_stack;
+ 	sigset_t uc_sigmask;
++	char __pad[12];
+ 	mcontext_t uc_mcontext;
+ } ucontext_t;
+ 
+diff --git a/arch/riscv64/bits/signal.h b/arch/riscv64/bits/signal.h
+index 56f8fe17..d859be1e 100644
+--- a/arch/riscv64/bits/signal.h
++++ b/arch/riscv64/bits/signal.h
+@@ -68,6 +68,7 @@ typedef struct __ucontext
+ 	struct __ucontext *uc_link;
+ 	stack_t uc_stack;
+ 	sigset_t uc_sigmask;
++	char __pad[8];
+ 	mcontext_t uc_mcontext;
+ } ucontext_t;
+ 
+-- 
+2.55.0
+

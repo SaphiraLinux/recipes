@@ -1,0 +1,444 @@
+--- a/src/misc/wordexp.c
++++ b/src/misc/wordexp.c
+@@ -403,14 +403,15 @@
+ 	int sq, int dq, int analyze, int in_brace, int ws0,
+ 	struct undef_asn *asn, int *nasn, int *found);
+ static const char *undef_brace(const char *s, const char *end, int depth,
+-	int sq, int dq, int analyze,
++	int sq, int dq, int analyze, int edq,
+ 	struct undef_asn *asn, int *nasn, int *found);
+ static const char *undef_arith(const char *s, const char *end, int depth,
+ 	int analyze, struct undef_asn *asn, int *nasn, int *found);
+ 
+ /* Skip a ${...} unit at s (structural only, no analysis).
+  * Returns past the matching '}', NULL on bare braces, unbalanced
+- * input or over-depth. Threaded quote state (shell tokenization);
++ * input or over-depth. Brace words re-tokenize with a fresh quote
++ * context (0016 brace_unit precedent: "parsed as their own context");
+  * balanced interiors are quote-neutral. Mirrors brace_unit's
+  * traversal discipline without its NOCMD verdicts. */
+ static const char *undef_skip_brace(const char *s, const char *end,
+@@ -420,6 +421,10 @@
+ 	if (depth > BRACE_MAXDEPTH) {
+ 		return NULL;
+ 	}
++	/* Entry sq is always 0 ($ is suppressed inside sq); the dq
++	 * reset is the effective change. */
++	sq = 0;
++	dq = 0;
+ 	while (s + i < end) {
+ 		char c = s[i];
+ 		if (c == '\\') {
+@@ -615,14 +620,24 @@
+ 
+ /* Scan a word span. Stops at end, or at an unquoted (sq-wise) '}'
+  * when in_brace is set (returns at the brace for the caller).
+- * Threaded sq/dq (shell tokenization). analyze=0: structural scan
+- * only (no flagging, no recording). Returns stop position, NULL on
+- * malformation (pass through). */
++ * in_brace is 0 at top level, 1 for a brace word entered from an
++ * unquoted context, 2 for a brace word entered from a quoted
++ * context (Class-B: only quoted-context words can expose a
++ * quote-first "$" pair; unquoted "${X-"$"Y}" stays literal, as
++ * the shell does). sq/dq thread the shell tokenization; brace
++ * words start from a fresh context (see undef_brace). analyze=0:
++ * structural scan only (no flagging, no recording). Returns stop
++ * position, NULL on malformation (pass through). */
+ static const char *undef_span(const char *s, const char *end, int depth,
+ 	int sq, int dq, int analyze, int in_brace, int ws0,
+ 	struct undef_asn *asn, int *nasn, int *found)
+ {
+ 	int wstart = ws0;
++	/* Class-B: set iff the immediately preceding consumed char is
++	 * an unescaped double-quote that opened dq (toggle 0->1).
++	 * Tracked by direction, not lookbehind, so an escaped \"
++	 * never counts. Gated with in_brace==2 below. */
++	int pqo = 0;
+ 	if (depth > BRACE_MAXDEPTH) {
+ 		return NULL;
+ 	}
+@@ -634,16 +649,24 @@
+ 			}
+ 			s += 2;
+ 			wstart = 0;
++			pqo = 0;
+ 			continue;
+ 		}
+ 		if (c == '\'' && !dq) {
+ 			sq ^= 1;
+ 			s++;
+ 			wstart = 0;
++			pqo = 0;
+ 			continue;
+ 		}
+ 		if (c == '"' && !sq) {
+-			dq ^= 1;
++			if (!dq) {
++				dq = 1;
++				pqo = 1;
++			} else {
++				dq = 0;
++				pqo = 0;
++			}
+ 			s++;
+ 			wstart = 0;
+ 			continue;
+@@ -653,17 +676,27 @@
+ 				   c == '(' || c == ')')) {
+ 			s++;
+ 			wstart = 1;
++			pqo = 0;
+ 			continue;
+ 		}
+-		if (!sq && !dq && c == '#') {
++		/* Class-B: a # starts a comment only when unquoted
++		 * in the outer sense. Word spans entered from a
++		 * quoted context (in_brace==2) are inside the
++		 * outer double quotes the whole time, where the
++		 * shell never starts a comment, so # stays
++		 * literal there. (Unquoted-context words keep the
++		 * legacy rule.) */
++		if (!sq && !dq && c == '#' && in_brace != 2) {
+ 			if (!wstart) {
+ 				s++;
++				pqo = 0;
+ 				continue;
+ 			}
+ 			while (s < end && *s != '\n') {
+ 				s++;
+ 			}
+ 			wstart = 1;
++			pqo = 0;
+ 			continue;
+ 		}
+ 		wstart = 0;
+@@ -674,6 +707,7 @@
+ 			size_t nl = 0;
+ 			if (s + 1 >= end) {
+ 				s++;
++				pqo = 0;
+ 				continue;
+ 			}
+ 			if (s[1] == '\'') {
+@@ -681,8 +715,150 @@
+ 					return NULL;
+ 				}
+ 				s += nl;
++				pqo = 0;
+ 				continue;
+ 			}
++			/* Class-B: quote-first "$" vs dollar-first $".
++			 * A quote-first pair (the $ directly follows a
++			 * dq-opening quote, inside a quoted-context brace
++			 * word) is transparent: the shell expands through
++			 * it ("${X-"$"Y}" behaves as "${X-"$Y"}"), so the
++			 * following token is an expansion position. A
++			 * dollar-first $" opens a locale string instead
++			 * (opaque, but its content still expands).
++			 * In-dq $" outside braces keeps the legacy
++			 * literal-$ reading ("a$"b" is literal). */
++			if (s[1] == '"') {
++				if (in_brace == 2 && pqo) {
++					const char *q = s + 2;
++					s += 2;
++					pqo = 0;
++					if (q >= end) {
++						return NULL;
++					}
++					if (*q == '_' ||
++					    (*q >= 'a' && *q <= 'z') ||
++					    (*q >= 'A' && *q <= 'Z')) {
++						size_t vl = 0;
++						undef_name(q, end, &vl);
++						if (analyze) {
++							int dd = undef_isdef(q, vl, asn, *nasn);
++							if (dd < 0) {
++								return NULL;
++							}
++							if (!dd) {
++								/* Class-B: flag the exposed
++								 * name only if the rest of
++								 * this word is quote-clean.
++								 * A later quote/backslash
++								 * means the shell re-parses
++								 * (often rejecting) the word
++								 * as a whole -- e.g. the
++								 * extra-quote shape the shell
++								 * itself reports as a syntax
++								 * error -- so pass through and
++								 * let the shell decide. Nested
++								 * ${...} is skipped atomically;
++								 * anything unbalanced passes
++								 * through. False negatives are
++								 * allowed; false positives are
++								 * not. */
++								const char *r = q + vl;
++								while (r < end) {
++									if (*r == '"' ||
++									    *r == '\'' ||
++									    *r == '\\') {
++										return NULL;
++									}
++									if (*r == '$' &&
++									    r + 1 < end &&
++									    r[1] == '{') {
++										const char *e = undef_skip_brace(r, end,
++											depth + 1, 0, 0);
++										if (!e) {
++											return NULL;
++										}
++										r = e;
++										continue;
++									}
++									if (*r == '{') {
++										return NULL;
++									}
++									if (*r == '}') {
++										break;
++									}
++									r++;
++								}
++								if (r >= end) {
++									return NULL;
++								}
++								*found = 1;
++							}
++						}
++						s = q + vl;
++						continue;
++					}
++					if (*q == '{') {
++						const char *e = undef_brace(q - 1, end,
++							depth + 1, sq, dq, analyze, dq,
++							asn, nasn, found);
++						if (!e) {
++							return NULL;
++						}
++						s = e;
++						continue;
++					}
++					if (*q == '(') {
++						const char *e;
++						if (q + 1 < end && q[1] == '(') {
++							e = undef_arith(q - 1, end,
++								depth + 1, analyze,
++								asn, nasn, found);
++						} else {
++							e = undef_skip_cmdsubst(q - 1, end,
++								depth + 1, sq, dq);
++						}
++						if (!e) {
++							return NULL;
++						}
++						s = e;
++						continue;
++					}
++					/* Anything else: the pair was
++					 * transparent; resume after it. */
++					continue;
++				}
++				if (!dq) {
++					const char *q = s + 2;
++					const char *ce = NULL;
++					while (q < end) {
++						if (*q == '\\') {
++							q += 2;
++							continue;
++						}
++						if (*q == '"') {
++							ce = q;
++							break;
++						}
++						q++;
++					}
++					if (!ce) {
++						return NULL;
++					}
++					if (analyze) {
++						const char *e = undef_span(s + 2, ce, depth,
++							0, 0, analyze, 0, 0,
++							asn, nasn, found);
++						if (!e) {
++							return NULL;
++						}
++					}
++					s = ce + 1;
++					pqo = 0;
++					continue;
++				}
++				/* else: in-dq non-pair $": legacy path below */
++			}
+ 			if (s[1] == '{') {
+ 				const char *e;
+ 				if (!analyze) {
+@@ -692,14 +868,16 @@
+ 						return NULL;
+ 					}
+ 					s = e;
++					pqo = 0;
+ 					continue;
+ 				}
+ 				e = undef_brace(s, end, depth+1, sq, dq,
+-						analyze, asn, nasn, found);
++						analyze, dq, asn, nasn, found);
+ 				if (!e) {
+ 					return NULL;
+ 				}
+ 				s = e;
++				pqo = 0;
+ 				continue;
+ 			}
+ 			if (s[1] == '(') {
+@@ -715,12 +893,14 @@
+ 					return NULL;
+ 				}
+ 				s = e;
++				pqo = 0;
+ 				continue;
+ 			}
+ 			if (s[1] == '*' || s[1] == '@' || s[1] == '#' ||
+ 			    s[1] == '?' || s[1] == '-' || s[1] == '$' ||
+ 			    s[1] == '!' || (s[1] >= '0' && s[1] <= '9')) {
+ 				s += 2;
++				pqo = 0;
+ 				continue;
+ 			}
+ 			if (s[1] == '_' || (s[1] >= 'a' && s[1] <= 'z') ||
+@@ -731,9 +911,11 @@
+ 					return NULL;
+ 				}
+ 				s += 1 + vl;
++				pqo = 0;
+ 				continue;
+ 			}
+ 			s++;
++			pqo = 0;
+ 			continue;
+ 		}
+ 		if (c == '`' && !sq) {
+@@ -742,12 +924,14 @@
+ 				return NULL;
+ 			}
+ 			s = e;
++			pqo = 0;
+ 			continue;
+ 		}
+ 		if (c == '{' && !sq) {
+ 			return NULL;
+ 		}
+ 		s++;
++		pqo = 0;
+ 	}
+ 	if (sq || dq) {
+ 		return NULL;
+@@ -758,9 +942,11 @@
+ /* Parse one ${...} unit at s (s[0]=='$', s[1]=='{').
+  * Returns past the closing '}', NULL on malformation (pass through).
+  * Operator semantics per shell left-to-right with lazy branches;
+- * only evaluated branches are descended into. */
++ * only evaluated branches are descended into. edq records whether
++ * the brace was entered from a quoted context (Class-B); the word
++ * itself is always scanned with a fresh quote context. */
+ static const char *undef_brace(const char *s, const char *end, int depth,
+-	int sq, int dq, int analyze,
++	int sq, int dq, int analyze, int edq,
+ 	struct undef_asn *asn, int *nasn, int *found)
+ {
+ 	const char *p = s + 2;
+@@ -768,9 +954,17 @@
+ 	size_t nlen = 0;
+ 	int lenop = 0, special = 0, d, col = 0;
+ 	const char *rest;
++	/* Quoted-context words scan with in_brace=2 (quote-first "$"
++	 * pairs expose the following token); unquoted-context words
++	 * scan with in_brace=1 (legacy literal-$ reading). */
++	int inb = edq ? 2 : 1;
+ 	if (depth > BRACE_MAXDEPTH) {
+ 		return NULL;
+ 	}
++	/* Fresh quote context for the word (see undef_span). Entry
++	 * sq is always 0 ($ is suppressed inside sq). */
++	sq = 0;
++	dq = 0;
+ 	if (p < end && *p == '#') {
+ 		lenop = 1;
+ 		p++;
+@@ -850,7 +1044,7 @@
+ 			if (!d || (col && d == 1)) {
+ 				*found = 1;
+ 			}
+-			e = undef_span(rest, end, depth, sq, dq, 0, 1, 0,
++			e = undef_span(rest, end, depth, sq, dq, 0, inb, 0,
+ 				       asn, nasn, found);
+ 			if (!e || e >= end || *e != '}') {
+ 				return NULL;
+@@ -869,7 +1063,7 @@
+ 		}
+ 		if (take) {
+ 			const char *e = undef_span(rest, end, depth, sq, dq,
+-						   1, 1, 0, asn, nasn, found);
++						   1, inb, 0, asn, nasn, found);
+ 			if (!e || e >= end || *e != '}') {
+ 				return NULL;
+ 			}
+@@ -877,7 +1071,7 @@
+ 		}
+ 		{
+ 			const char *e = undef_span(rest, end, depth, sq, dq,
+-						   0, 1, 0, asn, nasn, found);
++						   0, inb, 0, asn, nasn, found);
+ 			if (!e || e >= end || *e != '}') {
+ 				return NULL;
+ 			}
+@@ -897,7 +1091,7 @@
+ 		if (!d) {
+ 			*found = 1;
+ 		}
+-		e = undef_span(p + 1, end, depth, sq, dq, 1, 1, 0,
++		e = undef_span(p + 1, end, depth, sq, dq, 1, inb, 0,
+ 			       asn, nasn, found);
+ 		if (!e || e >= end || *e != '}') {
+ 			return NULL;
+@@ -913,7 +1107,7 @@
+ 		if (!d) {
+ 			*found = 1;
+ 		}
+-		e = undef_span(p + 1, end, depth, sq, dq, 1, 1, 0,
++		e = undef_span(p + 1, end, depth, sq, dq, 1, inb, 0,
+ 			       asn, nasn, found);
+ 		if (!e || e >= end || *e != '}') {
+ 			return NULL;
+@@ -1118,7 +1312,7 @@
+ 			}
+ 			if (p[1] == '{') {
+ 				const char *e = undef_brace(p, end, depth+1,
+-					0, 0, analyze, asn, nasn, found);
++					0, 0, analyze, 0, asn, nasn, found);
+ 				if (!e) {
+ 					return NULL;
+ 				}
+@@ -1176,6 +1370,24 @@
+ 		    c == '_' || (c >= '0' && c <= '9')) {
+ 			size_t vl = 0;
+ 			const char *q;
++			/* Class-B: a digit-led token is a numeric
++			 * constant, never a variable (plain 1, hex
++			 * 0x1F, base notation 8#ff all expand without
++			 * consulting the environment, and set -u stays
++			 * silent for them). Skip without flagging and
++			 * without recording an assignment. */
++			if (c >= '0' && c <= '9') {
++				undef_name(p, end, &vl);
++				p += vl;
++				if (p < end && *p == '#') {
++					p++;
++					while (p < end &&
++					       (is_wc(*p) || *p == '@')) {
++						p++;
++					}
++				}
++				continue;
++			}
+ 			undef_name(p, end, &vl);
+ 			q = p + vl;
+ 			while (q < end && (*q == ' ' || *q == '\t' ||

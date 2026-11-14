@@ -1,0 +1,41 @@
+From b5934c400ec53cc74a2a1156403ce1e7c3179b6c Mon Sep 17 00:00:00 2001
+From: Luca Kellermann <mailto.luca.kellermann@gmail.com>
+Date: Mon, 21 Jul 2025 00:18:39 +0200
+Subject: [PATCH] scandir: hide that errno is set to 0
+
+POSIX.1-2024 requires that standard functions don't set errno to 0.
+commit dae17a1aaf25d8333e729173d86659066607d87d ensured that cmp() and
+the caller of scandir() cannot observe that errno is set to 0
+internally. however, this was not yet the case for the sel() callback.
+---
+ src/dirent/scandir.c | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/src/dirent/scandir.c b/src/dirent/scandir.c
+index 7456b9b8..eead7e50 100644
+--- a/src/dirent/scandir.c
++++ b/src/dirent/scandir.c
+@@ -17,7 +17,11 @@ int scandir(const char *path, struct dirent ***res,
+ 	if (!d) return -1;
+ 
+ 	while ((errno=0), (de = readdir(d))) {
+-		if (sel && !sel(de)) continue;
++		if (sel) {
++			/* sel() must not observe that errno was set to 0. */
++			errno = old_errno;
++			if (!sel(de)) continue;
++		}
+ 		if (cnt >= len) {
+ 			len = 2*len+1;
+ 			if (len > SIZE_MAX/sizeof *names) break;
+@@ -37,6 +41,7 @@ int scandir(const char *path, struct dirent ***res,
+ 		free(names);
+ 		return -1;
+ 	}
++	/* cmp() and caller must not observe that errno was set to 0. */
+ 	errno = old_errno;
+ 
+ 	if (cmp) qsort(names, cnt, sizeof *names, (int (*)(const void *, const void *))cmp);
+-- 
+2.55.0
+

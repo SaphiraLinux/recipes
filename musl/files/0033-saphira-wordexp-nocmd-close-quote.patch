@@ -1,0 +1,44 @@
+--- a/src/misc/wordexp.c
++++ b/src/misc/wordexp.c
+@@ -128,6 +128,41 @@
+ 			i += al;
+ 			continue;
+ 		}
++		if (c == '$' && s[i+1] == '"' &&
++		    (in_arith || !sq || (sq && in_dq))) {
++			/* A "$" pair may CLOSE an enclosing double-quote
++			 * (the in_dq context) rather than opening a new one.
++			 * When it closes inside arithmetic, or anywhere a
++			 * double-quote context may be live, a directly
++			 * following paren forms a live $( command
++			 * substitution that the shell executes (S6q:
++			 * "${X-"$"(...)}"; R10c inside $((...))), while a
++			 * literal reading misses it entirely. Fail closed
++			 * on the ambiguous shape: a paren that cannot
++			 * start validated arithmetic is a command
++			 * substitution request. With no enclosing
++			 * double-quote context (and outside arithmetic),
++			 * a "$" can only open a new quoted span -- the
++			 * unit's own dq tracking then governs, and the
++			 * historical literal treatment below is kept. */
++			if ((in_arith || in_dq) && s[i+2] == '(') {
++				if (s[i+3] == '(') {
++					size_t al = 0;
++					int ar = arith_ok(s+i+2, &al);
++					if (ar == 0) {
++						i += 2 + al;
++						continue;
++					}
++					if (ar == 1) return 1;
++					/* Malformed arithmetic (ar==2)
++					 * falls through to the literal scan
++					 * below: it cannot execute, and the
++					 * shell itself rejects what remains. */
++				} else {
++					return 1;
++				}
++			}
++		}
+ 		/* A bare { opens no executable construct on its own (command
+ 		 * grouping needs ;/newline plus a matching close, all of
+ 		 * which expand as data inside a default word, never as

@@ -1,0 +1,32 @@
+From c4e1bb3994c14ed5112c894d15a451bf00f0d501 Mon Sep 17 00:00:00 2001
+From: Rich Felker <dalias@aerifal.cx>
+Date: Mon, 21 Sep 2026 09:15:22 -0400
+Subject: [PATCH] fnmatch: fix FNM_PERIOD failure of escaped '.' to match
+ leading '.'
+
+the new condition also allows forward progress into ordinary matching
+if the pattern begins with a backslash. this is fine independent of
+FNM_NOESCAPE and independent of what follows the backslash; if
+FNM_NOESCAPE is active, the backslash is literal and will not match.
+if FNM_NOESCAPE is not active, the pattern beginning with a backslash
+ensures that the first character is literal.
+---
+ src/regex/fnmatch.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/regex/fnmatch.c b/src/regex/fnmatch.c
+index 978fff88..ae3c1c24 100644
+--- a/src/regex/fnmatch.c
++++ b/src/regex/fnmatch.c
+@@ -168,7 +168,7 @@ static int fnmatch_internal(const char *pat, size_t m, const char *str, size_t n
+ 	int c, k, kfold;
+ 
+ 	if (flags & FNM_PERIOD) {
+-		if (*str == '.' && *pat != '.')
++		if (*str == '.' && *pat != '.' && *pat != '\\')
+ 			return FNM_NOMATCH;
+ 	}
+ 	for (;;) {
+-- 
+2.55.0
+

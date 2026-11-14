@@ -1,0 +1,950 @@
+--- a/src/misc/wordexp.c
++++ b/src/misc/wordexp.c
+@@ -291,6 +291,931 @@
+ 	return 2;
+ }
+ 
++/* WRDE_UNDEF support: detect attempts to expand unset variables
++ * without executing anything (Sinew 0020).
++ *
++ * undef_ref(s) returns 1 if s unambiguously attempts to expand an
++ * unset shell variable, 0 otherwise (clean input, or too ambiguous
++ * to judge: pass through to the shell, preserving current behaviour).
++ *
++ * Model (POSIX shell left-to-right, per SUSv3 sections 2.2/2.5/2.6;
++ * glibc H-series behaviour corroborates but does not define it):
++ * - Tracks quoting (sq/dq, ANSI $'...' skipped as literal),
++ *   backslash escapes, and #-comments (word-start, outside quotes).
++ * - $(...) and `...` interiors are skipped, never analysed: the
++ *   command's business, not wordexp's. $((...)) contents ARE
++ *   analysed (arithmetic expansion attempts count).
++ * - ${...} operators with lazy-branch evaluation: only evaluated
++ *   branches are descended into. ${v=word}/${v:=word} record v as
++ *   shell-locally defined (bounded set below; evaluated assignments
++ *   only — environment values come from getenv, never conflated).
++ * - Special parameters ($*, $@, $#, $?, $-, $$, $!, $0-9) and
++ *   tilde/globs are never attempts (POSIX leaves specials
++ *   unspecified; current behaviour preserved).
++ * - Depth over BRACE_MAXDEPTH, unbalanced input, bare braces,
++ *   indirection (${!...}), quoted arithmetic operands, arithmetic
++ *   laziness (? && ||) or anything unparseable: pass through
++ *   (return 0). Fail-open is a provisional strategy, not a
++ *   conformance claim: false negatives allowed, false positives
++ *   forbidden. Known gaps are documented, not silently resolved.
++ * - Assigned-set overflow (pathological inputs): pass through.
++ * - Runs before fork, only when WRDE_UNDEF is set: a WRDE_BADVAL
++ *   return performs zero command side effects by construction.
++ *   No fork/exec/pipe, no new shell flags, no rerun. */
++
++/* Bounded shell-local assignment set. Entries point into the scanned
++ * input string (no allocation, no truncation). Emptiness of assigned
++ * values is not tracked: later null-tests (:- :? :+) on assigned
++ * names pass through. */
++#define UNDEF_MAXASSIGN 64
++struct undef_asn {
++	const char *name;
++	size_t len;
++};
++
++/* Definedness of a variable name (not NUL-terminated): environment
++ * first, then shell-local assignments recorded earlier in the same
++ * word. Returns 2 if set with known-nonempty value (environment),
++ * 1 if set but known-empty (environment), 3 if shell-locally
++ * assigned (defined, emptiness unknown), 0 if unset, -1 if
++ * unjudgeable (overlong name: pass through). */
++static int undef_isdef(const char *name, size_t len,
++	struct undef_asn *asn, int nasn)
++{
++	char nbuf[256];
++	char *v;
++	int i;
++	if (len >= sizeof nbuf) {
++		return -1;
++	}
++	for (i = 0; i < nasn; i++) {
++		if (asn[i].len == len && !memcmp(asn[i].name, name, len)) {
++			return 3;
++		}
++	}
++	memcpy(nbuf, name, len);
++	nbuf[len] = 0;
++	v = getenv(nbuf);
++	if (!v) {
++		return 0;
++	}
++	return *v ? 2 : 1;
++}
++
++/* Record a shell-local assignment from an evaluated =/:= operator.
++ * Returns 0 ok, -1 when the bounded set overflows (pass through). */
++static int undef_assign(const char *name, size_t len,
++	struct undef_asn *asn, int *nasn)
++{
++	if (*nasn >= UNDEF_MAXASSIGN) {
++		return -1;
++	}
++	asn[*nasn].name = name;
++	asn[*nasn].len = len;
++	(*nasn)++;
++	return 0;
++}
++
++/* Skip a `...` span at s. No nesting (POSIX sh). Returns past the
++ * closing backquote, NULL if unterminated. Contents are never
++ * analysed (D1: the command's business). */
++static const char *undef_skip_backquote(const char *s, const char *end)
++{
++	size_t i = 1;
++	while (s + i < end) {
++		if (s[i] == '\\') {
++			i += 2;
++			continue;
++		}
++		if (s[i] == '`') {
++			return s + i + 1;
++		}
++		i++;
++	}
++	return NULL;
++}
++
++static const char *undef_skip_brace(const char *s, const char *end,
++	int depth, int sq, int dq);
++static const char *undef_skip_cmdsubst(const char *s, const char *end,
++	int depth, int sq, int dq);
++static const char *undef_span(const char *s, const char *end, int depth,
++	int sq, int dq, int analyze, int in_brace, int ws0,
++	struct undef_asn *asn, int *nasn, int *found);
++static const char *undef_brace(const char *s, const char *end, int depth,
++	int sq, int dq, int analyze,
++	struct undef_asn *asn, int *nasn, int *found);
++static const char *undef_arith(const char *s, const char *end, int depth,
++	int analyze, struct undef_asn *asn, int *nasn, int *found);
++
++/* Skip a ${...} unit at s (structural only, no analysis).
++ * Returns past the matching '}', NULL on bare braces, unbalanced
++ * input or over-depth. Threaded quote state (shell tokenization);
++ * balanced interiors are quote-neutral. Mirrors brace_unit's
++ * traversal discipline without its NOCMD verdicts. */
++static const char *undef_skip_brace(const char *s, const char *end,
++	int depth, int sq, int dq)
++{
++	size_t i = 2;
++	if (depth > BRACE_MAXDEPTH) {
++		return NULL;
++	}
++	while (s + i < end) {
++		char c = s[i];
++		if (c == '\\') {
++			i += 2;
++			continue;
++		}
++		if (c == '\'' && !dq) {
++			sq ^= 1;
++			i++;
++			continue;
++		}
++		if (c == '"' && !sq) {
++			dq ^= 1;
++			i++;
++			continue;
++		}
++		if (c == '$' && s + i + 1 < end && s[i+1] == '\'' && !sq) {
++			size_t al = 0;
++			if (ansi_unit(s+i, &al) < 0) {
++				return NULL;
++			}
++			i += al;
++			continue;
++		}
++		if (c == '{' && !sq) {
++			return NULL;
++		}
++		if (c == '$' && s + i + 1 < end && s[i+1] == '{' && !sq) {
++			const char *e = undef_skip_brace(s+i, end,
++							 depth+1, sq, dq);
++			if (!e) {
++				return NULL;
++			}
++			i = e - s;
++			continue;
++		}
++		if (c == '$' && s + i + 1 < end && s[i+1] == '(' && !sq) {
++			if (s + i + 2 < end && s[i+2] == '(') {
++				const char *e = undef_arith(s+i+1, end,
++					depth+1, 0, NULL, NULL, NULL);
++				if (!e) {
++					return NULL;
++				}
++				i = 1 + (e - (s+i+1));
++			} else {
++				const char *e = undef_skip_cmdsubst(s+i, end,
++					depth+1, sq, dq);
++				if (!e) {
++					return NULL;
++				}
++				i = e - s;
++			}
++			continue;
++		}
++		if (c == '`' && !sq) {
++			const char *e = undef_skip_backquote(s+i, end);
++			if (!e) {
++				return NULL;
++			}
++			i = e - s;
++			continue;
++		}
++		if (c == '}' && !sq) {
++			return s + i + 1;
++		}
++		i++;
++	}
++	return NULL;
++}
++
++/* Skip a $(...) unit at s (structural only).
++ * Returns past the matching ')', NULL if unbalanced. Command and
++ * arithmetic interiors are skipped atomically (never analysed). */
++static const char *undef_skip_cmdsubst(const char *s, const char *end,
++	int depth, int sq, int dq)
++{
++	size_t i = 2;
++	int np = 1;
++	if (depth > BRACE_MAXDEPTH) {
++		return NULL;
++	}
++	while (s + i < end) {
++		char c = s[i];
++		if (c == '\\') {
++			i += 2;
++			continue;
++		}
++		if (c == '\'' && !dq) {
++			sq ^= 1;
++			i++;
++			continue;
++		}
++		if (c == '"' && !sq) {
++			dq ^= 1;
++			i++;
++			continue;
++		}
++		if (!sq && !dq) {
++			if (c == '$' && s + i + 1 < end && s[i+1] == '\'') {
++				size_t al = 0;
++				if (ansi_unit(s+i, &al) < 0) {
++					return NULL;
++				}
++				i += al;
++				continue;
++			}
++			if (c == '$' && s + i + 1 < end && s[i+1] == '{') {
++				const char *e = undef_skip_brace(s+i, end,
++					depth+1, sq, dq);
++				if (!e) {
++					return NULL;
++				}
++				i = e - s;
++				continue;
++			}
++			if (c == '$' && s + i + 1 < end && s[i+1] == '(') {
++				if (s + i + 2 < end && s[i+2] == '(') {
++					const char *e = undef_arith(s+i+1, end,
++						depth+1, 0, NULL, NULL, NULL);
++					if (!e) {
++						return NULL;
++					}
++					i = 1 + (e - (s+i+1));
++				} else {
++					np++;
++					i += 2;
++				}
++				continue;
++			}
++			if (c == '`') {
++				const char *e = undef_skip_backquote(s+i, end);
++				if (!e) {
++					return NULL;
++				}
++				i = e - s;
++				continue;
++			}
++			if (c == '(') {
++				np++;
++				i++;
++				continue;
++			}
++			if (c == ')') {
++				if (--np == 0) {
++					return s + i + 1;
++				}
++				i++;
++				continue;
++			}
++		} else if (!sq && c == '`') {
++			const char *e = undef_skip_backquote(s+i, end);
++			if (!e) {
++				return NULL;
++			}
++			i = e - s;
++			continue;
++		}
++		i++;
++	}
++	return NULL;
++}
++
++/* Scan a word span for unambiguous attempts to expand unset
++ * variables. Threads sq/dq quote state (shell tokenization).
++ * Returns 0 with *found set on clean scan, -1 to pass through. */
++/* Parse a variable name at s (s[0] is [A-Za-z_]). *len set past the
++ * name. Names are matched exactly (no locale). */
++static int undef_name(const char *s, const char *end, size_t *len)
++{
++	size_t i = 1;
++	while (s + i < end && is_wc(s[i])) {
++		i++;
++	}
++	*len = i;
++	return 0;
++}
++
++/* Evaluate one variable reference as an expansion attempt:
++ * unset (0) sets *found. Specials are filtered by callers.
++ * Returns 0 ok, -1 to pass through (overlong name). */
++static int undef_varref(const char *name, size_t len,
++	struct undef_asn *asn, int nasn, int *found)
++{
++	int d = undef_isdef(name, len, asn, nasn);
++	if (d < 0) {
++		return -1;
++	}
++	if (!d) {
++		*found = 1;
++	}
++	return 0;
++}
++
++/* Scan a word span. Stops at end, or at an unquoted (sq-wise) '}'
++ * when in_brace is set (returns at the brace for the caller).
++ * Threaded sq/dq (shell tokenization). analyze=0: structural scan
++ * only (no flagging, no recording). Returns stop position, NULL on
++ * malformation (pass through). */
++static const char *undef_span(const char *s, const char *end, int depth,
++	int sq, int dq, int analyze, int in_brace, int ws0,
++	struct undef_asn *asn, int *nasn, int *found)
++{
++	int wstart = ws0;
++	if (depth > BRACE_MAXDEPTH) {
++		return NULL;
++	}
++	while (s < end) {
++		char c = *s;
++		if (c == '\\') {
++			if (s + 1 >= end) {
++				return NULL;
++			}
++			s += 2;
++			wstart = 0;
++			continue;
++		}
++		if (c == '\'' && !dq) {
++			sq ^= 1;
++			s++;
++			wstart = 0;
++			continue;
++		}
++		if (c == '"' && !sq) {
++			dq ^= 1;
++			s++;
++			wstart = 0;
++			continue;
++		}
++		if (!sq && !dq && (c == ' ' || c == '\t' || c == '\n' ||
++				   c == ';' || c == '&' || c == '|' ||
++				   c == '(' || c == ')')) {
++			s++;
++			wstart = 1;
++			continue;
++		}
++		if (!sq && !dq && c == '#') {
++			if (!wstart) {
++				s++;
++				continue;
++			}
++			while (s < end && *s != '\n') {
++				s++;
++			}
++			wstart = 1;
++			continue;
++		}
++		wstart = 0;
++		if (c == '}' && !sq && in_brace) {
++			return s;
++		}
++		if (c == '$' && !sq) {
++			size_t nl = 0;
++			if (s + 1 >= end) {
++				s++;
++				continue;
++			}
++			if (s[1] == '\'') {
++				if (ansi_unit(s, &nl) < 0) {
++					return NULL;
++				}
++				s += nl;
++				continue;
++			}
++			if (s[1] == '{') {
++				const char *e;
++				if (!analyze) {
++					e = undef_skip_brace(s, end, depth+1,
++							     sq, dq);
++					if (!e) {
++						return NULL;
++					}
++					s = e;
++					continue;
++				}
++				e = undef_brace(s, end, depth+1, sq, dq,
++						analyze, asn, nasn, found);
++				if (!e) {
++					return NULL;
++				}
++				s = e;
++				continue;
++			}
++			if (s[1] == '(') {
++				const char *e;
++				if (s + 2 < end && s[2] == '(') {
++					e = undef_arith(s, end, depth+1,
++							analyze, asn, nasn, found);
++				} else {
++					e = undef_skip_cmdsubst(s, end, depth+1,
++								sq, dq);
++				}
++				if (!e) {
++					return NULL;
++				}
++				s = e;
++				continue;
++			}
++			if (s[1] == '*' || s[1] == '@' || s[1] == '#' ||
++			    s[1] == '?' || s[1] == '-' || s[1] == '$' ||
++			    s[1] == '!' || (s[1] >= '0' && s[1] <= '9')) {
++				s += 2;
++				continue;
++			}
++			if (s[1] == '_' || (s[1] >= 'a' && s[1] <= 'z') ||
++			    (s[1] >= 'A' && s[1] <= 'Z')) {
++				size_t vl = 0;
++				undef_name(s+1, end, &vl);
++				if (analyze && undef_varref(s+1, vl, asn, *nasn, found)) {
++					return NULL;
++				}
++				s += 1 + vl;
++				continue;
++			}
++			s++;
++			continue;
++		}
++		if (c == '`' && !sq) {
++			const char *e = undef_skip_backquote(s, end);
++			if (!e) {
++				return NULL;
++			}
++			s = e;
++			continue;
++		}
++		if (c == '{' && !sq) {
++			return NULL;
++		}
++		s++;
++	}
++	if (sq || dq) {
++		return NULL;
++	}
++	return s;
++}
++
++/* Parse one ${...} unit at s (s[0]=='$', s[1]=='{').
++ * Returns past the closing '}', NULL on malformation (pass through).
++ * Operator semantics per shell left-to-right with lazy branches;
++ * only evaluated branches are descended into. */
++static const char *undef_brace(const char *s, const char *end, int depth,
++	int sq, int dq, int analyze,
++	struct undef_asn *asn, int *nasn, int *found)
++{
++	const char *p = s + 2;
++	const char *name = NULL;
++	size_t nlen = 0;
++	int lenop = 0, special = 0, d, col = 0;
++	const char *rest;
++	if (depth > BRACE_MAXDEPTH) {
++		return NULL;
++	}
++	if (p < end && *p == '#') {
++		lenop = 1;
++		p++;
++	}
++	if (p < end && (*p == '_' || (*p >= 'a' && *p <= 'z') ||
++	    (*p >= 'A' && *p <= 'Z'))) {
++		name = p;
++		p++;
++		while (p < end && is_wc(*p)) {
++			p++;
++		}
++		nlen = p - name;
++	} else if (p < end && (*p == '*' || *p == '@' || *p == '#' ||
++	    *p == '?' || *p == '-' || *p == '$' || *p == '!' ||
++	    (*p >= '0' && *p <= '9'))) {
++		special = 1;
++		p++;
++	} else {
++		return NULL;
++	}
++	if (!analyze) {
++		const char *e = undef_skip_brace(s, end, depth, sq, dq);
++		return e;
++	}
++	if (special) {
++		if (p >= end) {
++			return NULL;
++		}
++		if (*p == '}') {
++			return p + 1;
++		}
++		return NULL;
++	}
++	if (lenop) {
++		if (p < end && *p == '}') {
++			d = undef_isdef(name, nlen, asn, *nasn);
++			if (d < 0) {
++				return NULL;
++			}
++			if (!d) {
++				*found = 1;
++			}
++			return p + 1;
++		}
++		return NULL;
++	}
++	if (p >= end) {
++		return NULL;
++	}
++	if (*p == '}') {
++		d = undef_isdef(name, nlen, asn, *nasn);
++		if (d < 0) {
++			return NULL;
++		}
++		if (!d) {
++			*found = 1;
++		}
++		return p + 1;
++	}
++	if (*p == ':') {
++		col = 1;
++		p++;
++		if (p >= end) {
++			return NULL;
++		}
++	}
++	if (*p == '-' || *p == '=' || *p == '?' || *p == '+') {
++		char op = *p;
++		int take;
++		rest = p + 1;
++		d = undef_isdef(name, nlen, asn, *nasn);
++		if (d < 0) {
++			return NULL;
++		}
++		if (op == '?') {
++			const char *e;
++			if (!d || (col && d == 1)) {
++				*found = 1;
++			}
++			e = undef_span(rest, end, depth, sq, dq, 0, 1, 0,
++				       asn, nasn, found);
++			if (!e || e >= end || *e != '}') {
++				return NULL;
++			}
++			return e + 1;
++		}
++		if (op == '+') {
++			take = d && (!col || d == 2);
++		} else {
++			take = !d || (col && d == 1);
++		}
++		if (op == '=' && take) {
++			if (undef_assign(name, nlen, asn, nasn)) {
++				return NULL;
++			}
++		}
++		if (take) {
++			const char *e = undef_span(rest, end, depth, sq, dq,
++						   1, 1, 0, asn, nasn, found);
++			if (!e || e >= end || *e != '}') {
++				return NULL;
++			}
++			return e + 1;
++		}
++		{
++			const char *e = undef_span(rest, end, depth, sq, dq,
++						   0, 1, 0, asn, nasn, found);
++			if (!e || e >= end || *e != '}') {
++				return NULL;
++			}
++			return e + 1;
++		}
++	}
++	if (*p == '#' || *p == '%') {
++		char op = *p;
++		const char *e;
++		if (p + 1 < end && p[1] == op) {
++			p++;
++		}
++		d = undef_isdef(name, nlen, asn, *nasn);
++		if (d < 0) {
++			return NULL;
++		}
++		if (!d) {
++			*found = 1;
++		}
++		e = undef_span(p + 1, end, depth, sq, dq, 1, 1, 0,
++			       asn, nasn, found);
++		if (!e || e >= end || *e != '}') {
++			return NULL;
++		}
++		return e + 1;
++	}
++	if (*p == '/') {
++		const char *e;
++		d = undef_isdef(name, nlen, asn, *nasn);
++		if (d < 0) {
++			return NULL;
++		}
++		if (!d) {
++			*found = 1;
++		}
++		e = undef_span(p + 1, end, depth, sq, dq, 1, 1, 0,
++			       asn, nasn, found);
++		if (!e || e >= end || *e != '}') {
++			return NULL;
++		}
++		return e + 1;
++	}
++	if (*p == '@') {
++		d = undef_isdef(name, nlen, asn, *nasn);
++		if (d < 0) {
++			return NULL;
++		}
++		if (!d) {
++			*found = 1;
++		}
++		if (p + 2 >= end || p[2] != '}') {
++			return NULL;
++		}
++		switch (p[1]) {
++		case 'Q':
++		case 'E':
++		case 'P':
++		case 'A':
++		case 'K':
++		case 'a':
++			break;
++		default:
++			return NULL;
++		}
++		return p + 3;
++	}
++	return NULL;
++}
++
++/* Parse one $((...)) unit at s (s[0]=='$', s[1]=='(', s[2]=='(').
++ * Returns past the final ')', NULL on malformation (pass through).
++ * Variables are expansion attempts; lazy operators (?: && ||),
++ * quoted operands and stray syntax give up instead of guessing. */
++static const char *undef_arith(const char *s, const char *end, int depth,
++	int analyze,
++	struct undef_asn *asn, int *nasn, int *found)
++{
++	const char *p = s + 3;
++	int np = 0, bp = 0;
++	if (depth > BRACE_MAXDEPTH) {
++		return NULL;
++	}
++	if (!analyze) {
++		int sq = 0, dq = 0;
++		while (p < end) {
++			char c = *p;
++			if (c == '\\') {
++				if (p + 1 >= end || p[1] != '\n') {
++					return NULL;
++				}
++				p += 2;
++				continue;
++			}
++			if (c == '\'' || c == '"') {
++				return NULL;
++			}
++			if (c == '`') {
++				const char *e = undef_skip_backquote(p, end);
++				if (!e) {
++					return NULL;
++				}
++				p = e;
++				continue;
++			}
++			if (c == '$' && p + 1 < end && p[1] == '(') {
++				const char *e;
++				if (p + 2 < end && p[2] == '(') {
++					e = undef_arith(p+1, end, depth+1,
++							0, NULL, NULL, NULL);
++				} else {
++					e = undef_skip_cmdsubst(p, end, depth+1,
++								sq, dq);
++				}
++				if (!e) {
++					return NULL;
++				}
++				p = e;
++				continue;
++			}
++			if (c == '$' && p + 1 < end && p[1] == '{') {
++				const char *e = undef_skip_brace(p, end,
++					depth+1, sq, dq);
++				if (!e) {
++					return NULL;
++				}
++				p = e;
++				continue;
++			}
++			if (c == '(') {
++				np++;
++				p++;
++				continue;
++			}
++			if (c == '[') {
++				bp++;
++				p++;
++				continue;
++			}
++			if (c == ')') {
++				if (np > 0) {
++					np--;
++					p++;
++					continue;
++				}
++				if (p + 1 >= end || p[1] != ')') {
++					return NULL;
++				}
++				return p + 2;
++			}
++			if (c == ']') {
++				if (!bp) {
++					return NULL;
++				}
++				bp--;
++				p++;
++				continue;
++			}
++			p++;
++		}
++		return NULL;
++	}
++	while (p < end) {
++		char c = *p;
++		if (c == ' ' || c == '\t' || c == '\n') {
++			p++;
++			continue;
++		}
++		if (c == '\\') {
++			if (p + 1 >= end || p[1] != '\n') {
++				return NULL;
++			}
++			p += 2;
++			continue;
++		}
++		if (c == '\'' || c == '"') {
++			return NULL;
++		}
++		if (c == '`') {
++			const char *e = undef_skip_backquote(p, end);
++			if (!e) {
++				return NULL;
++			}
++			p = e;
++			continue;
++		}
++		if (c == '?') {
++			return NULL;
++		}
++		if (c == ';') {
++			return NULL;
++		}
++		if ((c == '&' || c == '|') && p + 1 < end && p[1] == c) {
++			return NULL;
++		}
++		if (c == ':') {
++			return NULL;
++		}
++		if (c == '(') {
++			np++;
++			p++;
++			continue;
++		}
++		if (c == '[') {
++			bp++;
++			p++;
++			continue;
++		}
++		if (c == ')') {
++			if (np > 0) {
++				np--;
++				p++;
++				continue;
++			}
++			if (p + 1 >= end || p[1] != ')') {
++				return NULL;
++			}
++			return p + 2;
++		}
++		if (c == ']') {
++			if (!bp) {
++				return NULL;
++			}
++			bp--;
++			p++;
++			continue;
++		}
++		if (c == '$') {
++			size_t nl = 0;
++			if (p + 1 >= end) {
++				return NULL;
++			}
++			if (p[1] == '\'') {
++				if (ansi_unit(p, &nl) < 0) {
++					return NULL;
++				}
++				p += nl;
++				continue;
++			}
++			if (p[1] == '{') {
++				const char *e = undef_brace(p, end, depth+1,
++					0, 0, analyze, asn, nasn, found);
++				if (!e) {
++					return NULL;
++				}
++				p = e;
++				continue;
++			}
++			if (p[1] == '(') {
++				const char *e;
++				if (p + 2 < end && p[2] == '(') {
++					e = undef_arith(p+1, end, depth+1,
++							analyze, asn, nasn, found);
++				} else {
++					e = undef_skip_cmdsubst(p, end, depth+1,
++								0, 0);
++				}
++				if (!e) {
++					return NULL;
++				}
++				p = e;
++				continue;
++			}
++			if (p[1] == '*' || p[1] == '@' || p[1] == '#' ||
++			    p[1] == '?' || p[1] == '-' || p[1] == '$' ||
++			    p[1] == '!' || (p[1] >= '0' && p[1] <= '9')) {
++				p += 2;
++				continue;
++			}
++			if (p[1] == '_' || (p[1] >= 'a' && p[1] <= 'z') ||
++			    (p[1] >= 'A' && p[1] <= 'Z')) {
++				size_t vl = 0;
++				const char *q;
++				undef_name(p+1, end, &vl);
++				q = p + 1 + vl;
++				while (q < end && (*q == ' ' || *q == '\t' ||
++				       *q == '\n')) {
++					q++;
++				}
++				if (q < end && *q == '=' &&
++				    (q + 1 >= end || q[1] != '=')) {
++					if (undef_assign(p+1, vl, asn, nasn)) {
++						return NULL;
++					}
++					p = q + 1;
++					continue;
++				}
++				if (undef_varref(p+1, vl, asn, *nasn, found)) {
++					return NULL;
++				}
++				p += 1 + vl;
++				continue;
++			}
++			return NULL;
++		}
++		if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
++		    c == '_' || (c >= '0' && c <= '9')) {
++			size_t vl = 0;
++			const char *q;
++			undef_name(p, end, &vl);
++			q = p + vl;
++			while (q < end && (*q == ' ' || *q == '\t' ||
++			       *q == '\n')) {
++				q++;
++			}
++			if (q < end && *q == '=' &&
++			    (q + 1 >= end || q[1] != '=')) {
++				if (undef_assign(p, vl, asn, nasn)) {
++					return NULL;
++				}
++				p = q + 1;
++				continue;
++			}
++			if (undef_varref(p, vl, asn, *nasn, found)) {
++				return NULL;
++			}
++			p = q;
++			continue;
++		}
++		p++;
++	}
++	return NULL;
++}
++
++/* Top-level check: 1 if s unambiguously attempts to expand an
++ * unset variable, 0 otherwise (clean or pass-through). */
++static int undef_ref(const char *s)
++{
++	struct undef_asn asn[UNDEF_MAXASSIGN];
++	int nasn = 0, found = 0;
++	size_t n = strlen(s);
++	const char *e = undef_span(s, s + n, 0, 0, 0, 1, 0, 1,
++				   asn, &nasn, &found);
++	if (!e) {
++		return 0;
++	}
++	return found ? 1 : 0;
++}
++
+ static int do_wordexp(const char *s, wordexp_t *we, int flags)
+ {
+ 	size_t i, l;
+@@ -387,6 +1312,15 @@
+ 		return WRDE_CMDSUB;
+ 	}
+ 
++	/* WRDE_UNDEF, checked without executing anything: report an
++	 * error on an unambiguous attempt to expand an unset shell
++	 * variable. Runs after the NOCMD scan (which keeps precedence)
++	 * and before any fork, so a WRDE_BADVAL return performs zero
++	 * command side effects by construction. Pass-through (return 0
++	 * here) preserves current behaviour exactly. */
++	if ((flags & WRDE_UNDEF) && undef_ref(s))
++		return WRDE_BADVAL;
++
+ 	if (flags & WRDE_APPEND) {
+ 		wc = we->we_wordc;
+ 		wv = we->we_wordv;

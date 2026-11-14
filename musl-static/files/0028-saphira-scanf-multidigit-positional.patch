@@ -1,0 +1,40 @@
+--- a/src/stdio/vfscanf.c
++++ b/src/stdio/vfscanf.c
+@@ -111,8 +111,15 @@
+ 		p++;
+ 		if (*p=='*') {
+ 			dest = 0; p++;
+-		} else if (isdigit(*p) && p[1]=='$') {
+-			dest = arg_n(ap, *p-'0'); p+=2;
++		} else if (isdigit(*p)) {
++			const unsigned char *q = p;
++			unsigned int n = 0;
++			while (isdigit(*q)) n = 10*n + *q++ - '0';
++			if (*q != '$') {
++				dest = va_arg(ap, void *);
++			} else {
++				dest = arg_n(ap, n); p = q+1;
++			}
+ 		} else {
+ 			dest = va_arg(ap, void *);
+ 		}
+--- a/src/stdio/vfwscanf.c
++++ b/src/stdio/vfwscanf.c
+@@ -134,8 +134,15 @@
+ 		p++;
+ 		if (*p=='*') {
+ 			dest = 0; p++;
+-		} else if (iswdigit(*p) && p[1]=='$') {
+-			dest = arg_n(ap, *p-'0'); p+=2;
++		} else if (iswdigit(*p)) {
++			const wchar_t *q = p;
++			unsigned int n = 0;
++			while (iswdigit(*q)) n = 10*n + *q++ - '0';
++			if (*q != '$') {
++				dest = va_arg(ap, void *);
++			} else {
++				dest = arg_n(ap, n); p = q+1;
++			}
+ 		} else {
+ 			dest = va_arg(ap, void *);
+ 		}

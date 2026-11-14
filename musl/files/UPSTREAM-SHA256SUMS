@@ -67,3 +67,4 @@ a6a811bdfd6edbe3a06e9ebe28de74738854c7d4fab1857175230515a32db0c9  0167-upstream-
 e0b191797bbe7d34e3c1364ef8840708fff9acd43d2ceda26f60909b6a088a29  0168-upstream-6426a515-strtod-fix-incorrect-logic-detecting-underflow.patch
 3171b8919669929e81533db25deae34f2188f5a4d19ec5d49dd81d3988635bb4  0169-upstream-f607123b-sigev-thread-timers-fix-deadlock-when-timer-create.patch
 723318189a21afbc6026a37742447af76f6992de6e8d85c8ae03a960e2bc594e  0170-upstream-7813e911-regex-avoid-int-overflow-in-regcomp.patch
+07d43fee72a48a35a5dbf4a8451b18081778a73741c1fd5ffcfd772f47515525  0171-upstream-48a619ca-math-fmaf-rewrite.patch

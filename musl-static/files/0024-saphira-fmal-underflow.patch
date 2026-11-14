@@ -1,0 +1,25 @@
+--- a/src/math/fmal.c
++++ b/src/math/fmal.c
+@@ -287,7 +287,20 @@
+ 	adj = add_adjusted(r.lo, xy.lo);
+ 	if (spread + ilogbl(r.hi) > -16383)
+ 		return scalbnl(r.hi + adj, spread);
+-	else
+-		return add_and_denormalize(r.hi, adj, spread);
++	else {
++		long double ret = add_and_denormalize(r.hi, adj, spread);
++#if defined(FE_INEXACT) && defined(FE_UNDERFLOW)
++		/* Tininess is certain here (subnormal result), while the
++		 * exact scaling inside add_and_denormalize cannot raise
++		 * underflow itself: if inexactness was observed anywhere
++		 * along the way, accuracy was lost on a tiny value, so
++		 * underflow is due. This mirrors the directed-mode tail
++		 * below, which performs the same tiny+inexact check
++		 * explicitly (suite fmal.h:46 was missing exactly this). */
++		if (ilogbl(ret) < -16382 && fetestexcept(FE_INEXACT))
++			feraiseexcept(FE_UNDERFLOW);
++#endif
++		return ret;
++	}
+ }
+ #endif

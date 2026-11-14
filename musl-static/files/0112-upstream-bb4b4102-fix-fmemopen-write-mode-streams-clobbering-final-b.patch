@@ -1,0 +1,30 @@
+From bb4b4102461acfbf77da759ca3a6deb555f3da3b Mon Sep 17 00:00:00 2001
+From: Rich Felker <dalias@aerifal.cx>
+Date: Tue, 5 May 2026 19:49:32 -0400
+Subject: [PATCH] fix fmemopen write-mode streams clobbering final byte with
+ null
+
+commit d2e061a2bd3f7674cfef2e2217e0695419041b5e wrongly added this
+case based on a misreading of the standard text regarding null
+termination in write/update modes. apparently, the condition "if it
+fits" was interpreted as only applying to update modes, despite the
+words "or for writing only" appearing.
+---
+ src/stdio/fmemopen.c | 1 -
+ 1 file changed, 1 deletion(-)
+
+diff --git a/src/stdio/fmemopen.c b/src/stdio/fmemopen.c
+index 04472247..38ba9f85 100644
+--- a/src/stdio/fmemopen.c
++++ b/src/stdio/fmemopen.c
+@@ -74,7 +74,6 @@ static size_t mwrite(FILE *f, const unsigned char *buf, size_t len)
+ 	if (c->pos > c->len) {
+ 		c->len = c->pos;
+ 		if (c->len < c->size) c->buf[c->len] = 0;
+-		else if ((f->flags&F_NORD) && c->size) c->buf[c->size-1] = 0;
+ 	}
+ 	return len;
+ }
+-- 
+2.55.0
+

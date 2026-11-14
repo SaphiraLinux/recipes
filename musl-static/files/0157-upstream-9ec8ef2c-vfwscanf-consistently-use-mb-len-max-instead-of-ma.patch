@@ -1,0 +1,28 @@
+From 9ec8ef2c6c8a6204211a38b842b497385488e2c6 Mon Sep 17 00:00:00 2001
+From: Rich Felker <dalias@aerifal.cx>
+Date: Thu, 10 Sep 2026 17:12:14 -0400
+Subject: [PATCH] vfwscanf: consistently use MB_LEN_MAX instead of magic number
+ 4
+
+this magic number 4 is what ensures the next wctomb won't overflow the
+allocated buffer, but its purpose wasn't clear.
+---
+ src/stdio/vfwscanf.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/stdio/vfwscanf.c b/src/stdio/vfwscanf.c
+index 38ea4539..de0b453e 100644
+--- a/src/stdio/vfwscanf.c
++++ b/src/stdio/vfwscanf.c
+@@ -271,7 +271,7 @@ int vfwscanf(FILE *restrict f, const wchar_t *restrict fmt, va_list ap)
+ 					int l = wctomb(s?s+i:tmp, c);
+ 					if (l<0) goto input_fail;
+ 					i += l;
+-					if (alloc && i > k-4) {
++					if (alloc && i > k-MB_LEN_MAX) {
+ 						k += k+1;
+ 						char *tmp = realloc(s, k);
+ 						if (!tmp) goto alloc_fail;
+-- 
+2.55.0
+

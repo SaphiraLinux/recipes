@@ -1,0 +1,30 @@
+From 1a094684868786b56a8e80c43420b44042ac9204 Mon Sep 17 00:00:00 2001
+From: Rich Felker <dalias@aerifal.cx>
+Date: Tue, 29 Sep 2026 20:41:33 -0400
+Subject: [PATCH] fix off-by-one in wcwidth special cases for tags, variation
+ selectors
+
+these ranges are special-cased because they lie near the top of the
+encoding space far above where the bit tables currently end, and they
+are unlikely to change often. the last character in each of these
+ranges failed to get reported as having width 0.
+---
+ src/ctype/wcwidth.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/ctype/wcwidth.c b/src/ctype/wcwidth.c
+index 36256a53..5a389860 100644
+--- a/src/ctype/wcwidth.c
++++ b/src/ctype/wcwidth.c
+@@ -23,7 +23,7 @@ int wcwidth(wchar_t wc)
+ 		return -1;
+ 	if (wc-0x20000U < 0x20000)
+ 		return 2;
+-	if (wc == 0xe0001 || wc-0xe0020U < 0x5f || wc-0xe0100U < 0xef)
++	if (wc == 0xe0001 || wc-0xe0020U <= 0x5f || wc-0xe0100U <= 0xef)
+ 		return 0;
+ 	return 1;
+ }
+-- 
+2.55.0
+

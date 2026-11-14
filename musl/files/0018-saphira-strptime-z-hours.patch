@@ -1,0 +1,40 @@
+--- a/src/time/strptime.c
++++ b/src/time/strptime.c
+@@ -197,14 +197,29 @@
+ 			want_century = 0;
+ 			goto numeric_digits;
+ 		case 'z':
+-			if (*s == '+') neg = 0;
+-			else if (*s == '-') neg = 1;
+-			else return 0;
+-			for (i=0; i<4; i++) if (!isdigit(s[1+i])) return 0;
+-			tm->__tm_gmtoff = (s[1]-'0')*36000+(s[2]-'0')*3600
+-				+ (s[3]-'0')*600 + (s[4]-'0')*60;
+-			if (neg) tm->__tm_gmtoff = -tm->__tm_gmtoff;
+-			s += 5;
++			if (*s == '+') {
++				neg = 0;
++			} else if (*s == '-') {
++				neg = 1;
++			} else {
++				return 0;
++			}
++			for (i = 0; i < 2; i++) {
++				if (!isdigit(s[1+i])) {
++					return 0;
++				}
++			}
++			if (isdigit(s[3]) && isdigit(s[4])) {
++				tm->__tm_gmtoff = (s[1]-'0')*36000+(s[2]-'0')*3600
++					+ (s[3]-'0')*600 + (s[4]-'0')*60;
++				s += 5;
++			} else {
++				tm->__tm_gmtoff = (s[1]-'0')*36000+(s[2]-'0')*3600;
++				s += 3;
++			}
++			if (neg) {
++				tm->__tm_gmtoff = -tm->__tm_gmtoff;
++			}
+ 			break;
+ 		case 'Z':
+ 			if (!strncmp(s, tzname[0], len = strlen(tzname[0]))) {

@@ -1,0 +1,243 @@
+# Sinew wordexp corpus: 174 vectors for NOCMD-scanner and UNDEF behaviour.
+# Format per line: input TAB flags TAB want [TAB alt]
+# - input is C-escaped (backslash-n = newline, and so on) as in the harness.
+# - flags selects the wordexp() flags for the probe.
+# - want is the expected return; alt, if present, is also accepted.
+# - lines starting with '#' are comments, skipped by runners.
+#
+# UNDEF-flagged lines and their contract (POSIX SUSv3 wordexp:
+# WRDE_UNDEF = "Report error on an attempt to expand an undefined shell
+# variable"; WRDE_BADVAL = "Reference to undefined shell variable when
+# WRDE_UNDEF is set in flags"):
+# - lines 3-6,8,10 (metachar/unbalanced inputs) are rejected by the
+#   NOCMD scanner first (BADCHAR/CMDSUB/SYNTAX): UNDEF never engages.
+#   Expectations unchanged by UNDEF support.
+# - line 7 ('$UNSET ${ $UNSET') is scanner-SYNTAX with alt BADCHAR:
+#   unchanged (scanner first).
+# - line 64 ('"${X-"$"Y}"', WRDE_UNDEF) passes the scanner and the
+#   Class-B checker (0021) reports BADVAL: the quote-first "$" pair is
+#   transparent, so Y is an expansion attempt on an unset variable.
+#   Verified against bash (`set -u' reports `Y: unbound variable'),
+#   homer glibc 2.44 (BADVAL, ret 3) and the 0003-style checker.
+#   alt 0 covers UNDEF-less builds (pristine musl expands to empty).
+#   Genuine locale controls stay silent: `$"foo"' expands to `foo'
+#   with no error under `set -u', and in-`dq` `$"` stays literal.
+# - line 65 ('"${X-"$"{Y"}"}"', WRDE_UNDEF) is NOCMD-rejected
+#   (BADCHAR from every implementation, pre-existing, unchanged):
+#   the shell cannot parse the shape at all, so UNDEF never engages.
+# - line 9 ('"$UNSET 'unterminated $UNSET", unbalanced quote) reaches
+#   no expansion: the shell fails to parse before any variable is
+#   expanded, so WRDE_SYNTAX is correct and takes precedence over any
+#   UNDEF finding. (During analysis this line was briefly misread as a
+#   balanced input implying BADVAL; direct byte-exact testing shows
+#   pristine, Sinew r13/r14, 0003-style and forkless-native
+#   implementations all agree on SYNTAX here, matching 'sh -u'
+#   itself, which reports the parse failure rather than an unbound
+#   variable.)
+# 0023 classification (2026-11-12, POSIX shell-equivalence oracle:
+# /bin/sh is bash here, the shell wordexp invokes; glibc 2.44 on homer
+# corroborates but does not define):
+# - spaced arithmetic close ('$((1 + 2 ) )') executes as $(...) in the
+#   shell: the scanner now requires adjacent '))' (missed execution
+#   closed). Quoted spans inside arithmetic ('$(("1"))') expand (value
+#   1) but their content is still scanned: '$(' or backquote inside
+#   blocks. Bare '{' in a brace word is literal ('${X-{}}' -> '{}').
+# - shell-proven want corrections: 80/81 SYNTAX (shell rejects, alt 0
+#   keeps glibc-compat green), 99/100 CMDSUB (shell executes), 108/109
+#   0 (shell+glibc+scanner agree), 114 0 (shell expands to 1; glibc says
+#   SYNTAX, shell is the oracle).
+# - remaining known gaps (fail closed, documented, not fixed here):
+#   23 ANSI-escape span over-blocks; 65 three-way split (shell clean,
+#   glibc SYNTAX); 72 nested-unit quote-state divergence; 78 shell
+#   executes but both libcs say BADCHAR (want CMDSUB pins the truth);
+#   105 arithmetic-paren swallows textual '$(cmd)' (both say CMDSUB).
+#   KNOWN DIVERGENCE (verified 2026-11-12 on homer/glibc 2.44):
+#   glibc returns WRDE_BADVAL here — its native UNDEF check fires
+#   before shell parsing. Sinew follows POSIX shell equivalence
+#   (parse first, then expand), not glibc, on malformed input.
+#   Verified 2026-11-12 against installed r14 on Egg and Minimer.
+# 0033 close-quote fix (2026-11-14, canary-proven on r19 + /bin/sh):
+#   vec-67 ('"${X-"$"(echo x)}"') and vec-68 ('$((${X-"$"(echo + 2)}))')
+#   both EXECUTE despite WRDE_NOCMD (the scanner read "$" as
+#   quote-opening while the shell re-parses it as quote-closing,
+#   exposing live '$('). Both now want CMDSUB (fail-closed, accurate);
+#   the old want=0 blessed the execution. S7-style valid arithmetic
+#   ('$"((1+1))') still evaluates via arith_ok and stays clean.
+'{'	WRDE_NOCMD	WRDE_BADCHAR	
+'}'	WRDE_NOCMD	WRDE_BADCHAR	
+'$UNSET ) $UNSET'	WRDE_UNDEF|WRDE_NOCMD	WRDE_BADCHAR	
+'$UNSET ( $UNSET'	WRDE_UNDEF|WRDE_NOCMD	WRDE_BADCHAR	
+'$UNSET $( $UNSET'	WRDE_UNDEF|WRDE_NOCMD	WRDE_CMDSUB	
+'$UNSET $(echo $UNSET'	WRDE_UNDEF|WRDE_NOCMD	WRDE_CMDSUB	
+'$UNSET ${ $UNSET'	WRDE_UNDEF|WRDE_NOCMD	WRDE_SYNTAX	WRDE_BADCHAR
+'$UNSET ` $UNSET'	WRDE_UNDEF|WRDE_NOCMD	WRDE_CMDSUB	
+"$UNSET 'unterminated $UNSET"	WRDE_UNDEF|WRDE_NOCMD	WRDE_SYNTAX	
+'$UNSET "unterminated $UNSET'	WRDE_UNDEF|WRDE_NOCMD	WRDE_SYNTAX	
+'#!@$^%&*(_+=<<-0>[{`${'	WRDE_NOCMD	0	
+"#'\necho x\\'"	WRDE_NOCMD	WRDE_BADCHAR	
+'$(echo x)'	WRDE_NOCMD	WRDE_CMDSUB	
+'`echo x`'	WRDE_NOCMD	WRDE_CMDSUB	
+'a$(echo x)b'	WRDE_NOCMD	WRDE_CMDSUB	
+'a`b'	WRDE_NOCMD	WRDE_CMDSUB	
+'"$(echo x)"'	WRDE_NOCMD	WRDE_CMDSUB	
+'$((echo foo) )'	WRDE_NOCMD	WRDE_CMDSUB	WRDE_SYNTAX
+'$(case $A in a) echo x ;; *) echo y ;; esac)'	WRDE_NOCMD	WRDE_CMDSUB	
+'$((case $A in a) echo x ;; *) echo y ;; esac))'	WRDE_NOCMD	WRDE_CMDSUB	
+'$((echo a);(echo b))'	WRDE_NOCMD	WRDE_CMDSUB	WRDE_SYNTAX
+"$'\\''$(echo bad)\\'"	WRDE_NOCMD	WRDE_CMDSUB	WRDE_SYNTAX
+"$'\\'$(echo bad)'\\'"	WRDE_NOCMD	0	WRDE_SYNTAX
+"$'\\n'$(echo bad)"	WRDE_NOCMD	WRDE_CMDSUB	
+'a|b'	WRDE_NOCMD	WRDE_BADCHAR	
+'a&b'	WRDE_NOCMD	WRDE_BADCHAR	
+'a;b'	WRDE_NOCMD	WRDE_BADCHAR	
+'a<b'	WRDE_NOCMD	WRDE_BADCHAR	
+'a>b'	WRDE_NOCMD	WRDE_BADCHAR	
+'a{b'	WRDE_NOCMD	WRDE_BADCHAR	
+'a}b'	WRDE_NOCMD	WRDE_BADCHAR	
+'a\nb'	WRDE_NOCMD	WRDE_BADCHAR	
+'('	WRDE_NOCMD	WRDE_BADCHAR	
+'$((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((1+$(((${X-1}+1)))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))'	WRDE_NOCMD	0	
+"${X-\\'}"	WRDE_NOCMD	0	WRDE_SYNTAX
+'${X-\\"}'	WRDE_NOCMD	0	WRDE_SYNTAX
+'${X-\\}}'	WRDE_NOCMD	0	WRDE_SYNTAX
+'${X-{}'	WRDE_NOCMD	0	
+'${X-\\{}'	WRDE_NOCMD	0	
+'${X-\\$A}'	WRDE_NOCMD	0	WRDE_SYNTAX
+'${X-\\`}'	WRDE_NOCMD	0	WRDE_SYNTAX
+"${X-'}'}"	WRDE_NOCMD	0	WRDE_SYNTAX
+'${X-\'"\'}'	WRDE_NOCMD	0	WRDE_SYNTAX
+'${X-\'}"\'}'	WRDE_NOCMD	0	WRDE_SYNTAX
+"${X-'$'A}"	WRDE_NOCMD	0	WRDE_SYNTAX
+'${X-"\'"}'	WRDE_NOCMD	0	WRDE_SYNTAX
+'${X-"$"A}'	WRDE_NOCMD	0	WRDE_SYNTAX
+'${X-"$"{A}B\\}'	WRDE_NOCMD	0	WRDE_SYNTAX
+'${X-"$"{A}B}'	WRDE_NOCMD	WRDE_BADCHAR	WRDE_SYNTAX
+"${X-${Y-\\'}}"	WRDE_NOCMD	0	WRDE_SYNTAX
+'${X-${Y-\\"}}'	WRDE_NOCMD	0	WRDE_SYNTAX
+'"${X-\\\'}"'	WRDE_NOCMD	0	WRDE_SYNTAX
+'"${X-\\"}"'	WRDE_NOCMD	0	WRDE_SYNTAX
+'"${X-\\}}"'	WRDE_NOCMD	0	WRDE_SYNTAX
+'"${X-{}"'	WRDE_NOCMD	0	
+'"${X-\\{}"'	WRDE_NOCMD	0	
+'"${X-\\$A}"'	WRDE_NOCMD	0	WRDE_SYNTAX
+'"${X-\\`}"'	WRDE_NOCMD	0	WRDE_SYNTAX
+'"${X-"\'"}"'	WRDE_NOCMD	0	WRDE_SYNTAX
+'"${X-${Y-\\\'}}"'	WRDE_NOCMD	0	WRDE_SYNTAX
+'"${X-${Y-\\"}}"'	WRDE_NOCMD	0	WRDE_SYNTAX
+'"${X-"$"A}"'	WRDE_NOCMD	0	WRDE_SYNTAX
+'"${X-"$"{A}B}"'	WRDE_NOCMD	0	WRDE_SYNTAX
+'"${X-"$"Y}"'	WRDE_NOCMD|WRDE_UNDEF	WRDE_BADVAL	0
+'"${X-"$"{Y"}"}"'	WRDE_NOCMD|WRDE_UNDEF	0	WRDE_SYNTAX
+'${X-"$"(echo x)}'	WRDE_NOCMD	0	WRDE_SYNTAX
+'"${X-"$"(echo x)}"'	WRDE_NOCMD	WRDE_CMDSUB
+'$((${X-"$"(echo + 2)}))'	WRDE_NOCMD	WRDE_CMDSUB
+'$((${X-"$"((1+1))}))'	WRDE_NOCMD	0	WRDE_SYNTAX
+'a\\'	WRDE_NOCMD	0	WRDE_SYNTAX
+'a\\'	WRDE_NOCMD	0	WRDE_SYNTAX
+'"${Y=x\\}} ${Y%${X-\'}\'}}"'	WRDE_NOCMD	0	
+'"${X-\'}\'}"'	WRDE_NOCMD	0	WRDE_SYNTAX
+'"${X-\'\\"\'}"'	WRDE_NOCMD	0	WRDE_SYNTAX
+'"${X-\'}\\"\'}"'	WRDE_NOCMD	0	WRDE_SYNTAX
+'"${X-\'$\'A}"'	WRDE_NOCMD	0	WRDE_SYNTAX
+'"${X-\'$\'A}"'	WRDE_NOCMD	0	WRDE_SYNTAX
+'"${X-\'"\'}"}"\'$(echo bad)"\\\''	WRDE_NOCMD	WRDE_CMDSUB	
+'$""'	WRDE_NOCMD	0	
+'${X=1} $((${X-))}))'	WRDE_NOCMD	WRDE_SYNTAX	0
+'"$((${x-\'1\'}))"'	WRDE_NOCMD	WRDE_SYNTAX	0
+'${X=1} $((${X-"${X-))}"}))'	WRDE_NOCMD	0	
+'${X=2} $((${X-"))"}+1))'	WRDE_NOCMD	0	
+'${X=2} $((${X-")"}+1))'	WRDE_NOCMD	0	
+'${X=2} $((${X-"\')\'"}+1))'	WRDE_NOCMD	0	
+'${X=2} "$((${X-"))"}+1))"'	WRDE_NOCMD	0	
+'${X=2} "$((${X-")"}+1))"'	WRDE_NOCMD	0	
+'${X=2} "$((${X-"\')\'"}+1))"'	WRDE_NOCMD	0	
+'\t @\t $\t %\t []'	WRDE_NOCMD	0	
+'${X} ${Y}'	WRDE_NOCMD	0	
+'$\\$'	WRDE_NOCMD	0	
+"$'$'"	WRDE_NOCMD	0	
+'$)'	WRDE_NOCMD	WRDE_BADCHAR	
+'$}'	WRDE_NOCMD	WRDE_BADCHAR	
+'$: $~ $. $, $'	WRDE_NOCMD	0	
+'"$) $} $\\ $"'	WRDE_NOCMD	0	
+"${X-$''}"	WRDE_NOCMD	WRDE_SYNTAX	
+'${X-"$\'$(cmd)\'y"}'	WRDE_NOCMD	WRDE_CMDSUB	
+'"${X-$\'$(cmd)\'y}"'	WRDE_NOCMD	WRDE_CMDSUB	
+"$((${X-$'$(cmd)'y}))"	WRDE_NOCMD	WRDE_CMDSUB	
+"$'\\'"	WRDE_NOCMD	WRDE_SYNTAX	
+"$'x'"	WRDE_NOCMD	0	
+'"$\'x\'"'	WRDE_NOCMD	0	
+"${X=1} $((${X-'}))"	WRDE_NOCMD	WRDE_SYNTAX	
+"${X=1} $((${X%'}))$(cmd)'}))"	WRDE_NOCMD	0	
+'${X=12} $((${X%"\'$(cmd)\'"}))'	WRDE_NOCMD	WRDE_CMDSUB	
+'${X=12} $((${X%"2"}))'	WRDE_NOCMD	0	
+'"${X-\'$\'A}"'	WRDE_NOCMD	0	
+'$((${X-"$"((1+1))}))'	WRDE_NOCMD	0	
+'$((cmd #(\n)\n))'	WRDE_NOCMD	WRDE_SYNTAX	WRDE_CMDSUB
+'$((cmd #(\n)) )'	WRDE_NOCMD	WRDE_SYNTAX	WRDE_CMDSUB
+'$((cmd #(\n))\n)'	WRDE_NOCMD	WRDE_SYNTAX	WRDE_CMDSUB
+'$((echo + 1 #)\n))'	WRDE_NOCMD	WRDE_SYNTAX	WRDE_CMDSUB
+'$(("1"))'	WRDE_NOCMD	0	
+'$((echo + 1 ) )'	WRDE_NOCMD	WRDE_CMDSUB	
+'$((case x in x) echo a;; esac) )'	WRDE_NOCMD	WRDE_CMDSUB	
+'"${X-))}"'	WRDE_NOCMD	0	
+"${X%${X-'}}"	WRDE_NOCMD	WRDE_SYNTAX	
+"${Y=x\\}} ${Y%${X-'}'}}"	WRDE_NOCMD	0	
+'"${AB%${X-\'$(echo b)\'}}"'	WRDE_NOCMD	0	
+'"${AB%${X-\'b\'}}"'	WRDE_NOCMD	0	
+'$((1+1))'	WRDE_NOCMD	0	
+'${X=2} $((X+1))'	WRDE_NOCMD	0	
+'${X=2} $((((X)+(1))))'	WRDE_NOCMD	0	
+'${X=2} $((X(+)1))'	WRDE_NOCMD	WRDE_SYNTAX	
+'${X=2} $(($X+1))'	WRDE_NOCMD	0	
+'${X=2} $((${X}+1))'	WRDE_NOCMD	0	
+'${X=2} $((${X-))}+1))'	WRDE_NOCMD	0	WRDE_SYNTAX
+'${X=2} $((${X-\\)\\)}+1))'	WRDE_NOCMD	0	
+'${X=2} $((${X-$((}))}+1))'	WRDE_NOCMD	0	WRDE_BADCHAR
+"${X=2} $((${X-')'}+1))"	WRDE_NOCMD	0	WRDE_SYNTAX
+'$((${X-2}+1))'	WRDE_NOCMD	0	
+'$(($((1+2))+3))'	WRDE_NOCMD	0	
+'$(($((1+${X-2}))+3))'	WRDE_NOCMD	0	
+'$(($((1+${X-$((1+1))}))+3))'	WRDE_NOCMD	0	
+'$((cat<<x\n)(\nx\n))'	WRDE_NOCMD	WRDE_CMDSUB	WRDE_BADCHAR
+'$((echo x #)\n))'	WRDE_NOCMD	WRDE_SYNTAX	WRDE_CMDSUB
+'"$((1+1))"'	WRDE_NOCMD	0	
+'${X=2} "$((X+1))"'	WRDE_NOCMD	0	
+'${X=2} "$(($X+1))"'	WRDE_NOCMD	0	
+'${X=2} "$((((X)+(1))))"'	WRDE_NOCMD	0	
+'${X=2} "$((X(+)1))"'	WRDE_NOCMD	WRDE_SYNTAX	
+'${X=2} "$(($X+1))"'	WRDE_NOCMD	0	
+'${X=2} "$((${X}+1))"'	WRDE_NOCMD	0	
+'${X=2} "$((${X-))}+1))"'	WRDE_NOCMD	0	WRDE_SYNTAX
+'${X=2} "$((${X-\\)\\)}+1))"'	WRDE_NOCMD	0	
+'${X=2} "$((${X-$((}))}+1))"'	WRDE_NOCMD	0	WRDE_BADCHAR
+'${X=2} "$((${X-\')\'}+1))"'	WRDE_NOCMD	0	WRDE_SYNTAX
+'"$((${X-2}+1))"'	WRDE_NOCMD	0	
+'"$(($((1+2))+3))"'	WRDE_NOCMD	0	
+'"$(($((1+${X-2}))+3))"'	WRDE_NOCMD	0	
+'"$(($((1+${X-$((1+1))}))+3))"'	WRDE_NOCMD	0	
+'${X- #x}'	WRDE_NOCMD	0	
+'${X-x }#${Y-y}'	WRDE_NOCMD	0	
+'x \\\n\\\n#);'	WRDE_NOCMD	0	
+'$((1 + #x))\n1))'	WRDE_NOCMD	WRDE_SYNTAX	
+'" #x"'	WRDE_NOCMD	0	
+' \\ #x'	WRDE_NOCMD	0	
+"'a;b'"	WRDE_NOCMD	0	
+'"a;b"'	WRDE_NOCMD	0	
+'a\\;b'	WRDE_NOCMD	0	
+'"a;b"'	WRDE_NOCMD	0	
+"'a&b'"	WRDE_NOCMD	0	
+'a\\&b'	WRDE_NOCMD	0	
+"'$(echo x)'"	WRDE_NOCMD	0	
+'$((1+1))'	WRDE_NOCMD	0	
+'$((1+${X-$((1+(1)))}))'	WRDE_NOCMD	0	WRDE_SYNTAX
+'${FOO}'	WRDE_NOCMD	0	WRDE_SYNTAX
+'~'	WRDE_NOCMD	0	
+'/~'	WRDE_NOCMD	0	
+'~/'	WRDE_NOCMD	0	
+'${X-~}'	WRDE_NOCMD	0	
+'"${X-~}"'	WRDE_NOCMD	0	
+'$FOO'	WRDE_NOCMD	0	
+'$((1 + 2 ) )'	WRDE_NOCMD	WRDE_CMDSUB	
+'$((echo + 1) )'	WRDE_NOCMD	WRDE_CMDSUB	
+'$(("$(echo x)"))'	WRDE_NOCMD	WRDE_CMDSUB	
+'$(( "1" + "2" ))'	WRDE_NOCMD	0	

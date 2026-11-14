@@ -1,0 +1,56 @@
+diff --git a/src/math/x86_64/rint.c b/src/math/x86_64/rint.c
+new file mode 100644
+index 0000000..fcb1989
+--- /dev/null
++++ b/src/math/x86_64/rint.c
+@@ -0,0 +1,23 @@
++#include <math.h>
++#include <stdint.h>
++
++double rint(double x)
++{
++	union {double f; uint64_t i;} u = {x};
++	uint64_t a = u.i & 0x7fffffffffffffff;
++	double y;
++
++	/* Round according to the current rounding mode.  Unlike the
++	 * directed modes below, roundsd with the MXCSR mode raises the
++	 * inexact exception exactly as rint must.  It does not set the
++	 * denormal-operand status bit that the C implementation raised
++	 * for subnormal inputs, so that bit is preserved explicitly. */
++	__asm__ ("roundsd $4, %1, %0" : "=x" (y) : "x" (x));
++	if (a != 0 && a < 0x0010000000000000) {
++		unsigned mxcsr;
++		__asm__ volatile ("stmxcsr %0" : "=m" (mxcsr));
++		mxcsr |= 0x2;
++		__asm__ volatile ("ldmxcsr %0" :: "m" (mxcsr));
++	}
++	return y;
++}
+diff --git a/src/math/x86_64/rintf.c b/src/math/x86_64/rintf.c
+new file mode 100644
+index 0000000..cf89315
+--- /dev/null
++++ b/src/math/x86_64/rintf.c
+@@ -0,0 +1,21 @@
++#include <math.h>
++#include <stdint.h>
++
++float rintf(float x)
++{
++	union {float f; uint32_t i;} u = {x};
++	uint32_t a = u.i & 0x7fffffff;
++	float y;
++
++	/* As rint, but for float: roundss with the MXCSR mode raises
++	 * inexact exactly as required; the denormal-operand status
++	 * bit is preserved explicitly for subnormal inputs. */
++	__asm__ ("roundss $4, %1, %0" : "=x" (y) : "x" (x));
++	if (a != 0 && a < 0x00800000) {
++		unsigned mxcsr;
++		__asm__ volatile ("stmxcsr %0" : "=m" (mxcsr));
++		mxcsr |= 0x2;
++		__asm__ volatile ("ldmxcsr %0" :: "m" (mxcsr));
++	}
++	return y;
++}

@@ -1,0 +1,23 @@
+--- a/src/stdio/vfscanf.c
++++ b/src/stdio/vfscanf.c
+@@ -271,4 +271,4 @@
+ 			shunget(f);
+ 			if (!shcnt(f)) goto match_fail;
+-			if (t == 'c' && shcnt(f) != width) goto match_fail;
++			if (t == 'c' && size != SIZE_l && shcnt(f) != width) goto input_fail;
+ 			if (alloc) {
+ 				if (size == SIZE_l) *(wchar_t **)dest = wcs;
+ 				else *(char **)dest = s;
+--- a/src/stdio/vfwscanf.c
++++ b/src/stdio/vfwscanf.c
+@@ -285,6 +285,9 @@
+ 			if (width) {
+ 				ungetwc(c, f);
+-				if (t == 'c' || !gotmatch) goto match_fail;
++				/* A short %c read means EOF was hit before the field
++				 * completed: input failure, not matching failure. */
++				if (t == 'c') goto input_fail;
++				if (!gotmatch) goto match_fail;
+ 			}
+ 
+ 			if (alloc) {

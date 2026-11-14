@@ -1,0 +1,58 @@
+diff --git a/src/linux/clone3.c b/src/linux/clone3.c
+new file mode 100644
+index 0000000..37aa469
+--- /dev/null
++++ b/src/linux/clone3.c
+@@ -0,0 +1,52 @@
++#define _GNU_SOURCE
++#include <stddef.h>
++#include "syscall.h"
++
++/*
++ * Raw clone3(2) primitive (Linux 5.3+). Internal only: there is no
++ * public declaration, and the definition below is hidden, so this
++ * symbol never leaves the sinew build.
++ *
++ * Contract (enforced, not merely documented): the child returns
++ * normally through the caller's stack, which is only possible when
++ * the child inherits a copy of it. Explicit stacks are therefore
++ * rejected here with EINVAL instead of being passed on: after a
++ * stack switch no C call can return (its return address lives on
++ * the abandoned stack), so accepting them would jump to garbage.
++ * Callers that need an explicit stack must use the future
++ * callback-plus-trampoline form, where the child never returns
++ * through the caller. The kernel itself accepts the combination
++ * silently and produces a stillborn child; this guard exists
++ * because the failure mode is silent.
++ *
++ * The return value is the raw kernel result: child pid, 0 in the
++ * child, or -errno. Callers that expose errno semantics apply
++ * __syscall_ret themselves. No fallback lives here: ENOSYS and
++ * policy decisions belong to the caller (see the sinew clone3
++ * design), never silently inside the primitive.
++ *
++ * struct clone_args is defined locally (stable kernel ABI, fields
++ * are append-only) because the sinew build closure carries no
++ * kernel UAPI headers.
++ */
++struct clone_args {
++	unsigned long long flags;
++	unsigned long long pidfd;
++	unsigned long long child_tid;
++	unsigned long long parent_tid;
++	unsigned long long exit_signal;
++	unsigned long long stack;
++	unsigned long long stack_size;
++	unsigned long long tls;
++	unsigned long long set_tid;
++	unsigned long long set_tid_size;
++	unsigned long long cgroup;
++};
++
++hidden long __clone3(struct clone_args *args, size_t size)
++{
++	if (args->stack || args->stack_size) {
++		return -EINVAL;
++	}
++	return __syscall(SYS_clone3, args, size);
++}

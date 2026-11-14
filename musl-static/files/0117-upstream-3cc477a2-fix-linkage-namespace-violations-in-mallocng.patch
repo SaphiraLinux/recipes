@@ -1,0 +1,29 @@
+From 3cc477a2cec8f591f04a74c32ff18a5150e704f3 Mon Sep 17 00:00:00 2001
+From: Rich Felker <dalias@aerifal.cx>
+Date: Fri, 12 Jun 2026 12:15:13 -0400
+Subject: [PATCH] fix linkage namespace violations in mallocng
+
+the namespace-safety remappings in glue.h handled mmap, madvise, and
+mremap correctly but somehow overlooked munmap and mprotect.
+---
+ src/malloc/mallocng/glue.h | 2 ++
+ 1 file changed, 2 insertions(+)
+
+diff --git a/src/malloc/mallocng/glue.h b/src/malloc/mallocng/glue.h
+index 8c2586fb..c347a4ef 100644
+--- a/src/malloc/mallocng/glue.h
++++ b/src/malloc/mallocng/glue.h
+@@ -36,8 +36,10 @@
+ #define brk(p) ((uintptr_t)__syscall(SYS_brk, p))
+ 
+ #define mmap __mmap
++#define munmap __munmap
+ #define madvise __madvise
+ #define mremap __mremap
++#define mprotect __mprotect
+ 
+ #define DISABLE_ALIGNED_ALLOC (__malloc_replaced && !__aligned_alloc_replaced)
+ 
+-- 
+2.55.0
+

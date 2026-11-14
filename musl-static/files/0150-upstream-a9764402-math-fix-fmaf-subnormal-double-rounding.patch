@@ -1,0 +1,54 @@
+From a97644025bad0fe2a25d2458769f922232880826 Mon Sep 17 00:00:00 2001
+From: Szabolcs Nagy <nsz@port70.net>
+Date: Tue, 11 Aug 2026 19:00:25 +0000
+Subject: [PATCH] math: fix fmaf subnormal double rounding
+
+inexact halfway cases were not handled correctly for subnormals
+
+  fmaf(0x20201p-92f, 0x1fe01p-92f, 0x1p-130f)
+  = (float)(0x1p-130 + 0x1.000000004p-150)
+
+was rounded to 0x1.00001p-130 first in double precision, then to
+0x1p-130 in the float subnormal range instead of 0x1.00002p-130.
+
+this is a minimal fix of the halfway check.
+
+Reported-by: Sergey Davidoff <shnatsel@gmail.com>
+---
+ src/math/fmaf.c | 14 ++++++++++++--
+ 1 file changed, 12 insertions(+), 2 deletions(-)
+
+diff --git a/src/math/fmaf.c b/src/math/fmaf.c
+index 7c65acf1..e14dd194 100644
+--- a/src/math/fmaf.c
++++ b/src/math/fmaf.c
+@@ -41,14 +41,24 @@ float fmaf(float x, float y, float z)
+ 	#pragma STDC FENV_ACCESS ON
+ 	double xy, result;
+ 	union {double f; uint64_t i;} u;
+-	int e;
++	int e, halfway;
+ 
+ 	xy = (double)x * y;
+ 	result = xy + z;
+ 	u.f = result;
+ 	e = u.i>>52 & 0x7ff;
++	halfway = (u.i & 0x1fffffff) == 0x10000000;
++
++	/* subnormal range */
++	if (e < 0x3ff-126 && e >= 0x3ff-149) {
++		/* fix halfway for subnormals */
++		uint64_t m = 1;
++		m <<= 52 + 0x3ff-149 - e;
++		halfway = (u.i & m-1) == m/2;
++	}
++
+ 	/* Common case: The double precision result is fine. */
+-	if ((u.i & 0x1fffffff) != 0x10000000 || /* not a halfway case */
++	if (!halfway ||
+ 		e == 0x7ff ||                   /* NaN */
+ 		(result - xy == z && result - z == xy) || /* exact */
+ 		fegetround() != FE_TONEAREST)       /* not round-to-nearest */
+-- 
+2.55.0
+

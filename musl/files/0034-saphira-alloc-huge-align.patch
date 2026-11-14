@@ -1,0 +1,45 @@
+--- a/src/malloc/mallocng/aligned_alloc.c
++++ b/src/malloc/mallocng/aligned_alloc.c
+@@ -1,5 +1,6 @@
+ #include <stdlib.h>
+ #include <errno.h>
++#include <sys/mman.h>
+ #include "meta.h"
+
+ void *aligned_alloc(size_t align, size_t len)
+@@ -32,6 +33,35 @@
+ 	unsigned char *end = g->mem->storage + stride*(idx+1) - IB;
+ 	size_t adj = -(uintptr_t)p & (align-1);
+
++	if (!g->last_idx && g->maplen &&
++	    (size_t)(end - p) - len > (size_t)INT_MAX) {
++		/* Extreme overalignment can leave gigabytes of headroom
++		 * between the (possibly unshifted) payload and the slot
++		 * end.  The slot metadata below cannot represent that:
++		 * set_size takes an int reservation and the tail field
++		 * is u32, so a truncated value corrupts the books and
++		 * crashes (2^34 aligned_alloc SIGSEGV, layout-dependent).
++		 * The group is dedicated to this chunk (single-slot
++		 * classless group; small size-class groups can never
++		 * reach this headroom), so return the unneeded tail
++		 * pages instead: exact metadata, less waste, same
++		 * capability.  Checked before any shift so the adj==0
++		 * fast path below is covered too. */
++		unsigned char *grp = (unsigned char *)g->mem;
++		size_t keep = (size_t)((p + adj + len + IB + UNIT) - grp);
++		keep += -(intptr_t)keep & (PGSZ - 1);
++		size_t old = (size_t)g->maplen * 4096UL;
++		if (keep < old) {
++			if (munmap(grp + keep, old - keep)) {
++				free(p);
++				errno = ENOMEM;
++				return 0;
++			}
++			g->maplen = keep / 4096;
++			end = g->mem->storage + (keep - UNIT) - IB;
++		}
++	}
++
+ 	if (!adj) {
+ 		set_size(p, end, len);
+ 		return p;

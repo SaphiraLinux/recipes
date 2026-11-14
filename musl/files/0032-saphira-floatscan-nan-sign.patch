@@ -1,0 +1,30 @@
+--- a/src/internal/floatscan.c
++++ b/src/internal/floatscan.c
+@@ -468,13 +468,13 @@
+ 	if (i==3) {
+ 		if (shgetc(f) != '(') {
+ 			shunget(f);
+-			return NAN;
++			return sign < 0 ? -NAN : NAN;
+ 		}
+ 		for (i=1; ; i++) {
+ 			c = shgetc(f);
+ 			if (c-'0'<10U || c-'A'<26U || c-'a'<26U || c=='_')
+ 				continue;
+-			if (c==')') return NAN;
++			if (c==')') return sign < 0 ? -NAN : NAN;
+ 			shunget(f);
+ 			if (!pok) {
+ 				errno = EINVAL;
+@@ -482,9 +482,9 @@
+ 				return 0;
+ 			}
+ 			while (i--) shunget(f);
+-			return NAN;
++			return sign < 0 ? -NAN : NAN;
+ 		}
+-		return NAN;
++		return sign < 0 ? -NAN : NAN;
+ 	}
+ 
+ 	if (i) {

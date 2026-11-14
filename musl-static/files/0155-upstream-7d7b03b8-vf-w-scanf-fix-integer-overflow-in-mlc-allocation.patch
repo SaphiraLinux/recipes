@@ -1,0 +1,47 @@
+From 7d7b03b8e8dbecadc6b790444b91fa62929c257c Mon Sep 17 00:00:00 2001
+From: Rich Felker <dalias@aerifal.cx>
+Date: Thu, 10 Sep 2026 16:50:31 -0400
+Subject: [PATCH] vf[w]scanf: fix integer overflow in %mlc allocation with
+ large width
+
+on archs with 32-bit size_t, multiplying the caller-provided signed
+int field width by sizeof(wchar_t) can overflow.
+
+we could explicitly error out, but just replacing the requested size
+to let malloc fail avoids the need to poke at errno, and the rest of
+the function here is already using guaranteed-fail in the geometric
+buffer growth path to avoid explicit size checks.
+---
+ src/stdio/vfscanf.c  | 2 ++
+ src/stdio/vfwscanf.c | 2 ++
+ 2 files changed, 4 insertions(+)
+
+diff --git a/src/stdio/vfscanf.c b/src/stdio/vfscanf.c
+index b78a374d..7b3aecb3 100644
+--- a/src/stdio/vfscanf.c
++++ b/src/stdio/vfscanf.c
+@@ -226,6 +226,8 @@ int vfscanf(FILE *restrict f, const char *restrict fmt, va_list ap)
+ 			k = t=='c' ? width+1U : 31;
+ 			if (size == SIZE_l) {
+ 				if (alloc) {
++					if (k > -1/sizeof(wchar_t))
++						k = -1/sizeof(wchar_t);
+ 					wcs = malloc(k*sizeof(wchar_t));
+ 					if (!wcs) goto alloc_fail;
+ 				} else {
+diff --git a/src/stdio/vfwscanf.c b/src/stdio/vfwscanf.c
+index 82f48604..243fa3d4 100644
+--- a/src/stdio/vfwscanf.c
++++ b/src/stdio/vfwscanf.c
+@@ -245,6 +245,8 @@ int vfwscanf(FILE *restrict f, const wchar_t *restrict fmt, va_list ap)
+ 			if (alloc) {
+ 				k = t=='c' ? width+1U : 31;
+ 				if (size == SIZE_l) {
++					if (k > -1/sizeof(wchar_t))
++						k = -1/sizeof(wchar_t);
+ 					wcs = malloc(k*sizeof(wchar_t));
+ 					if (!wcs) goto alloc_fail;
+ 				} else {
+-- 
+2.55.0
+

@@ -1,0 +1,86 @@
+--- a/src/misc/wordexp.c
++++ b/src/misc/wordexp.c
+@@ -117,7 +117,17 @@
+ 			i += al;
+ 			continue;
+ 		}
+-		if (c == '{' && !sq) return -1;
++		/* A bare { opens no executable construct on its own (command
++		 * grouping needs ;/newline plus a matching close, all of
++		 * which expand as data inside a default word, never as
++		 * code the pre-check must see through). Treating it as
++		 * literal keeps lazily-skipped defaults expanding exactly
++		 * as the shell expands them (${X-{}} -> {}); unbalanced
++		 * input still fails closed at the end of the unit. */
++		if (c == '{' && !sq) {
++			i++;
++			continue;
++		}
+ 		if (c == '$' && s[i+1] == '{' && !sq) {
+ 			size_t nl = 0;
+ 			int n = brace_unit(s+i, &nl, in_arith, depth+1, dq);
+@@ -198,6 +208,20 @@
+ 		if (c == ')') {
+ 			if (last != 1) return 2;
+ 			if (--depth == 0) {
++				/* The shell only parses $((...)) as
++				 * arithmetic when the two closing parens
++				 * are adjacent: '$((1 + 2 ) )' and
++				 * '$((echo + 1 ) )' both execute as $(...)
++				 * command substitution in bash (which is
++				 * also /bin/sh here, the shell wordexp
++				 * invokes), verified 2026-11-12. A spaced
++				 * close is therefore not verified
++				 * arithmetic: fail closed (caller blocks).
++				 * (A genuine close followed by a literal
++				 * " )" still ends here first: the close
++				 * itself stays adjacent.) */
++				if (p[i-1] != ')')
++					return 1;
+ 				*len = i+1;
+ 				return 0;
+ 			}
+@@ -218,7 +242,42 @@
+ 		}
+ 		if (c == '\'')
+ 			return 1;
+-		if (c == '"' || c == '\\' || c == '`' || c == ';' ||
++		if (c == '"') {
++			/* Double-quoted span inside arithmetic: the shell
++			 * still expands it (so $(("1")) is valid, value 1),
++			 * but $(...) and backquotes inside execute. Scan the
++			 * span: command substitution blocks, ${...} words
++			 * recurse through brace_unit (in quoted context, so
++			 * bogus single-quotes cannot hide execution), anything
++			 * else is inert arithmetic content. An unterminated
++			 * quote is malformed. Adjacent values stay rejected,
++			 * mirroring the word rule below. */
++			size_t j = i+1;
++			while (p[j] && p[j] != '"') {
++				if (p[j] == '\\') {
++					if (!p[j+1]) return 2;
++					j += 2;
++					continue;
++				}
++				if (p[j] == '$' && p[j+1] == '(') return 1;
++				if (p[j] == '`') return 1;
++				if (p[j] == '$' && p[j+1] == '{') {
++					size_t bl = 0;
++					int b = brace_unit(p+j, &bl, 1, 0, 1);
++					if (b < 0) return 2;
++					if (b) return 1;
++					j += bl;
++					continue;
++				}
++				j++;
++			}
++			if (!p[j]) return 2;
++			if (last == 1) return 1;
++			last = 1;
++			i = j+1;
++			continue;
++		}
++		if (c == '\\' || c == '`' || c == ';' ||
+ 		    c == '\n') return 1;
+ 		if (c == '#') {
+ 			/* base notation 16#ff needs a digit before # */

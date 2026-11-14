@@ -1,0 +1,65 @@
+diff --git b/src/string/x86_64/memcmp.s b/src/string/x86_64/memcmp.s
+new file mode 100644
+index 0000000..0974d01
+--- /dev/null
++++ b/src/string/x86_64/memcmp.s
+@@ -0,0 +1,59 @@
++/* SSE2 memcmp: page-guarded 16-byte blocks, pure binary compare.
++ * Same contract as generic C: unsigned-byte ordering, first
++ * differing byte decides, n==0 returns 0 untouched. */
++.global memcmp
++.type memcmp,@function
++memcmp:
++	test %rdx,%rdx
++	jz .Lzero
++	xor %ecx,%ecx			# offset i = 0
++	mov %rdx,%r8			# remaining = n
++.Lvec:
++	cmp $16,%r8
++	jb .Ltail
++	# page check: 16B block [p,p+16) must not cross a page
++	mov %rdi,%rax
++	add %rcx,%rax
++	and $0xfff,%eax
++	cmp $0xff0,%eax
++	ja .Ltail
++	mov %rsi,%rax
++	add %rcx,%rax
++	and $0xfff,%eax
++	cmp $0xff0,%eax
++	ja .Ltail
++	movups (%rdi,%rcx),%xmm0
++	movups (%rsi,%rcx),%xmm1
++	pcmpeqb %xmm1,%xmm0
++	pmovmskb %xmm0,%eax
++	cmp $0xffff,%eax
++	jne .Ldiff
++	add $16,%rcx
++	sub $16,%r8
++	jmp .Lvec
++.Ldiff:
++	not %eax
++	bsf %eax,%eax
++	add %rcx,%rax
++	movzbl (%rdi,%rax),%edx
++	movzbl (%rsi,%rax),%eax
++	sub %eax,%edx
++	mov %edx,%eax
++	ret
++.Ltail:
++	test %r8,%r8
++	jz .Lzero
++1:	movzbl (%rdi,%rcx),%eax
++	movzbl (%rsi,%rcx),%edx
++	cmp %al,%dl
++	jne 2f
++	inc %rcx
++	dec %r8
++	jnz 1b
++	xor %eax,%eax
++	ret
++2:	sub %edx,%eax
++	ret
++.Lzero:
++	xor %eax,%eax
++	ret

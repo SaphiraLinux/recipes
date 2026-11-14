@@ -1,0 +1,37 @@
+--- a/src/stdio/vfscanf.c
++++ b/src/stdio/vfscanf.c
+@@ -241,6 +241,9 @@
+ 					wcs = dest;
+ 				}
+ 				st = (mbstate_t){0};
++				/* Wide %c counts characters, not bytes: lift the byte
++				 * limit and stop after width complete characters. */
++				if (t == 'c') shlim(f, 0);
+ 				while (scanset[(c=shgetc(f))+1]) {
+ 					switch (mbrtowc(&wc, &(char){c}, 1, &st)) {
+ 					case -1:
+@@ -248,7 +251,9 @@
+ 					case -2:
+ 						continue;
+ 					}
+-					if (wcs) wcs[i++] = wc;
++					i++;
++					if (wcs) wcs[i-1] = wc;
++					if (t == 'c' && (int)i == width) break;
+ 					if (alloc && i==k) {
+ 						k+=k+1;
+ 						wchar_t *tmp = realloc(wcs, k*sizeof(wchar_t));
+@@ -275,9 +280,12 @@
+ 			} else {
+ 				while (scanset[(c=shgetc(f))+1]);
+ 			}
+-			shunget(f);
++			/* Exact-width wide %c leaves the stream positioned at the
++			 * next unconsumed byte: nothing to push back. */
++			if (!(t == 'c' && size == SIZE_l && (int)i == width)) shunget(f);
+ 			if (!shcnt(f)) goto match_fail;
+ 			if (t == 'c' && size != SIZE_l && shcnt(f) != width) goto input_fail;
++			if (t == 'c' && size == SIZE_l && (int)i != width) goto input_fail;
+ 			if (alloc) {
+ 				if (size == SIZE_l) *(wchar_t **)dest = wcs;
+ 				else *(char **)dest = s;

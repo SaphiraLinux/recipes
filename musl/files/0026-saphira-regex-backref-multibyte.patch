@@ -1,0 +1,112 @@
+--- a/src/regex/regexec.c
++++ b/src/regex/regexec.c
+@@ -495,6 +495,7 @@
+   tre_tnfa_transition_t *state;
+   int state_id;
+   int next_c;
++  regoff_t pos_add_next;
+   regoff_t *tags;
+ #ifdef TRE_MBSTATE
+   mbstate_t mbstate;
+@@ -563,7 +564,8 @@
+       stack->item.str_byte = (_str_byte);				      \
+       stack->item.state = (_state);					      \
+       stack->item.state_id = (_state_id);				      \
+-      stack->item.next_c = (_next_c);					      \
++      stack->item.next_c = (_next_c); \
++      stack->item.pos_add_next = pos_add_next;					      \
+       for (i = 0; i < tnfa->num_tags; i++)				      \
+ 	stack->item.tags[i] = (_tags)[i];				      \
+       BT_STACK_MBSTATE_IN;						      \
+@@ -578,7 +580,8 @@
+       pos = stack->item.pos;						      \
+       str_byte = stack->item.str_byte;					      \
+       state = stack->item.state;					      \
+-      next_c = stack->item.next_c;					      \
++      next_c = stack->item.next_c; \
++      pos_add_next = stack->item.pos_add_next;					      \
+       for (i = 0; i < tnfa->num_tags; i++)				      \
+ 	tags[i] = stack->item.tags[i];					      \
+       BT_STACK_MBSTATE_OUT;						      \
+@@ -610,7 +613,6 @@
+      started from. */
+   int next_c_start;
+   const char *str_byte_start;
+-  regoff_t pos_start = -1;
+ #ifdef TRE_MBSTATE
+   mbstate_t mbstate_start;
+ #endif /* TRE_MBSTATE */
+@@ -691,9 +693,14 @@
+   }
+ 
+   state = NULL;
+-  pos = pos_start;
++  /* Resynchronize: `pos_add_next' still holds the length of whatever
++     character the abandoned attempt read last, which is unrelated to
++     the new start position (and wrong for multibyte input, silently
++     skipping start positions and desynchronizing `pos' from
++     `str_byte'). Recompute from `str_byte', rewound above. */
++  pos = str_byte - (const char *)string;
++  pos_add_next = 0;
+   GET_NEXT_WCHAR();
+-  pos_start = pos;
+   next_c_start = next_c;
+   str_byte_start = str_byte;
+ #ifdef TRE_MBSTATE
+@@ -778,12 +785,17 @@
+ 	     turn off REG_NOSUB temporarily. */
+ 	  tre_fill_pmatch(bt + 1, pmatch, tnfa->cflags & ~REG_NOSUB,
+ 			  tnfa, tags, pos);
++
+ 	  so = pmatch[bt].rm_so;
+ 	  eo = pmatch[bt].rm_eo;
+ 	  bt_len = eo - so;
+ 
+-	  result = strncmp((const char*)string + so, str_byte - 1,
+-				 (size_t)bt_len);
++	  /* Compare against the current input position.  (`str_byte - 1'
++	     used to work only because the one-byte lookahead made it equal
++	     to `string + pos'; for multibyte input it points inside the
++	     lookahead character.) */
++	  result = strncmp((const char*)string + so, (const char*)string + pos,
++			   (size_t)bt_len);
+ 
+ 	  if (result == 0)
+ 	    {
+@@ -798,9 +810,16 @@
+ 	      states_seen[trans_i->state_id] = empty_br_match;
+ 
+ 	      /* Advance in input string and resync `prev_c', `next_c'
+-		 and pos. */
+-	      str_byte += bt_len - 1;
+-	      pos += bt_len - 1;
++		 and `pos'.  `pos' is the current byte offset and the
++		 backref text occupies [pos, pos+bt_len): reposition
++		 `str_byte' there and take a fresh length, so byte offsets
++		 stay character-aligned for multibyte input.  (The
++		 following GET_NEXT_WCHAR re-reads consistently; for
++		 single-byte input this computes exactly the same values
++		 as the old `str_byte - 1' form.) */
++	      pos += bt_len;
++	      str_byte = (const char *)string + pos;
++	      pos_add_next = 0;
+ 	      GET_NEXT_WCHAR();
+ 	    }
+ 	  else
+@@ -884,8 +903,14 @@
+ 	  else if (match_eo < 0)
+ 	    {
+ 	      /* Try starting from a later position in the input string. */
+-	      /* Check for end of string. */
+-	      if (next_c == L'\0')
++	      /* Check for end of string. `next_c' is the read head left
++		 over by the failed attempt, which may have run to EOS
++		 even when later start positions were never tried (e.g. a
++		 greedy group that consumed everything, then failed its
++		 back reference). What matters is whether the attempt we
++		 just abandoned started at end of string: `next_c_start'
++		 is the character at that start position. */
++	      if (next_c_start == L'\0')
+ 		    {
+ 		      break;
+ 		    }

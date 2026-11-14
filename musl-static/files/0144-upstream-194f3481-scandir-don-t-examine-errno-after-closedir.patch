@@ -1,0 +1,45 @@
+From 194f3481840990d961d0512fad30b7ed3fa9c110 Mon Sep 17 00:00:00 2001
+From: Luca Kellermann <mailto.luca.kellermann@gmail.com>
+Date: Wed, 15 Apr 2026 16:31:22 +0200
+Subject: [PATCH] scandir: don't examine errno after closedir()
+
+when closedir() set errno, scandir() misinterpreted this as a failure.
+this was wrong for two reasons:
+
+* if closedir() succeeds, errno could still have been set, e.g. by
+  __aio_close().
+
+* even if closedir() "fails", it always closes the file descriptor and
+  frees memory, so there is no reason to free all directory entries
+  and return from scandir() with a failure.
+---
+ src/dirent/scandir.c | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/src/dirent/scandir.c b/src/dirent/scandir.c
+index eead7e50..aa0d10e2 100644
+--- a/src/dirent/scandir.c
++++ b/src/dirent/scandir.c
+@@ -33,12 +33,18 @@ int scandir(const char *path, struct dirent ***res,
+ 		if (!names[cnt]) break;
+ 		memcpy(names[cnt++], de, de->d_reclen);
+ 	}
++	/* closedir() might set errno via __aio_close(). It might also "fail"
++	 * (return -1 and set errno). But even then, the file descriptor is
++	 * closed and memory is freed, so there is no reason to report the
++	 * "failure" of closedir() as a failure of scandir(). */
++	int err = errno;
+ 
+ 	closedir(d);
+ 
+-	if (errno) {
++	if (err) {
+ 		if (names) while (cnt-->0) free(names[cnt]);
+ 		free(names);
++		errno = err;
+ 		return -1;
+ 	}
+ 	/* cmp() and caller must not observe that errno was set to 0. */
+-- 
+2.55.0
+

@@ -1,0 +1,81 @@
+diff --git b/src/string/x86_64/strncmp.s b/src/string/x86_64/strncmp.s
+new file mode 100644
+index 0000000..a8cd7ee
+--- /dev/null
++++ b/src/string/x86_64/strncmp.s
+@@ -0,0 +1,75 @@
++/* SSE2 strncmp: page-guarded 16-byte blocks, NUL-aware both sides.
++ * Same contract as generic C: unsigned-byte ordering, first
++ * differing byte (or NUL) decides, n==0 returns 0 untouched. */
++.global strncmp
++.type strncmp,@function
++strncmp:
++	test %rdx,%rdx
++	jz .Lzero
++	xor %ecx,%ecx			# offset i = 0
++	mov %rdx,%r8			# remaining = n
++	pxor %xmm3,%xmm3		# zero constant
++.Lvec:
++	cmp $16,%r8
++	jb .Ltail
++	# page check: 16B block [p,p+16) must not cross a page
++	mov %rdi,%rax
++	add %rcx,%rax
++	and $0xfff,%eax
++	cmp $0xff0,%eax
++	ja .Ltail
++	mov %rsi,%rax
++	add %rcx,%rax
++	and $0xfff,%eax
++	cmp $0xff0,%eax
++	ja .Ltail
++	movups (%rdi,%rcx),%xmm0
++	movups (%rsi,%rcx),%xmm1
++	movdqa %xmm0,%xmm2
++	pcmpeqb %xmm1,%xmm2
++	movdqa %xmm0,%xmm4
++	pcmpeqb %xmm3,%xmm4
++	movdqa %xmm1,%xmm5
++	pcmpeqb %xmm3,%xmm5
++	pmovmskb %xmm2,%eax
++	pmovmskb %xmm4,%r9d
++	pmovmskb %xmm5,%r10d
++	not %eax
++	or %r9d,%eax
++	or %r10d,%eax
++	and $0xffff,%eax
++	jz .Lnext
++	bsf %eax,%eax
++	add %rcx,%rax
++	movzbl (%rdi,%rax),%edx
++	movzbl (%rsi,%rax),%eax
++	sub %eax,%edx
++	mov %edx,%eax
++	ret
++.Lnext:
++	add $16,%rcx
++	sub $16,%r8
++	jmp .Lvec
++.Ltail:
++	test %r8,%r8
++	jz .Lzero
++1:	movzbl (%rdi,%rcx),%eax
++	movzbl (%rsi,%rcx),%edx
++	test %al,%al
++	jz 2f
++	test %dl,%dl
++	jz 2f
++	cmp %al,%dl
++	jne 2f
++	inc %rcx
++	dec %r8
++	jnz 1b
++	xor %eax,%eax
++	ret
++2:	movzbl (%rdi,%rcx),%eax
++	movzbl (%rsi,%rcx),%edx
++	sub %edx,%eax
++	ret
++.Lzero:
++	xor %eax,%eax
++	ret
