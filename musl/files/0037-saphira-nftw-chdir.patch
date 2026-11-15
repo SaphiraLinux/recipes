@@ -1,0 +1,163 @@
+--- a/src/misc/nftw.c
++++ b/src/misc/nftw.c
+@@ -20,7 +20,7 @@
+ #undef dirfd
+ #define dirfd(d) (*(int *)d)
+ 
+-static int do_nftw(char *path, int (*fn)(const char *, const struct stat *, int, struct FTW *), int fd_limit, int flags, struct history *h)
++static int do_nftw(char *path, int (*fn)(const char *, const struct stat *, int, struct FTW *), int fd_limit, int flags, struct history *h, int dl)
+ {
+ 	size_t l = strlen(path), j = l && path[l-1]=='/' ? l-1 : l;
+ 	struct stat st;
+@@ -55,7 +55,9 @@
+ 	new.dev = st.st_dev;
+ 	new.ino = st.st_ino;
+ 	new.level = h ? h->level+1 : 0;
+-	new.base = j+1;
++	/* Base indexes the caller-visible spelling (path+dl); with no
++	 * CHDIR absolutization dl is 0 and nothing changes. */
++	new.base = j+1-dl;
+ 	
+ 	lev.level = new.level;
+ 	if (h) {
+@@ -64,7 +66,7 @@
+ 		size_t k;
+ 		for (k=j; k && path[k]=='/'; k--);
+ 		for (; k && path[k-1]!='/'; k--);
+-		lev.base = k;
++		lev.base = k-dl;
+ 	}
+ 
+ 	if (type == FTW_D || type == FTW_DP) {
+@@ -74,7 +76,7 @@
+ 		if (!fd_limit) close(dfd);
+ 	}
+ 
+-	if (!(flags & FTW_DEPTH) && (r=fn(path, &st, type, &lev)))
++	if (!(flags & FTW_DEPTH) && (r=fn(path+dl, &st, type, &lev)))
+ 		return r;
+ 
+ 	for (; h; h = h->chain)
+@@ -89,6 +91,16 @@
+ 		DIR *d = fdopendir(dfd);
+ 		if (d) {
+ 			struct dirent *de;
++			if (flags & FTW_CHDIR) {
++				/* Descend: subsequent names are resolved
++				 * from inside this directory. */
++				if (fchdir(dfd) < 0) {
++					err = errno;
++					closedir(d);
++					errno = err;
++					return -1;
++				}
++			}
+ 			while ((de = readdir(d))) {
+ 				if (de->d_name[0] == '.'
+ 				 && (!de->d_name[1]
+@@ -101,7 +113,21 @@
+ 				}
+ 				path[j]='/';
+ 				strcpy(path+j+1, de->d_name);
+-				if ((r=do_nftw(path, fn, fd_limit-1, flags, &new))) {
++				r = do_nftw(path, fn, fd_limit-1, flags, &new, dl);
++				if (flags & FTW_CHDIR) {
++					/* The child left the working directory
++					 * somewhere below us; restore it so the
++					 * next sibling (and fn) sees this dir. */
++					int e2 = errno;
++					if (fchdir(dfd) < 0) {
++						err = errno;
++						closedir(d);
++						errno = err;
++						return -1;
++					}
++					errno = e2;
++				}
++				if (r) {
+ 					closedir(d);
+ 					return r;
+ 				}
+@@ -114,7 +140,10 @@
+ 	}
+ 
+ 	path[l] = 0;
+-	if ((flags & FTW_DEPTH) && (r=fn(path, &st, type, &lev)))
++	/* Post-order visits run with the working directory still inside
++	 * this directory (each child restored it on return), matching the
++	 * observable glibc behavior; the wrapper restores the caller. */
++	if ((flags & FTW_DEPTH) && (r=fn(path+dl, &st, type, &lev)))
+ 		return r;
+ 
+ 	return 0;
+@@ -125,6 +154,10 @@
+ 	int r, cs;
+ 	size_t l;
+ 	char pathbuf[PATH_MAX+1];
++	int orig_dfd = -1;
++	/* Offset of the caller-visible spelling within pathbuf. Zero
++	 * unless CHDIR anchored a relative root. */
++	int dl = 0;
+ 
+ 	if (fd_limit <= 0) return 0;
+ 
+@@ -133,10 +166,56 @@
+ 		errno = ENAMETOOLONG;
+ 		return -1;
+ 	}
+-	memcpy(pathbuf, path, l+1);
+-	
++	if (flags & FTW_CHDIR) {
++		if (path[0] != '/') {
++			/* Descent builds on the root string after each
++			 * fchdir, so a relative root would stop resolving.
++			 * Anchor it to the current directory up front. */
++			char cwdbuf[PATH_MAX+1];
++			size_t cl;
++			if (!getcwd(cwdbuf, sizeof cwdbuf))
++				return -1;
++			cl = strlen(cwdbuf);
++			if (cl + 1 + l > PATH_MAX) {
++				errno = ENAMETOOLONG;
++				return -1;
++			}
++			memcpy(pathbuf, cwdbuf, cl);
++			pathbuf[cl] = '/';
++			memcpy(pathbuf+cl+1, path, l+1);
++			l = cl + 1 + l;
++			dl = cl + 1;
++		} else {
++			memcpy(pathbuf, path, l+1);
++		}
++		/* Save the caller's directory; restored below on every
++		 * path out, success or failure (recovery is best-effort
++		 * only if this open itself fails). */
++		orig_dfd = open(".", O_RDONLY|O_DIRECTORY|O_CLOEXEC);
++		if (orig_dfd < 0)
++			return -1;
++	} else {
++		memcpy(pathbuf, path, l+1);
++	}
++
+ 	pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &cs);
+-	r = do_nftw(pathbuf, fn, fd_limit, flags, NULL);
++	r = do_nftw(pathbuf, fn, fd_limit, flags, NULL, dl);
++	if (flags & FTW_CHDIR) {
++		/* Restore before re-enabling cancellation so a pending
++		 * cancel cannot strand the caller elsewhere. */
++		int e = errno;
++		if (fchdir(orig_dfd) < 0) {
++			if (r == 0) r = -1;
++			else errno = e;
++		} else {
++			errno = e;
++		}
++	}
+ 	pthread_setcancelstate(cs, 0);
++	if (flags & FTW_CHDIR) {
++		int e = errno;
++		close(orig_dfd);
++		errno = e;
++	}
+ 	return r;
+ }

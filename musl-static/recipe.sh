@@ -49,7 +49,7 @@ pkgver=1.2.6_p1
 _sinew_version=0.1.0
 # New package, first release. Tracks musl 1.2.6_p1 source; pkgrel is
 # independent of musl's pkgrel (musl is r6, this starts at 1).
-pkgrel=11
+pkgrel=13
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='Sinew static toolchain — isolated musl headers + static libc'
 license='MIT'
@@ -115,6 +115,12 @@ nan_sign_patch_sha256=a8ea20789e36555a818ae4fb0092c5b6d156a472a5eb5d6e7f030082de
 nocmd_close_quote_patch_sha256=c21ddf3b81e5217b439be6465227a6d733e019e930e03a4140110e221f501f31
 # mallocng huge-overalignment (mirrored from musl).
 huge_align_patch_sha256=7d08bf676ec0791a3185716f31a2ce83008a59cb742c9d7f8022d79415b4f6ff
+# timer_delete error conversion (mirrored from musl).
+timer_delete_errno_patch_sha256=5d268ee6a9c938349f597e3e9dceb2c601592a27ee934c8abdae2047766b1f26
+# legacy ftw() follows symlinks (mirrored from musl).
+ftw_legacy_follow_patch_sha256=e14fc73d5b082645452e9fb7e0e128135abe2d74298fe02f8928ab3f389030b6
+# nftw FTW_CHDIR support (mirrored from musl).
+nftw_chdir_patch_sha256=30d0f8c40dd984d7ea78e2ab9a9e0dd5c0bae6fc4b874c4a62a9ca9750907505
 
 depends=""
 makedepends="
@@ -264,6 +270,18 @@ recipe_build()
 	P37="$RECIPE_DIR/files/0034-saphira-alloc-huge-align.patch"
 	echo "$huge_align_patch_sha256  $P37" | sha256sum -c -
 	patch -d "$SRC" -Np1 -i "$P37"
+	# timer_delete error conversion (mirrored from musl; applied after 0034).
+	P38="$RECIPE_DIR/files/0035-saphira-timer-delete-errno.patch"
+	echo "$timer_delete_errno_patch_sha256  $P38" | sha256sum -c -
+	patch -d "$SRC" -Np1 -i "$P38"
+	# legacy ftw() follows symlinks (mirrored from musl; applied after 0035).
+	P39="$RECIPE_DIR/files/0036-saphira-ftw-legacy-follow.patch"
+	echo "$ftw_legacy_follow_patch_sha256  $P39" | sha256sum -c -
+	patch -d "$SRC" -Np1 -i "$P39"
+	# nftw FTW_CHDIR support (mirrored from musl; applied after 0036).
+	P40="$RECIPE_DIR/files/0037-saphira-nftw-chdir.patch"
+	echo "$nftw_chdir_patch_sha256  $P40" | sha256sum -c -
+	patch -d "$SRC" -Np1 -i "$P40"
 	cd "$SRC"
 	# Isolated prefix: everything stays under /opt/saphira/musl-static.
 	./configure --prefix=/opt/saphira/musl-static --sysconfdir=/opt/saphira/musl-static/etc --syslibdir=/opt/saphira/musl-static/lib --localstatedir=/opt/saphira/musl-static/var

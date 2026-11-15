@@ -3,7 +3,7 @@
 pkgname=libc-test
 # Snapshot date of the vendored upstream suite (commit below).
 pkgver=20261101
-pkgrel=18
+pkgrel=23
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='musl libc-test suite + Saphira runner (validates the installed libc)'
 license='MIT'

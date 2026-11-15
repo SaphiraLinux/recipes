@@ -2827,11 +2827,19 @@
   "expected": "PASS",
   "note": ""
  },
- "saphira/saphira_guards:static": {
-  "expected": "PASS",
-  "note": ""
- },
- "saphira/saphira_proc:dynamic": {
+  "saphira/saphira_guards:static": {
+   "expected": "PASS",
+   "note": ""
+  },
+  "saphira/saphira_mq:dynamic": {
+   "expected": "PASS",
+   "note": ""
+  },
+  "saphira/saphira_mq:static": {
+   "expected": "PASS",
+   "note": ""
+  },
+  "saphira/saphira_proc:dynamic": {
   "expected": "PASS",
   "note": ""
  },
@@ -2851,11 +2859,19 @@
   "expected": "PASS",
   "note": ""
  },
- "saphira/saphira_threads:static": {
-  "expected": "PASS",
-  "note": ""
- },
- "saphira/saphira_tls:dynamic": {
+  "saphira/saphira_threads:static": {
+   "expected": "PASS",
+   "note": ""
+  },
+  "saphira/saphira_timer:dynamic": {
+   "expected": "PASS",
+   "note": ""
+  },
+  "saphira/saphira_timer:static": {
+   "expected": "PASS",
+   "note": ""
+  },
+  "saphira/saphira_tls:dynamic": {
   "expected": "PASS",
   "note": ""
  },

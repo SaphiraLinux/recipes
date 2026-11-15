@@ -1,0 +1,9 @@
+--- a/src/time/timer_delete.c
++++ b/src/time/timer_delete.c
+@@ -10,5 +10,5 @@
+ 		__syscall(SYS_tkill, td->tid, SIGTIMER);
+ 		return 0;
+ 	}
+-	return __syscall(SYS_timer_delete, t);
++	return __syscall_ret(__syscall(SYS_timer_delete, t));
+ }

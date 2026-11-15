@@ -45,7 +45,7 @@ pkgver=1.2.6_p1
 _sinew_version=0.1.0
 # New _p1 line, so pkgrel restarts at 1 (it must still sort above
 # every 1.2.6-rN: verified > r8 via apk version -t).
-pkgrel=21
+pkgrel=23
 pkgarch=${SAPHIRA_ARCH:-x86_64}
 pkgdesc='Sinew libc — Saphira'"'"'s musl-compatible C library'
 license='MIT'
@@ -67,10 +67,10 @@ utmp_patch_sha256=e8eab82e03d975af6d0dbd33af878e85dbe5909059c8871248868bd7fc7b11
 # Sinew-lineage optimisation (promoted from exp/musl-r8):
 # arch rint/rintf via SSE4.1 roundsd/roundss + DE-bit preservation.
 rint_patch_sha256=f5b27c7dac830a02985685337cbca2ddb32ffcbdb7eccf79b0e7a070d17da5c5
-# EXPERIMENTAL strncmp/memcmp (independent; drop either freely).
+# Shipped-since-r8 strncmp/memcmp (independent; drop either freely).
 strncmp_patch_sha256=be76e9d667157364819089eeedc0824b7bc42e1025f680871bc96bdd0fdd3b3c
 memcmp_patch_sha256=8ecdce7e87c156aa47b0d21b2890bbaf0033ccb8a28a3837c7bf090fa8aa0759
-# EXPERIMENTAL (exp/musl-r8 only): arch memmove backward path via
+# Shipped since r8 (promoted from exp/musl-r8): arch memmove backward path via
 # SSE2 16-byte blocks (Parker Loflin 31-Oct proposal; evidence:
 # 564450 checks x 5 hosts, 0 fails; backward 10-21x, forward 1.00x).
 # Generic C stays untouched as reference. Drop this block and the
@@ -115,6 +115,8 @@ wordexp_nocmd_patch_sha256=d56eacb6f49e442de554cc0491c6b67fb55bd86ffec87b1159d4b
 powf_y1_patch_sha256=af7884a0f21a02561525f5fc8cfa615c04b3a33a424fad6792c253c5f2e6b695
 # strptime %z hours-only form (bugs/strptime-z-hours-only.md):
 # accept ±HH in addition to ±HHMM (no colon form).
+# Must apply before the upstream loop below: the trailing context
+# pins the pre-0104 %Z body, which 0104 replaces with __tzname_to_isdst.
 strptime_z_patch_sha256=208f8d3320cc1cbd9d0331ea72dfecf35f9c714c162ddca163bbd7263ef6ba9a
 # strptime %s epoch conversion: convert signed Unix epoch seconds to
 # calendar fields via __localtime_r (glibc local-time semantics; POSIX
@@ -205,6 +207,21 @@ nocmd_close_quote_patch_sha256=c21ddf3b81e5217b439be6465227a6d733e019e930e03a414
 # dependent). Complements upstream 0114 (get_meta offset width).
 # Touches aligned_alloc only; size-class paths cannot reach it.
 huge_align_patch_sha256=7d08bf676ec0791a3185716f31a2ce83008a59cb742c9d7f8022d79415b4f6ff
+# timer_delete error conversion (Sinew 0035): wrap the raw syscall
+# result in __syscall_ret so failures return -1 with errno set
+# (Linux -1/errno convention, glibc agrees). Previously the raw
+# -errno leaked as the return value and errno stayed untouched.
+# SIGEV_THREAD branch (negative timer IDs) unchanged.
+timer_delete_errno_patch_sha256=5d268ee6a9c938349f597e3e9dceb2c601592a27ee934c8abdae2047766b1f26
+# legacy ftw() follows symlinks (Sinew 0036): call nftw() with flags 0
+# instead of FTW_PHYS, matching the documented flags-zero equivalence
+# and glibc behavior. Touches the wrapper call only.
+ftw_legacy_follow_patch_sha256=e14fc73d5b082645452e9fb7e0e128135abe2d74298fe02f8928ab3f389030b6
+# nftw FTW_CHDIR support (Sinew 0037): fchdir into each descended
+# directory, restore per level and at return (success and failure),
+# absolutize relative roots (fpath keeps the caller spelling via the
+# dl offset). No-op without the flag. Touches nftw.c only.
+nftw_chdir_patch_sha256=30d0f8c40dd984d7ea78e2ab9a9e0dd5c0bae6fc4b874c4a62a9ca9750907505
 
 depends=""
 makedepends="
@@ -233,11 +250,11 @@ recipe_build()
 	P8="$RECIPE_DIR/files/0004-x86_64-rint-roundsd.patch"
 	echo "$rint_patch_sha256  $P8" | sha256sum -c -
 	patch -d "$SRC" -Np1 -i "$P8"
-	# EXPERIMENTAL (exp/musl-r8 only): arch memmove backward path.
+	# Shipped since r8 (promoted from exp/musl-r8): arch memmove backward path.
 	P9="$RECIPE_DIR/files/0005-x86_64-memmove-sse2-backward.patch"
 	echo "$memmove_patch_sha256  $P9" | sha256sum -c -
 	patch -d "$SRC" -Np1 -i "$P9"
-	# EXPERIMENTAL (exp/musl-r8 only): arch strncmp/memcmp via SSE2.
+	# Shipped since r8 (promoted from exp/musl-r8): arch strncmp/memcmp via SSE2.
 	# Independent patches so each can be dropped separately.
 	P10="$RECIPE_DIR/files/0006-x86_64-strncmp-sse2.patch"
 	echo "$strncmp_patch_sha256  $P10" | sha256sum -c -
@@ -245,7 +262,7 @@ recipe_build()
 	P11="$RECIPE_DIR/files/0007-x86_64-memcmp-sse2.patch"
 	echo "$memcmp_patch_sha256  $P11" | sha256sum -c -
 	patch -d "$SRC" -Np1 -i "$P11"
-	# F3 (exp/musl-r8 only): arch floor/ceil/trunc families + rint
+	# F3 (shipped since r8; promoted from exp/musl-r8): arch floor/ceil/trunc families + rint
 	# real-op denormal handling. Independent patches; 0011 modifies
 	# the 0004 files so it applies last. Drop all four + this block
 	# to restore pre-F3 behaviour (0004 rint stays).
@@ -261,7 +278,7 @@ recipe_build()
 	P15="$RECIPE_DIR/files/0011-x86_64-rint-realop-denormal.patch"
 	echo "$rint_realop_patch_sha256  $P15" | sha256sum -c -
 	patch -d "$SRC" -Np1 -i "$P15"
-	# F4 (exp/musl-f4-nearbyint only): arch nearbyint/nearbyintf.
+	# F4 (shipped since r8; promoted from exp/musl-f4-nearbyint): arch nearbyint/nearbyintf.
 	P16="$RECIPE_DIR/files/0012-x86_64-nearbyint-roundsd.patch"
 	echo "$nearbyint_patch_sha256  $P16" | sha256sum -c -
 	patch -d "$SRC" -Np1 -i "$P16"
@@ -386,6 +403,22 @@ recipe_build()
 	P37="$RECIPE_DIR/files/0034-saphira-alloc-huge-align.patch"
 	echo "$huge_align_patch_sha256  $P37" | sha256sum -c -
 	patch -d "$SRC" -Np1 -i "$P37"
+	# timer_delete error conversion (Sinew 0035): wrap the raw
+	# syscall result so kernel errors return -1 with errno set.
+	# Applied after 0034 (independent file, order is documentary).
+	P38="$RECIPE_DIR/files/0035-saphira-timer-delete-errno.patch"
+	echo "$timer_delete_errno_patch_sha256  $P38" | sha256sum -c -
+	patch -d "$SRC" -Np1 -i "$P38"
+	# legacy ftw() follows symlinks (Sinew 0036): flags 0, not PHYS.
+	# Applied after 0035 (independent file, order is documentary).
+	P39="$RECIPE_DIR/files/0036-saphira-ftw-legacy-follow.patch"
+	echo "$ftw_legacy_follow_patch_sha256  $P39" | sha256sum -c -
+	patch -d "$SRC" -Np1 -i "$P39"
+	# nftw FTW_CHDIR support (Sinew 0037). Applied after 0036
+	# (independent file, order is documentary).
+	P40="$RECIPE_DIR/files/0037-saphira-nftw-chdir.patch"
+	echo "$nftw_chdir_patch_sha256  $P40" | sha256sum -c -
+	patch -d "$SRC" -Np1 -i "$P40"
 	cd "$SRC"
 	# Same configure baseline as r7: non-usrmerged layout,
 	# syslibdir /lib keeps the loader at /lib/ld-musl-x86_64.so.1.

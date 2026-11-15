@@ -800,6 +800,16 @@ def cmd_scan(args):
             print(f"scan: skipping disabled {info['name']}: {reason}")
             skipped += 1
             continue
+        # A recipe whose sourced metadata lacks version or revision cannot
+        # form an NVR and must never be queued: warn loudly (naming the
+        # recipe and its directory) and move on. An empty revision is as
+        # unusable as a missing one - queueing it produced unbuildable
+        # "ver-r" rows. No default is invented here. (Untreated, the
+        # KeyError below killed the daemon and stalled the whole queue.)
+        if not info.get("version") or not info.get("revision"):
+            print(f"scan: skipping {info['name']} ({info['pkgdir']}): no version/revision in sourced metadata")
+            skipped += 1
+            continue
         # An exact NVR already in the live repository is not work. Publishing
         # it again is impossible - sign-apk-repo refuses a rebuild whose NVR is
         # already there, by the immutable-filename rule - so queueing it can

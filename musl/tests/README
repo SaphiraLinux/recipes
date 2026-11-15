@@ -89,8 +89,8 @@ no regression). Code size: candidates 252+305+355=912B text vs ~224B of C
 loop bodies replaced (est. from staged disasm ranges) = ~+690B net if wired.
 STOP before integration; separate release decision required. F8 Phase 3
 (integration + staged validation, checkpoint 108): patch prepared as
-`files/0014-x86_64-strstr-sse2-short-needle.patch` — UNWIRED (recipe.sh
-untouched, no bump/build/sign/publish/install). Wiring: strstr.c keeps the
+`files/0014-x86_64-strstr-sse2-short-needle.patch` — since wired into
+recipe.sh (P17) and shipped (see PATCHES.md 0014 row). Wiring: strstr.c keeps the
 generic bodies under `#else` (other arches + readable fallback) and calls
 hidden `__twobyte/threebyte/fourbyte_strstr` on x86_64; helpers are GLOBAL
 HIDDEN (no new dynamic exports, direct tail calls, 0 bad relocs, SSE2-only).
@@ -99,4 +99,4 @@ differential 401431/0 with guard pages clean; staged bench repeats the pilot
 wins (2B absent 8.6x, 3B 5.2x, 4B 4.5x, mid 3.6-4.3x; controls tie incl.
 ADV/PERIODIC); dynamic loader smoke correct; libc-testsuite identical
 (5 known failures only, string passed); net +695B text. Full numbers in
-`f8-work/STAGED-RESULTS.txt`. Awaiting release decision.
+`f8-work/STAGED-RESULTS.txt`. Release decision taken (wired, shipped since r8).
